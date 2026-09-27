@@ -20,9 +20,11 @@ backstop that keeps them from being quietly removed.
 """
 
 import ast
+import inspect
 
 import pytest
 
+from tests import _timed_menu_milestone_sentinel_support as support
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
@@ -30,6 +32,7 @@ from tests._timed_menu_milestone_sentinel_support import (
     RETENTION_COUNT_SITES,
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
+    _bypassing_sites,
     _is_enforced,
     _is_tautology,
     _may_bypass,
@@ -40,6 +43,102 @@ from tests._timed_menu_milestone_sentinel_support import (
     retention_sites_observed,
     retention_subscript_sites_observed,
 )
+
+
+def _sentinel_uses(name, owner_name):
+    """True if ``owner_name`` in the support module actually calls ``name``."""
+    source = inspect.getsource(getattr(support, owner_name))
+    return any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+        for node in ast.walk(ast.parse(source))
+    )
+
+
+@pytest.mark.parametrize(
+    ("predicate", "caller", "defect"),
+    (
+        (
+            "_may_bypass",
+            "_count_comparison",
+            (
+                "pinned count sites would be reported as exact equalities again "
+                "even when a BoolOp short-circuits the comparison away, which is "
+                "the #280 hole these sentinels exist to close"
+            ),
+        ),
+        (
+            "_may_bypass",
+            "guard_rejects_the_deadline_terminal_state",
+            (
+                f"{GUARD_FUNCTION}() would count as having teeth again once its "
+                "assert is short-circuited by a tautological `or` operand, so a "
+                "deadline-truncated run would again be reported as retention"
+            ),
+        ),
+        (
+            "_is_enforced",
+            "_count_comparison",
+            (
+                "pinned count sites would count again when wrapped in a "
+                "swallowing try/except, which is the #280 handler half"
+            ),
+        ),
+        (
+            "_is_enforced",
+            "guard_rejects_the_deadline_terminal_state",
+            (
+                "the teeth check would certify a guard that can no longer "
+                "fail: wrapping its assert in try/except AssertionError or "
+                "contextlib.suppress keeps the node and the operator, so only "
+                "_is_enforced closes the #280 defect this function exists to "
+                "catch"
+            ),
+        ),
+        (
+            "_may_bypass",
+            "subscript_count_comparisons",
+            (
+                "pinned record-subscript counts would be reported as exact "
+                "equalities again once a tautological operand short-circuits "
+                "them, undoing the counts this branch just added"
+            ),
+        ),
+    ),
+    ids=(
+        "count-uses-bypass",
+        "guard-uses-bypass",
+        "count-uses-enforced",
+        "guard-uses-enforced",
+        "subscript-counts-use-bypass",
+    ),
+)
+def test_the_short_circuit_rule_is_wired_into_every_enforcement_call_site(
+    predicate, caller, defect
+):
+    """``_may_bypass`` must be *called* wherever enforcement is decided.
+
+    The bypass rule is only load-bearing if the helpers that decide whether a
+    pinned assert is live actually consult it. The table-driven rows above
+    exercise ``_may_bypass`` *directly*, so they keep passing even when these
+    three callers stop calling it. Measured on this branch, each deletion left
+    all 43 rows green and unmasks exactly its own attack:
+
+    ==================  ==============================  ==========================
+    deletion             attack that then survives       caught when wiring intact
+    ==================  ==============================  ==========================
+    ``_count_comparison``  ``or True`` on a ``== 271``   yes (1 failed / 42 passed)
+    guard check            ``or True`` on the #261      yes (1 failed / 42 passed)
+                            guard's own assert
+    subscript counts       ``or True`` on                yes (1 failed / 42 passed)
+                            ``record["call_counts"]``
+    ==================  ==============================  ==========================
+
+    Pinning the wiring here means a future edit that drops one of these calls
+    fails loudly, instead of silently disarming that call site and nothing else.
+    """
+    assert _sentinel_uses(predicate, caller), (
+        f"{caller}() no longer consults {predicate}(), so {defect}"
+    )
 
 
 def test_the_261_guard_is_still_wired_to_the_fast_clock_path():
@@ -128,6 +227,106 @@ def test_the_pinned_counts_are_reached_with_the_261_precondition_active():
     assert not offenders, (
         f"these pinned retention sites call {RUN_OWNER}() with a clock_step "
         f"that bypasses the #261 terminal-state guard: {offenders}"
+    )
+
+
+#: ``(label, call arguments, bypasses?)`` -- does this spelling of the pinned
+#: site's ``run_owner`` call opt the site out of the #261 precondition? A ``**``
+#: unpacking arrives from ``ast`` with ``arg=None``, so a filter on
+#: ``keyword.arg == "clock_step"`` skips it even though it reaches the same
+#: unguarded path.
+CLOCK_STEP_SPELLINGS = (
+    ("guarded literal", "clock_step=0.0", False),
+    ("named override", "clock_step=0.5", True),
+    ("absent", "", False),
+    ("unpacked override", '**{"clock_step": 0.5}', True),
+    ("unpacked guarded", '**{"clock_step": 0.0}', False),
+    ("unpacked with sibling", '**{"clock_step": 0.5, "x": 1}', True),
+    ("unpacked without clock_step", '**{"x": 1}', False),
+    ("unrelated keyword", "other=1", False),
+    # An unpacking that cannot be read statically might still carry
+    # clock_step, so it is reported rather than assumed safe.
+    ("unreadable unpacking", "**options", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "arguments", "bypasses"),
+    CLOCK_STEP_SPELLINGS,
+    ids=[spelling[0] for spelling in CLOCK_STEP_SPELLINGS],
+)
+def test_every_clock_step_spelling_is_classified(label, arguments, bypasses):
+    """The guard-bypass check must read ``**`` as well as named keywords.
+
+    ``run_owner(m, p, **{"clock_step": 0.5})`` reaches the same unguarded path
+    as the named spelling, but ``ast`` reports it with ``arg=None``. Matching
+    only the named form is the mistake #288 corrected for ``except*``: one
+    concrete node shape instead of the family that reaches it.
+
+    Each row is mounted inside a real pinned retention function and run through
+    the same site walk :func:`count_sites_that_bypass_the_guard` uses, so a row
+    cannot pass while the production call path has stopped consulting the
+    classifier at all.
+    """
+    site = next(iter(RETENTION_COUNT_SITES))
+    source = f"def {site}():\n    return run_owner(m, p, {arguments})\n"
+    offenders = _bypassing_sites(ast.parse(source))
+    assert bool(offenders) is bypasses, f"{label}: reported {offenders}"
+
+
+def test_a_bypass_in_any_pinned_site_is_reported_not_just_the_first():
+    """The site walk must cover every pinned function, not only the first.
+
+    Every row in the spellings table mounts a single-function tree, so a walk
+    narrowed to one function -- ``milestones_tree.body[:1]`` -- still reports
+    every row correctly and leaves the suite green. Measured on this head with
+    the narrowing applied in memory: 1 bypassing site is reported either way,
+    but 2, 3 and 4 bypassing sites all collapse to 1. The real tree is clean
+    today, so this would only under-report once a bypass lands in a pinned site
+    that is not the first one walked.
+
+    A bypass in the *last* pinned function is the discriminating case, so this
+    mounts every pinned site and puts the override in the final one.
+    """
+    sites = list(RETENTION_COUNT_SITES)
+    assert len(sites) > 1, "this row is only meaningful with more than one pinned site"
+    guarded = f"def {sites[0]}():\n    return run_owner(m, p)\n"
+    last = sites[-1]
+    overriding = f"def {last}():\n    return run_owner(m, p, **{{'clock_step': 0.5}})\n"
+    offenders = _bypassing_sites(ast.parse(guarded + overriding))
+    assert [name for name, _spelling in offenders] == [last], f"reported {offenders}"
+
+
+def test_the_production_entry_point_is_what_actually_reports_a_bypass():
+    """The spellings table must not be satisfiable while production is inert.
+
+    The rows above drive ``_bypassing_sites()`` directly, so they stay green if
+    ``count_sites_that_bypass_the_guard()`` stops consulting it altogether.
+    Measured on this head: replacing that function's body with ``return []``
+    left the whole sentinel file green. A table that cannot fail when the
+    production entry point is stubbed out is not pinning the entry point.
+
+    The production function reads the real module through ``_module_tree()``,
+    so the way to pin it is to make it report something. ``_module_tree`` is
+    temporarily pointed at a tree carrying a real bypass: the entry point must
+    report it. Combined with the ``== []`` assertion already in
+    ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
+    that pins the entry point from both directions — it must fire, and it must
+    not fire spuriously.
+    """
+    site = next(iter(RETENTION_COUNT_SITES))
+    mutant = ast.parse(f"def {site}():\n    return run_owner(m, p, **{{'clock_step': 0.5}})\n")
+    assert _bypassing_sites(mutant), "sanity: the mutant tree must contain a bypass"
+
+    real_tree = support._module_tree
+    support._module_tree = lambda: mutant
+    try:
+        offenders = count_sites_that_bypass_the_guard()
+    finally:
+        support._module_tree = real_tree
+    assert offenders, (
+        "count_sites_that_bypass_the_guard() did not report a bypass that is "
+        "demonstrably present, so it is not actually reading the tree"
     )
 
 
