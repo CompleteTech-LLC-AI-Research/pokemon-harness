@@ -1900,6 +1900,148 @@ def test_a_definition_binds_its_name_and_retires_the_carried_walrus(label, defin
 
 
 @pytest.mark.parametrize(
+    ("label", "definition", "live"),
+    [
+        # The six regions a `def` evaluates *outside* its own body. Every one
+        # of them runs in the enclosing scope, when the `def` statement
+        # executes, so a store there is an enclosing-scope rebind and the
+        # carried suppressor has to retire. `_nested_scope_nodes` excluded the
+        # whole definition, so all six were invisible.
+        ("positional-default", "def other(arg=(cs := helper.make())): pass", True),
+        ("keyword-only-default", "def other(*, arg=(cs := helper.make())): pass", True),
+        ("posonly-default", "def other(a, /, b=(cs := helper.make())): pass", True),
+        ("parameter-annotation", "def other(arg: (cs := helper.make())): pass", True),
+        ("return-annotation", "def other() -> (cs := helper.make()): pass", True),
+        ("decorator", "@(cs := helper.make())\ndef other(): pass", True),
+        ("async-def-default", "async def other(arg=(cs := helper.make())): pass", True),
+        # A comprehension inside a default is NOT a scope for a walrus. This
+        # is the opposite of the usual folklore and was measured on 3.12.14
+        # rather than assumed -- a first attempt at this repair excluded
+        # comprehension subtrees and so reported these two as defeated:
+        #
+        #     >>> [(cs := "COMP") for _ in range(1)] and None
+        #     >>> cs
+        #     'COMP'
+        #
+        # Only the *iteration variables* are comprehension-local, so excluding
+        # them is a damaging false-defeated. They are walked in full.
+        ("comprehension-element", "def other(a=[(cs := helper.make()) for _ in x]): pass", True),
+        (
+            "dictcomp-value",
+            "def other(a={k: (cs := helper.make()) for k in x}): pass",
+            True,
+        ),
+        # The negatives, and the reason the repair is region-scoped rather
+        # than "walk the whole definition". A `lambda` or a nested `def`
+        # reached through a default is a scope in its own right; never called
+        # here, so its store never reaches the enclosing name.
+        ("lambda-in-a-default", "def other(a=(lambda: (cs := helper.make()))): pass", False),
+        ("def-in-a-default", "def other(a=[f() for f in x]): pass", False),
+        # The body is still the function's own scope. Already pinned by
+        # `a-body-bind-does-not-escape`; repeated here so this repair cannot
+        # quietly widen the walk.
+        ("body-still-excluded", "def other():\n    cs = helper.make()", False),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_a_definition_header_binds_in_the_enclosing_scope(label, definition, live):
+    """A `def` binds names in the enclosing scope *before* its body exists.
+
+    ``_nested_scope_nodes`` drops a definition's entire subtree because its
+    body is a scope, and that is right for the body and wrong for everything
+    the ``def`` evaluates first. Default values, annotations and decorators
+    are all evaluated where the ``def`` appears:
+
+        async def outer(x, helper):
+            with (cs := contextlib.suppress(AssertionError)):
+                pass
+            def other(arg=(cs := helper.make())): pass   # `cs` rebound here
+            with cs:                   # TypeError on entry, assert never runs
+                assert x != 1        # live
+
+    So the exclusion is lifted for exactly those regions, by
+    ``_definition_header_nodes``, and only those. The parameter *names* are
+    left out: they are not evaluated here at all, and are bound in the
+    function's own scope when it is called.
+
+    The three negative rows keep this from over-widening into a false
+    "defeated", which is the more damaging of the two directions.
+    """
+    source = (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + textwrap.indent(definition, "    ") + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    results = _verdicts(source)
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "statement", "bound"),
+    [
+        # The round-6 PRIMARY's M26: slicing the alias loop to `names[:2]`
+        # survived every test, because the closure test's own import sample
+        # carries a single alias and so cannot see a third one go missing.
+        # These rows assert the whole bound *set* rather than a verdict, so
+        # they fail for any truncation that drops an alias -- not only for the
+        # truncations that happen to break a verdict somewhere else.
+        ("three-alias-import", "import os, sys, json", {"os", "sys", "json"}),
+        (
+            "three-alias-from-import",
+            "from os import path, sep, curdir",
+            {"path", "sep", "curdir"},
+        ),
+        ("two-alias-import", "import os, sys", {"os", "sys"}),
+        ("one-alias-import", "import os", {"os"}),
+        # Dotted names resolve per form, so the bound set is not a prefix rule.
+        ("dotted-import-binds-head", "import xml.etree.ElementTree", {"xml"}),
+        ("mixed-dotted-and-plain", "import xml.etree, os", {"xml", "os"}),
+        # `from a import b.c` is a SyntaxError, so an `ast.ImportFrom` alias
+        # is never dotted: the "last component" rule in `_import_bound_name`
+        # is defensive, not reachable from source. Pinned here as a plain
+        # `from` form, which is the only shape that can occur.
+        ("from-import-binds-whole-name", "from xml import etree", {"etree"}),
+        # An `as` overrides the form, for that alias alone.
+        (
+            "aliased-and-bare-in-one-statement",
+            "import os, sys as renamed",
+            {"os", "renamed"},
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_one_import_statement_binds_every_alias_it_names(label, statement, bound):
+    """A single import statement binds one name per alias, with no truncation.
+
+    The verdict rows elsewhere in this file can only catch a truncation that
+    happens to change a verdict, which is why ``names[:2]`` survived: with a
+    one-alias sample in the closure test, dropping the third alias of a
+    three-alias statement changed no verdict anywhere. Asserting the bound set
+    directly closes that, because *any* dropped alias makes the set smaller
+    than the language says it is.
+
+    The expected sets come from the language, not from the implementation:
+    ``ast.Import`` binds the leading component of each dotted name,
+    ``ast.ImportFrom`` binds the whole imported name, and an ``as`` replaces
+    the name for that alias alone.
+    """
+    node = ast.parse(statement).body[0]
+    names = _names_bound_by(node)
+    assert names == bound, (
+        f"{label}: `{statement}` must bind exactly {sorted(bound)}; "
+        f"the walk reports {sorted(names)}"
+    )
+
+
+@pytest.mark.parametrize(
     ("label", "body", "live"),
     [
         ("assign-inside-the-walrus-statement", "__INSIDE_HEADER__cs = helper.make()", True),

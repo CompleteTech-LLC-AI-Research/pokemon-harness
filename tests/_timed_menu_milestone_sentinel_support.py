@@ -37,6 +37,7 @@ import tests.test_timed_menu_milestones as milestones
 #: never matches, which is the right behaviour for a syntax that cannot parse.
 _TYPE_ALIAS = getattr(ast, "TypeAlias", None)
 
+
 #: Dotted paths whose call is a suppression context. Matched by *resolved*
 #: name rather than by spelling, so the qualified, from-import and both alias
 #: forms all collapse to the same value before the comparison. Matching one
@@ -1118,8 +1119,47 @@ def _binding_targets_by_name(statement, enclosing=None):
     ``_supersedes_walrus``.
     """
     excluded = _nested_scope_nodes(statement, enclosing)
+    # `_nested_scope_nodes` excludes a definition's whole subtree, because its
+    # body is a scope of its own. That is right for the body and wrong for
+    # everything a `def` evaluates *before* that body exists: the decorators,
+    # the default values, and the annotations all run in the enclosing scope,
+    # when the `def` statement itself executes.
+    #
+    #     with (cs := contextlib.suppress(AssertionError)):
+    #         pass
+    #     def other(arg=(cs := helper.make())): pass   # rebinds `cs` here
+    #     with cs:                                       # TypeError on entry
+    #         assert x != 1                              # live
+    #
+    # so the carried suppressor has to be retired. This first pass collects
+    # those regions so the walk below can include exactly them; the body
+    # keeps its own scope and stays excluded. Collected before the walk
+    # because `ast.walk` reaches a default only *through* the excluded
+    # definition, and the exclusion test is made per node as it is reached.
+    # See `ledger/LEAD_329_FUNCTION_DEFAULT_FINDING.md`.
+    #
+    # `enclosing` is threaded through to `_nested_scope_nodes` for #332, which
+    # needs it to resolve a `nonlocal`; the header regions below do not need
+    # it, because a default or a decorator is evaluated in the scope the
+    # `def` appears in whatever that scope is.
+    evaluated_in_enclosing_scope = set()
+    for node in ast.walk(statement):
+        if id(node) in excluded and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            evaluated_in_enclosing_scope.update(
+                id(inner) for inner in _definition_header_nodes(node)
+            )
     bindings = {}
     for node in ast.walk(statement):
+        if id(node) in evaluated_in_enclosing_scope:
+            # Reached back through a definition's own header, which
+            # `_nested_scope_nodes` excluded wholesale. The store is real and
+            # lands in *this* scope, so it is recorded. The test comes first
+            # because the header is reached through the excluded definition:
+            # `excluded` holds the definition and everything under it,
+            # header included.
+            for name, target in _bound_targets(node):
+                bindings.setdefault(name, []).append(target)
+            continue
         if id(node) in excluded:
             # A `def`/`async def` is excluded as a nested scope, but the name
             # it binds belongs to the *enclosing* scope: `def cs(): ...` after
@@ -1135,6 +1175,104 @@ def _binding_targets_by_name(statement, enclosing=None):
         for name, target in _bound_targets(node):
             bindings.setdefault(name, []).append(target)
     return bindings
+
+
+def _definition_header_nodes(definition):
+    """The nodes a ``def``/``async def`` evaluates in the *enclosing* scope.
+
+    A function definition has three regions, and they are not one scope:
+
+    * the decorators, the default values, and the annotations of every
+      parameter, plus the return annotation. All of these are evaluated
+      where the ``def`` appears, in the enclosing scope, *before* the body
+      exists -- so a store in any of them is an enclosing-scope bind.
+    * the body, which is the function's own scope and is correctly excluded
+      by ``_nested_scope_nodes``.
+    * the parameter names, which are not evaluated here at all. They are
+      bound in the function's own scope when it is called, so a store among
+      them is a parameter rebind rather than an enclosing-scope bind.
+
+    ``ast.Lambda`` has no decorators and no return annotation, but its
+    parameter annotations are evaluated in the enclosing scope for the same
+    reason. The caller only reaches a ``def``; ``lambda`` is accepted for
+    symmetry and costs nothing.
+    """
+    arguments = definition.args
+    header = [
+        *definition.decorator_list,
+        *arguments.defaults,
+        *(default for default in (arguments.kw_defaults or ()) if default is not None),
+        *(argument.annotation for argument in _annotatable_arguments(arguments)),
+    ]
+    returns = getattr(definition, "returns", None)
+    if returns is not None:
+        header.append(returns)
+    nodes = []
+    seen = set()
+    for region in header:
+        if region is None:
+            # An unannotated parameter and an absent keyword default are both
+            # spelled `None`; neither is an expression to walk.
+            continue
+        for inner in _scope_free_nodes(region):
+            if id(inner) not in seen:
+                seen.add(id(inner))
+                nodes.append(inner)
+    return nodes
+
+
+def _scope_free_nodes(region):
+    """``ast.walk(region)`` without the parts that are not the enclosing scope.
+
+    A definition header can itself *contain* a scope, and a store inside one
+    of those binds that inner scope rather than the name the ``def`` is being
+    defined in. A ``lambda`` is the case that actually occurs:
+
+        def other(a=(lambda: (cs := m()))): pass
+
+    Never called, so ``cs`` is the lambda's local and the enclosing ``cs`` is
+    untouched -- walking it would retire a carried suppressor the interpreter
+    keeps, which is the damaging direction again. A ``def`` reached through a
+    default is a scope for the same reason; ``_nested_scope_nodes`` handles a
+    ``def``/``lambda`` that is the statement itself, but not one buried
+    inside an expression.
+
+    A **comprehension is not such a scope for a walrus**, which is the
+    opposite of the long-standing folklore and is the reason this function
+    does not simply reuse ``_nested_scope_nodes``. Measured on 3.12.14:
+
+        >>> [(cs := "COMP") for _ in range(1)] and None
+        >>> cs
+        'COMP'
+
+    A named expression inside a comprehension binds the *enclosing* scope;
+    only the iteration variables are comprehension-local. So a comprehension
+    is walked in full, and the whole subtree is kept.
+    """
+    out = []
+    stack = [region]
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        if _opens_a_scope(node):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _opens_a_scope(node):
+    """Does ``node`` introduce a scope that is not the enclosing one?"""
+    return isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef))
+
+
+def _annotatable_arguments(arguments):
+    """Every parameter node of ``arguments`` that can carry an annotation."""
+    ordered = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+    if arguments.vararg is not None:
+        ordered.append(arguments.vararg)
+    if arguments.kwarg is not None:
+        ordered.append(arguments.kwarg)
+    return ordered
 
 
 def _import_bound_name(node, alias):
