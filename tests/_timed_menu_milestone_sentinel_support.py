@@ -1077,9 +1077,7 @@ def _resolve_bindings(entries, bound, orders, entry_orders=None):
     key = entry_orders or {id(e): orders[id(e[0])] for e in entries}
     latest = max((key[id(entry)] for entry in unconditional), default=None)
     competing = [
-        entry
-        for entry in entries
-        if entry[2] and (latest is None or key[id(entry)] > latest)
+        entry for entry in entries if entry[2] and (latest is None or key[id(entry)] > latest)
     ]
     if len(competing) > 1:
         # More than one conditional binding can reach this `with` on different
@@ -1126,33 +1124,6 @@ def _owning_statement(function, node):
     """
     return next(
         top for top in function.body if top is node or any(child is node for child in ast.walk(top))
-    )
-
-
-def _binds_inside_header_body(statement, function):
-    """Does a carrier or capture sit in a ``with`` header's own **body**?
-
-    A ``with`` header's context expressions are evaluated -- and its walruses
-    run -- before its body does, so a rebind written in the body retires a
-    carried suppressor that the header itself just bound:
-
-        with (cs := suppress(AssertionError)):
-            import os as cs        # runs AFTER the walrus
-        with cs:                    # `os` is not a context manager
-            assert x != 1           # live
-
-    The ``header is statement`` shortcut in ``_aliased_suppressions`` normally
-    handles exactly this "nothing has run yet" position, and it is right for a
-    store in the header's *items*. It is wrong for the body, which runs later.
-    """
-    late = {id(carrier) for carrier in _carrier_bound_names(function).values()}
-    late |= {id(owner) for owner in _match_capture_names(function).values()}
-    return any(
-        id(child) in late
-        for header in ast.walk(statement)
-        if isinstance(header, (ast.With, ast.AsyncWith))
-        for node in header.body
-        for child in ast.walk(node)
     )
 
 
@@ -1292,7 +1263,7 @@ def _aliased_suppressions(node, function, bound):
                 continue
             live = (
                 bound_so_far
-                if header is statement and not _binds_inside_header_body(statement, function)
+                if header is statement
                 else _bindings_before(
                     header, statement, bound_so_far, by_index.get(index, {}), function
                 )
@@ -1376,22 +1347,11 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
         }
-        # The same question for the string-field carriers. This is a
-        # containment test on the **carrier node**, and that is the whole point:
-        # an `ast.alias` is a real child of its `ast.Import`, so it can be found
-        # inside a block, while a detached `ast.Name` could never be found and
-        # the row stayed silently wrong.
-        carriers_scope = function if function is not None else statement
-        carriers = {
-            name
-            for name, carrier in _carrier_bound_names(carriers_scope).items()
-            if any(child is carrier for child in ast.walk(block))
-        }
         for node in body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
-                return dict(own) if seen_store or captures or carriers else bound_so_far
+                return dict(own) if seen_store or captures else bound_so_far
             if isinstance(node, ast.Assign) or (
                 isinstance(node, ast.AnnAssign) and node.value is not None
             ):
