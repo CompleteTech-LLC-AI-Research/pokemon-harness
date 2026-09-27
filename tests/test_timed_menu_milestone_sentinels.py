@@ -821,6 +821,98 @@ RESIDUAL_DEFEAT_SHAPES = (
         "    cs = helper.make()\n    cs = helper.other()\n    with cs:\n        assert x != 1",
         True,
     ),
+    # Which store is live is a question about ONE `with`, not about the whole
+    # function. A `with` placed between two stores must see the earlier one --
+    # resolving once for the function would answer it with the *last* store and
+    # certify this swallowed assert as load-bearing.
+    (
+        "with between two stores sees the first",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+            "    cs = helper.make()"
+        ),
+        False,
+    ),
+    # An unconditional store runs on every path, so a competing pair of
+    # conditional bindings written BEFORE it is overwritten by it rather than
+    # still ambiguous.
+    (
+        "competing branches superseded by a later unconditional store",
+        (
+            "    if p:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    else:\n        cs = contextlib.suppress(ValueError)\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
+    # ...and a conditional store written AFTER an unconditional one genuinely
+    # can still be the last to run, so it stays ambiguous.
+    (
+        "unconditional store then competing later conditionals",
+        (
+            "    cs = helper.make()\n"
+            "    if p:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    else:\n        cs = contextlib.suppress(ValueError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # A suppressor whose exception does not catch AssertionError leaves the
+    # assert loud, so superseding an alias with one is not a defeat.
+    (
+        "suppressor alias superseded by an unrelated suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.suppress(ValueError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
+    (
+        "suppressor alias superseded by a broad suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.suppress(BaseException)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # A single conditional binding does not compete with a later unconditional
+    # store: the unconditional one overwrites it on the path that ran.
+    (
+        "conditional alias superseded by a later ordinary call",
+        (
+            "    if p:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
+    # Two separate conditional blocks compete even though neither is a branch
+    # of the other: on `p and not q` the first runs alone, and the rule cannot
+    # pick between the two.
+    (
+        "two conditional blocks both binding a suppressor",
+        (
+            "    for a in L:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    for b in M:\n        cs = contextlib.suppress(ValueError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    # Three straight-line stores: the middle one does not resurrect the first.
+    (
+        "three straight-line stores with an ordinary call last",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.suppress(ValueError)\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
     # A literal container that is empty never enters its body. The loop
     # spelling of the `if False:` defeat.
     ("for over empty list", "    for _ in []:\n        assert x != 1", False),

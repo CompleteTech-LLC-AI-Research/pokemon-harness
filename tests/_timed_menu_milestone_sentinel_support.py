@@ -51,6 +51,17 @@ SUPPRESSING_CONTEXTS = ("contextlib.suppress", "asyncio.suppress")
 #: the only spelling that can stand in for one.
 SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRESSING_CONTEXTS)
 
+#: Sentinel recorded for a name bound to *more than one* readable suppressor, so
+#: that which one applies depends on the runtime path taken.
+#:
+#: #308 criterion 1 requires such a name to be treated as unreadable and
+#: reported as a defeat, rather than resolved by source order. It is a distinct
+#: object rather than a boolean so that the ambiguity can be told apart from a
+#: known alias when the exception names are inspected -- an ambiguous binding
+#: suppresses *any* exception, because the rule cannot know which target was
+#: applied.
+AMBIGUOUS_SUPPRESSOR = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -550,6 +561,22 @@ def _suppression_names(call):
 
     An element that is not a plain name is still reported as universal, so an
     argument the check cannot read is never assumed to be harmless.
+
+    The *no positional argument at all* case is the one place where the two
+    families must be told apart, and the difference is measured rather than
+    assumed:
+
+    * ``contextlib.suppress()`` is legal and suppresses *everything*, so it is
+      a genuine defeat and the universal reading is right.
+    * ``pytest.raises()`` with no expected type raises ``ValueError: You must
+      specify at least one parameter`` while the context object is being
+      constructed -- before the body is entered at all. The test fails loudly
+      and no assert is ever evaluated, so calling it a defeat would report a
+      live contract as dead.
+
+    ``pytest.raises(match=...)`` stays universal on purpose; see
+    ``_raises_without_an_expected_type`` for why that case is undecidable
+    rather than loud.
     """
     names = []
     for argument in call.args:
@@ -615,9 +642,48 @@ def _assigned_suppressors(function, bound):
     fails loudly rather than passing quietly -- so it is not a defeat, and a
     single merged dict would have called it one. Only the assignments that
     precede the ``with`` are visible to it.
+
+    Assignments are collected from the whole function body rather than from
+    ``function.body`` alone, so a suppressor bound inside an ``if``, a loop, a
+    ``try`` or a nested ``with`` is still found. Restricting the walk to the
+    top level is the escape recorded in #308: a suppressor's reach does not
+    depend on the indentation it was written at, and reading only the
+    outermost statements reports a swallowed assert as *enforced*.
+
+    Bindings are split by whether two of them can be reached on the same path.
+    Only *competing* bindings make a name ambiguous:
+
+    * **Unconditional** -- sitting directly in the function body. These run in
+      source order, so at any ``with`` only the last one can be live, and it
+      supersedes the rest rather than competing with them.
+    * **Conditional** -- nested in an ``if``, a loop, a ``try`` or a ``with``.
+      Two of these genuinely can reach the same ``with`` on different paths, so
+      only these make a name ambiguous.
+
+    The distinction is load-bearing in both directions. Reading two
+    *sequential* suppressor bindings as competing would report a live assert
+    as dead -- the opposite error from the one #308 criterion 1 is about, and
+    the more damaging one here, because it drops a real contract out of the
+    sentinel's view. Reading two *competing* bindings as sequential would pick
+    a winner by source order and certify a disarmed assert as load-bearing.
+    Per #308 criterion 1 a competing name is *unreadable*, and the safe
+    direction is to treat it as a defeat.
+
+    EVERY binding of a name is recorded, not only the suppressor ones. That is
+    what makes a superseding store visible at all: a name rebound to an
+    ordinary call is recorded and supersedes like any other value, so
+
+        cs = contextlib.suppress(AssertionError)
+        cs = helper.make()
+
+    resolves to "not an alias" instead of leaving the first binding as the sole
+    known one. Recording only the suppressor bindings would make that
+    sequence look like a lone alias and report the live assert as dead.
     """
-    assigned = {}
-    for index, statement in enumerate(function.body):
+    # Every binding of every name, tagged with whether that store can compete
+    # with another, so that supersession and ambiguity stay told apart.
+    bindings = {}
+    for statement in ast.walk(function):
         targets = []
         value = None
         if isinstance(statement, ast.Assign):
@@ -628,11 +694,125 @@ def _assigned_suppressors(function, bound):
             value = statement.value
         else:
             continue
-        if isinstance(value, ast.Call) and _is_suppression_call(value, bound):
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    assigned.setdefault(index, {})[target.id] = value
+        # A store written directly in the function body runs on every path;
+        # one nested inside a block runs on some paths only.
+        conditional = statement not in function.body
+        for target in targets:
+            if isinstance(target, ast.Name):
+                bindings.setdefault(target.id, []).append((statement, value, conditional))
+    # A name bound by exactly one readable suppressor is a known alias. A name
+    # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
+    # and must NOT be resolved by source order. It is recorded as an
+    # `AMBIGUOUS` marker instead of being dropped: dropping it would fall back
+    # to "this name is not a known suppressor", which reports the assert as
+    # *enforced*, and that is the damaging direction. On the ambiguous path the
+    # rule genuinely cannot tell which target was applied, so it treats the
+    # name as a suppression and says so (#308 criterion 1: over-reporting is the
+    # safe direction here).
+    #
+    # Ambiguity is judged over the whole function: a nested binding and a
+    # top-level one are the same name, and a rule that let the source order
+    # pick between them would report the verdict for one path only.
+    # Resolution is per top-level statement rather than once for the whole
+    # function, because "which store is live" is a question about one `with`
+    # and not about the function. A `with` placed *between* two stores sees
+    # the earlier one:
+    #
+    #     cs = contextlib.suppress(AssertionError)
+    #     with cs:              # <- this assert is swallowed
+    #         assert 1 == 2
+    #     cs = helper.make()
+    #
+    # Resolving once for the function would answer that `with` with the *last*
+    # store and certify a disarmed assert as load-bearing. So each index
+    # resolves from the bindings that precede it alone.
+    orders = {
+        id(statement): _binding_order(function, statement)
+        for entries in bindings.values()
+        for statement, _, _ in entries
+    }
+    assigned = {}
+    for index in range(len(function.body)):
+        for name, entries in bindings.items():
+            seen = [entry for entry in entries if orders[id(entry[0])] <= index]
+            if not seen:
+                continue
+            value = _resolve_bindings(seen, bound, orders)
+            if value is not None:
+                assigned.setdefault(index, {})[name] = value
     return assigned
+
+
+def _resolve_bindings(entries, bound, orders):
+    """Resolve one name from the bindings in effect at a single ``with``.
+
+    ``entries`` are ``(statement, value, conditional)`` triples, already
+    filtered to the stores that run at or before the ``with`` in question.
+    """
+    # An unconditional store runs on *every* path, so the last one of those is
+    # the value in force unless some conditional store comes after it. Only the
+    # conditional stores that are ordered later can still compete with it;
+    # earlier ones were overwritten by it:
+    #
+    #     if p:
+    #         cs = contextlib.suppress(AssertionError)   # competing
+    #     else:
+    #         cs = contextlib.suppress(ValueError)        # competing
+    #     cs = helper.make()                              # runs last, everywhere
+    #     with cs:                                        # `cs` is not a suppressor
+    #
+    # Treating the two branches above as still ambiguous here would report a
+    # live assert as swallowed. Counting a conditional store written *after* an
+    # unconditional one as competing is the other half: it genuinely can be the
+    # last store to run.
+    unconditional = [entry for entry in entries if not entry[2]]
+    latest = max((orders[id(entry[0])] for entry in unconditional), default=None)
+    competing = [
+        entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
+    ]
+    if len(competing) > 1:
+        # More than one conditional binding can reach this `with` on different
+        # paths, so which suppressor is live is undecidable. Recorded as an
+        # `AMBIGUOUS` marker rather than dropped: dropping it would fall back
+        # to "this name is not a known suppressor", which reports the assert as
+        # *enforced* -- the damaging direction.
+        return AMBIGUOUS_SUPPRESSOR
+    # Otherwise nothing competes with anything: the stores that can be last are
+    # a single one, so the highest-ordered entry is what the `with` enters.
+    last = max(entries, key=lambda entry: orders[id(entry[0])])[1]
+    return last if _is_readable_suppressor(last, bound) else None
+
+
+def _binding_order(function, statement):
+    """Where ``statement`` sits among the function's top-level statements.
+
+    This is the sort key for "which store runs last". A statement written
+    directly in the body has its own index. A nested one has none, so it is
+    ordered by the top-level statement that contains it -- the earliest point
+    at which it can possibly have run, and the only position that is true on
+    every path. Two stores inside one top-level statement would therefore
+    compare equal, which is fine: they are in the same block, and if both are
+    conditional the name is already ambiguous by the caller.
+    """
+    for index, top in enumerate(function.body):
+        if top is statement:
+            return index
+    return next(
+        index
+        for index, top in enumerate(function.body)
+        if any(child is statement for child in ast.walk(top))
+    )
+
+
+def _is_readable_suppressor(value, bound):
+    """Is ``value`` a right-hand side this check can read as a suppressor?
+
+    A non-``Call`` right-hand side -- a constant, a subscript, another name --
+    is never a readable suppressor, and neither is a call that fails the
+    suppressor predicate. Both are recorded as *not* a suppressor so that the
+    store still supersedes an earlier binding of the same name.
+    """
+    return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
 def _aliased_suppressions(node, function, bound):
@@ -657,10 +837,28 @@ def _aliased_suppressions(node, function, bound):
     name from an outer scope is deliberately not followed: assuming an
     arbitrary call returns a suppressor would report live asserts as dead on
     every context manager this check cannot trace.
+
+    An assignment expression in the header is the same defeat with the binding
+    folded into the ``with`` itself:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2
+
+    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` never
+    records it, and the header no longer holds a bare ``Name`` for the
+    resolution rule to read -- the suppressor sits in a node shape nothing else
+    inspects. Executed, the assertion failure really is swallowed, so this is
+    the damaging direction: a live defeat reported as enforced.
+
+    The right-hand side is still gated on :func:`_is_suppression_call`, and that
+    guard is load-bearing rather than a redundancy. A zero-argument call such as
+    ``nullcontext()`` or ``helper.make()`` reads as the unreadable case
+    ``BaseException`` in :func:`_suppression_names`, and ``BaseException`` *does*
+    catch ``AssertionError`` -- so appending every walrus unconditionally would
+    report both of those live context managers as defeats. The mutation matrix
+    in the sentinel suite pins that difference.
     """
     by_index = _assigned_suppressors(function, bound)
-    if not by_index:
-        return []
     # A name is bound only by the assignments that run *before* the `with`.
     # Walking `function.body` in order and carrying the bindings forward keeps
     # that ordering explicit; a merged view of every assignment would claim a
@@ -674,6 +872,20 @@ def _aliased_suppressions(node, function, bound):
                 continue
             for item in header.items:
                 expression = item.context_expr
+                # `with (cs := contextlib.suppress(AssertionError)):` binds the
+                # name and enters it in one node, so the alias is classified
+                # from its right-hand side rather than from `bound_so_far`. The
+                # right-hand side need not be a call at all -- `with (cs := 1):`
+                # is legal and fails loudly on entry with `TypeError` -- so the
+                # node type is checked before the suppressor predicate, which
+                # reads `call.func` and would otherwise raise.
+                walrus = expression if isinstance(expression, ast.NamedExpr) else None
+                if (
+                    walrus is not None
+                    and isinstance(walrus.value, ast.Call)
+                    and _is_suppression_call(walrus.value, bound)
+                ):
+                    entered.append(walrus.value)
                 if isinstance(expression, ast.Name) and expression.id in bound_so_far:
                     entered.append(bound_so_far[expression.id])
                 if not isinstance(expression, ast.Call) or not isinstance(
@@ -685,8 +897,13 @@ def _aliased_suppressions(node, function, bound):
                 value = expression.func.value
                 if isinstance(value, ast.Name) and value.id in bound_so_far:
                     entered.append(bound_so_far[value.id])
-        # Bindings take effect only *after* the statement that makes them.
-        bound_so_far.update(by_index.get(index, {}))
+        # Bindings take effect only *after* the statement that makes them, and
+        # each index is the COMPLETE set in force there rather than a delta.
+        # Merging would leave a superseded alias live: a suppressor bound in an
+        # `if` at index 0 followed by `cs = helper.make()` at index 1 would
+        # still resolve `cs` to the suppressor at index 2, reporting a live
+        # assert as swallowed.
+        bound_so_far = dict(by_index.get(index, {}))
     return entered
 
 
@@ -710,11 +927,12 @@ def _unreadable_suppressor(call, bound):
     Scoped deliberately to a bare ``Name``, and only when that name is one of the
     documented suppressor spellings. Every context manager wrapping a real pinned
     assert in ``test_timed_menu_milestones.py`` is called on an ``Attribute``
-    (``pytest.raises(...)``, ``harness.observe()``, ...), measured: 48 of 48. A
-    bare name is therefore a shape the real file never uses, so widening the
-    check to it cannot manufacture a false "unenforced" verdict on pinned sites.
-    An ``Attribute`` this function cannot resolve is left alone, because
-    ``pytest.raises(AssertionError)`` legitimately wraps 17 of the real asserts.
+    (``pytest.raises(...)``, ``harness.observe()``, ...) -- measured: 40 of the
+    40 ``with``-items in that file, with no other shape present. A bare name is
+    therefore a shape the real file never uses, so widening the check to it
+    cannot manufacture a false "unenforced" verdict on pinned sites. An
+    ``Attribute`` this function cannot resolve is left alone, because
+    ``pytest.raises(...)`` legitimately wraps many of the real asserts.
     """
     func = call.func
     if not isinstance(func, ast.Name):
@@ -727,12 +945,39 @@ def _unreadable_suppressor(call, bound):
 
 def _is_suppression_call(call, bound):
     """Is this call a suppression context that can eat an assertion failure?"""
-    if any(
-        _resolves_to(call.func, dotted, bound)
-        for dotted in (*SUPPRESSING_CONTEXTS, *ASSERTION_CAPTURING_CONTEXTS)
-    ):
+    if any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return True
+    if any(_resolves_to(call.func, dotted, bound) for dotted in ASSERTION_CAPTURING_CONTEXTS):
+        return not _raises_without_an_expected_type(call)
     return _unreadable_suppressor(call, bound)
+
+
+def _raises_without_an_expected_type(call):
+    """Is this ``pytest.raises`` call one that cannot leave the test green?
+
+    ``pytest.raises`` requires the expected exception type to be given
+    positionally. With *no* argument at all it raises ``ValueError: You must
+    specify at least one parameter`` while building the context object, before
+    the body is ever entered -- so no assert is evaluated and the test fails
+    loudly for an unrelated reason. That case is decidable and excluded.
+
+    ``match=`` is deliberately *not* excluded, and the reason is that it is
+    undecidable rather than loud. Whether the block ends green depends on the
+    assertion's own message at runtime: with ``pytest.raises(AssertionError,
+    match="1 == 2")`` the empty message of a bare ``assert`` fails the regex and
+    pytest re-raises -- loud -- but with ``match=""`` or ``match=".*"`` the
+    failure is caught, matches, and the test passes green. Measured across
+    all three. A static check cannot know which, so the two defensible answers
+    are "always a defeat" and "never a defeat", and this picks the first: an
+    assert that is *sometimes* unenforceable is not a contract that can be
+    relied on, whereas calling it enforced would certify a shape that has
+    already been measured to go green.
+
+    The no-argument case is different in kind: there the failure is raised
+    before the body runs, so the assert is never evaluated and *no* runtime
+    value can rescue it.
+    """
+    return not call.args
 
 
 def _entered_suppressions(node, bound):
@@ -784,6 +1029,10 @@ def _is_suppressing_with(node, bound, function=None):
     if function is None:
         return False
     for argument in _aliased_suppressions(node, function, bound):
+        # An ambiguous binding may be *any* suppressor, so the rule cannot claim
+        # the exception is harmless and reports the assert as defeated (#308).
+        if argument is AMBIGUOUS_SUPPRESSOR:
+            return True
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
     return False
