@@ -520,7 +520,7 @@ def _own_imports(function):
     return found
 
 
-def _nested_scope_nodes(statement):
+def _nested_scope_nodes(statement, enclosing=None):
     """The ids of nodes inside ``statement`` that belong to a nested scope.
 
     A walrus inside a nested ``def``, ``async def`` or ``lambda`` binds a name
@@ -530,17 +530,177 @@ def _nested_scope_nodes(statement):
     direction. Mirrors ``_own_imports``, which excludes the same scopes for the
     same reason.
     """
+    # `enclosing` is the function that owns `statement`. It is only needed to
+    # resolve a `nonlocal` (see `_nonlocal_rebind_exceptions`), and callers that
+    # have it pass it so a nested rebind of the enclosing cell is not excluded.
     excluded = set()
     stack = list(ast.iter_child_nodes(statement))
     while stack:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            excluded.update(id(inner) for inner in ast.walk(node))
+            excluded.update(_scope_node_ids(node, _nonlocal_rebind_exceptions(node, enclosing)))
             continue
         stack.extend(ast.iter_child_nodes(node))
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        excluded.update(id(inner) for inner in ast.walk(statement))
+        excluded.update(
+            _scope_node_ids(statement, _nonlocal_rebind_exceptions(statement, enclosing))
+        )
     return excluded
+
+
+def _nonlocal_rebind_exceptions(function, enclosing=None):
+    """The node ids in ``function``'s body that bind an *enclosing* name.
+
+    #332: a nested scope normally binds its own names, which is why
+    ``_nested_scope_nodes`` drops the whole subtree. But ``nonlocal cs``
+    makes ``cs`` in the nested body the *same cell* as the name in the
+    enclosing function, so a store there really does rebind the enclosing
+    name, and the carried suppressor the outer function bound is retired by
+    it:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            pass
+        def inner():
+            nonlocal cs
+            cs = contextlib.nullcontext()   # rebinds `outer`'s cell
+        inner()
+        with cs:                            # nullcontext, not the suppressor
+            assert 1 == 2                   # live, but reported defeated
+
+    Only the names each nested body actually declares ``nonlocal`` are let
+    through, and only when the enclosing scope really binds them -- which is
+    what keeps a plain nested ``cs = ...`` fully isolated, the shape whose
+    ``NameError`` this module already reports as defeated:
+
+        def inner():
+            cs = contextlib.nullcontext()   # `inner`'s own local
+        with cs:                            # NameError: not bound in `outer`
+            assert 1 == 2
+
+    ``global`` is deliberately NOT let through. A ``global`` store writes the
+    module binding, not the enclosing function's local, so the function's
+    suppressor survives it and the assert stays swallowed.
+
+    The target store itself is always included, whatever its value, because a
+    store to an unreadable right-hand side (``cs = 5``) retires the carried
+    binding just as a readable one does: the later ``with cs:`` then raises
+    ``TypeError`` on entry, which is loud, so the assert is live.
+    """
+    # A `nonlocal` is a compile-time error unless the name is bound somewhere
+    # in the enclosing chain, so reading a nonexistent `ast.Nonlocal` is only
+    # reachable from a synthetic tree -- and the second branch is what keeps
+    # a fixture that spells the keyword as plain text off the `getattr`.
+    declared = {
+        name
+        for node in ast.walk(function)
+        if isinstance(node, getattr(ast, "Nonlocal", None))
+        for name in node.names
+    }
+    if not declared:
+        return frozenset()
+    # The cell `nonlocal` writes is the one the *enclosing* function bound, so
+    # the declared names are resolved against that scope rather than against
+    # `function` itself. Without an enclosing function there is no such cell,
+    # and the exclusion stands -- a `FunctionDef` reached on its own is the
+    # outermost scope of whatever fixture is being walked.
+    if enclosing is None:
+        return frozenset()
+    live = set(_function_parameters(enclosing))
+    # A nested `def`'s *name* binds the enclosing scope, but nothing inside its
+    # body does. Walking into the body to answer "does the enclosing function
+    # bind this name?" is wrong in exactly the case the check exists for: a
+    # `nonlocal` over a name only a *helper* binds has no cell in `enclosing`,
+    # so the helper's walrus must not be attributed to the outer `with cs:`.
+    for statement in enclosing.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            live.add(statement.name)
+            continue
+        live.update(_scope_bound_names(statement))
+    live &= declared
+    if not live:
+        return frozenset()
+    keep = set()
+    # Walk this body's own statements -- descending into `if`/`with`/`try`
+    # bodies but not into a further nested `def` -- and keep each statement
+    # that stores one of the declared names. The whole *statement* has to be
+    # kept, not just its target: `_binding_targets_by_name` skips every node
+    # in the excluded set, and the target is only ever read as part of the
+    # statement that owns it.
+    stack = list(function.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(node, getattr(ast, "Nonlocal", None)):
+            # The declaration carries only names and binds nothing, so there
+            # is nothing to keep here. The walk deliberately continues past
+            # it: the store it authorises is a sibling statement further down
+            # the same body, and stopping at the declaration would drop it.
+            continue
+        for name, target in _bound_targets(node):
+            if name in live:
+                keep.add(id(node))
+                keep.add(id(target))
+        stack.extend(ast.iter_child_nodes(node))
+    return frozenset(keep)
+
+
+def _function_parameters(function):
+    """The parameter names a function binds in its own scope."""
+    spec = function.args
+    names = [
+        *getattr(spec, "posonlyargs", ()),
+        *spec.args,
+        *spec.kwonlyargs,
+    ]
+    if spec.vararg is not None:
+        names.append(spec.vararg)
+    if spec.kwarg is not None:
+        names.append(spec.kwarg)
+    return {argument.arg for argument in names}
+
+
+def _scope_bound_names(statement):
+    """Every name bound by ``statement`` in its own scope, nested scopes aside.
+
+    A deliberately non-recursive collector used only to answer "does the
+    enclosing function bind this name?". It walks ``statement`` and stops at
+    every nested ``def``/``async def``/``lambda``/``class`` -- a bind inside
+    one of those is that scope's own name, never the enclosing function's. It
+    cannot call ``_names_bound_by``, because that resolves a nested body's
+    ``nonlocal`` by asking this same question of the enclosing scope again,
+    and the two would recurse into each other forever.
+    """
+    names = set()
+    stack = list(ast.iter_child_nodes(statement))
+    while stack:
+        node = stack.pop()
+        # A walrus stores a name with no statement node of its own -- the
+        # `NamedExpr` is a bare expression, so `_bound_targets` sees it only
+        # through this branch. The #332 shape depends entirely on it.
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            continue
+        for name, _target in _bound_targets(node):
+            names.add(name)
+        stack.extend(ast.iter_child_nodes(node))
+    return names
+
+
+def _scope_node_ids(function, keep):
+    """Every node id in ``function``, minus the nodes in ``keep``.
+
+    Splitting the traversal out lets ``_nested_scope_nodes`` keep the whole
+    nested subtree excluded *except* the specific stores that a
+    ``nonlocal`` declaration makes binds of the enclosing scope. Without the
+    split, dropping the subtree is the only option and the ``nonlocal``
+    rebind in #332 never reaches ``_names_bound_by``.
+    """
+    return {id(inner) for inner in ast.walk(function) if id(inner) not in keep}
 
 
 def _class_scope_nodes(statement):
@@ -916,7 +1076,7 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
-def _names_bound_by(statement):
+def _names_bound_by(statement, enclosing=None):
     """Every name ``statement`` binds, whatever its right-hand side reads as.
 
     ``_assigned_suppressors`` records only names whose right-hand side is a
@@ -946,10 +1106,10 @@ def _names_bound_by(statement):
     Every bind is a rebind or an unbind, so each has to retire a carried
     walrus, whether or not ``_assigned_suppressors`` could read its value.
     """
-    return set(_binding_targets_by_name(statement))
+    return set(_binding_targets_by_name(statement, enclosing))
 
 
-def _binding_targets_by_name(statement):
+def _binding_targets_by_name(statement, enclosing=None):
     """Map each name ``statement`` binds to the target nodes that bind it.
 
     The targets are kept rather than only the names because the caller has to
@@ -957,7 +1117,7 @@ def _binding_targets_by_name(statement):
     carried walrus retires it, and one that ran before does not. See
     ``_supersedes_walrus``.
     """
-    excluded = _nested_scope_nodes(statement)
+    excluded = _nested_scope_nodes(statement, enclosing)
     bindings = {}
     for node in ast.walk(statement):
         if id(node) in excluded:
@@ -1229,7 +1389,7 @@ def _aliased_suppressions(node, function, bound):
         #
         # so every node belonging to a nested scope is excluded from both the
         # walk and the binding it would contribute.
-        nested = _nested_scope_nodes(statement)
+        nested = _nested_scope_nodes(statement, function)
         # A `class` body is a nested scope too, but it is excluded *only* from
         # the walrus carry below, not from the binding walk: a class body's
         # `with ... as` target binds the class local rather than the enclosing
@@ -1256,9 +1416,9 @@ def _aliased_suppressions(node, function, bound):
         # its own statement -- but that also means it retires *every* other
         # bind in the statement, including one that runs after the walrus.
         # `_supersedes_walrus` puts that position back below.
-        for name in _names_bound_by(statement):
+        for name in _names_bound_by(statement, function):
             walrus_bindings.pop(name, None)
-        bindings = _binding_targets_by_name(statement)
+        bindings = _binding_targets_by_name(statement, function)
         for header in ast.walk(statement):
             if not isinstance(header, (ast.With, ast.AsyncWith)):
                 continue

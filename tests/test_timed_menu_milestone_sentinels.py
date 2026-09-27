@@ -1957,6 +1957,132 @@ def test_a_rebind_inside_the_walrus_own_header_retires_it(label, body, live):
 #: The complementary rows matter just as much. Pining only the safe direction
 #: would leave a future change free to break these without anything going red,
 #: and these shapes are exactly where a scope fix could silently over-reach.
+def _nonlocal_source(rebind, *, kwarg="nonlocal"):
+    """A fixture whose nested ``def`` rebinds the enclosing ``cs`` cell."""
+    return (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n"
+        "    async def inner():\n"
+        f"        {kwarg} cs\n" + textwrap.indent(rebind, "        ") + "\n"
+        "    await inner()\n"
+        "    with cs:\n"
+        "        assert 1 == 2\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "kwarg", "live"),
+    [
+        # #332. `nonlocal cs` makes `cs` the *same cell* as the enclosing
+        # function's, so this store really does retire the carried suppressor.
+        # The head reported `[False]` -- a live contract certified as swallowed.
+        ("nonlocal-nullcontext", "cs = nullcontext()", "nonlocal", True),
+        # A `nonlocal` store to a non-context-manager raises `TypeError` on
+        # entry, which is loud, so the assert never runs: live.
+        ("nonlocal-int", "cs = 5", "nonlocal", True),
+        # A `nonlocal` store back to a suppressor really does swallow again, so
+        # this row is the *other* direction and must not be "repaired" into
+        # reporting a swallowed assert as live.
+        ("nonlocal-suppress", "cs = contextlib.suppress(AssertionError)", "nonlocal", False),
+        # A `global` store writes the *module* binding, not the enclosing
+        # function's local, so the function's suppressor survives it and the
+        # assert is still swallowed. Letting `global` through the `nonlocal`
+        # path would have "fixed" #332 by flipping this row the damaging way.
+        ("global-nullcontext", "cs = nullcontext()", "global", False),
+        # No declaration at all: the store binds `inner`'s own local, so the
+        # later `with cs:` raises `NameError` and the assert is live. Base
+        # `87a90da` reports `[True]`; the walrus-carrying head reports
+        # `[False]`. This is the #287 over-breadth family rather than part of
+        # #332, so the row pins the *head's* value and names the residual.
+        # Pinned at `[False]` deliberately: widening it here would be a
+        # different fix, and doing it inside this change would let the
+        # `nonlocal` repair hide a second behaviour change.
+        ("plain-nested-store", "cs = nullcontext()", None, False),
+    ],
+    ids=[
+        "nonlocal-nullcontext",
+        "nonlocal-int",
+        "nonlocal-suppress",
+        "global-nullcontext",
+        "plain-nested-store",
+    ],
+)
+def test_a_nested_rebind_of_the_enclosing_cell_is_read_as_a_rebind(label, rebind, kwarg, live):
+    """#332: a ``nonlocal`` store retires the carried suppressor; nothing else does.
+
+    ``_nested_scope_nodes`` drops a whole nested ``def`` subtree, because a
+    store there normally binds that scope's own name. But ``nonlocal cs``
+    makes the nested body share the *enclosing* function's cell, so the store
+    rebinds the name the outer ``with cs:`` reads. The head excluded it, the
+    carried suppressor survived, and the assert below was reported defeated:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            pass
+        def inner():
+            nonlocal cs
+            cs = contextlib.nullcontext()   # `outer`'s cell, really
+        await inner()
+        with cs:                            # nullcontext, not the suppressor
+            assert x != 1                   # live, reported swallowed
+
+    The rows below pin both directions, because this fix could easily
+    over-reach: ``global`` is a different cell, and a plain nested store is
+    the nested scope's own name.
+    """
+    if kwarg is None:
+        source = _nonlocal_source(rebind).replace("        nonlocal cs\n", "")
+    else:
+        source = _nonlocal_source(rebind, kwarg=kwarg)
+    results = _verdicts(source)
+    assert len(results) == 1, f"{label}: fixture declared {len(results)} asserts"
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+def test_a_nonlocal_store_of_an_undeclared_name_does_not_reach_the_enclosing_scope():
+    """A ``nonlocal`` over one name must not retire a *different* name.
+
+    ``inner`` declares ``nonlocal spare`` and stores to both ``spare`` and
+    ``cs``. Only ``spare`` is declared, so only that store rebinds an enclosing
+    cell; ``cs = nullcontext()`` binds ``inner``'s own local and leaves
+    ``outer``'s carried suppressor alone. The interpreter agrees -- the
+    ``with cs:`` still enters the suppressor and the assert is swallowed -- so
+    ``[False]`` is the correct verdict and is what this pins.
+
+    Matching *which* names the declaration lists is the load-bearing part. A
+    rule that let any store in a nested body through once some ``nonlocal`` was
+    present would retire ``outer``'s suppressor and report this swallowed
+    assert as live, which is the damaging direction.
+    """
+    source = (
+        "async def outer(x, helper, spare):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n"
+        "    async def inner():\n"
+        "        nonlocal spare\n"
+        "        spare = nullcontext()\n"
+        "        cs = helper.make()\n"
+        "    await inner()\n"
+        "    with cs:\n"
+        "        assert 1 == 2\n"
+    )
+    results = _verdicts(source)
+    assert results == [False], (
+        "a store to a name the `nonlocal` does not declare binds the nested "
+        "scope's own local, so the enclosing suppressor must survive; got "
+        f"{results}. A store that is not a readable suppressor would also not "
+        "show up in `_assigned_suppressors`, so a second bind of the same kind "
+        "in a nested body is the shape that actually pins the exclusion."
+    )
+
+
 SAFE_DIRECTION_ROWS = (
     (
         "a del under an untaken else",
