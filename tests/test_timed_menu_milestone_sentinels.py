@@ -1695,3 +1695,54 @@ def test_only_a_module_level_class_counts():
     assert _is_enforced(outer, target, tree), (
         "a class nested inside another was matched by its bare inner name"
     )
+
+
+def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
+    """#316: the two scopes must stay distinguishable, or nothing pins them.
+
+    ``_assigned_value`` reads a module's *own top-level statements* and a
+    function's statements separately, with the function consulted first. That
+    split is load-bearing: ``_constructed_class_of`` relies on a function-local
+    binding shadowing an outer one, and on the module fallback firing only when
+    the function really has nothing to say.
+
+    Using ``ast.walk`` on the module would collapse the two -- it descends into
+    every function body, so a module lookup would find assignments belonging to
+    an unrelated function. The row below is the shape that tells the two
+    readings apart, and it is not reachable from any other #316 test: they all
+    resolve their binding inside the one function under test, so the module
+    fallback is never the thing being exercised.
+
+    Reintroducing ``ast.walk`` here leaves the whole suite green while flipping
+    this row: the module-level ``helper`` is a loud ``Loud``, so the assert is
+    live and must stay ``enforced``, but the walk finds ``unrelated``'s
+    ``helper = Suppressor()`` and reports the live assert as a defeat -- the
+    damaging direction.
+    """
+    source = (
+        "class Suppressor:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return exc[0] is AssertionError\n"
+        "class Loud:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return False\n"
+        "def unrelated(y):\n"
+        "    helper = Suppressor()\n"
+        "helper = Loud()\n"
+        "def probe(x):\n"
+        "    with helper:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    probe = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "probe"
+    )
+    target = next(node for node in ast.walk(probe) if isinstance(node, ast.Assert))
+    assert _is_enforced(probe, target, tree), (
+        "a module-scope lookup descended into an unrelated function body and "
+        "adopted its binding; a live assert was reported as defeated"
+    )
