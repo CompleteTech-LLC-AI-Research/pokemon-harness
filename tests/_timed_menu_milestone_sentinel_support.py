@@ -537,6 +537,35 @@ def _nested_scope_nodes(statement):
     return excluded
 
 
+def _class_scope_nodes(statement):
+    """The ids of nodes inside ``statement`` that belong to a nested ``class``.
+
+    A ``class`` body is a scope, and a walrus in it binds the class local, not
+    the enclosing function's name. A ``def`` body is a scope for the same
+    reason, and ``_nested_scope_nodes`` already excludes those; a class was
+    missed, and the recorder's walrus carry let a class-local alias decide an
+    enclosing function's verdict.
+
+    This is deliberately separate from ``_nested_scope_nodes``, which feeds the
+    binding walk. The walk must keep counting a class body's ``with ... as``
+    target -- that bind does not touch the function's name, so the carried
+    suppressor the function bound must survive it. Only the walrus is both
+    carried forward and read through the walk, so only the walrus needs the
+    class excluded.
+    """
+    excluded = set()
+    stack = list(ast.iter_child_nodes(statement))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.ClassDef):
+            excluded.update(id(inner) for inner in ast.walk(node))
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    if isinstance(statement, ast.ClassDef):
+        excluded.update(id(inner) for inner in ast.walk(statement))
+    return excluded
+
+
 def _resolved_dotted(expression, bound):
     """The dotted path ``expression`` refers to, with every alias expanded."""
     if isinstance(expression, ast.Name):
@@ -1122,6 +1151,15 @@ def _aliased_suppressions(node, function, bound):
         # so every node belonging to a nested scope is excluded from both the
         # walk and the binding it would contribute.
         nested = _nested_scope_nodes(statement)
+        # A `class` body is a nested scope too, but it is excluded *only* from
+        # the walrus carry below, not from the binding walk: a class body's
+        # `with ... as` target binds the class local rather than the enclosing
+        # function's name, and the shape pinned in `SAFE_DIRECTION_ROWS` shows
+        # the walk must still count it, or a carried suppressor survives a
+        # re-entry the interpreter really does swallow. The walrus is the only
+        # binding form carried *and* read through the walk, so it is the only
+        # one a nested scope corrupts.
+        class_scoped = _class_scope_nodes(statement)
         # Any name this statement assigns retires a carried walrus binding for
         # that name, whether or not `_assigned_suppressors` could read the
         # stored value:
@@ -1161,6 +1199,27 @@ def _aliased_suppressions(node, function, bound):
             # certified as load-bearing.
             for item in header.items:
                 expression = item.context_expr
+                # A walrus in a *nested* scope binds that scope's name, so it
+                # cannot be carried into the enclosing function's verdict. The
+                # recorder walks every `with` header in the statement, so a
+                # class body -- a scope exactly as a `def` is -- was letting
+                # its class-local alias decide a name the function never bound:
+                #
+                #     def outer(x, helper):
+                #         class Inner:
+                #             with (cs := contextlib.suppress(AssertionError)):
+                #                 pass
+                #         with cs:      # NameError: `cs` is `Inner`'s local
+                #             assert x != 1
+                #
+                # and the second assert was reported defeated when it is live.
+                # That is the damaging direction: a live contract reported as
+                # already broken. The guard is on the header's own scope, not
+                # on every nested bind, so a class body's `with ... as` target
+                # still retires a walrus the *enclosing* function bound -- the
+                # shape pinned in `SAFE_DIRECTION_ROWS`.
+                if id(header) in class_scoped:
+                    break
                 # Only a *suppression call* is carried, gated exactly as the
                 # same-statement path below gates the identical value. A
                 # walrus whose value is not a suppressor re-entering a later

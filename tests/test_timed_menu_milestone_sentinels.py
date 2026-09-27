@@ -1655,6 +1655,47 @@ def test_every_binding_form_retires_a_carried_walrus(label, body, live):
     )
 
 
+def test_a_walrus_in_a_class_body_does_not_escape_the_class():
+    """A class body is a nested scope, so its walrus binds the class local.
+
+    The rows above all rebind a walrus the *enclosing* function bound. This one
+    is the opposite: the only suppressor alias in the function lives on a
+    ``class`` local, so the ``with cs:`` that re-enters the name raises
+    ``NameError`` before the assert is reached and the assert is live.
+
+    ``_nested_scope_nodes`` excluded ``def``/``async def``/``lambda`` but not
+    ``class``, so the class-local alias was carried as though the enclosing
+    function had bound it, and the head reported this live assert as defeated:
+
+        def outer(x, helper):
+            class Inner:
+                with (cs := contextlib.suppress(AssertionError)):
+                    pass
+            with cs:               # NameError: `cs` is `Inner`'s local
+                assert x != 1      # live
+
+    This is a *damaging* direction, not the safe over-breadth the ceiling rows
+    pin: reporting a live contract as defeated stops it protecting anything.
+    The expected verdict is the interpreter's, measured.
+    """
+    source = (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    class Inner:\n"
+        "        with (cs := contextlib.suppress(AssertionError)):\n"
+        "            pass\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    results = _verdicts(source)
+    assert results == [True], (
+        "a class-body walrus binds the class local, so the enclosing `with cs:` "
+        f"raises NameError and the assert is live; got {results}"
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "body", "live"),
     [
