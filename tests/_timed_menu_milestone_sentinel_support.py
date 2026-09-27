@@ -38,6 +38,38 @@ import tests.test_timed_menu_milestones as milestones
 #: ``except*``.
 SUPPRESSING_CONTEXTS = ("contextlib.suppress", "asyncio.suppress")
 
+#: The *last component* of each suppressing path -- ``suppress`` for both
+#: entries in ``SUPPRESSING_CONTEXTS``. This is the set of bare names that can
+#: stand in for a suppressor whose binding the enclosing function cannot see
+#: (see ``_unreadable_suppressor``).
+#:
+#: Taking every component of the dotted path would also admit ``contextlib``
+#: and ``asyncio``. Those are module names, not suppressors -- ``with
+#: contextlib:`` suppresses nothing -- so including them would report live
+#: asserts as dead on any code that uses a module object as a context manager.
+#: The suppressing callable is always the final component, so that component is
+#: the only spelling that can stand in for one.
+SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRESSING_CONTEXTS)
+
+#: Dotted paths whose call turns a caught exception into a *pass*. This is a
+#: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
+#: load-bearing, so the two sets stay separate rather than being merged:
+#:
+#: * ``suppress`` swallows the failure silently -- the test still passes and
+#:   nothing is recorded.
+#: * ``raises`` *asserts* the failure happened. ``with
+#:   pytest.raises(AssertionError): assert 1 == 2`` therefore raises the
+#:   AssertionError, ``pytest.raises`` catches it, finds the expected type, and
+#:   the block ends normally. The test goes green on a failing assert, which is
+#:   the same present-but-dead contract as the other shapes in this family.
+#:
+#: Measured on the pinned file, ``pytest.raises`` wraps asserts 5 times and
+#: never once for ``AssertionError``: the arguments there are ``RuntimeError``,
+#: ``BaseExceptionGroup``, and tuples of ``TypeError``/``ValueError``/
+#: ``KeyError``/``RuntimeError``, none of which catch an ``assert``. Adding this
+#: set therefore drops 0 of the 143 real asserts.
+ASSERTION_CAPTURING_CONTEXTS = ("pytest.raises",)
+
 _OPERATORS = {
     ast.Eq: "==",
     ast.NotEq: "!=",
@@ -471,6 +503,12 @@ def _resolved_dotted(expression, bound):
     if isinstance(expression, ast.Attribute):
         prefix = _resolved_dotted(expression.value, bound)
         return f"{prefix}.{expression.attr}" if prefix else None
+    if isinstance(expression, ast.Call):
+        # `contextlib.suppress(...)` *is* `contextlib.suppress` for the purpose
+        # of asking what callable it is. Without this, an attribute hanging off
+        # the result -- `contextlib.suppress(X).__enter__()` -- resolves to
+        # None and every dunder-shaped defeat reads as an ordinary method call.
+        return _resolved_dotted(expression.func, bound)
     return None
 
 
@@ -500,23 +538,236 @@ def _name_catches_assertion_error(name):
 def _suppression_names(call):
     """The exception names passed to a ``suppress(...)`` call.
 
-    Anything that is not a plain name is reported as universal, so an argument
-    the check cannot read is never assumed to be harmless.
+    A tuple is flattened, because ``suppress((TypeError, ValueError))`` and
+    ``pytest.raises((KeyError, RuntimeError))`` are both ordinary spellings that
+    name two types. Reading only the tuple node itself would report the
+    unreadable case ``BaseException`` for *every* tuple, and since
+    ``BaseException`` catches ``AssertionError``, that would report the pinned
+    file's four tuple-typed ``pytest.raises`` sites as defeated -- a false alarm
+    on real, live asserts. Measured on ``test_timed_menu_milestones.py``:
+    ``(TypeError, ValueError)``, ``(KeyError, ValueError, RuntimeError)`` and
+    ``(ValueError, RuntimeError)`` all appear.
+
+    An element that is not a plain name is still reported as universal, so an
+    argument the check cannot read is never assumed to be harmless.
     """
-    return [
-        argument.id if isinstance(argument, ast.Name) else "BaseException" for argument in call.args
-    ] or ["BaseException"]
+    names = []
+    for argument in call.args:
+        if isinstance(argument, ast.Tuple):
+            names.extend(
+                element.id if isinstance(element, ast.Name) else "BaseException"
+                for element in argument.elts
+            )
+        else:
+            names.append(argument.id if isinstance(argument, ast.Name) else "BaseException")
+    return names or ["BaseException"]
 
 
-def _is_suppressing_with(node, bound):
+def _suppressed_by_dunder(call, bound):
+    """Is this ``suppressor.__enter__()`` -- the dunder spelling of the defeat?
+
+    ``with contextlib.suppress(AssertionError):`` has an alias that never leaves
+    the ``with`` header:
+
+        with contextlib.suppress(AssertionError).__enter__():
+            assert 1 == 2
+
+    That reads as a suppression to a human and as an ordinary method call to the
+    existing rules: ``_resolves_to`` sees ``contextlib.suppress.__enter__`` and
+    matches no entry in ``SUPPRESSING_CONTEXTS``, and ``_unreadable_suppressor``
+    only accepts a bare ``Name``. Matching one concrete spelling and leaving the
+    family open is exactly the mistake #288 recorded for ``except*``.
+
+    Only the ``__enter__`` dunder is stripped, and only one component, so this
+    cannot match a suppressor stored under a different attribute name. A
+    non-suppressor that happens to define ``__enter__`` is not matched: the
+    underlying call still has to resolve to a real suppressor.
+    """
+    func = call.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
+        return False
+    if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
+        return False
+    return [name for name in call.args if isinstance(name, ast.Name)] or ["BaseException"]
+
+
+def _assigned_suppressors(function, bound):
+    """Names bound to a readable suppressor earlier in this function.
+
+    ``contextlib.suppress(AssertionError)`` is an expression, and an expression
+    can be given a name and entered later:
+
+        cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert 1 == 2
+
+    By the time the ``with`` header is read, the call that built ``cs`` is gone,
+    so the header holds a bare ``Name`` and the resolution rule has nothing to
+    resolve. Only an assignment whose right-hand side is itself a readable
+    suppressor is recorded, so a name bound to an ordinary call is never
+    assumed to suppress. ``isinstance`` on a class attribute is deliberately
+    not matched: that is an ``Attribute`` chain, not a bare name, and reaching
+    through a class to a descriptor needs a runtime this check does not have.
+    """
+    assigned = {}
+    for statement in function.body:
+        targets = []
+        value = None
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            value = statement.value
+        else:
+            continue
+        if isinstance(value, ast.Call) and _is_suppression_call(value, bound):
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    assigned[target.id] = value
+    return assigned
+
+
+def _aliased_suppressions(node, function, bound):
+    """Suppressors reached through a bare ``Name`` in a ``with`` header.
+
+    ``contextlib.suppress(AssertionError)`` is an expression, and an expression
+    can be given a name and entered later:
+
+        cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert 1 == 2
+
+    This is the *silent* form of the defeat. Unlike the ``__enter__()``
+    dunder -- which returns ``None`` and so raises ``TypeError`` on entry,
+    failing loudly -- entering the alias object directly really does swallow the
+    assertion failure and the test stays green. It is therefore the more
+    damaging of the two, and matching only the dunder would have left the worse
+    spelling open.
+
+    Only names bound by an assignment in the owning function qualify, and only
+    when that assignment's right-hand side is a *readable* suppressor. A name
+    from an outer scope is deliberately not followed: assuming an arbitrary
+    call returns a suppressor would report live asserts as dead on every
+    context manager this check cannot trace.
+    """
+    assigned = _assigned_suppressors(function, bound)
+    if not assigned:
+        return []
+    entered = []
+    for header in ast.walk(node):
+        if not isinstance(header, (ast.With, ast.AsyncWith)):
+            continue
+        for item in header.items:
+            expression = item.context_expr
+            if isinstance(expression, ast.Name) and expression.id in assigned:
+                entered.append(assigned[expression.id])
+            if not isinstance(expression, ast.Call) or not isinstance(
+                expression.func, ast.Attribute
+            ):
+                continue
+            if expression.func.attr != "__enter__":
+                continue
+            if isinstance(expression.func.value, ast.Name) and expression.func.value.id in assigned:
+                entered.append(assigned[expression.func.value.id])
+    return entered
+
+
+def _unreadable_suppressor(call, bound):
+    """Is this a suppression this function cannot trace back to an import?
+
+    ``_resolves_to`` answers "does this name *resolve* to ``contextlib.suppress``",
+    which is a question about a binding that exists. A function parameter never
+    has one:
+
+        def f(suppress):
+            with suppress(AssertionError):
+                assert 1 == 2
+
+    There is no import to resolve, so the dotted path is the bare name ``suppress``
+    and the equality simply fails. That is a defeat by the same argument
+    ``_name_catches_assertion_error`` already accepts -- an exception this check
+    cannot prove harmless is treated as harmful -- applied one level up to the
+    *suppressor* rather than the exception it is handed.
+
+    Scoped deliberately to a bare ``Name``, and only when that name is one of the
+    documented suppressor spellings. Every context manager wrapping a real pinned
+    assert in ``test_timed_menu_milestones.py`` is called on an ``Attribute``
+    (``pytest.raises(...)``, ``harness.observe()``, ...), measured: 48 of 48. A
+    bare name is therefore a shape the real file never uses, so widening the
+    check to it cannot manufacture a false "unenforced" verdict on pinned sites.
+    An ``Attribute`` this function cannot resolve is left alone, because
+    ``pytest.raises(AssertionError)`` legitimately wraps 17 of the real asserts.
+    """
+    func = call.func
+    if not isinstance(func, ast.Name):
+        return False
+    if func.id in bound:
+        # A binding exists; `_is_suppressing_with` already decided it properly.
+        return False
+    return func.id in SUPPRESSOR_SPELLINGS
+
+
+def _is_suppression_call(call, bound):
+    """Is this call a suppression context that can eat an assertion failure?"""
+    if any(
+        _resolves_to(call.func, dotted, bound)
+        for dotted in (*SUPPRESSING_CONTEXTS, *ASSERTION_CAPTURING_CONTEXTS)
+    ):
+        return True
+    return _unreadable_suppressor(call, bound)
+
+
+def _entered_suppressions(node, bound):
+    """Suppressions installed by ``stack.enter_context(...)`` inside this ``with``.
+
+    ``ExitStack`` defers the suppression past the ``with`` header, so the shape is
+
+        with ExitStack() as stack:
+            stack.enter_context(suppress(AssertionError))
+            assert 1 == 2
+
+    where the assert is enclosed by the ``with`` but the suppressor is a statement
+    in its body rather than an item of its header. Reading only the header misses
+    it. A resolved suppressor already answers True in ``_is_suppression_call``;
+    this narrows the *unresolved* case to ``enter_context``, because a bare-name
+    rule over every call in the body would also fire on unrelated statements.
+    """
+    entered = []
+    for statement in node.body:
+        for child in ast.walk(statement):
+            if not isinstance(child, ast.Call) or not isinstance(child.func, ast.Attribute):
+                continue
+            if child.func.attr != "enter_context" or not child.args:
+                continue
+            entered.append(child.args[0])
+    return entered
+
+
+def _is_suppressing_with(node, bound, function=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
     for item in node.items:
         call = item.context_expr
         if not isinstance(call, ast.Call):
             continue
-        if not any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
+        dunder = _suppressed_by_dunder(call, bound)
+        if dunder and any(_name_catches_assertion_error(name) for name in dunder):
+            return True
+        if not _is_suppression_call(call, bound):
             continue
         if any(_name_catches_assertion_error(name) for name in _suppression_names(call)):
+            return True
+    for argument in _entered_suppressions(node, bound):
+        if not isinstance(argument, ast.Call):
+            continue
+        if not _is_suppression_call(argument, bound):
+            continue
+        if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
+            return True
+    if function is None:
+        return False
+    for argument in _aliased_suppressions(node, function, bound):
+        if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
     return False
 
@@ -545,6 +796,26 @@ def _in_body(branch, target):
 def _falsy_literal(node):
     """A condition that is a literal false, so its body can never run."""
     return isinstance(node, ast.Constant) and not node.value
+
+
+def _is_empty_literal_iterable(node):
+    """Is this iterable a literal container that provably yields nothing?
+
+    ``for _ in []:`` keeps the assert in the AST and never runs it, which is the
+    loop spelling of the ``if False:`` defeat already closed above. The literal
+    must be *readable* rather than merely a literal: ``[]``, ``()``, ``{}``,
+    ``(0,)`` and ``(False, True)`` all have a decidable value, and the
+    emptiness test is then exact.
+
+    A call such as ``range(0)`` or ``dict()`` is deliberately *not* matched
+    even though it too yields nothing. Deciding those means reasoning about
+    builtins rather than reading a literal, and a wrong answer there drops a
+    live contract from the sentinel's view -- the more damaging error. The rule
+    answers only the question a literal settles on its own.
+    """
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        return False
+    return not _literal_value(node)
 
 
 def _is_uncalled_nested_def(function, node):
@@ -931,7 +1202,30 @@ def _is_enforced(function, target, tree=None):
     the structural walk is the only place the defeat is visible.
 
     Suppression is matched by *resolved* name, so the qualified, from-import
-    and both alias spellings are covered alongside ``contextlib.suppress``.
+    and both alias spellings are covered alongside ``contextlib.suppress``. The
+    three ways a suppressor gets past that rule are each closed separately,
+    because each is a different reason the resolution has nothing to match:
+    a bare ``Name`` with no binding at all (a parameter, read by
+    ``_unreadable_suppressor``), a suppressor installed *inside* the body by
+    ``stack.enter_context`` rather than in the header, and a suppressor bound
+    to a name that the header then enters (``_aliased_suppressions``). The
+    ``.__enter__()`` dunder is a fourth spelling, matched by
+    ``_suppressed_by_dunder``. All of them lean on the same "cannot prove it
+    harmless, so do not assume it" principle the exception argument already
+    uses, and all are scoped to *readable* suppressors so they cannot fire on
+    the pinned file's own contexts.
+
+    ``pytest.raises(AssertionError)`` is a different mechanism -- it asserts
+    that the failure happened -- but the same defeat: the failure is caught,
+    matches, and the test goes green on an assert that could not have failed.
+    It is matched by ``ASSERTION_CAPTURING_CONTEXTS`` and kept separate from
+    ``SUPPRESSING_CONTEXTS`` so the two stay independently checkable.
+
+    Reachability is decided the same way. A literal container that is empty
+    never enters its body, so ``for _ in []:`` is the loop spelling of the
+    ``if False:`` defeat; a *call* like ``range(0)`` is deliberately not
+    matched, because deciding it means reasoning about builtins rather than
+    reading a literal, and a wrong answer there drops a live contract.
 
     ``tree`` supplies the module whose import bindings to resolve, so the
     bindings always come from the file the assert actually lives in.
@@ -950,7 +1244,7 @@ def _is_enforced(function, target, tree=None):
         elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
             if not _in_body(ancestor, target):
                 continue
-            if _is_suppressing_with(ancestor, bound):
+            if _is_suppressing_with(ancestor, bound, function):
                 return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
@@ -960,6 +1254,14 @@ def _is_enforced(function, target, tree=None):
             # `if False:` / `while False:` -- the body never runs. Only the `if
             # False:` case matters: an `else` branch of a falsy `if` is
             # precisely the one that *does* run, hence the `_in_body` guard.
+            return False
+        elif (
+            isinstance(ancestor, (ast.For, ast.AsyncFor))
+            and _is_empty_literal_iterable(ancestor.iter)
+            and _in_body(ancestor, target)
+        ):
+            # `for _ in []:` -- the loop body never runs, so an assert inside it
+            # is never evaluated. The loop spelling of the `if False:` defeat.
             return False
     return True
 

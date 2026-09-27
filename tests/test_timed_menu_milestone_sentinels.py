@@ -616,3 +616,208 @@ def test_reachability_rejects_exactly_the_shapes_that_cannot_fail(label, body, l
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+
+
+#: The residual defeats of #287: every spelling that keeps the assert in the AST
+#: while making it incapable of failing, and the live control beside it that
+#: must stay enforced.
+#:
+#: Each pair is one *behavioral* claim about the interpreter, not a guess about
+#: what the checker ought to accept. ``with cs:`` where ``cs`` is a suppressor
+#: really does swallow the failure and the test stays green; the same suppression
+#: reached through ``.__enter__()`` raises ``TypeError`` instead, so that one is
+#: listed as a control. Guessing wrong here is what would have shipped a rule
+#: either missing the real defect or crying wolf on live asserts.
+RESIDUAL_DEFEAT_SHAPES = (
+    # A parameter has no import to resolve, so the dotted path is a bare name
+    # and the resolution rule finds nothing to match.
+    (
+        "suppress passed as a parameter",
+        (
+            "    def probe(suppress):\n        with suppress(AssertionError):\n"
+            "            assert x != 1"
+        ),
+        False,
+    ),
+    # ExitStack defers the suppression past the with header, into the body.
+    (
+        "enter_context defers past the header",
+        (
+            "    with ExitStack() as stack:\n"
+            "        stack.enter_context(suppress(AssertionError))\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
+    # pytest.raises(AssertionError) turns the failure into a *pass*: the raise
+    # happens, is caught, matches, and the block ends normally.
+    (
+        "pytest.raises catches the assert",
+        "    with pytest.raises(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    (
+        "pytest.raises Exception",
+        "    with pytest.raises(Exception):\n        assert x != 1",
+        False,
+    ),
+    (
+        "pytest.raises BaseException",
+        "    with pytest.raises(BaseException):\n        assert x != 1",
+        False,
+    ),
+    # A tuple argument is the ordinary spelling on the real file; reading only
+    # the tuple node would report it as unreadable and thus universal, which
+    # would drop four live pinned sites.
+    (
+        "pytest.raises tuple naming AssertionError",
+        "    with pytest.raises((TypeError, AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    # The alias form. This is the *silent* one: entering the object directly
+    # swallows, whereas the __enter__ dunder returns None and raises TypeError.
+    (
+        "suppressor bound to a name",
+        "    cs = contextlib.suppress(AssertionError)\n    with cs:\n        assert x != 1",
+        False,
+    ),
+    (
+        "aliased suppressor Exception",
+        "    cs = suppress(Exception)\n    with cs:\n        assert x != 1",
+        False,
+    ),
+    (
+        "annotated suppressor alias",
+        (
+            "    cs: object = contextlib.suppress(BaseException)\n    with cs:\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
+    # A literal container that is empty never enters its body. The loop
+    # spelling of the `if False:` defeat.
+    ("for over empty list", "    for _ in []:\n        assert x != 1", False),
+    ("for over empty tuple", "    for _ in ():\n        assert x != 1", False),
+    ("for over empty dict", "    for _ in {}:\n        assert x != 1", False),
+    ("for unpack over empty list", "    for _, v in []:\n        assert x != 1", False),
+    # A tuple with one falsy member still iterates once, so the assert runs.
+    ("for over single falsy member", "    for _ in (0,):\n        assert x != 1", True),
+    # --- controls: every one of these must stay enforced ---
+    (
+        "parameter suppress of an unrelated error",
+        ("    def probe(suppress):\n        with suppress(ValueError):\n            assert x != 1"),
+        True,
+    ),
+    (
+        "pytest.raises of an unrelated error",
+        "    with pytest.raises(RuntimeError):\n        assert x != 1",
+        True,
+    ),
+    # The exact tuple spellings the real pinned file uses. If the tuple rule
+    # regresses to "unreadable", these are the sites it would wrongly drop.
+    (
+        "pytest.raises TypeError ValueError",
+        "    with pytest.raises((TypeError, ValueError)):\n        assert x != 1",
+        True,
+    ),
+    (
+        "pytest.raises KeyError ValueError RuntimeError",
+        ("    with pytest.raises((KeyError, ValueError, RuntimeError)):\n        assert x != 1"),
+        True,
+    ),
+    (
+        "pytest.raises BaseExceptionGroup",
+        "    with pytest.raises(BaseExceptionGroup):\n        assert x != 1",
+        True,
+    ),
+    # An unrelated enter_context on the same stack is not a suppression.
+    (
+        "unrelated enter_context",
+        (
+            "    with ExitStack() as stack:\n        stack.enter_context(helper.make())\n"
+            "        assert x != 1"
+        ),
+        True,
+    ),
+    # A name bound to an ordinary call must not be assumed to suppress.
+    (
+        "name bound to an ordinary call",
+        "    cs = helper.make()\n    with cs:\n        assert x != 1",
+        True,
+    ),
+    (
+        "aliased suppressor of an unrelated error",
+        "    cs = contextlib.suppress(ValueError)\n    with cs:\n        assert x != 1",
+        True,
+    ),
+    # A context manager parameter is the common legitimate shape.
+    ("context manager parameter", "    with cm:\n        assert x != 1", True),
+    # Non-empty loops reach their bodies.
+    ("for over a list", "    for _ in [1]:\n        assert x != 1", True),
+    (
+        "for over a falsy member",
+        "    for _ in (False, True):\n        assert x != 1",
+        True,
+    ),
+    ("for over range", "    for _ in range(3):\n        assert x != 1", True),
+    ("for over a name", "    for _ in items:\n        assert x != 1", True),
+    # An empty loop that does not contain the assert is not a defeat of it.
+    ("empty loop on a sibling", "    for _ in []:\n        helper()\n    assert x != 1", True),
+    # A suppression that is not wrapped around the assert does not disarm it.
+    (
+        "suppression on a sibling statement",
+        "    with contextlib.suppress(AssertionError):\n        helper()\n    assert x != 1",
+        True,
+    ),
+    # A module used as a context manager is not a suppressor. This is the
+    # control for SUPPRESSOR_SPELLINGS: taking every component of the dotted
+    # path would put `contextlib` in the set and fire here.
+    ("module object as a context manager", "    with contextlib:\n        assert x != 1", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    RESIDUAL_DEFEAT_SHAPES,
+    ids=[shape[0] for shape in RESIDUAL_DEFEAT_SHAPES],
+)
+def test_the_residual_defeats_of_287_are_rejected(label, body, live):
+    """The remaining #287 spellings must be classified by their runtime effect.
+
+    A rule that is too narrow leaves a present-but-dead pinned assertion
+    certified as load-bearing; a rule that is too wide drops a live contract
+    from the sentinel's view, which is the more damaging of the two errors. The
+    controls therefore carry as much weight as the defeats, and several of them
+    exist specifically to catch a rule that has been over-generalized to fix a
+    gap -- most importantly the tuple-typed ``pytest.raises`` spellings the real
+    file actually uses.
+    """
+    imports = (
+        "    import contextlib\n"
+        "    from contextlib import suppress\n"
+        "    from contextlib import ExitStack\n"
+    )
+    # Each body is already indented for a function body, so only the header is
+    # added -- re-indenting the whole body is what has produced spurious
+    # IndentationErrors in this repo's own probes.
+    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    for statement in outer.body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement is not outer
+        ):
+            # A `def probe(...)` fixture makes the assert the *only* one, so
+            # the nested-def rule cannot confound the suppression verdict.
+            function = statement
+            break
+    else:
+        function = outer
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
