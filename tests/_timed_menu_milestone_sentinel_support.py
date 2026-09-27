@@ -657,10 +657,20 @@ def _aliased_suppressions(node, function, bound):
     name from an outer scope is deliberately not followed: assuming an
     arbitrary call returns a suppressor would report live asserts as dead on
     every context manager this check cannot trace.
+
+    An assignment *expression* (:pep:`572`, ``:=``) binds inline, in the very
+    ``with`` header that then enters the name:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2
+
+    That is the same silent defeat as the two-statement spelling, and it is
+    invisible to ``_assigned_suppressors`` because a ``NamedExpr`` is not an
+    ``ast.Assign``. It is handled here rather than there because the binding
+    and the ``with`` are one node: there is no earlier statement to order it
+    against, so the ordering walk below does not apply to it.
     """
     by_index = _assigned_suppressors(function, bound)
-    if not by_index:
-        return []
     # A name is bound only by the assignments that run *before* the `with`.
     # Walking `function.body` in order and carrying the bindings forward keeps
     # that ordering explicit; a merged view of every assignment would claim a
@@ -674,6 +684,30 @@ def _aliased_suppressions(node, function, bound):
                 continue
             for item in header.items:
                 expression = item.context_expr
+                # `(cs := suppress(X))` binds and enters in one node. The
+                # right-hand side is the suppression; the target name is
+                # irrelevant to the verdict, so it is read off the same place
+                # the two-statement form reads it from `bound_so_far`.
+                # Only a call is recorded, because the caller reads
+                # `_suppression_names(argument)`, which needs `.args`. A
+                # walrus whose right-hand side is not a call -- `(n := 3)` --
+                # binds no context manager and is left to the normal rules.
+                if (
+                    isinstance(expression, ast.NamedExpr)
+                    and isinstance(expression.value, ast.Call)
+                    and _is_suppression_call(expression.value, bound)
+                ):
+                    # The `_is_suppression_call` guard is load-bearing, not a
+                    # redundancy. `nullcontext()` and `helper.make()` take no
+                    # arguments, so `_suppression_names` reads them as
+                    # "universal" -- `BaseException`, which catches
+                    # `AssertionError`. Without this check every zero-argument
+                    # context manager bound by walrus would be reported as a
+                    # suppression, silently dropping live asserts. The
+                    # two-statement alias path is already guarded because it
+                    # only ever records bindings that passed the same test.
+                    entered.append(expression.value)
+                    continue
                 if isinstance(expression, ast.Name) and expression.id in bound_so_far:
                     entered.append(bound_so_far[expression.id])
                 if not isinstance(expression, ast.Call) or not isinstance(

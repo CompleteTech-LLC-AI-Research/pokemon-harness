@@ -837,3 +837,161 @@ def test_the_residual_defeats_of_287_are_rejected(label, body, live):
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+
+
+#: #308: the name-resolution escapes around a suppressor bound *in* the ``with``
+#: header rather than by a preceding statement.
+#:
+#: Two of the three escapes named in #308 no longer reproduce on this tree --
+#: ``#309``'s alias resolver already settles them. What remains is the
+#: assignment-expression (:pep:`572`) spelling, which ``_assigned_suppressors``
+#: cannot see because a ``NamedExpr`` is not an ``ast.Assign``. The order
+#: rows are kept deliberately: #308's first acceptance criterion is that
+#: *source order must not decide* the verdict, and the only way to keep that
+#: property is to pin it in both directions.
+#:
+#: The zero-argument controls carry the weight here. ``nullcontext()`` and
+#: ``helper.make()`` take no arguments, so ``_suppression_names`` reads them as
+#: the unreadable case ``BaseException``, which *does* catch ``AssertionError``.
+#: A resolver that appended the walrus right-hand side unconditionally would
+#: therefore report both of these live asserts as dead -- the damaging error,
+#: and one this table exists to prevent.
+RESIDUAL_ALIAS_RESOLUTION_SHAPES = (
+    (
+        "walrus binds a suppressor in the header",
+        "    with (cs := contextlib.suppress(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds a bare suppressor name",
+        "    with (cs := suppress(Exception)):\n        assert x != 1",
+        False,
+    ),
+    (
+        "walrus binds pytest.raises",
+        "    with (cs := pytest.raises(AssertionError)):\n        assert x != 1",
+        False,
+    ),
+    # --- controls ---
+    # A zero-argument context manager is the control for the guard that keeps
+    # the walrus from being read as a universal suppressor.
+    (
+        "walrus binds a zero-argument context manager",
+        "    with (cs := contextlib.nullcontext()):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus binds a zero-argument call",
+        "    with (cs := helper.make()):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus binds an unrelated exception",
+        "    with (cs := contextlib.suppress(ValueError)):\n        assert x != 1",
+        True,
+    ),
+    (
+        "walrus binds an unrelated pytest.raises",
+        "    with (cs := pytest.raises(RuntimeError)):\n        assert x != 1",
+        True,
+    ),
+    # A walrus whose value is not a call binds no context manager, so it is
+    # left to the ordinary rules rather than guessed at.
+    (
+        "walrus binds a non-call value",
+        "    with (cs := 3), cm:\n        assert x != 1",
+        True,
+    ),
+    # #308 escape 1: the two branches disagree. Both source orders must give
+    # the same verdict, or order has decided the answer.
+    (
+        "disagreeing branches, import written first",
+        (
+            "    def probe(flag):\n"
+            "        if flag:\n"
+            "            from contextlib import suppress\n"
+            "        else:\n"
+            "            suppress = contextlib.suppress\n"
+            "        with suppress(AssertionError):\n"
+            "            assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "disagreeing branches, assignment written first",
+        (
+            "    def probe(flag):\n"
+            "        if flag:\n"
+            "            suppress = contextlib.suppress\n"
+            "        else:\n"
+            "            from contextlib import suppress\n"
+            "        with suppress(AssertionError):\n"
+            "            assert x != 1"
+        ),
+        False,
+    ),
+    # #308 escape 2: plain assignment aliasing with no import node at all.
+    (
+        "plain assignment alias of a module attribute",
+        "    suppress = contextlib.suppress\n    with suppress(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    (
+        "annotated assignment alias of a module attribute",
+        (
+            "    suppress: object = contextlib.suppress\n"
+            "    with suppress(AssertionError):\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "assignment alias of a non-suppressor attribute",
+        (
+            "    from json import dumps as sq\n    sq = helper.make()\n"
+            "    with sq(AssertionError):\n        assert x != 1"
+        ),
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    RESIDUAL_ALIAS_RESOLUTION_SHAPES,
+    ids=[shape[0] for shape in RESIDUAL_ALIAS_RESOLUTION_SHAPES],
+)
+def test_alias_resolution_cannot_be_decided_by_source_order(label, body, live):
+    """A suppressor bound inline must be found wherever the binding sits.
+
+    The resolver reads names from imports and from assignments that precede the
+    ``with``. A :pep:`572` assignment expression binds *inside* the header, so
+    it is invisible to that walk; the rows above keep it from being reported as
+    a live contract. The paired order rows exist because the defect #308
+    describes is precisely that the answer changed with source order -- asserting
+    one direction alone would not catch a regression that reintroduced it.
+    """
+    imports = (
+        "    import contextlib\n"
+        "    import pytest\n"
+        "    from contextlib import suppress\n"
+        "    from contextlib import ExitStack\n"
+    )
+    source = "def outer(x, cm, items, record, helper):\n" + imports + body + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    for statement in outer.body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement is not outer
+        ):
+            function = statement
+            break
+    else:
+        function = outer
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert all(results) is live, (
+        f"{label}: expected every assert to be "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
