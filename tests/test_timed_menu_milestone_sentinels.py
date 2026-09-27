@@ -1257,6 +1257,54 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
 
 
 @pytest.mark.parametrize(
+    "rebind",
+    ["helper.make()", "nullcontext()", "1"],
+    ids=["unreadable-call", "live-context-manager", "non-call"],
+)
+def test_a_store_retires_a_carried_walrus_whatever_it_binds(rebind):
+    """A later store wins even when its value is not a readable suppressor.
+
+    ``_assigned_suppressors`` records only names whose right-hand side is a
+    *readable* suppressor, so a store to an ordinary call leaves no trace in its
+    result. Testing that map to decide what a carried walrus has been
+    superseded by therefore leaves the stale walrus in place:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2      # swallowed
+        with cs:
+            assert 1 == 2      # swallowed
+        cs = helper.make()      # the interpreter keeps THIS binding
+        with cs:
+            assert 1 == 2      # live -- an ordinary context manager
+
+    The first two asserts are defeated and the third is a live contract, so the
+    row cannot live in ``WALRUS_SHAPES``, which requires one shared verdict.
+    """
+    source = (
+        "def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    import pytest\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+        f"    cs = {rebind}\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 3, f"fixture declared {len(asserts)} asserts, expected 3"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False, False, True], (
+        f"rebind to {rebind}: expected the two swallowed asserts unenforced and "
+        f"the rebound one live, got {results}"
+    )
+
+
+@pytest.mark.parametrize(
     ("label", "body", "live"),
     DUNDER_SPELLING_SHAPES,
     ids=[shape[0] for shape in DUNDER_SPELLING_SHAPES],

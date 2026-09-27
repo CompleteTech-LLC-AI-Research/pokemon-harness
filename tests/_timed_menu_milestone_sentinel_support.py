@@ -881,6 +881,31 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
+def _names_bound_by(statement):
+    """Every name ``statement`` binds, whatever its right-hand side reads as.
+
+    ``_assigned_suppressors`` records only names whose right-hand side is a
+    *readable* suppressor, so a store to an ordinary call leaves no trace in its
+    result. That is right for deciding what a header resolves to, but not for
+    deciding what a *carried* walrus binding has been superseded by: a store to
+    an unreadable value must still retire the walrus, or a live assert is
+    reported swallowed. Nested scopes are excluded for the same reason
+    ``_own_imports`` excludes them.
+    """
+    excluded = _nested_scope_nodes(statement)
+    names = set()
+    for node in ast.walk(statement):
+        if id(node) in excluded:
+            continue
+        if isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and isinstance(
+            node.target, ast.Name
+        ):
+            names.add(node.target.id)
+    return names
+
+
 def _aliased_suppressions(node, function, bound):
     """Suppressors reached through a bare ``Name`` in a ``with`` header.
 
@@ -968,6 +993,23 @@ def _aliased_suppressions(node, function, bound):
         # so every node belonging to a nested scope is excluded from both the
         # walk and the binding it would contribute.
         nested = _nested_scope_nodes(statement)
+        # Any name this statement assigns retires a carried walrus binding for
+        # that name, whether or not `_assigned_suppressors` could read the
+        # stored value:
+        #
+        #     with (cs := contextlib.suppress(AssertionError)):
+        #         pass
+        #     cs = helper.make()      # not a readable suppressor, so `by_index`
+        #     with cs:                # records nothing -- but `cs` *is* rebound,
+        #         assert 1 == 2        # so the walrus must not survive
+        #
+        # Testing `by_index` alone leaves the stale walrus in place and reports
+        # a live assert as swallowed. `_names_bound_by` is the complete record
+        # of what the statement assigns. This runs before the walk below so a
+        # walrus in *this* statement is recorded after, not retired by, the
+        # statement that introduces it.
+        for name in _names_bound_by(statement):
+            walrus_bindings.pop(name, None)
         for header in ast.walk(statement):
             if not isinstance(header, (ast.With, ast.AsyncWith)):
                 continue
@@ -1058,11 +1100,12 @@ def _aliased_suppressions(node, function, bound):
         # of the walrus's own statement loses it before any later header can
         # read it, which is what left a re-entering `with cs:` reported live.
         #
-        # A store in *this* statement still wins: `by_index` is applied first,
-        # so only a name the statement did not rebind keeps its walrus value.
+        # A name the statement did not assign keeps its carried walrus value;
+        # a name it did assign is either in `by_index` above (readable) or was
+        # retired above (unreadable). Either way the walrus does not survive a
+        # store, so everything still in `walrus_bindings` here is live.
         for name, value in walrus_bindings.items():
-            if name not in by_index.get(index, {}):
-                bound_so_far[name] = value
+            bound_so_far[name] = value
     return entered
 
 
