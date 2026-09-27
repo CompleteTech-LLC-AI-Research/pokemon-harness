@@ -630,7 +630,40 @@ def _nonlocal_rebind_exceptions(function, enclosing=None):
     stack = list(function.body)
     while stack:
         node = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # A nested function's own stores are its locals, so normally this
+            # walk stops. Inside a class body it must not: a *method* reaches
+            # the enclosing cell through `nonlocal` exactly as a plain nested
+            # function does, and the class is not a barrier to that. The
+            # method's own `nonlocal` declaration is what qualifies the store,
+            # so the method body is walked on the same terms as this one and
+            # the declaration check below still applies.
+            stack.extend(ast.iter_child_nodes(node))
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.ClassDef):
+            # A class body is a scope, so its *own* stores are the class
+            # local's and are left alone -- but a method defined in it is a
+            # nested function, and `nonlocal` reaches the enclosing cell
+            # through it unchanged. The round-7 ALT found that descending
+            # through the `ClassDef` is required:
+            #
+            #     def middle():
+            #         class C:
+            #             def method(self):
+            #                 nonlocal cs
+            #                 (cs := helper.make())
+            #         C().method()
+            #     middle()
+            #
+            # `cs` is the outer function's cell; the method rebinds it, so the
+            # carried suppressor is retired. The class local case is unaffected
+            # because a method body that does *not* declare `nonlocal` is
+            # excluded again on the way back down, exactly as before.
+            # The children are pushed, never the node itself: re-pushing the
+            # `ClassDef` would pop it again and loop forever.
+            stack.extend(ast.iter_child_nodes(node))
             continue
         if isinstance(node, getattr(ast, "Nonlocal", None)):
             # The declaration carries only names and binds nothing, so there

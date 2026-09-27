@@ -2205,6 +2205,88 @@ def test_a_nested_rebind_of_the_enclosing_cell_is_read_as_a_rebind(label, rebind
     )
 
 
+def _nonlocal_through_class_source(rebind, declaration="nonlocal cs"):
+    """The #332 fixture with the nested ``def`` reached through a class body.
+
+    A class body is a scope, so a store *in* it binds the class local. A method
+    defined in it is a plain nested function, and ``nonlocal`` reaches the
+    enclosing cell through the class unchanged -- which is the round-7 ALT's
+    finding, and the reason the store-collecting walk descends through a
+    ``ClassDef`` rather than stopping at one.
+    """
+    return (
+        "async def outer(x, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n"
+        "    def middle():\n"
+        "        class C:\n"
+        "            def method(self):\n"
+        f"                {declaration}\n" + textwrap.indent(rebind, "                ") + "\n"
+        "        C().method()\n"
+        "    await middle()\n"
+        "    with cs:\n"
+        "        assert 1 == 2\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "declaration", "live"),
+    [
+        # The damaging direction. The method rebinds the outer function's cell
+        # through the class, so the carried suppressor is retired and the
+        # `with cs:` raises TypeError before the assert. The store-collecting
+        # walk stopped at the `ClassDef`, so the store was never let through
+        # and the head reported this live assert as defeated.
+        ("method-nonlocal-nullcontext", "cs = nullcontext()", "nonlocal cs", True),
+        # The same shape storing a suppressor really does swallow again, so
+        # the repair must not report it live.
+        (
+            "method-nonlocal-suppress",
+            "cs = contextlib.suppress(AssertionError)",
+            "nonlocal cs",
+            False,
+        ),
+        # A method that stores without declaring `nonlocal` binds the method's
+        # own local; the outer cell is untouched and the assert stays
+        # swallowed. This is what stops the class descent from becoming a
+        # blanket "any method body reaches the enclosing scope".
+        ("method-store-without-nonlocal", "cs = nullcontext()", "", False),
+        # A `nonlocal` over an unrelated name must not retire `cs` either.
+        ("method-nonlocal-other-name", "spare = nullcontext()", "nonlocal spare", False),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_a_nonlocal_reaches_the_enclosing_cell_through_a_class(label, rebind, declaration, live):
+    """A class body is a scope; a ``nonlocal`` in a method is not stopped by it.
+
+    ``_nonlocal_rebind_exceptions`` collects the stores a ``nonlocal``
+    authorises, and its walk stopped at every ``ClassDef``. That is right for
+    the class body's own stores and wrong for a *method*, which is an ordinary
+    nested function:
+
+        def middle():
+            class C:
+                def method(self):
+                    nonlocal cs
+                    cs = contextlib.nullcontext()   # `outer`'s cell
+            C().method()
+
+    The three negative rows are the boundary. A method body that does not
+    declare ``nonlocal`` still binds its own name, and a ``nonlocal`` over a
+    different name still does not reach ``cs`` -- so the descent through the
+    class is not a blanket "every method body reaches the enclosing scope".
+    """
+    source = _nonlocal_through_class_source(rebind, declaration)
+    results = _verdicts(source)
+    assert len(results) == 1, f"{label}: fixture declared {len(results)} asserts"
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
 def test_a_nonlocal_store_of_an_undeclared_name_does_not_reach_the_enclosing_scope():
     """A ``nonlocal`` over one name must not retire a *different* name.
 
