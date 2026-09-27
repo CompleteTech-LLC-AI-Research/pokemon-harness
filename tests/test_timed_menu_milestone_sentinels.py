@@ -30,6 +30,7 @@ from tests._timed_menu_milestone_sentinel_support import (
     RETENTION_COUNT_SITES,
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
+    _bypassing_sites,
     _is_enforced,
     _is_tautology,
     _may_bypass,
@@ -129,6 +130,50 @@ def test_the_pinned_counts_are_reached_with_the_261_precondition_active():
         f"these pinned retention sites call {RUN_OWNER}() with a clock_step "
         f"that bypasses the #261 terminal-state guard: {offenders}"
     )
+
+
+#: ``(label, call arguments, bypasses?)`` -- does this spelling of the pinned
+#: site's ``run_owner`` call opt the site out of the #261 precondition? A ``**``
+#: unpacking arrives from ``ast`` with ``arg=None``, so a filter on
+#: ``keyword.arg == "clock_step"`` skips it even though it reaches the same
+#: unguarded path.
+CLOCK_STEP_SPELLINGS = (
+    ("guarded literal", "clock_step=0.0", False),
+    ("named override", "clock_step=0.5", True),
+    ("absent", "", False),
+    ("unpacked override", '**{"clock_step": 0.5}', True),
+    ("unpacked guarded", '**{"clock_step": 0.0}', False),
+    ("unpacked with sibling", '**{"clock_step": 0.5, "x": 1}', True),
+    ("unpacked without clock_step", '**{"x": 1}', False),
+    ("unrelated keyword", "other=1", False),
+    # An unpacking that cannot be read statically might still carry
+    # clock_step, so it is reported rather than assumed safe.
+    ("unreadable unpacking", "**options", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "arguments", "bypasses"),
+    CLOCK_STEP_SPELLINGS,
+    ids=[spelling[0] for spelling in CLOCK_STEP_SPELLINGS],
+)
+def test_every_clock_step_spelling_is_classified(label, arguments, bypasses):
+    """The guard-bypass check must read ``**`` as well as named keywords.
+
+    ``run_owner(m, p, **{"clock_step": 0.5})`` reaches the same unguarded path
+    as the named spelling, but ``ast`` reports it with ``arg=None``. Matching
+    only the named form is the mistake #288 corrected for ``except*``: one
+    concrete node shape instead of the family that reaches it.
+
+    Each row is mounted inside a real pinned retention function and run through
+    the same site walk :func:`count_sites_that_bypass_the_guard` uses, so a row
+    cannot pass while the production call path has stopped consulting the
+    classifier at all.
+    """
+    site = next(iter(RETENTION_COUNT_SITES))
+    source = f"def {site}():\n    return run_owner(m, p, {arguments})\n"
+    offenders = _bypassing_sites(ast.parse(source))
+    assert bool(offenders) is bypasses, f"{label}: reported {offenders}"
 
 
 def test_the_pinned_record_subscript_counts_are_still_exact_equalities():
