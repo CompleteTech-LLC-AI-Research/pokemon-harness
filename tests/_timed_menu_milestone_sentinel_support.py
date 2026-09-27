@@ -891,19 +891,128 @@ def _names_bound_by(statement):
     an unreadable value must still retire the walrus, or a live assert is
     reported swallowed. Nested scopes are excluded for the same reason
     ``_own_imports`` excludes them.
+
+    The node types read below are every way a name can be bound. An earlier
+    version read only ``Assign``, ``AnnAssign``, ``AugAssign`` and
+    ``NamedExpr``, which left ordinary forms binding a name without retiring
+    the carried walrus for it. Three of those reported a live assert as
+    swallowed, each a regression against the base:
+
+        for cs in ...:            # ast.For.target
+        with ... as cs:           # ast.withitem.optional_vars
+        del cs                    # ast.Delete, which *unbinds* a name
+
+    ``ast.ExceptHandler.name`` is read here too, but measured on this
+    interpreter it never changes a verdict -- the compiler deletes that name
+    when the handler exits, so it cannot survive to a later ``with cs:``. It
+    is kept as a bind because it is one, and the comment at the branch says so
+    rather than claiming coverage the matrix does not show.
+
+    Every bind is a rebind or an unbind, so each has to retire a carried
+    walrus, whether or not ``_assigned_suppressors`` could read its value.
+    """
+    return set(_binding_targets_by_name(statement))
+
+
+def _binding_targets_by_name(statement):
+    """Map each name ``statement`` binds to the target nodes that bind it.
+
+    The targets are kept rather than only the names because the caller has to
+    ask *where* in the statement each bind happens: a bind that runs after a
+    carried walrus retires it, and one that ran before does not. See
+    ``_supersedes_walrus``.
     """
     excluded = _nested_scope_nodes(statement)
-    names = set()
+    bindings = {}
     for node in ast.walk(statement):
         if id(node) in excluded:
             continue
-        if isinstance(node, ast.Assign):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and isinstance(
-            node.target, ast.Name
-        ):
-            names.add(node.target.id)
-    return names
+        for name, target in _bound_targets(node):
+            bindings.setdefault(name, []).append(target)
+    return bindings
+
+
+def _bound_targets(node):
+    """The ``(name, target)`` pairs a single node binds, unpacking containers.
+
+    ``(a, cs) = ...``, ``for a, cs in ...`` and ``with ... as (a, cs):`` all
+    reach ``cs`` through a ``Tuple``/``List``, and ``(a, *cs)`` through a
+    ``Starred``. Reading only the immediate ``ast.Name`` target missed the
+    nested ones, so a packed rebind left the carried walrus in place.
+    """
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.For, ast.AsyncFor)):
+        targets = [node.target]
+    elif isinstance(node, ast.Delete):
+        # `del cs` unbinds the name outright, so a carried binding for it is
+        # stale in exactly the way a rebind makes it stale -- and a later
+        # `with cs:` then raises UnboundLocalError for real.
+        targets = list(node.targets)
+    elif isinstance(node, ast.ExceptHandler):
+        # An `except ... as cs:` name is *deleted* when the handler exits, by
+        # an implicit `finally: del cs` the compiler emits. So it is a bind
+        # inside the handler and an unbind after it, and neither outlives the
+        # statement in a way a later `with cs:` can observe: measured, the
+        # verdict is identical with and without this branch on every fixture
+        # tried. It is kept because it is a bind, and because "fails closed"
+        # is the direction to be wrong in -- but the mutation matrix records
+        # it as NOT DETECTED, honestly, rather than claiming coverage it does
+        # not have. See `ledger/R323_ROUND3_EVIDENCE.md`.
+        targets = [node.name] if node.name is not None else []
+    elif isinstance(node, ast.withitem):
+        targets = [node.optional_vars] if node.optional_vars is not None else []
+    else:
+        targets = []
+    return [
+        (element.id, element)
+        for target in targets
+        for element in _flatten_target(target)
+        if isinstance(element, ast.Name)
+    ]
+
+
+def _flatten_target(target):
+    """The ``ast.Name`` leaves reachable from a binding target."""
+    if isinstance(target, ast.Name):
+        return [target]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _flatten_target(element)]
+    if isinstance(target, ast.Starred):
+        return _flatten_target(target.value)
+    return []
+
+
+def _is_within(node, ancestor):
+    """Is ``node`` ``ancestor`` itself or somewhere inside it?"""
+    return node is ancestor or any(child is node for child in ast.walk(ancestor))
+
+
+def _supersedes_walrus(bindings, name, header, walrus):
+    """Does a bind inside ``header`` run after the ``walrus`` that set ``name``?
+
+    Retirement runs across the whole statement *before* the walk that records
+    walruses, so a bind anywhere in the same top-level statement used to be
+    erased by the recording that followed it. That is wrong for every bind
+    that runs after the walrus rather than before it, and the position that
+    decides it is *inside the walrus's own header, outside the walrus*:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            cs = helper.make()     # runs after the header bound `cs`
+        with cs:                   # ...so the walrus must not survive
+            assert 1 == 2          # live -- an ordinary context manager
+
+    Everything in a header's body runs after that header's context expressions
+    are evaluated, and so does the ``optional_vars`` of a later ``with`` item,
+    so "inside the header but outside the walrus expression" is that position.
+    A bind elsewhere in the statement is left to the statement-level
+    retirement, which is the conservative answer in the direction this check
+    cares about.
+    """
+    return any(
+        _is_within(target, header) and not _is_within(target, walrus)
+        for target in bindings.get(name, ())
+    )
 
 
 def _aliased_suppressions(node, function, bound):
@@ -1005,11 +1114,14 @@ def _aliased_suppressions(node, function, bound):
         #
         # Testing `by_index` alone leaves the stale walrus in place and reports
         # a live assert as swallowed. `_names_bound_by` is the complete record
-        # of what the statement assigns. This runs before the walk below so a
-        # walrus in *this* statement is recorded after, not retired by, the
-        # statement that introduces it.
+        # of what the statement binds. This runs before the walk below so the
+        # walrus that introduces a binding is recorded after it, not retired by
+        # its own statement -- but that also means it retires *every* other
+        # bind in the statement, including one that runs after the walrus.
+        # `_supersedes_walrus` puts that position back below.
         for name in _names_bound_by(statement):
             walrus_bindings.pop(name, None)
+        bindings = _binding_targets_by_name(statement)
         for header in ast.walk(statement):
             if not isinstance(header, (ast.With, ast.AsyncWith)):
                 continue
@@ -1047,6 +1159,14 @@ def _aliased_suppressions(node, function, bound):
                     and _is_suppression_call(expression.value, bound)
                 ):
                     walrus_bindings[expression.target.id] = expression.value
+                    # A bind in this header's body or in a later `with` item's
+                    # `as` target runs *after* the header bound the name, so the
+                    # retirement above has just been undone for this position
+                    # and has to be redone. Without this the walrus survives a
+                    # rebind that provably happens later, and a live assert is
+                    # reported swallowed.
+                    if _supersedes_walrus(bindings, expression.target.id, header, expression):
+                        walrus_bindings.pop(expression.target.id, None)
             if not _encloses(header, node):
                 # A `with` that does not enclose the queried assert says
                 # nothing about the context that assert runs under. Collecting

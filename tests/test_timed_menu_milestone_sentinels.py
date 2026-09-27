@@ -21,6 +21,7 @@ backstop that keeps them from being quietly removed.
 
 import ast
 import inspect
+import textwrap
 
 import pytest
 
@@ -1301,6 +1302,394 @@ def test_a_store_retires_a_carried_walrus_whatever_it_binds(rebind):
     assert results == [False, False, True], (
         f"rebind to {rebind}: expected the two swallowed asserts unenforced and "
         f"the rebound one live, got {results}"
+    )
+
+
+#: Every statement that binds a name, as the source of one statement that
+#: rebinds a name a carried suppressor walrus is still bound to, with the
+#: verdict the *interpreter* produces for that fixture.
+#:
+#: The verdict is measured, not asserted by hand. An earlier hand-written
+#: version of this table shipped three rows whose expected value was wrong --
+#: they failed against correct code, which is the same failure as a row that
+#: passes against broken code. This one is generated from an interpreter run.
+#:
+#: This table is the gate that was missing. The four round-1 repairs and the
+#: position-aware retirement all passed 190 tests and a green mutation matrix
+#: while `Assign`-only handling shipped ten damaging-direction regressions.
+#: Every mutant in that matrix was chosen from the code under review, so
+#: nothing ever asked the language what its binding forms are.
+#:
+#: Rows commented `False` are measured as genuinely defeated and the checker
+#: agrees: an `except ... as cs:` that never fires leaves the carried walrus
+#: standing, and a `del` under an untaken `else` never runs. Those rows are as
+#: load-bearing as the `True` ones -- they pin that the fix does not
+#: over-reach into the safe direction.
+REBINDING_STATEMENTS = {
+    "annassign": "cs: int = 1",  # True (TypeError)
+    "assign": "cs = helper.make()",  # True (AssertionError)
+    "async-for-target": (
+        "async def drain():\n    async for cs in helper.stream():\n        pass\nawait drain()"
+    ),  # False (swallowed)
+    "augassign": "cs += helper.make()",  # True (TypeError)
+    "delete": "del cs",  # True (UnboundLocalError)
+    "delete-inside-a-block": "if x:\n    del cs",  # True (UnboundLocalError)
+    "delete-inside-a-loop": "for _ in [1]:\n    del cs",  # True (UnboundLocalError)
+    "delete-inside-a-try": (
+        "try:\n    del cs\nexcept ValueError:\n    pass"
+    ),  # True (UnboundLocalError)
+    "delete-inside-a-while": "while x:\n    del cs",  # True (UnboundLocalError)
+    "delete-two-targets": "del cs, other",  # True (UnboundLocalError)
+    "except-as": "try:\n    pass\nexcept ValueError as cs:\n    pass",  # False (swallowed)
+    "except-as-inside-a-block": (
+        "if x:\n    try:\n        pass\n    except ValueError as cs:\n        pass"
+    ),  # False (swallowed)
+    "except-as-multiple-types": (
+        "try:\n    pass\nexcept (ValueError, TypeError) as cs:\n    pass"
+    ),  # False (swallowed)
+    "for-as-target": (
+        "for _ in [1]:\n    for cs in [helper.make()]:\n        pass"
+    ),  # True (AssertionError)
+    "for-else-target": (
+        "for _ in [1]:\n    pass\nelse:\n    for cs in [helper.make()]:\n        pass"
+    ),  # True (AssertionError)
+    "for-target": "for cs in [helper.make()]:\n    pass",  # True (AssertionError)
+    "for-target-inside-a-try": (
+        "try:\n    for cs in [helper.make()]:\n        pass\nexcept ValueError:\n    pass"
+    ),  # True (AssertionError)
+    "for-target-inside-a-with-body": (
+        "with contextlib.nullcontext():\n    for cs in [helper.make()]:\n        pass"
+    ),  # True (AssertionError)
+    "for-tuple-target": (
+        "for other, cs in [(1, helper.make())]:\n    pass"
+    ),  # True (AssertionError)
+    "list-unpack": "[other, cs] = [1, helper.make()]",  # True (AssertionError)
+    "named-expression-on-another-name": (
+        "if (check := helper.make()):\n    pass"
+    ),  # False (swallowed)
+    "named-expression-on-cs": "if (cs := helper.make()):\n    pass",  # True (AssertionError)
+    "nested-tuple-unpack": "((other, cs),) = ((1, helper.make()),)",  # True (AssertionError)
+    "starred-unpack": "(other, *cs) = (1, helper.make(), helper.make())",  # True (TypeError)
+    "tuple-unpack": "(other, cs) = (1, helper.make())",  # True (AssertionError)
+    "with-as": "with helper.make() as cs:\n    pass",  # True (TypeError)
+    "with-as-and-a-second-item": (
+        "with helper.make() as cs, helper.make():\n    pass"
+    ),  # True (TypeError)
+    "with-as-followed-by-another-with-as": (
+        "with helper.make() as other:\n    with helper.make() as cs:\n        pass"
+    ),  # True (TypeError)
+    "with-as-inside-a-block": (
+        "if x:\n    with helper.make() as cs:\n        pass"
+    ),  # True (TypeError)
+    "with-as-inside-a-loop": (
+        "for _ in [1]:\n    with helper.make() as cs:\n        pass"
+    ),  # True (TypeError)
+    "with-as-inside-a-try": (
+        "try:\n    with helper.make() as cs:\n        pass\nexcept ValueError:\n    pass"
+    ),  # True (TypeError)
+    "with-as-tuple": "with helper.make() as (other, cs):\n    pass",  # True (TypeError)
+}
+
+#: The same, for a rebind that runs *inside* the walrus's own `with` header.
+#: The statement-level retirement runs before the walk that records walruses,
+#: so it erases the very bind it is about to record; these rows pin that
+#: position back.
+REBINDS_INSIDE_A_HEADER = {
+    "assign-inside-the-walrus-statement": (
+        "__INSIDE_HEADER__cs = helper.make()"
+    ),  # True (AssertionError)
+    "delete-inside-the-walrus-statement": "__INSIDE_HEADER__del cs",  # True (UnboundLocalError)
+    "for-target-inside-a-nested-with-item": (
+        "with contextlib.nullcontext() as other:\n    with helper.make() as cs:\n        pass"
+    ),  # True (measured)
+    "for-target-inside-the-walrus-statement": (
+        "__INSIDE_HEADER__for cs in [helper.make()]:\n    pass"
+    ),  # True (AssertionError)
+    "with-as-inside-the-walrus-statement": (
+        "with helper.make() as cs:\n    pass"
+    ),  # True (measured)
+}
+
+
+#: Marker for a rebind that has to be written *inside* the walrus's own
+#: ``with`` header, rather than after it. Those rows are the ones the
+#: statement-level retirement cannot see, because it erases the bind the walk
+#: is about to record.
+_INSIDE_HEADER = "__INSIDE_HEADER__"
+
+
+def _rebind_source(body):
+    """A fixture in which ``body`` rebinds a carried suppressor walrus."""
+    prefix = "async def outer(x, helper):\n"
+    prefix += "    import contextlib\n"
+    prefix += "    from contextlib import suppress, nullcontext\n"
+    prefix += "    import pytest\n"
+    tail = "    with cs:\n        assert x != 1\n"
+    if body.startswith(_INSIDE_HEADER):
+        rebind = body[len(_INSIDE_HEADER) :]
+        return (
+            prefix
+            + "    with (cs := contextlib.suppress(AssertionError)):\n"
+            + textwrap.indent(rebind, "        ")
+            + "\n"
+            + tail
+        )
+    return (
+        prefix
+        + "    with (cs := contextlib.suppress(AssertionError)):\n"
+        + "        pass\n"
+        + textwrap.indent(body, "    ")
+        + "\n"
+        + tail
+    )
+
+
+def _verdicts(source):
+    """The checker's per-assert verdicts for one fixture source."""
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"fixture declared {len(asserts)} asserts, expected 1"
+    return [_is_enforced(function, node, tree) for node in asserts]
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    [
+        ("annassign", "cs: int = 1", True),
+        ("assign", "cs = helper.make()", True),
+        (
+            "async-for-target",
+            "async def drain():\n    async for cs in helper.stream():\n        pass\nawait drain()",
+            False,
+        ),
+        ("augassign", "cs += helper.make()", True),
+        ("delete", "del cs", True),
+        ("delete-inside-a-block", "if x:\n    del cs", True),
+        ("delete-inside-a-loop", "for _ in [1]:\n    del cs", True),
+        ("delete-inside-a-try", "try:\n    del cs\nexcept ValueError:\n    pass", True),
+        ("delete-inside-a-while", "while x:\n    del cs", True),
+        ("delete-two-targets", "del cs, other", True),
+        ("except-as", "try:\n    pass\nexcept ValueError as cs:\n    pass", False),
+        (
+            "except-as-inside-a-block",
+            "if x:\n    try:\n        pass\n    except ValueError as cs:\n        pass",
+            False,
+        ),
+        (
+            "except-as-multiple-types",
+            "try:\n    pass\nexcept (ValueError, TypeError) as cs:\n    pass",
+            False,
+        ),
+        ("for-as-target", "for _ in [1]:\n    for cs in [helper.make()]:\n        pass", True),
+        (
+            "for-else-target",
+            "for _ in [1]:\n    pass\nelse:\n    for cs in [helper.make()]:\n        pass",
+            True,
+        ),
+        ("for-target", "for cs in [helper.make()]:\n    pass", True),
+        (
+            "for-target-inside-a-try",
+            "try:\n    for cs in [helper.make()]:\n        pass\nexcept ValueError:\n    pass",
+            True,
+        ),
+        (
+            "for-target-inside-a-with-body",
+            "with contextlib.nullcontext():\n    for cs in [helper.make()]:\n        pass",
+            True,
+        ),
+        ("for-tuple-target", "for other, cs in [(1, helper.make())]:\n    pass", True),
+        ("list-unpack", "[other, cs] = [1, helper.make()]", True),
+        ("named-expression-on-another-name", "if (check := helper.make()):\n    pass", False),
+        ("named-expression-on-cs", "if (cs := helper.make()):\n    pass", True),
+        ("nested-tuple-unpack", "((other, cs),) = ((1, helper.make()),)", True),
+        ("starred-unpack", "(other, *cs) = (1, helper.make(), helper.make())", True),
+        ("tuple-unpack", "(other, cs) = (1, helper.make())", True),
+        ("with-as", "with helper.make() as cs:\n    pass", True),
+        ("with-as-and-a-second-item", "with helper.make() as cs, helper.make():\n    pass", True),
+        (
+            "with-as-followed-by-another-with-as",
+            "with helper.make() as other:\n    with helper.make() as cs:\n        pass",
+            True,
+        ),
+        ("with-as-inside-a-block", "if x:\n    with helper.make() as cs:\n        pass", True),
+        (
+            "with-as-inside-a-loop",
+            "for _ in [1]:\n    with helper.make() as cs:\n        pass",
+            True,
+        ),
+        (
+            "with-as-inside-a-try",
+            "try:\n    with helper.make() as cs:\n        pass\nexcept ValueError:\n    pass",
+            True,
+        ),
+        ("with-as-tuple", "with helper.make() as (other, cs):\n    pass", True),
+    ],
+    ids=[
+        "annassign",
+        "assign",
+        "async-for-target",
+        "augassign",
+        "delete",
+        "delete-inside-a-block",
+        "delete-inside-a-loop",
+        "delete-inside-a-try",
+        "delete-inside-a-while",
+        "delete-two-targets",
+        "except-as",
+        "except-as-inside-a-block",
+        "except-as-multiple-types",
+        "for-as-target",
+        "for-else-target",
+        "for-target",
+        "for-target-inside-a-try",
+        "for-target-inside-a-with-body",
+        "for-tuple-target",
+        "list-unpack",
+        "named-expression-on-another-name",
+        "named-expression-on-cs",
+        "nested-tuple-unpack",
+        "starred-unpack",
+        "tuple-unpack",
+        "with-as",
+        "with-as-and-a-second-item",
+        "with-as-followed-by-another-with-as",
+        "with-as-inside-a-block",
+        "with-as-inside-a-loop",
+        "with-as-inside-a-try",
+        "with-as-tuple",
+    ],
+)
+def test_every_binding_form_retires_a_carried_walrus(label, body, live):
+    """A rebind of any form must retire the carried walrus bound to that name.
+
+    ``_names_bound_by`` originally read only ``Assign``, ``AnnAssign``,
+    ``AugAssign`` and ``NamedExpr``. Every other form in the language -- a
+    ``for`` target, a ``with ... as ...`` target, an ``except ... as ...``
+    name, a ``del``, and any of those reached through a tuple, list or star --
+    bound a name without retiring the carried binding, so the ``with cs:`` that
+    re-entered it was still read as the old suppressor and a live assert was
+    reported swallowed.
+
+    The expected verdict is the interpreter's, measured per row.
+    """
+    results = _verdicts(_rebind_source(body))
+    assert results == [live], (
+        f"{label}: the interpreter says this form is "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    [
+        ("assign-inside-the-walrus-statement", "__INSIDE_HEADER__cs = helper.make()", True),
+        ("delete-inside-the-walrus-statement", "__INSIDE_HEADER__del cs", True),
+        (
+            "for-target-inside-a-nested-with-item",
+            "with contextlib.nullcontext() as other:\n    with helper.make() as cs:\n        pass",
+            True,
+        ),
+        (
+            "for-target-inside-the-walrus-statement",
+            "__INSIDE_HEADER__for cs in [helper.make()]:\n    pass",
+            True,
+        ),
+        ("with-as-inside-the-walrus-statement", "with helper.make() as cs:\n    pass", True),
+    ],
+    ids=[
+        "assign-inside-the-walrus-statement",
+        "delete-inside-the-walrus-statement",
+        "for-target-inside-a-nested-with-item",
+        "for-target-inside-the-walrus-statement",
+        "with-as-inside-the-walrus-statement",
+    ],
+)
+def test_a_rebind_inside_the_walrus_own_header_retires_it(label, body, live):
+    """A rebind inside the walrus's own ``with`` has to retire it as well.
+
+    The statement-level retirement runs before the walk that records walruses,
+    so it erases the bind it is about to record, and a bind in that header's
+    body runs strictly after the header bound the name:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            cs = helper.make()     # runs after the header bound `cs`
+        with cs:                   # ...so the walrus must not survive
+            assert 1 == 2          # live -- an ordinary context manager
+
+    An earlier version reported this ``[False]``: a live contract certified as
+    swallowed, and a regression against the base it was written to fix.
+    """
+    results = _verdicts(_rebind_source(body))
+    assert results == [live], (
+        f"{label}: a rebind that runs after the walrus header bound the name "
+        f"must retire it; the interpreter says "
+        f"{'live' if live else 'defeated'}; got {results}"
+    )
+
+
+#: Rows where the checker's answer is `True` but the interpreter really does
+#: swallow the assert -- the SAFE direction, because an over-reported live
+#: contract drops no assert from the sentinel's view. Each is measured to be
+#: *unchanged from base `87a90da`*, which is what makes them acceptable here:
+#: they are pre-existing over-breadth, owned by #287, and this fix neither
+#: introduces nor widens them.
+#:
+#: The complementary rows matter just as much. Pining only the safe direction
+#: would leave a future change free to break these without anything going red,
+#: and these shapes are exactly where a scope fix could silently over-reach.
+SAFE_DIRECTION_ROWS = (
+    (
+        "a del under an untaken else",
+        "if x:\n    pass\nelse:\n    del cs",
+    ),
+    (
+        "a with-as target in a class body",
+        "class Inner:\n    with helper.make() as cs:\n        pass",
+    ),
+    (
+        "a walrus inside a comprehension",
+        "check = [cs for _ in [1] if (cs := contextlib.suppress(AssertionError))]",
+    ),
+    (
+        "an untaken if",
+        "if False:\n    check = (cs := contextlib.suppress(AssertionError))",
+    ),
+    (
+        "a zero-iteration for",
+        "for _ in []:\n    check = (cs := contextlib.suppress(AssertionError))",
+    ),
+    (
+        "an except-as name is deleted when the handler exits",
+        "try:\n    helper.make()\nexcept ValueError as cs:\n    cs = helper.make()",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [(label, body) for label, body in SAFE_DIRECTION_ROWS],
+    ids=[label for label, _body in SAFE_DIRECTION_ROWS],
+)
+def test_the_safe_direction_rows_stay_unchanged_from_base(label, body):
+    """The over-breadth this fix must not widen, pinned as-is.
+
+    Every row here is a shape where the interpreter swallows the assert and the
+    checker calls it live anyway. That is the conservative answer, and it is
+    what ``87a90da`` already produced -- so the requirement is not "be right"
+    (that is #287's) but "do not get worse". Asserting ``[True]`` pins the
+    ceiling: if a later scope change makes any of these ``[False]``, a defeated
+    assert has been promoted to a load-bearing one and this row fails.
+
+    The same rows were verified against the base commit by the lead; see
+    ``ledger/R323_ROUND3_EVIDENCE.md``.
+    """
+    source = _rebind_source(body)
+    results = _verdicts(source)
+    assert results == [True], (
+        f"{label}: this shape is pre-existing over-breadth in the SAFE direction "
+        f"(the interpreter swallows the assert and the checker reports it live). "
+        f"Pin the ceiling at [True] rather than widening it; got {results}"
     )
 
 
