@@ -582,13 +582,34 @@ def _suppressed_by_dunder(call, bound):
     cannot match a suppressor stored under a different attribute name. A
     non-suppressor that happens to define ``__enter__`` is not matched: the
     underlying call still has to resolve to a real suppressor.
+
+    The exception types are read from the *suppressor's* arguments, not from
+    the ``__enter__()`` call's. ``contextlib.suppress(ValueError).__enter__()``
+    is ``Call(func=Attribute(value=Call(func=Attribute(...suppress),
+    args=[ValueError]), attr=__enter__), args=[])``: the types live one level
+    down, and the outer call has none at all. Reading ``call.args`` therefore
+    returns the empty fallback ``BaseException`` for *every* dunder spelling,
+    and since ``BaseException`` catches ``AssertionError`` that reported
+    ``suppress(ValueError).__enter__()`` -- which suppresses nothing relevant --
+    as a defeat of the assert.
     """
     func = call.func
     if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
         return False
     if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return False
-    return [name for name in call.args if isinstance(name, ast.Name)] or ["BaseException"]
+    # `func.value` is the `suppress(...)` call itself, resolved above.
+    suppressor = func.value
+    if not isinstance(suppressor, ast.Call):
+        return False
+    # `_suppression_names` reports the unreadable case for an argument it
+    # cannot read, which includes *no* argument at all. `suppress()` with empty
+    # parens therefore reads as universal here, as it already does in the plain
+    # `with suppress():` form. That is the conservative direction: a bare
+    # `suppress()` suppresses nothing and the assert does fail, so the verdict
+    # is stricter than runtime. It is shared with the non-dunder path on
+    # purpose rather than special-cased in only one of the two.
+    return _suppression_names(suppressor)
 
 
 def _assigned_suppressors(function, bound):
