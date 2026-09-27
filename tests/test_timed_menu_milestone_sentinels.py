@@ -1937,6 +1937,25 @@ def test_a_definition_binds_its_name_and_retires_the_carried_walrus(label, defin
         # here, so its store never reaches the enclosing name.
         ("lambda-in-a-default", "def other(a=(lambda: (cs := helper.make()))): pass", False),
         ("def-in-a-default", "def other(a=[f() for f in x]): pass", False),
+        # A nested scope's *own* header is not a scope, and stopping at the
+        # `ast.Lambda` node threw its defaults away with its body. A lambda's
+        # defaults are evaluated when the lambda object is created, in the
+        # enclosing scope, so this one really does rebind `cs`:
+        #
+        #     def other(a=(lambda b=(cs := helper.make()): b)): pass
+        #
+        # found by the round-7 PRIMARY. The two rows either side of it are
+        # what keep the fix from over-widening back into the lambda's body.
+        (
+            "lambda-default-in-a-default",
+            "def other(a=(lambda b=(cs := helper.make()): b)): pass",
+            True,
+        ),
+        (
+            "lambda-keyword-default-in-a-default",
+            "def other(a=(lambda *, b=(cs := helper.make()): b)): pass",
+            True,
+        ),
         # The body is still the function's own scope. Already pinned by
         # `a-body-bind-does-not-escape`; repeated here so this repair cannot
         # quietly widen the walk.

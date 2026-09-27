@@ -1199,7 +1199,11 @@ def _definition_header_nodes(definition):
     """
     arguments = definition.args
     header = [
-        *definition.decorator_list,
+        # A `lambda` has no decorators and no return annotation, so these two
+        # are read through `getattr` rather than assumed. The one caller that
+        # reaches a `lambda` is `_scope_free_nodes`, which descends into a
+        # lambda's defaults for exactly the reason the round-7 PRIMARY found.
+        *getattr(definition, "decorator_list", ()),
         *arguments.defaults,
         *(default for default in (arguments.kw_defaults or ()) if default is not None),
         *(argument.annotation for argument in _annotatable_arguments(arguments)),
@@ -1226,7 +1230,7 @@ def _scope_free_nodes(region):
 
     A definition header can itself *contain* a scope, and a store inside one
     of those binds that inner scope rather than the name the ``def`` is being
-    defined in. A ``lambda`` is the case that actually occurs:
+    defined in. A ``lambda`` **body** is the case that actually occurs:
 
         def other(a=(lambda: (cs := m()))): pass
 
@@ -1236,6 +1240,18 @@ def _scope_free_nodes(region):
     default is a scope for the same reason; ``_nested_scope_nodes`` handles a
     ``def``/``lambda`` that is the statement itself, but not one buried
     inside an expression.
+
+    A nested scope's *own header* is not itself a scope, though, and the
+    round-7 PRIMARY found that stopping at the ``Lambda`` node threw its
+    defaults away along with its body:
+
+        def other(a=(lambda b=(cs := m()): b)): pass
+
+    A lambda's defaults are evaluated when the lambda object is created, in
+    the enclosing scope, so that ``cs`` really is rebound and the assert is
+    live. This is the same split as `_definition_header_nodes` one level
+    down, so the same helper resolves it: a nested ``def``/``lambda`` is
+    entered through `_definition_header_nodes` and its body is left alone.
 
     A **comprehension is not such a scope for a walrus**, which is the
     opposite of the long-standing folklore and is the reason this function
@@ -1255,6 +1271,7 @@ def _scope_free_nodes(region):
         node = stack.pop()
         out.append(node)
         if _opens_a_scope(node):
+            stack.extend(_definition_header_nodes(node))
             continue
         stack.extend(ast.iter_child_nodes(node))
     return out
