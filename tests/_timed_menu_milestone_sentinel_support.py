@@ -31,6 +31,13 @@ import inspect
 
 import tests.test_timed_menu_milestones as milestones
 
+#: Dotted paths whose call is a suppression context. Matched by *resolved*
+#: name rather than by spelling, so the qualified, from-import and both alias
+#: forms all collapse to the same value before the comparison. Matching one
+#: concrete spelling and leaving the family open is what #288 did with
+#: ``except*``.
+SUPPRESSING_CONTEXTS = ("contextlib.suppress", "asyncio.suppress")
+
 _OPERATORS = {
     ast.Eq: "==",
     ast.NotEq: "!=",
@@ -141,7 +148,7 @@ def _count_comparison(tree, node, comparison):
         return
     if isinstance(right, ast.Constant) and isinstance(right.value, int):
         owner = _enclosing_function_node(tree, node)
-        if owner is not None and (not _is_enforced(owner, node) or _may_bypass(node.test)):
+        if owner is not None and (not _is_enforced(owner, node, tree) or _may_bypass(node.test)):
             return
         yield (_enclosing_function(tree, node), op, right.value)
 
@@ -164,6 +171,47 @@ def _enclosing_function_node(tree, target):
 def observed_count_comparisons():
     """Sorted ``(function, operator, literal)`` triples actually present."""
     return sorted(count_comparisons())
+
+
+#: Every ``len(...) == <int>`` exact-count assertion in the milestones module,
+#: written out rather than recomputed.
+#:
+#: The four ``RETENTION_COUNT_SITES`` are hardcoded for the same reason, but
+#: they only cover the #261 retention contract. ``observed_count_comparisons()``
+#: is the *whole* set, and it was the wider set that went missing: when #294
+#: began applying its bypass rule to ``and`` as well as ``or``, the live
+#: contract ``assert len(errors) == 1 and isinstance(errors[0], RuntimeError)``
+#: was reported as bypassed and silently dropped from this set -- 11 sites on
+#: ``c896da7``, 10 on ``4415452``, with the whole sentinel file green.
+#:
+#: A backstop that recomputes its expectation from the same code it polices
+#: cannot notice its own expectation shrinking, so this list is a literal. A
+#: site that is deleted, relaxed, duplicated or neutralised changes the observed
+#: set and fails.
+#:
+#: The literal was first written by dumping the observed set on the *broken*
+#: tree, which reproduced the defect exactly: the list then held 10 entries and
+#: deleting a pinned site kept the suite green. It is transcribed from the
+#: pre-#294 baseline ``c896da7`` instead, and the ``== 1`` site from
+#: ``test_disabled_touches_no_dependencies_and_still_checks_owner`` is the one
+#: that had gone missing.
+PINNED_COUNT_COMPARISONS = (
+    ("_authored_cartridge_check", "==", 1),
+    ("bounded_child", "<=", 32768),
+    ("test_authored_cartridge_actual_helper_is_non_mutating", "==", 1),
+    ("test_cap_failure_preserves_unspooled_call_and_incomplete_artifact", "<=", 1200),
+    ("test_counter_saturation_fails_explicitly_instead_of_silently_losing_hits", "==", 1),
+    ("test_default_retention_keeps_full_calls_and_installs_no_hooks", "==", 300),
+    ("test_disabled_touches_no_dependencies_and_still_checks_owner", "==", 1),
+    ("test_late_noncompleted_calls_have_exact_counts_and_full_evidence", "==", 271),
+    ("test_overflow_is_sticky_counts_continue_without_context_access", "==", 1),
+    (
+        "test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context",
+        "==",
+        300,
+    ),
+    ("test_unknown_actual_progress_is_counted_and_retained_as_interruption", "==", 271),
+)
 
 
 # The four frame-bound retention counts #270 names. Keyed by the test function
@@ -256,7 +304,9 @@ def subscript_count_comparisons():
             if not (isinstance(right, ast.Constant) and isinstance(right.value, int)):
                 continue
             owner = _enclosing_function_node(tree, node)
-            if owner is not None and (not _is_enforced(owner, node) or _may_bypass(node.test)):
+            if owner is not None and (
+                not _is_enforced(owner, node, tree) or _may_bypass(node.test)
+            ):
                 continue
             yield (_enclosing_function(tree, node), path, op, right.value)
 
@@ -333,9 +383,208 @@ def _swallows_assertion_error(handler):
     return bool({"AssertionError", "Exception", "BaseException"} & set(names))
 
 
-#: Operand kinds whose truthiness can decide a ``BoolOp`` on its own. A nested
+_MILESTONES_TREE = None
+
+
+def milestones_tree():
+    """The parsed milestones module, cached for repeated name resolution."""
+    global _MILESTONES_TREE
+    if _MILESTONES_TREE is None:
+        _MILESTONES_TREE = _module_tree()
+    return _MILESTONES_TREE
+
+
+def _owning_module(function):
+    """The parsed module that ``function`` belongs to, for import resolution.
+
+    The bound names must come from the module that actually *contains* the assert
+    being judged, not from whichever module the sentinel happens to be inspecting.
+    Reading them from the milestones tree alone would make the rule correct for
+    that one file and silently wrong for any other, which is how a spelling slips
+    through: the aliases that matter are the ones in the file being edited.
+
+    A function from a tree the sentinel has not seen -- a probe built by a test --
+    falls back to the milestones module, which is correct for every real call site
+    because those asserts live in that file. Probes that need a different set of
+    bindings pass their own tree via ``_is_enforced(..., tree=...)``.
+    """
+    for tree in (milestones_tree(), _module_tree()):
+        if any(node is function for node in ast.walk(tree)):
+            return tree
+    return _module_tree()
+
+
+def _bound_names(tree, function=None):
+    """Map every name bound by an import to the dotted path it binds to.
+
+    ``from contextlib import suppress as sq`` binds ``sq`` to
+    ``contextlib.suppress``; ``import contextlib as c`` binds ``c`` to
+    ``contextlib``.
+
+    ``function``, when given, contributes its *own* imports as well. A binding
+    is only in scope where it appears, so an alias introduced inside the
+    function that holds the assert must be resolved from that function -- and
+    for correctness it must win over a module-level binding of the same name,
+    because the inner ``import`` shadows the outer one. Reading only
+    ``tree.body`` left every function-local alias unresolved, which reported a
+    disarmed assert as enforced; that gap is measured, not theoretical.
+    """
+    bound = {}
+    nodes = list(getattr(tree, "body", []))
+    if function is not None:
+        nodes.extend(_own_imports(function))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
+
+
+def _own_imports(function):
+    """Imports belonging to ``function``'s own scope, excluding nested scopes.
+
+    An import inside a nested ``def`` binds a name in *that* scope, so
+    attributing it to the enclosing function would let a nested helper's alias
+    decide whether the outer function's assert counts as suppressed -- a false
+    "unenforced" verdict, which is the damaging direction.
+    """
+    found = []
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            found.append(node)
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _resolved_dotted(expression, bound):
+    """The dotted path ``expression`` refers to, with every alias expanded."""
+    if isinstance(expression, ast.Name):
+        return bound.get(expression.id, expression.id)
+    if isinstance(expression, ast.Attribute):
+        prefix = _resolved_dotted(expression.value, bound)
+        return f"{prefix}.{expression.attr}" if prefix else None
+    return None
+
+
+def _resolves_to(expression, dotted, bound):
+    """Does ``expression`` name ``dotted``, however this module spelled it?"""
+    return _resolved_dotted(expression, bound) == dotted
+
+
+def _name_catches_assertion_error(name):
+    """Does a caught *name* also catch ``AssertionError``?
+
+    Shared by the handler rule and the suppression rule so the two agree on
+    what counts. ``ValueError`` and friends are the false case: they cannot
+    swallow an ``assert``. A name that is not a known exception type is
+    reported as swallowing, because an assert that cannot be proven live must
+    not be counted as enforced.
+    """
+    if name in {"AssertionError", "Exception", "BaseException"}:
+        return True
+    builtins = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+    candidate = builtins.get(name)
+    if isinstance(candidate, type):
+        return issubclass(candidate, AssertionError)
+    return True
+
+
+def _suppression_names(call):
+    """The exception names passed to a ``suppress(...)`` call.
+
+    Anything that is not a plain name is reported as universal, so an argument
+    the check cannot read is never assumed to be harmless.
+    """
+    return [
+        argument.id if isinstance(argument, ast.Name) else "BaseException" for argument in call.args
+    ] or ["BaseException"]
+
+
+def _is_suppressing_with(node, bound):
+    """Is this ``with`` a suppression context that can eat an assertion failure?"""
+    for item in node.items:
+        call = item.context_expr
+        if not isinstance(call, ast.Call):
+            continue
+        if not any(_resolves_to(call.func, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
+            continue
+        if any(_name_catches_assertion_error(name) for name in _suppression_names(call)):
+            return True
+    return False
+
+
+def _ancestors(function, target):
+    """The chain of nodes from ``function`` down to ``target``, outermost first."""
+    chain = []
+    current = function
+    while True:
+        for child in ast.iter_child_nodes(current):
+            if child is target:
+                return [*chain, child]
+            if any(node is target for node in ast.walk(child)):
+                chain.append(child)
+                current = child
+                break
+        else:
+            return chain
+
+
+def _in_body(branch, target):
+    """Is ``target`` inside ``branch``'s executed body, not a handler or ``else``?"""
+    return any(_contains(statement, target) for statement in branch.body)
+
+
+def _falsy_literal(node):
+    """A condition that is a literal false, so its body can never run."""
+    return isinstance(node, ast.Constant) and not node.value
+
+
+def _is_uncalled_nested_def(function, node):
+    """Is this nested ``def`` referenced nowhere in the owning function?
+
+    A nested definition is only a defeat if nothing can reach it. The common
+    pattern is a callback handed to the code under test, which *is* called even
+    though nothing in the function body calls it, so the rule treats a nested
+    def as live whenever its name is loaded anywhere in the enclosing function.
+
+    The asymmetry is deliberate. A missed defeat leaves one pinned assert
+    defensible-but-weak; a wrong "defeated" verdict *removes* a live contract
+    from the sentinel's view, which is the more damaging error and the one
+    #280/#287 exist to prevent.
+    """
+    name = node.name
+    for candidate in ast.walk(function):
+        if candidate is node:
+            continue
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == name
+            and isinstance(candidate.ctx, ast.Load)
+        ):
+            return False
+    return True
+
+
+#: Operand kinds whose truthiness can decide an ``or`` on its own. A nested
 #: ``Compare`` is deliberately absent: it is not a decision on its own, and
 #: treating it as one would flag a legitimate ``and`` of two comparisons.
+#:
+#: This applies to ``or`` only. In ``A or B`` a truthy ``A`` means ``B`` is
+#: never evaluated, so the comparison in ``B`` goes unchecked. In ``A and B``
+#: the opposite holds: ``B`` is skipped when ``A`` is *falsy*, and a truthy
+#: runtime value in ``A`` -- a ``Name``, ``Call`` or ``Subscript`` -- carries no
+#: information about whether ``B`` runs. Applying this tuple to ``and`` too
+#: reported the live contract
+#: ``assert len(errors) == 1 and isinstance(errors[0], RuntimeError)`` as
+#: bypassed, silently dropping it from the pinned count set.
 _DECIDING_OPERANDS = (
     ast.Name,
     ast.Attribute,
@@ -616,6 +865,15 @@ def _may_bypass(expression):
     ``Name/Attribute/Call/Subscript/Constant`` and missed a ``Compare`` operand
     that was trivially true.
 
+    The two operators are handled separately, because they bypass in opposite
+    conditions. Under ``or`` any deciding operand skips its sibling when
+    truthy, so every operand is a candidate. Under ``and`` a sibling is skipped
+    only when the other side is *falsy*, which no decidable-true operand can
+    establish, so a runtime value is not a bypass there. Only a tautology
+    remains a bypass under ``and``, and only in the operand positions that
+    decide the result: a leading tautology short-circuits to true and the rest
+    never runs.
+
     A bare ``Compare`` operand does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
     stays enforced. That distinction is pinned by table rows, because an
@@ -624,12 +882,30 @@ def _may_bypass(expression):
     if not isinstance(expression, ast.BoolOp):
         return False
     operands = expression.values
-    if any(_is_tautology(value) for value in operands):
+    tautologies = [_is_tautology(value) for value in operands]
+    if any(tautologies):
+        if isinstance(expression.op, ast.Or):
+            return True
+        # Under `and`, a tautology only decides the result when it is the
+        # first operand: `True and <comparison>` never evaluates the
+        # comparison. In any later position it is only decisive when every
+        # operand before it is itself truthy -- `a and True and <comparison>`
+        # still short-circuits to true without reaching the comparison, while
+        # `<comparison> and True` evaluates the comparison first and so is not
+        # a bypass. An earlier operand that could be falsy leaves the
+        # comparison reachable, so the tautology is not the deciding one.
+        return any(
+            tautology and all(_is_literal_true(operand) for operand in operands[:position])
+            for position, tautology in enumerate(tautologies)
+        )
+    if isinstance(expression.op, ast.And):
+        return False
+    if any(isinstance(value, _DECIDING_OPERANDS) for value in operands):
         return True
-    return any(isinstance(value, _DECIDING_OPERANDS) or _may_bypass(value) for value in operands)
+    return any(_may_bypass(value) for value in operands)
 
 
-def _is_enforced(function, target):
+def _is_enforced(function, target, tree=None):
     """Is ``target`` an assert that can actually fail?
 
     An ``assert`` is defeated, without being removed, if it sits inside a
@@ -644,13 +920,46 @@ def _is_enforced(function, target):
     handler in the function: a swallowing ``try`` around a *sibling* statement
     does not disarm an assert outside it, and treating it as though it did
     would drop real pinned sites. ``_contains`` is what draws that line.
+
+    The remaining defeats are all reachability, and all are decided here rather
+    than behaviourally (#287). That is a measured choice, not a preference: an
+    assert moved into an uncalled nested ``def`` or hidden in an ``if False:``
+    branch leaves the *owning test green* -- the assert is never evaluated, so
+    nothing about running the test can observe it. #291's behavioural guard
+    closes the dead-code arm for the #261 guard only because that guard is
+    *called*; the retention counts are not called from anywhere, so for them
+    the structural walk is the only place the defeat is visible.
+
+    Suppression is matched by *resolved* name, so the qualified, from-import
+    and both alias spellings are covered alongside ``contextlib.suppress``.
+
+    ``tree`` supplies the module whose import bindings to resolve, so the
+    bindings always come from the file the assert actually lives in.
     """
-    for node in ast.walk(function):
-        if not isinstance(node, (ast.Try, ast.TryStar)):
-            continue
-        if not any(_contains(statement, target) for statement in node.body):
-            continue
-        if any(_swallows_assertion_error(handler) for handler in node.handlers):
+    bound = _bound_names(tree if tree is not None else _owning_module(function), function)
+    for ancestor in _ancestors(function, target):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
+                # The assert moved into a nested definition nothing calls.
+                return False
+        elif isinstance(ancestor, (ast.Try, ast.TryStar)):
+            if not _in_body(ancestor, target):
+                continue
+            if any(_swallows_assertion_error(handler) for handler in ancestor.handlers):
+                return False
+        elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
+            if not _in_body(ancestor, target):
+                continue
+            if _is_suppressing_with(ancestor, bound):
+                return False
+        elif (
+            isinstance(ancestor, (ast.If, ast.While))
+            and _falsy_literal(ancestor.test)
+            and _in_body(ancestor, target)
+        ):
+            # `if False:` / `while False:` -- the body never runs. Only the `if
+            # False:` case matters: an `else` branch of a falsy `if` is
+            # precisely the one that *does* run, hence the `_in_body` guard.
             return False
     return True
 
@@ -690,7 +999,7 @@ def guard_rejects_the_deadline_terminal_state():
                     _is_termination_key(comparison.left)
                     and isinstance(right, ast.Constant)
                     and right.value == DEADLINE_TERMINATION
-                    and _is_enforced(func, node)
+                    and _is_enforced(func, node, tree)
                     and not _may_bypass(node.test)
                 ):
                     return True
