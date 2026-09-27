@@ -622,12 +622,12 @@ def test_reachability_rejects_exactly_the_shapes_that_cannot_fail(label, body, l
 #: while making it incapable of failing, and the live control beside it that
 #: must stay enforced.
 #:
-#: Each pair is one *behavioral* claim about the interpreter, not a guess about
+#: Each row is one *behavioral* claim about the interpreter, not a guess about
 #: what the checker ought to accept. ``with cs:`` where ``cs`` is a suppressor
-#: really does swallow the failure and the test stays green; the same suppression
-#: reached through ``.__enter__()`` raises ``TypeError`` instead, so that one is
-#: listed as a control. Guessing wrong here is what would have shipped a rule
-#: either missing the real defect or crying wolf on live asserts.
+#: really does swallow the failure and the test stays green, whereas the same
+#: suppression reached through ``.__enter__()`` raises ``TypeError`` before the
+#: body runs. Guessing wrong here is what would have shipped a rule either
+#: missing the real defect or crying wolf on live asserts.
 RESIDUAL_DEFEAT_SHAPES = (
     # A parameter has no import to resolve, so the dotted path is a bare name
     # and the resolution rule finds nothing to match.
@@ -911,6 +911,72 @@ RESIDUAL_DEFEAT_SHAPES = (
             "    cs = helper.make()\n"
             "    with cs:\n        assert x != 1"
         ),
+        True,
+    ),
+    # The `.__enter__()` dunder spelling. `contextlib.suppress.__enter__`
+    # returns None, so `with suppress(X).__enter__():` raises `TypeError` on
+    # entry and the body is NEVER entered -- measured for every exception
+    # below, including `AssertionError` itself. So this spelling cannot leave
+    # the test green, and no assert inside it is disarmed.
+    #
+    # The rows are still worth pinning even though the body never runs: the
+    # rule exists and is reachable, and without a row it could be deleted with
+    # the suite staying green. Deleting `_suppressed_by_dunder` entirely is
+    # measured to leave every test in this file passing.
+    (
+        "suppressor dunder over AssertionError",
+        "    with contextlib.suppress(AssertionError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over Exception",
+        "    with suppress(Exception).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over BaseException",
+        "    with suppress(BaseException).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over a tuple naming AssertionError",
+        (
+            "    with contextlib.suppress((ValueError, AssertionError)).__enter__():\n"
+            "        assert x != 1"
+        ),
+        False,
+    ),
+    # An aliased suppressor still resolves through the alias rule.
+    (
+        "aliased suppressor dunder",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with cs.__enter__():\n        assert x != 1"
+        ),
+        False,
+    ),
+    # `contextlib.suppress()` with no argument is legal and suppresses
+    # everything, and its `__enter__()` still returns None.
+    (
+        "empty-parens suppressor dunder",
+        "    with contextlib.suppress().__enter__():\n        assert x != 1",
+        False,
+    ),
+    # The scope of the rule: only a real suppressor is matched, and only the
+    # `__enter__` dunder. Both of these must stay enforced.
+    (
+        "unrelated object dunder",
+        "    with helper.make().__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "nullcontext dunder",
+        "    with contextlib.nullcontext().__enter__():\n        assert x != 1",
+        True,
+    ),
+    (
+        "a different dunder on a real suppressor",
+        ("    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1"),
         True,
     ),
     # A literal container that is empty never enters its body. The loop
