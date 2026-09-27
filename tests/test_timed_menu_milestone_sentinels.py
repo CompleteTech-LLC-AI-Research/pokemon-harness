@@ -1780,6 +1780,18 @@ WALRUS_REBINDING_SHAPES = (
         "    with nullcontext() as cs:\n        pass",
     ),
     (
+        "an async with-as target retires the walrus",
+        "    async with nullcontext() as cs:\n        pass",
+    ),
+    (
+        "an async loop target retires the walrus",
+        "    async for cs in gen():\n        pass",
+    ),
+    (
+        "an except-as target retires the walrus",
+        "    try:\n        raise ValueError()\n    except ValueError as cs:\n        pass",
+    ),
+    (
         "a del retires the walrus",
         "    del cs",
     ),
@@ -1933,11 +1945,11 @@ MATCH_CAPTURE_SHAPES = (
 )
 def test_a_walrus_alias_is_retired_by_a_match_capture(label, capture):
     """A ``match`` capture must retire a carried suppressor like any store.
-    +
-    +    The first assert is swallowed by the walrus-bound suppressor. The capture
-    +    then rebinds ``cs`` to the matched value, so the ``with cs:`` that follows
-    +    enters something that does not suppress and the second assert is live.
-    +"""
+
+    The first assert is swallowed by the walrus-bound suppressor. The capture
+    then rebinds ``cs`` to the matched value, so the ``with cs:`` that follows
+    enters something that does not suppress and the second assert is live.
+    """
     source = (
         "def outer(x, flag, helper):\n"
         "    import contextlib\n"
@@ -1986,6 +1998,79 @@ MATCH_CAPTURE_SCOPE_ROWS = (
         [False, True],
     ),
 )
+
+
+#: A capture is not a *statement*, so nothing in the block that holds a header
+#: can be found by looking for a store statement -- but a header written inside
+#: the capturing ``case`` body has still had the capture run by the time it is
+#: reached.  These rows are what makes that block in ``_bindings_before``
+#: load-bearing rather than dead: without it every row below reports the
+#: second assert as swallowed.
+MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS = (
+    (
+        "a header in the capturing clause body reads the capture",
+        (
+            "    match flag:\n"
+            "        case [cs]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "a header in a second clause body reads that clause's capture",
+        (
+            "    match flag:\n"
+            "        case [other]:\n"
+            "            pass\n"
+            "        case [cs]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "a header in a clause that captures nothing still reads the suppressor",
+        (
+            "    match flag:\n"
+            "        case [other]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS],
+)
+def test_a_capture_reaches_a_header_nested_in_its_own_clause_body(label, body, enforced):
+    """The capture is not a store *statement*, so the block holding a header
+    sees no store at all and would fall back to the carried suppressor.
+
+    A header written inside the capturing ``case`` body must instead read the
+    capture, so that assert is reported enforced. A header in a clause that
+    captures nothing must still read the carried suppressor, so that one is
+    reported swallowed.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + body
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False, enforced], (
+        f"{label}: expected verdicts [False, {enforced}], got {results}. "
+        f"The capture binds `cs` before the nested header is reached."
+    )
 
 
 @pytest.mark.parametrize(
