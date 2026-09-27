@@ -1022,11 +1022,34 @@ def count_sites_that_bypass_the_guard():
     opt out of the precondition, leaving its exact count asserting something the
     guard never qualified. Returns the offending ``(function, clock_step)``
     pairs; empty is correct.
+
+    A ``**`` unpacking is read as well as a named keyword. ``ast`` gives it
+    ``arg=None``, so a filter on ``keyword.arg == "clock_step"`` skips it
+    entirely -- yet ``run_owner(m, p, **{"clock_step": 0.5})`` reaches exactly
+    the same unguarded path as the named spelling. Reading only the named form
+    is the same mistake #288 corrected for ``except*``: matching one concrete
+    node shape instead of the family of spellings that reach it.
+
+    An unpacking that cannot be read statically (a computed dict, a name) is
+    reported rather than assumed safe, because it might carry ``clock_step``
+    and silently opt the site out. Over-reporting here is the safe direction:
+    it is a false alarm on a pinned site, not a missed bypass.
     """
-    tree = _module_tree()
+    return [spelling for _name, spelling in _bypassing_sites(_module_tree())]
+
+
+def _bypassing_sites(milestones_tree):
+    """``(function, spelling)`` pairs for the bypasses in this milestones tree.
+
+    ``milestones_tree`` is a parameter so a spellings table can be classified
+    against a synthetic ``run_owner`` call without going through
+    :func:`_module_tree`, which only ever returns the real module. The table
+    test drives this with one mutated call, so it covers the call path
+    production uses and not just the per-call classifier.
+    """
     offenders = []
     for func_name in RETENTION_COUNT_SITES:
-        for func in tree.body:
+        for func in milestones_tree.body:
             if not (isinstance(func, ast.FunctionDef) and func.name == func_name):
                 continue
             for node in ast.walk(func):
@@ -1036,13 +1059,58 @@ def count_sites_that_bypass_the_guard():
                     and node.func.id == RUN_OWNER
                 ):
                     continue
-                for keyword in node.keywords:
-                    if keyword.arg != "clock_step":
-                        continue
-                    guarded = (
-                        isinstance(keyword.value, ast.Constant)
-                        and keyword.value.value == GUARDED_CLOCK_STEP
-                    )
-                    if not guarded:
-                        offenders.append((func_name, ast.unparse(keyword.value)))
+                offenders.extend((func_name, spelling) for spelling in clock_step_overrides(node))
     return offenders
+
+
+def clock_step_overrides(call):
+    """Spellings in this ``run_owner`` call that override the guarded value.
+
+    A single source of truth for the bypass rule, so the caller that reports
+    offenders and the table that pins the classification cannot drift apart.
+    Reads named keywords and ``**`` unpackings alike: ``ast`` reports an
+    unpacking with ``arg=None``, and ``run_owner(m, p, **{"clock_step": 0.5})``
+    reaches the same unguarded path as the named spelling.
+
+    An unpacking that cannot be read statically (a computed dict, a bare name)
+    is returned as an offender: it might carry ``clock_step`` and silently opt
+    the site out, so it is reported rather than assumed safe. Over-reporting is
+    the safe direction -- a false alarm on a pinned site, not a missed bypass.
+    """
+    overrides = []
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            continue
+        for name, value in _unpacked_keywords(keyword.value):
+            if name == "<unreadable>" or (name == "clock_step" and value != GUARDED_CLOCK_STEP):
+                overrides.append(f"**{{{name}: {value}}}")
+    for keyword in call.keywords:
+        if keyword.arg != "clock_step":
+            continue
+        guarded = (
+            isinstance(keyword.value, ast.Constant) and keyword.value.value == GUARDED_CLOCK_STEP
+        )
+        if not guarded:
+            overrides.append(ast.unparse(keyword.value))
+    return overrides
+
+
+def _unpacked_keywords(node):
+    """``(name, value)`` pairs from a ``**`` unpacking of a literal dict.
+
+    Yields ``("<unreadable>", source)`` for an unpacking whose keys cannot be
+    determined statically, so the caller can report it instead of treating an
+    unreadable dict as harmless. Values are the literal objects, so the caller
+    compares them against ``GUARDED_CLOCK_STEP`` the same way it compares a
+    named keyword rather than re-parsing source text.
+    """
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        yield ("<unreadable>", ast.unparse(node))
+        return
+    if not isinstance(value, dict):
+        yield ("<unreadable>", ast.unparse(node))
+        return
+    for key, item in value.items():
+        yield (key if isinstance(key, str) else "<unreadable>", item)
