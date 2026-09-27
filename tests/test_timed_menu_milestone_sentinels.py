@@ -20,9 +20,11 @@ backstop that keeps them from being quietly removed.
 """
 
 import ast
+import inspect
 
 import pytest
 
+from tests import _timed_menu_milestone_sentinel_support as support
 from tests._timed_menu_milestone_sentinel_support import (
     DEADLINE_TERMINATION,
     GUARD_FUNCTION,
@@ -41,6 +43,90 @@ from tests._timed_menu_milestone_sentinel_support import (
     retention_sites_observed,
     retention_subscript_sites_observed,
 )
+
+
+def _sentinel_uses(name, owner_name):
+    """True if ``owner_name`` in the support module actually calls ``name``."""
+    source = inspect.getsource(getattr(support, owner_name))
+    return any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+        for node in ast.walk(ast.parse(source))
+    )
+
+
+@pytest.mark.parametrize(
+    ("predicate", "caller", "defect"),
+    (
+        (
+            "_may_bypass",
+            "_count_comparison",
+            (
+                "pinned count sites would be reported as exact equalities again "
+                "even when a BoolOp short-circuits the comparison away, which is "
+                "the #280 hole these sentinels exist to close"
+            ),
+        ),
+        (
+            "_may_bypass",
+            "guard_rejects_the_deadline_terminal_state",
+            (
+                f"{GUARD_FUNCTION}() would count as having teeth again once its "
+                "assert is short-circuited by a tautological `or` operand, so a "
+                "deadline-truncated run would again be reported as retention"
+            ),
+        ),
+        (
+            "_is_enforced",
+            "_count_comparison",
+            (
+                "pinned count sites would count again when wrapped in a "
+                "swallowing try/except, which is the #280 handler half"
+            ),
+        ),
+        (
+            "_may_bypass",
+            "subscript_count_comparisons",
+            (
+                "pinned record-subscript counts would be reported as exact "
+                "equalities again once a tautological operand short-circuits "
+                "them, undoing the counts this branch just added"
+            ),
+        ),
+    ),
+    ids=(
+        "count-uses-bypass",
+        "guard-uses-bypass",
+        "count-uses-enforced",
+        "subscript-counts-use-bypass",
+    ),
+)
+def test_the_short_circuit_rule_is_wired_into_every_enforcement_call_site(
+    predicate, caller, defect
+):
+    """``_may_bypass`` must be *called* wherever enforcement is decided.
+
+    The bypass rule is only load-bearing if the helpers that decide whether a
+    pinned assert is live actually consult it. The table-driven rows above
+    exercise ``_may_bypass`` *directly*, so they keep passing even when these
+    three callers stop calling it. Measured on this branch, each deletion left
+    all 43 rows green and unmasks exactly its own attack:
+
+    ==================  ==============================  ==========================
+    deletion             attack that then survives       caught when wiring intact
+    ==================  ==============================  ==========================
+    ``_count_comparison``  ``or True`` on a ``== 271``   yes (1 failed / 42 passed)
+    guard check            ``or True`` on the #261      yes (1 failed / 42 passed)
+                            guard's own assert
+    subscript counts       ``or True`` on                yes (1 failed / 42 passed)
+                            ``record["call_counts"]``
+    ==================  ==============================  ==========================
+
+    Pinning the wiring here means a future edit that drops one of these calls
+    fails loudly, instead of silently disarming that call site and nothing else.
+    """
+    assert _sentinel_uses(predicate, caller), (
+        f"{caller}() no longer consults {predicate}(), so {defect}"
+    )
 
 
 def test_the_261_guard_is_still_wired_to_the_fast_clock_path():
