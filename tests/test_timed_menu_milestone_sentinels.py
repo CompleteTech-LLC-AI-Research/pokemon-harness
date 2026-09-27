@@ -956,7 +956,10 @@ RESIDUAL_DEFEAT_SHAPES = (
         False,
     ),
     # `contextlib.suppress()` with no argument is legal and suppresses
-    # everything, and its `__enter__()` still returns None.
+    # NOTHING -- `__exit__` evaluates `issubclass(exctype, ())`, which is
+    # false for every exception -- and its `__enter__()` still returns None.
+    # The dunder row is DEAD either way, but for the dunder's own reason
+    # rather than the empty-parens one; see the note above the table.
     (
         "empty-parens suppressor dunder",
         "    with contextlib.suppress().__enter__():\n        assert x != 1",
@@ -978,6 +981,65 @@ RESIDUAL_DEFEAT_SHAPES = (
         "a different dunder on a real suppressor",
         ("    with contextlib.suppress(AssertionError).__exit__():\n        assert x != 1"),
         True,
+    ),
+    # --- #313's scope, ported with its runtime premise corrected ---
+    #
+    # #313 added a `DUNDER_SPELLING_SHAPES` table and read the suppressor's
+    # exception list in `_suppressed_by_dunder` to "fix" a defect. The rows
+    # that survive here are the ones measuring something real; the two rows it
+    # pinned True are corrected below, with the execution that corrects them.
+    #
+    # #313's premise was that `suppress(ValueError).__enter__()` lets the
+    # assert fire while `suppress(AssertionError).__enter__()` does not, so
+    # the rule must read the exception list to tell them apart. Measured:
+    #
+    #     >>> import inspect, contextlib
+    #     >>> print(inspect.getsource(contextlib.suppress.__enter__))
+    #         def __enter__(self):
+    #             pass
+    #
+    # `__enter__` is `pass`, so it returns None for EVERY instantiation. The
+    # exception list is discarded by the call and cannot affect the outcome.
+    # Executed, all of these raise `TypeError: 'NoneType' object does not
+    # support the context manager protocol` with the body NEVER entered:
+    # suppress(), suppress(ValueError), suppress(AssertionError),
+    # suppress(RuntimeError), suppress(Exception), suppress(BaseException)
+    # and the tuple form. So the dunder spelling is a LOUD failure in every
+    # case, never a silent defeat, and no assert inside one is ever disarmed.
+    #
+    # Reading `func.value`'s arguments therefore does not recover a missing
+    # distinction -- it invents one. It reported the ValueError and
+    # RuntimeError rows LIVE while their AssertionError and Exception
+    # siblings were DEAD, which is one function returning two different
+    # verdicts for identical runtime.
+    #
+    # These two rows are genuinely new coverage and are pinned at measured
+    # truth: a bare `suppress` name and an alias must resolve to the same
+    # verdict as the qualified spelling, and must land in the same loud
+    # family as the rows above.
+    (
+        "bare suppressor dunder",
+        "    with suppress(AssertionError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "aliased suppressor dunder over an unrelated error",
+        "    cs = contextlib.suppress(ValueError)\n    with cs.__enter__():\n        assert x != 1",
+        False,
+    ),
+    # #313 pinned these True on the claim that the assert fires. It does not:
+    # the `with` raises TypeError on entry and the body never runs, exactly as
+    # for the AssertionError row. Pinned with the rows they were split from, so
+    # the family cannot be split again.
+    (
+        "suppressor dunder over ValueError",
+        "    with contextlib.suppress(ValueError).__enter__():\n        assert x != 1",
+        False,
+    ),
+    (
+        "suppressor dunder over RuntimeError",
+        "    with contextlib.suppress(RuntimeError).__enter__():\n        assert x != 1",
+        False,
     ),
     # A suppressor bound and entered inside the SAME top-level statement. The
     # store and the `with` share one statement, so reading the header before

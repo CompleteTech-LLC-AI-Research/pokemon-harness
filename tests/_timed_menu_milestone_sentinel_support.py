@@ -62,6 +62,18 @@ SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRES
 #: applied.
 AMBIGUOUS_SUPPRESSOR = object()
 
+#: Sentinel for a ``with`` header that enters a suppressor through the
+#: ``__enter__()`` dunder rather than entering the suppressor itself.
+#:
+#: ``contextlib.suppress.__enter__`` is ``def __enter__(self): pass``, so it
+#: returns ``None`` for every instantiation and the enclosing ``with`` raises
+#: ``TypeError`` without ever running the body. That is true of the qualified
+#: spelling and of the aliased one alike, so both are recorded as this sentinel
+#: and neither is read as a suppression whose exception list matters. Resolving
+#: the alias to its bound value instead split the family: the qualified dunder
+#: came out DEAD and the aliased one LIVE, for identical runtime.
+DUNDER_ENTERED = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -601,7 +613,7 @@ def _suppression_names(call):
 
 
 def _suppressed_by_dunder(call, bound):
-    """Is this ``suppressor.__enter__()`` -- the dunder spelling of the defeat?
+    """Is this ``suppressor.__enter__()`` -- the broken dunder spelling?
 
     ``with contextlib.suppress(AssertionError):`` has an alias that never leaves
     the ``with`` header:
@@ -619,13 +631,34 @@ def _suppressed_by_dunder(call, bound):
     cannot match a suppressor stored under a different attribute name. A
     non-suppressor that happens to define ``__enter__`` is not matched: the
     underlying call still has to resolve to a real suppressor.
+
+    The rule is deliberately uniform over the exception names, because runtime
+    is. ``contextlib.suppress.__enter__`` is ``def __enter__(self): pass``:
+
+        def __enter__(self):
+            pass
+
+    so it returns ``None`` for *every* instantiation and the exception list is
+    discarded by the call. Executed, ``with suppress(X).__enter__():`` raises
+    ``TypeError: 'NoneType' object does not support the context manager
+    protocol`` with the body never entered, for every spelling measured:
+    ``suppress()``, ``suppress(ValueError)``, ``suppress(AssertionError)``,
+    ``suppress(RuntimeError)``, ``suppress(Exception)``,
+    ``suppress(BaseException)`` and the tuple form.
+
+    #313 read the suppressor's arguments here to split that family, on the
+    premise that ``suppress(ValueError).__enter__()`` lets the assert fire
+    while the ``AssertionError`` spelling does not. It does not -- neither
+    spelling enters the body. Reading the arguments therefore invented a
+    distinction that does not exist, reporting two of these rows LIVE and
+    their siblings DEAD for identical runtime.
     """
     func = call.func
     if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
         return False
     if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return False
-    return [name for name in call.args if isinstance(name, ast.Name)] or ["BaseException"]
+    return ["BaseException"]
 
 
 def _assigned_suppressors(function, bound):
@@ -940,7 +973,13 @@ def _aliased_suppressions(node, function, bound):
                     continue
                 value = expression.func.value
                 if isinstance(value, ast.Name) and value.id in live:
-                    entered.append(live[value.id])
+                    # Recorded as the dunder shape, not as the suppressor the
+                    # name happens to be bound to. `with cs.__enter__():` never
+                    # enters the body whatever `cs` is, because `__enter__`
+                    # returns `None`; reading the binding would report it as a
+                    # suppression and split this family from the qualified
+                    # dunder spelling, which the same reasoning marks DEAD.
+                    entered.append(DUNDER_ENTERED)
         # Bindings take effect only *after* the statement that makes them, and
         # each index is the COMPLETE set in force there rather than a delta.
         # Merging would leave a superseded alias live: a suppressor bound in an
@@ -1119,6 +1158,16 @@ def _is_suppressing_with(node, bound, function=None):
         # An ambiguous binding may be *any* suppressor, so the rule cannot claim
         # the exception is harmless and reports the assert as defeated (#308).
         if argument is AMBIGUOUS_SUPPRESSOR:
+            return True
+        # A dunder entered through an alias (`with cs.__enter__():`) is recorded
+        # as the dunder shape rather than as the bound suppressor, because
+        # `suppress.__enter__` returns `None` whatever it is called on. Reading
+        # the bound value here instead reported the dunder spelling as a plain
+        # suppression, which both mis-attributed the mechanism and split the
+        # family: the qualified dunder was DEAD while this alias spelling was
+        # LIVE for identical runtime. See the measurement on
+        # `_suppressed_by_dunder`.
+        if argument is DUNDER_ENTERED:
             return True
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
