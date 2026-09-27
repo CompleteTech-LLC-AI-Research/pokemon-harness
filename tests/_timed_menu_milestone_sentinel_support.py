@@ -722,6 +722,23 @@ def _assigned_suppressors(function, bound):
     resolves to "not an alias" instead of leaving the first binding as the sole
     known one. Recording only the suppressor bindings would make that
     sequence look like a lone alias and report the live assert as dead.
+
+    An assignment *expression* is a binding too, and is collected here for the
+    same reason:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            assert 1 == 2
+        with cs:
+            assert 1 == 2          # also swallowed -- `cs` is still bound
+
+    A ``NamedExpr`` is not an ``ast.Assign``, so before #324 it was invisible
+    to this walk entirely and that second assert was reported enforced -- the
+    damaging direction. Recording it here rather than in the header logic is
+    what makes the supersession above apply to it unchanged: a later
+    ``cs = nullcontext()`` is an ordinary store, it wins on order, and the
+    carried suppressor does not outlive it. Recording the binding *only* where
+    the header is read -- the approach #323 took -- gets the re-entry case and
+    loses the supersession case, because nothing ever retires the value.
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
@@ -735,11 +752,32 @@ def _assigned_suppressors(function, bound):
         elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
             targets = [statement.target]
             value = statement.value
+        elif isinstance(statement, ast.NamedExpr):
+            # #324: an assignment expression is a binding like any other store.
+            # It is not an `ast.Assign`, so before this it was invisible here
+            # and a `with (cs := suppress(...)):` header left `cs` bound for
+            # the rest of the scope without any later `with cs:` seeing it --
+            # a swallowed assert reported live. Recording it through the same
+            # machinery means the per-index resolution, the supersession by a
+            # later store, and the non-suppressor rule below all apply to it
+            # unchanged, which is what keeps a later `cs = nullcontext()` from
+            # inheriting the carried suppressor (#308).
+            targets = [statement.target]
+            value = statement.value
         else:
             continue
         # A store written directly in the function body runs on every path;
         # one nested inside a block runs on some paths only.
-        conditional = statement not in function.body
+        # A `NamedExpr` never sits directly in the function body, so for it the
+        # question is whether the *top-level statement that contains it* is
+        # written directly in the body. A walrus in a top-level `with` header
+        # therefore runs on every path (it is evaluated whenever that `with`
+        # is reached), while a walrus inside an `if` or a loop still runs on
+        # some paths only.
+        if isinstance(statement, ast.NamedExpr):
+            conditional = _walrus_is_conditional(function, statement)
+        else:
+            conditional = statement not in function.body
         for target in targets:
             if isinstance(target, ast.Name):
                 bindings.setdefault(target.id, []).append((statement, value, conditional))
@@ -847,6 +885,42 @@ def _binding_order(function, statement):
     )
 
 
+def _walrus_is_conditional(function, walrus):
+    """Is this assignment expression reachable on only some paths?
+
+    An ``ast.NamedExpr`` never appears directly in the function body, so
+    ``statement not in function.body`` would classify every walrus as
+    conditional. That is right for ``if flag: (cs := suppress(...))`` and
+    wrong for a walrus written in a top-level ``with`` header, which is
+    evaluated on every path that reaches that ``with``.
+
+    The question is therefore asked of the blocks *inside* the top-level
+    statement that contains the walrus. Only the blocks that can *skip* the
+    walrus count: ``if``, the loops, ``try`` and a conditional expression. A
+    ``with`` header is not one of them -- its item expressions are evaluated
+    to build the context manager before the body is entered, so a walrus in
+    one runs on every path that reaches the header.
+
+    That keeps two successive top-level ``with`` headers from looking like two
+    *competing* bindings of one name, which would make the second header's
+    value ambiguous (#308) instead of letting it supersede the first.
+    """
+    for top in function.body:
+        if top is walrus or any(child is walrus for child in ast.walk(top)):
+            return _walrus_skipped_by_a_branch(top, walrus)
+    return True
+
+
+def _walrus_skipped_by_a_branch(statement, walrus):
+    """Is ``walrus`` inside a block of ``statement`` that can skip it?"""
+    for block in ast.walk(statement):
+        if not isinstance(block, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.IfExp)):
+            continue
+        if any(child is walrus for child in ast.walk(block)):
+            return True
+    return False
+
+
 def _is_readable_suppressor(value, bound):
     """Is ``value`` a right-hand side this check can read as a suppressor?
 
@@ -887,11 +961,14 @@ def _aliased_suppressions(node, function, bound):
         with (cs := contextlib.suppress(AssertionError)):
             assert 1 == 2
 
-    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` never
-    records it, and the header no longer holds a bare ``Name`` for the
-    resolution rule to read -- the suppressor sits in a node shape nothing else
-    inspects. Executed, the assertion failure really is swallowed, so this is
-    the damaging direction: a live defeat reported as enforced.
+    A ``NamedExpr`` is not an ``ast.Assign``, so ``_assigned_suppressors`` used
+    to skip it entirely, and the header no longer holds a bare ``Name`` for the
+    resolution rule to read -- the suppressor sat in a node shape nothing else
+    inspected. Executed, the assertion failure really is swallowed, so this
+    was the damaging direction: a live defeat reported as enforced. #324
+    records the ``NamedExpr`` in :func:`_assigned_suppressors` so the *later*
+    header that re-enters the name resolves it too; the inline classification
+    below is what handles the header that performs the binding.
 
     The right-hand side is still gated on :func:`_is_suppression_call`, and that
     guard is load-bearing rather than a redundancy. A zero-argument call such as

@@ -1467,3 +1467,158 @@ def test_both_orders_in_one_block_keep_their_own_verdict(label, body):
         f"{label}: the assert before the store must stay enforced and the one "
         f"after it must be reported defeated, got {results}"
     )
+
+
+#: #324: a walrus in a ``with`` header binds the name for the rest of the
+#: enclosing scope, so a *later* header that re-enters that name enters the
+#: same suppressor. ``NamedExpr`` is not an ``ast.Assign``, so the binding was
+#: never recorded and the re-entering assert was reported live -- a defeated
+#: assert certified as load-bearing, which is the damaging direction.
+#:
+#: The rows below compare the full list of verdicts rather than reducing it
+#: with ``all()``. Each fixture holds more than one assert whose verdicts are
+#: *not* all the same, and ``all()`` collapses such a fixture to its first
+#: verdict -- so a wrong second verdict passed the shipped table. That harness
+#: bug is itself fixed here; the exact comparison is what keeps these rows
+#: honest.
+#
+#: Every fixture is two- or three-assert on purpose: the first assert is the
+#: one already covered by the single-header walrus rows, and the later
+#: assert(s) are the ones this issue is about.
+WALRUS_REENTRY_SHAPES = (
+    # The defect itself. `cs` is still the suppressor at the second header, so
+    # its assert is swallowed too. Both are defeated; the first assert being
+    # already correct means `all()` would have passed while the second was
+    # wrong.
+    (
+        "a walrus-bound suppressor is re-entered by a later header",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # #324 criterion 1: the same must hold when the walrus is not written at
+    # the top level. Inside an `if` the bind happens on one path only, but the
+    # later header re-enters whatever was bound, and executed that is the
+    # suppressor.
+    (
+        "a walrus inside an if is re-entered by a later header",
+        (
+            "    if flag:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # ... and inside a `try`.
+    (
+        "a walrus inside a try is re-entered by a later header",
+        (
+            "    try:\n"
+            "        with (cs := suppress(AssertionError)):\n"
+            "            assert x != 1\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # #324 criterion 2: a later rebind must WIN over the carried walrus
+    # value. `nullcontext()` does not suppress, so the second assert really is
+    # live and must be reported enforced. This is the row that a naive
+    # "record every walrus" repair gets wrong -- it is exactly the
+    # over-breadth that blocked #323.
+    (
+        "a later nullcontext rebind wins over a carried walrus value",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    cs = nullcontext()\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # ... the same through a helper, which is the `#308` rebind family.
+    (
+        "a later helper rebind wins over a carried walrus value",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    cs = helper.make()\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # ... and a rebind nested in an `if`, which is conditional.
+    (
+        "a later rebind inside an if wins over a carried walrus value",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    if flag:\n"
+            "        cs = nullcontext()\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # #324 criterion 3: a walrus whose value is not a suppressor never yields
+    # a defeated verdict, even when the name is re-entered. This is the
+    # cleanest canary -- nothing rebinds `cs`, so the suppressor value simply
+    # must never have been attached to it.
+    (
+        "a walrus of a non-suppressor is never reported defeated when re-entered",
+        (
+            "    with (cs := nullcontext()):\n        assert x != 1\n"
+            "    with cs:\n        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # Two walruses of the same name in sequence: the later one supersedes the
+    # earlier, so the third assert runs under a `nullcontext` and is live.
+    (
+        "a later walrus of the same name supersedes the earlier one",
+        (
+            "    with (cs := suppress(AssertionError)):\n        assert x != 1\n"
+            "    with (cs := nullcontext()):\n        assert x != 2\n"
+            "    with cs:\n        assert x != 3"
+        ),
+        [False, True, True],
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    WALRUS_REENTRY_SHAPES,
+    ids=[row[0] for row in WALRUS_REENTRY_SHAPES],
+)
+def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, expected):
+    """A walrus bind is a real binding, and a later rebind still supersedes it.
+
+    #323 tried to close the re-entry half of this and could not without
+    re-opening the supersession half: carrying the walrus value forward
+    unconditionally made a stale suppressor outlive a later ``cs =
+    nullcontext()``, so a *live* assert was reported defeated on three
+    separate rows. The shipped rule records a ``NamedExpr`` through the same
+    per-index binding machinery as an ordinary store, so both halves hold at
+    once.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts but the row "
+        f"expects {len(expected)} verdicts"
+    )
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. Every assert "
+        f"is compared individually -- `all()` would collapse this fixture to "
+        f"its first verdict and hide a wrong later one."
+    )
