@@ -566,8 +566,13 @@ def _suppression_names(call):
     families must be told apart, and the difference is measured rather than
     assumed:
 
-    * ``contextlib.suppress()`` is legal and suppresses *everything*, so it is
-      a genuine defeat and the universal reading is right.
+    * ``contextlib.suppress()`` is legal but suppresses *nothing*. Its
+      ``__exit__`` calls ``issubclass(exctype, self._exceptions)`` with
+      ``self._exceptions == ()``, which is false for every exception, so
+      ``AssertionError`` propagates and the assert is live at runtime. Reading
+      it as universal reports the assert DEAD anyway: stricter than runtime,
+      which is the safe direction, and the conservative choice when the check
+      cannot read the argument.
     * ``pytest.raises()`` with no expected type raises ``ValueError: You must
       specify at least one parameter`` while the context object is being
       constructed -- before the body is entered at all. The test fails loudly
