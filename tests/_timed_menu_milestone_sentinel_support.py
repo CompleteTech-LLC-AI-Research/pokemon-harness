@@ -62,6 +62,18 @@ SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRES
 #: applied.
 AMBIGUOUS_SUPPRESSOR = object()
 
+#: Sentinel for a ``with`` header that enters something through the
+#: ``__enter__()`` dunder rather than entering it directly.
+#:
+#: ``contextlib.suppress.__enter__`` is ``def __enter__(self): pass``, so it
+#: returns ``None`` for every instantiation and the enclosing ``with`` raises
+#: ``TypeError`` without ever running the body. That holds for the qualified
+#: spelling and the aliased one alike, so both are recorded as this sentinel
+#: rather than being resolved to whatever the name happens to be bound to.
+#: Resolving the alias to its binding split the family: the qualified dunder
+#: came out DEAD and the aliased one LIVE, for identical runtime.
+DUNDER_ENTERED = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -615,33 +627,45 @@ def _suppressed_by_dunder(call, bound):
     non-suppressor that happens to define ``__enter__`` is not matched: the
     underlying call still has to resolve to a real suppressor.
 
-    The exception types are read from the *suppressor's* arguments, not from
-    the ``__enter__()`` call's. ``contextlib.suppress(ValueError).__enter__()``
-    is ``Call(func=Attribute(value=Call(func=Attribute(...suppress),
-    args=[ValueError]), attr=__enter__), args=[])``: the types live one level
-    down, and the outer call has none at all. Reading ``call.args`` therefore
-    returns the empty fallback ``BaseException`` for *every* dunder spelling,
-    and since ``BaseException`` catches ``AssertionError`` that reported
-    ``suppress(ValueError).__enter__()`` -- which suppresses nothing relevant --
-    as a defeat of the assert.
+    The exception types are deliberately *not* read from either call. It is
+    tempting to read them from the suppressor rather than from the
+    ``__enter__()`` call, since they live one level down in
+    ``Call(func=Attribute(value=Call(...suppress, args=[ValueError]),
+    attr=__enter__), args=[])``. Doing so looks like recovering a distinction
+    the rule was missing, and it was implemented that way -- but it invents one
+    instead. ``__enter__`` returns ``None`` whatever it is called on, so the
+    ``with`` never enters the body and the assert is never evaluated. There is
+    no exception argument that makes this spelling a silent defeat, because the
+    suppression object is thrown away before ``__exit__`` is ever consulted.
     """
     func = call.func
     if not (isinstance(func, ast.Attribute) and func.attr == "__enter__"):
         return False
     if not any(_resolves_to(func.value, dotted, bound) for dotted in SUPPRESSING_CONTEXTS):
         return False
-    # `func.value` is the `suppress(...)` call itself, resolved above.
-    suppressor = func.value
-    if not isinstance(suppressor, ast.Call):
-        return False
-    # `_suppression_names` reports the unreadable case for an argument it
-    # cannot read, which includes *no* argument at all. `suppress()` with empty
-    # parens therefore reads as universal here, as it already does in the plain
-    # `with suppress():` form. That is the conservative direction: a bare
-    # `suppress()` suppresses nothing and the assert does fail, so the verdict
-    # is stricter than runtime. It is shared with the non-dunder path on
-    # purpose rather than special-cased in only one of the two.
-    return _suppression_names(suppressor)
+    # The exception names are deliberately not consulted, because runtime does
+    # not consult them either. `contextlib.suppress.__enter__` is:
+    #
+    #     def __enter__(self):
+    #         pass
+    #
+    # so it returns `None` for *every* instantiation and the exception list is
+    # discarded by the call before it can matter. Executed,
+    # `with suppress(X).__enter__():` raises `TypeError: 'NoneType' object does
+    # not support the context manager protocol` with the body never entered, for
+    # every spelling measured: `suppress()`, `suppress(ValueError)`,
+    # `suppress(AssertionError)`, `suppress(RuntimeError)`,
+    # `suppress(Exception)`, `suppress(BaseException)` and the tuple form.
+    #
+    # Reading the suppressor's arguments, as this function did, therefore
+    # invented a distinction that does not exist rather than recovering a
+    # missing one. It reported `suppress(ValueError).__enter__()` and
+    # `suppress(RuntimeError).__enter__()` as LIVE while their
+    # `AssertionError` and `Exception` siblings came out DEAD -- one function,
+    # two verdicts, for identical runtime. The empty-parens case is no longer
+    # read through `_suppression_names` either, for the same reason: the dunder
+    # spelling is decided by the `__enter__` result, not by the arguments.
+    return ["BaseException"]
 
 
 def _assigned_suppressors(function, bound):
@@ -908,7 +932,13 @@ def _aliased_suppressions(node, function, bound):
                 continue
             value = expression.func.value
             if isinstance(value, ast.Name) and value.id in bound_so_far:
-                entered.append(bound_so_far[value.id])
+                # Recorded as the dunder shape, not as the suppressor the name
+                # happens to be bound to. `with cs.__enter__():` never enters
+                # the body whatever `cs` is, because `__enter__` returns
+                # `None`; reading the binding would report this as a
+                # suppression and split it from the qualified dunder spelling,
+                # which the same reasoning marks DEAD.
+                entered.append(DUNDER_ENTERED)
     return entered
 
 
@@ -1054,6 +1084,11 @@ def _is_suppressing_with(node, bound, function=None):
         # An ambiguous binding may be *any* suppressor, so the rule cannot claim
         # the exception is harmless and reports the assert as defeated (#308).
         if argument is AMBIGUOUS_SUPPRESSOR:
+            return True
+        # A dunder entered through an alias (`with cs.__enter__():`) is recorded
+        # as the dunder shape rather than as the suppressor `cs` is bound to,
+        # because `suppress.__enter__` returns `None` whatever it is called on.
+        if argument is DUNDER_ENTERED:
             return True
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True

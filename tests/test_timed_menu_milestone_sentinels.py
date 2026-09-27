@@ -1089,18 +1089,36 @@ DUNDER_SPELLING_SHAPES = (
         ),
         False,
     ),
-    # --- controls: the exception must actually catch AssertionError ---
-    # These are the rows that were wrong before the argument-reading fix. Each
-    # suppresses nothing relevant, so the assert is live and must stay enforced.
+    # --- the exception argument does not affect this spelling ---
+    #
+    # These three rows were pinned True on the premise that the exception
+    # decides whether the assert fires, so that a suppressor over `ValueError`
+    # or `RuntimeError` would let it through while the `AssertionError` rows
+    # above would not. It does not, for either direction:
+    #
+    #     >>> import inspect, contextlib
+    #     >>> print(inspect.getsource(contextlib.suppress.__enter__))
+    #         def __enter__(self):
+    #             pass
+    #
+    # `__enter__` is `pass`, so it returns `None` for every instantiation and
+    # the `with` raises `TypeError: 'NoneType' object does not support the
+    # context manager protocol` with the body never entered. Executed for
+    # `suppress()`, `ValueError`, `AssertionError`, `RuntimeError`,
+    # `Exception`, `BaseException` and the tuple form -- all identical.
+    #
+    # So the exception is discarded by the call, and no spelling of this dunder
+    # is a silent defeat. They are pinned False here, alongside the
+    # `AssertionError` rows above, so the family cannot be split again.
     (
         "suppressor dunder over ValueError",
         "    with contextlib.suppress(ValueError).__enter__():\n        assert x != 1",
-        True,
+        False,
     ),
     (
         "suppressor dunder over RuntimeError",
         "    with contextlib.suppress(RuntimeError).__enter__():\n        assert x != 1",
-        True,
+        False,
     ),
     (
         "aliased suppressor dunder over ValueError",
@@ -1108,7 +1126,7 @@ DUNDER_SPELLING_SHAPES = (
             "    cs = contextlib.suppress(ValueError)\n"
             "    with cs.__enter__():\n        assert x != 1"
         ),
-        True,
+        False,
     ),
     # A different dunder is not this spelling, and an unrelated object that
     # happens to define `__enter__` is never a suppressor.
@@ -1175,13 +1193,21 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
     ids=[shape[0] for shape in DUNDER_SPELLING_SHAPES],
 )
 def test_the_dunder_spelling_is_covered_and_scoped_to_real_suppression(label, body, live):
-    """#310: the dunder rule must be exercised, and must key on the exception.
+    """#310: the dunder rule must be exercised, and must be scoped to suppressors.
 
     The rule shipped untested, so it could be deleted without any test going
-    red. These rows fix that, and they also pin the scope: a suppressor dunder
-    over an exception that does *not* catch ``AssertionError`` is a live
-    contract, and flagging it would drop a real assert from the sentinel's
-    view.
+    red. These rows fix that, and they also pin the scope in the direction that
+    matters: an object that is not a suppressor is never matched, so
+    ``helper.make().__enter__()``, ``nullcontext().__enter__()`` and
+    ``__exit__`` must all stay enforced.
+
+    The exception argument is *not* part of that scope, because
+    ``contextlib.suppress.__enter__`` is ``def __enter__(self): pass`` and
+    returns ``None`` for every instantiation -- the enclosing ``with`` raises
+    ``TypeError`` and the body never runs, whatever the suppressor was built
+    with. Rows for ``ValueError`` and ``RuntimeError`` were briefly pinned the
+    other way, on the belief that the assert would fire; it never does, and they
+    now sit with the rest of the family.
     """
     imports = (
         "    import contextlib\n"
