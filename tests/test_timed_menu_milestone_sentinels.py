@@ -1856,18 +1856,24 @@ CARRIER_NESTED_ROWS = (
 CARRIER_UNREACHABLE_ROWS = (
     (
         "a capture in a sibling branch of the same if",
-        "    if flag:\n        with cs:\n            assert x != 1\n"
-        "    else:\n        match [1]:\n            case [cs]:\n                pass",
+        (
+            "    if flag:\n        with cs:\n            assert x != 1\n"
+            "    else:\n        match [1]:\n            case [cs]:\n                pass"
+        ),
     ),
     (
         "a capture in a block that cannot run",
-        "    if False:\n        match [1]:\n            case [cs]:\n                pass\n"
-        "    with cs:\n        assert x != 1",
+        (
+            "    if False:\n        match [1]:\n            case [cs]:\n                pass\n"
+            "    with cs:\n        assert x != 1"
+        ),
     ),
     (
         "a capture in a sibling block of the same if",
-        "    if flag:\n        with cs:\n            assert x != 1\n"
-        "    else:\n        import os as cs",
+        (
+            "    if flag:\n        with cs:\n            assert x != 1\n"
+            "    else:\n        import os as cs"
+        ),
     ),
 )
 
