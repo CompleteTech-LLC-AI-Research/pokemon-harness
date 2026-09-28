@@ -1575,6 +1575,68 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [True, True],
     ),
+    # #348: a store whose right-hand side is the name it binds. The alias walk
+    # stands on the very store it is resolving, so the suppressor it already
+    # holds is never seen and both headers reported a SWALLOWED assert as
+    # live. Both are the damaging direction, and neither was pinned before.
+    (
+        "a walrus aliasing the very name it binds re-enters",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The same self-alias written as an ordinary store rather than a walrus.
+    # It resolves on a different path, so pinning only the walrus spelling
+    # would leave this one unpinned.
+    (
+        "a plain store aliasing the very name it binds re-enters",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = cs\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # A rebind of the aliased name *after* the header. The interpreter has not
+    # run it when the header reads the name, so the suppressor is still in
+    # force and the assert is swallowed -- but a whole-function "last binding"
+    # view resolves the header to the nullcontext instead, which reads as live.
+    # The re-entering `with first:` is the control: by then the rebind HAS
+    # run, so that assert really is live and must stay reported so.
+    (
+        "an alias read before its own later rebind re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    with (cs := first):\n"
+            "        assert x != 1\n"
+            "    first = nullcontext()\n"
+            "    with first:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # A two-hop chain whose last link is rebound after the header that reads
+    # it. Same failure as the row above, one link further from the store, so
+    # a rule that only special-cases the direct name would still look right.
+    (
+        "a two-hop alias read before its last link is rebound re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    second = first\n"
+            "    with (cs := second):\n"
+            "        assert x != 1\n"
+            "    first = nullcontext()\n"
+            "    with first:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
     # Two walruses of the same name in sequence: the later one supersedes the
     # earlier, so the third assert runs under a `nullcontext` and is live.
     (
@@ -1698,6 +1760,267 @@ WALRUS_REENTRY_SHAPES = (
             "        assert x != 3"
         ),
         [True, False, False],
+    ),
+    # #333: the binding takes its value from a NAME that is already bound to a
+    # suppressor, rather than from an inline call. Executed, `cs` *is* `base`,
+    # so both asserts are swallowed. The rule recorded the bare `base` node,
+    # `_is_readable_suppressor` accepts only an `ast.Call`, and both headers
+    # were reported live -- a disarmed contract certified as load-bearing.
+    (
+        "a walrus of a pre-bound suppressor name re-enters",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    with (cs := base):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # Two hops, so a rule that follows exactly one link is caught. Both links
+    # are ordinary unconditional stores, so nothing is ambiguous here.
+    (
+        "a walrus of a two-hop suppressor alias re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    second = first\n"
+            "    with (cs := second):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The from-import spelling: the suppressor is built from the bare name
+    # `suppress`, so the chain has to terminate at a suppressor the module
+    # spells without a dotted prefix. The walrus still binds the *instance*:
+    # `with (cs := suppress):` would enter the factory object itself, which
+    # raises `TypeError` on `__enter__` and never reaches the assert, so it is
+    # not this shape and is not pinned as one.
+    (
+        "a walrus of a from-imported suppressor re-enters",
+        (
+            "    base = suppress(AssertionError)\n"
+            "    with (cs := base):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The binding is not confined to a `with` header. An assignment expression
+    # binds a name wherever it appears, and #324 already taught the rule to
+    # harvest them from assignments and comprehensions -- but it classified
+    # each by its own right-hand side, so a pre-bound NAME was still unreadable
+    # in all three of those positions.
+    (
+        "a walrus of a pre-bound name in a plain assignment re-enters",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    y = (cs := base)\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "a walrus of a pre-bound name in a comprehension re-enters",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    rows = [(cs, v) for v in items if (cs := base)]\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # A conditional store of the alias. `flag` gates the store, so on the
+    # `not flag` path `cs` is never bound and the header raises `NameError` --
+    # loudly. On the `flag` path it really is the suppressor, so the safe
+    # reading is the same one `_resolve_bindings` already gives an ambiguous
+    # name.
+    (
+        "a conditional store of a pre-bound suppressor name re-enters",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    if flag:\n"
+            "        cs = base\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The name the walrus aliases is bound TWICE, so the value in force is the
+    # LATER store. Reading the first binding instead resolves the alias to the
+    # ordinary call, leaves it unreadable, and reports a swallowed assert as
+    # live -- a supersession this module already models for every other store.
+    (
+        "a walrus of a name rebound to a suppressor re-enters",
+        (
+            "    first = helper.make()\n"
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    with (cs := first):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The same supersession in the other direction, so a rule that simply
+    # reaches for the most recent *suppressor* is caught as well: the suppressor
+    # is the earlier store and the ordinary call is what is live.
+    (
+        "a walrus of a name rebound to a non-suppressor re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # --- controls: the chain must not manufacture a suppressor ---------------
+    # The name the walrus binds is bound to a context manager that does NOT
+    # swallow. Following the alias must reach that value and stop, not conclude
+    # "somewhere in this chain there was a call" and report a defeat.
+    (
+        "a walrus of a pre-bound non-suppressor name stays live",
+        (
+            "    base = contextlib.nullcontext()\n"
+            "    with (cs := base):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # An unbound name is not a suppressor. The chain runs out of entries, the
+    # value stays unreadable, and the assert stays live.
+    (
+        "a walrus of an unbound name stays live",
+        (
+            "    with (cs := helper.make()):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # A cycle must terminate rather than recurse. The mutually referential
+    # stores live in a nested frame so the outer scope is unaffected; the point
+    # of the row is that the run reaches a verdict at all.
+    (
+        "a walrus whose alias chain cycles terminates",
+        (
+            "    def build():\n"
+            "        first = second\n"
+            "        second = first\n"
+            "        return first\n"
+            "    with (cs := build()):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # A later store supersedes the walrus exactly as it supersedes an ordinary
+    # assign, so substituting the aliased value must not make the carried
+    # binding outlive its replacement.
+    (
+        "a walrus of a pre-bound name after a superseding store",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    with (cs := base):\n"
+            "        assert x != 1\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # --- #328: the same alias chain WITHOUT a walrus -----------------------
+    #
+    # These three rows are not #333. They were filed as a separate issue and
+    # were blind in exactly the same way -- a swallowed assert certified as
+    # load-bearing -- because a bare `with alias:` records a `Name` that
+    # `_is_readable_suppressor` rejects. They are pinned HERE because the fix
+    # that repairs them is the fix that repairs #333: the whole-function
+    # pre-pass in `_raw_store_values` hands the ordinary alias path the same
+    # complete table the walrus path needs, so both resolve together or not at
+    # all.
+    #
+    # They are stated as rows rather than left to the PR narrative so the
+    # side-effect fix is pinned by a test. A future change that narrows the
+    # dereference back to walrus headers alone fails these.
+    (
+        "a plain alias of a pre-bound suppressor re-enters",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    alias = base\n"
+            "    with alias:\n"
+            "        assert x != 1\n"
+            "    with alias:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # Two hops. Note this is NOT the discriminating row a single-hop mutation
+    # would catch, and the difference matters: the dereference runs at the
+    # *store site*, so `second = first` is resolved to the suppressor the
+    # moment it is recorded, and the header then reads an already-resolved
+    # value. The walrus path resolves at the *header*, one link further down
+    # the chain, which is why the walrus two-hop row is the one a single-hop
+    # mutation breaks. This row still pins #328: it fails outright if the
+    # ordinary alias path resolves nothing at all.
+    (
+        "a plain two-hop suppressor alias re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    second = first\n"
+            "    with second:\n"
+            "        assert x != 1\n"
+            "    with second:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # #328 acceptance criterion 4 names a THREE-link chain explicitly
+    # ("a = suppress(...); b = a; c = b"), and the shipped table only pinned
+    # two. Three links is past the point where a hand-written "follow one or
+    # two" rule would still look correct, so the row is here to make the bound
+    # a tested property rather than an accident of how far the fixture reached.
+    #
+    # The walrus twin of this shape already exists two rows up; this one is the
+    # ordinary `with` spelling, which resolves at the store site instead of the
+    # header and so is reached by a different call path.
+    (
+        "a plain three-hop suppressor alias re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    second = first\n"
+            "    third = second\n"
+            "    with third:\n"
+            "        assert x != 1\n"
+            "    with third:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The control for the ordinary path: following the chain must stop at a
+    # context manager that does not suppress, rather than report a defeat
+    # because a suppressor appeared somewhere earlier in the chain.
+    (
+        "a plain alias of a pre-bound non-suppressor stays live",
+        (
+            "    base = contextlib.nullcontext()\n"
+            "    alias = base\n"
+            "    with alias:\n"
+            "        assert x != 1\n"
+            "    with alias:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
     ),
 )
 
