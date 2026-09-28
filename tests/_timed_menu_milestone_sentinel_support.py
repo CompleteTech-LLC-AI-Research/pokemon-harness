@@ -2632,6 +2632,44 @@ def _stores_of(name, by_index, index, function):
     decidable = [
         entry for entry in entries if not entry[2] or isinstance(entry[0], ast.ExceptHandler)
     ]
+    # A conditional store that *supersedes* a carrier leaves the name's final
+    # value undecidable, so the carrier must not be read as still in force.
+    #
+    # This is the same hazard `_module_stores` guards for module-scope
+    # bindings, applied to the function path. Without it, an unconditional
+    # local carrier followed by a conditional rebind reads the carrier as the
+    # settled value:
+    #
+    #     def outer():
+    #         import os as cs
+    #         if flag:
+    #             cs = contextlib.nullcontext()
+    #         with cs:
+    #             assert x != 1
+    #
+    # When the branch runs the name holds a real context manager and the
+    # assert is **live**; when it does not, the module is in force and entry
+    # raises. Either way the header's value is not settled by the carrier
+    # alone, and answering "dead entry" from the carrier reports a live
+    # contract as unreachable -- the damaging direction. `None` makes
+    # `_entry_is_dead` decline, which is the safe direction.
+    #
+    # `except ... as cs:` is excluded for the same reason `_stores_of`'s
+    # `decidable` list excludes it from `conditional`: the handler *unbinds*
+    # rather than supersedes, so the carrier is what remains in force.
+    carrier_orders = [
+        orders[id(entry[0])] for entry in entries if not entry[2] and isinstance(entry[1], str)
+    ]
+    if carrier_orders:
+        last_carrier = max(carrier_orders)
+        if any(
+            entry[2]
+            and not isinstance(entry[1], str)
+            and not isinstance(entry[0], ast.ExceptHandler)
+            and orders[id(entry[0])] > last_carrier
+            for entry in entries
+        ):
+            return None
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
     if latest is None:
         return None

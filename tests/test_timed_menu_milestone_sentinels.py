@@ -2470,6 +2470,86 @@ def test_a_with_header_bound_by_a_carrier_is_dead_entry(label, bind, live):
     )
 
 
+#: A **conditional** store that supersedes a function-local carrier.
+#:
+#: #375 review finding (high). Making an unconditional local carrier visible
+#: to :func:`_stores_of` exposed a hazard the module path already guarded: a
+#: store nested in a block may not have run, so the carrier is not necessarily
+#: the name's final value.
+#:
+#:     def outer(flag):
+#:         import os as cs
+#:         if flag:
+#:             cs = contextlib.nullcontext()
+#:         with cs:
+#:             assert x != 1
+#:
+#: When the branch runs, the name holds a real context manager and the assert
+#: is **live**. When it does not, the module is in force and entry raises. The
+#: header's value is undecidable either way, so the rule must decline rather
+#: than read the carrier as settled. Answering "dead entry" from the carrier
+#: reports a live contract as unreachable, which is the damaging direction.
+STALE_LOCAL_CARRIER_SHAPES = (
+    (
+        "an import carrier superseded by a conditional store",
+        "    import os as cs",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a def carrier superseded by a conditional store",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a class carrier superseded by a conditional store",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "an import carrier superseded by a loop store",
+        "    import os as cs",
+        "    for _ in (1,):\n        cs = nullcontext()",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "carrier", "conditional"),
+    STALE_LOCAL_CARRIER_SHAPES,
+    ids=[shape[0] for shape in STALE_LOCAL_CARRIER_SHAPES],
+)
+def test_a_conditional_store_superseding_a_local_carrier_is_declined(label, carrier, conditional):
+    """A carrier a conditional store may have replaced is not still in force.
+
+    The rule must not report the entry dead on the strength of a carrier that
+    a later conditional store may have replaced. Every row is executed under
+    CPython with ``flag`` **true**, which is the path on which the assert is
+    live, so the fixture proves the header really is enterable and the
+    ``enforced`` verdict is the correct answer.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import nullcontext\n"
+        "def outer(x, flag, helper):\n" + carrier + "\n" + conditional + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    # `_assert_entry_contract` calls `outer(1, True, None)`: `x=1` makes the
+    # assert false, and `flag=True` makes the conditional store run, so the
+    # name holds a real context manager and the assert is live.
+    _assert_entry_contract(label, source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}: expected verdicts [True], got {results}. A conditional store "
+        f"that may have superseded the carrier leaves the header's value "
+        f"undecidable, so the rule must decline instead of reporting the "
+        f"entry dead."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "prelude", "live"),
     MODULE_CARRIER_SHAPES,
