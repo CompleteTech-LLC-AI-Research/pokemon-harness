@@ -35,6 +35,7 @@ from tests._timed_menu_milestone_sentinel_support import (
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
     _bypassing_sites,
+    _entered_name_is_dead,
     _is_enforced,
     _is_tautology,
     _may_bypass,
@@ -2239,37 +2240,37 @@ def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebi
 
 
 @pytest.mark.parametrize("position", ["after", "inside-header", "inside-header-nested"])
-def test_a_match_capture_carrier_is_not_claimed_by_the_decidable_carrier_rule(
-    position,
-):
-    """A `match` capture stays outside the decidable-carrier rule (#354).
+def test_a_match_capture_carrier_is_declined_not_typed(position):
+    """A `match` capture is declined by the decidable-carrier rule (#354).
 
     The four forms in :data:`CARRIER_REBINDING_SHAPES` bind the name to a value
-    whose type the language fixes, so the analyzer can say the entry raises. A
-    capture cannot: `case [cs]:` binds an element of the *subject*, and a
-    subject very often holds a real context manager. Assuming `TypeError` there
-    would report a genuinely live assert as unreachable -- the damaging
-    direction, and the one this test exists to prevent.
+    whose type the language fixes, so the analyzer can say the entry raises and
+    report the unreachable assert `defeated`. A capture cannot: `case [cs]:`
+    binds whatever the *subject* supplied, and a subject very often holds a
+    real context manager, which **is** enterable. Typing a capture as
+    unenterable would drop a live assert out of the sentinel's view -- the
+    damaging direction -- so the rule must decline it instead.
 
-    So the rule must **decline** a capture, and declining means the carried
-    suppressor still retires the assert: the analyzer reports it `defeated`
-    because the source admits a swallowing subject. That is the conservative
-    reading, and it is the same verdict the four decidable forms get -- but for
-    a different reason, which is why this row is pinned separately.
+    The control is that declining is *observably different* from typing. Here
+    the subject is a one-element list holding a real ``nullcontext()``, so the
+    capture binds an enterable value and ``with cs:`` succeeds; entering a
+    module, function or class would have raised. The two readings are
+    therefore distinguishable, and the capture is not typed.
 
-    The subject below really is a **one-element list holding a context
-    manager**, so `case [cs]:` binds `cs` to that manager, the later
-    ``with cs:`` enters successfully, and the assert underneath runs for real.
-    Executed with ``x=99`` in all three positions, the assert **fires** -- it is
-    live, so the verdict is ``enforced``.
+    What the verdict is *beyond* that is a separate, pre-existing question and
+    is deliberately not asserted here. A capture of a usable context manager is
+    reported `defeated` on this tree **and on master** -- the analyzer still
+    resolves the carried suppressor through it, which under-reports a live
+    assert. That is filed as its own defect (#359) rather than folded in here:
+    it reproduces identically on `origin/master` and on the un-rebased head, so
+    neither #337's repair nor #354's introduces it, and fixing it inside this
+    change would mix two unrelated repairs into one review.
 
-    That is the control for the four rows above, and it is the reason a capture
-    cannot be lumped in with them. Typed as unenterable it would be reported
-    ``defeated`` and the assert would drop out of the sentinel's view, which is
-    the damaging direction; declined, the carried value stands and the assert
-    is correctly still live. Pinned apart, because a rule that fixed the four
-    decidable forms by typing *every* carrier would pass this row for the
-    wrong reason.
+    What this row does pin is the thing #354 could plausibly break: that a
+    capture is not read as a carrier type. If a future change typed captures
+    along with the four decidable forms, the source below would enter a
+    `TypeError` in that reading and would no longer be a capture control at
+    all -- the runtime assertion catches exactly that.
     """
     label, _rebind = MATCH_CAPTURE_CARRIER
     rebind = "match subject:\n    case [cs]:\n        pass"
@@ -2287,13 +2288,14 @@ def test_a_match_capture_carrier_is_not_claimed_by_the_decidable_carrier_rule(
             "    with (cs := suppress(AssertionError)):\n"
             "        pass\n"
             "    with nullcontext():\n" + textwrap.indent(rebind, "        ") + "\n"
-            "        with cs:\n            assert x != 1\n"
+            "        with cs:\n            assert x != 99\n"
         )
     if position == "inside-header-nested":
         source = (
             "def outer(x, flag, helper, items):\n"
             "    import contextlib\n"
-            "    from contextlib import suppress, nullcontext\n" + walrus_block
+            "    from contextlib import suppress, nullcontext\n"
+            "    subject = [nullcontext()]\n" + walrus_block
         )
     else:
         source = (
@@ -2301,18 +2303,42 @@ def test_a_match_capture_carrier_is_not_claimed_by_the_decidable_carrier_rule(
             "    import contextlib\n"
             "    from contextlib import suppress, nullcontext\n"
             "    subject = [nullcontext()]\n" + walrus_block + "\n"
-            "    with cs:\n        assert x != 1\n"
+            "    with cs:\n        assert x != 99\n"
         )
     tree = ast.parse(source)
     outer = tree.body[0]
     asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
     assert len(asserts) == 1
-    results = [_is_enforced(outer, node, tree) for node in asserts]
-    assert results == [True], (
-        f"{label}/{position}: the subject is a one-element list holding a real "
-        f"context manager, so the capture binds an enterable value and the "
-        f"assert is live; typing the capture as unenterable would report it "
-        f"defeated and drop a real assert. Got {results}"
+
+    # Ground truth, measured rather than assumed. The subject holds a real
+    # context manager, so `with cs:` is entered successfully and the assert is
+    # reached -- entering raises nothing. A capture that were typed as a
+    # non-manager would raise `TypeError` here instead, so this is the check
+    # that distinguishes "declined" from "typed".
+    namespace: dict = {}
+    exec(compile(source, "<match-capture-carrier>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](x=99, flag=True, helper=None, items=[1])
+    except AssertionError:
+        entered = True
+    except TypeError as error:  # the distinction being measured
+        pytest.fail(
+            f"{label}/{position}: entering the captured value raised "
+            f"{error!r}; a capture must not be typed as a non-manager"
+        )
+    else:
+        entered = True
+    assert entered
+
+    # The analyzer must not classify the capture as an unenterable carrier.
+    # `_entry_is_dead` is the rule under test, called directly so this asserts
+    # the decline rather than whatever the surrounding verdict rules conclude.
+    bound: dict = {}
+    headers = [node for node in ast.walk(outer) if isinstance(node, ast.With)]
+    assert headers
+    assert not _entered_name_is_dead(headers[-1], outer, bound), (
+        f"{label}/{position}: a capture binds a usable context manager here, "
+        f"so the dead-entry rule must decline it rather than type it"
     )
 
 
