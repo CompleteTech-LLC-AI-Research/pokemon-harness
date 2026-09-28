@@ -866,68 +866,6 @@ def _carrier_runtime_kinds(function):
     return owners
 
 
-def _module_carrier_runtime_kinds(module):
-    """The same carriers, read from a *module* body rather than a function's.
-
-    #359. A carrier written at module scope binds the name for the whole file,
-    so a ``with`` header inside any function reads it as a free name. Before
-    this the function-scoped walk saw no store for that name at all, so
-    :func:`_stores_of` returned ``None`` and the rule declined -- reporting a
-    dead assert as *enforced*, which is the damaging direction.
-
-    Only the last carrier of a name counts, exactly as for a function body:
-    module-level statements run in source order at import time, so a later
-    carrier replaces an earlier one before any function is called. Carriers
-    nested in a block (``if``/``try``/loop) are skipped rather than recorded,
-    because whether they ran is not decidable from the syntax, and an
-    undecidable value must be declined.
-
-    "Skipped" is worth being precise about, because it is a *narrowing* and
-    not a no-op. A carrier nested in a module-level ``if``/``try``/loop leaves
-    the name with **no** recorded store, so :func:`_module_carrier_stores`
-    returns ``None`` and the rule falls back to ``enforced`` -- the same answer
-    master gave. That is conservative in the safe direction, but it does mean a
-    block-nested module carrier is *not* repaired by this rule:
-
-        if flag:
-            import os as cs
-        def outer():
-            with cs:                  # TypeError on entry, assert unreachable
-                assert x != 1         # still reported `enforced`
-
-    The narrowing is deliberate. Reading a conditional binding as settled
-    would claim a certainty the source does not carry, and the whole point of
-    the direct case being decidable is that it is *unconditional*. Closing the
-    conditional case is a separate rule with its own mutation matrix, not
-    something to fold in here.
-
-    A function or class *definition* at module scope is the one carrier that
-    can legitimately nest: its body is a new scope, but the ``def``/``class``
-    statement itself always runs. So definitions are taken from the module
-    body directly rather than through a scope walk that would descend into
-    them.
-
-    ``ast.ImportFrom`` is excluded here for the same reason and with the same
-    consequence as in :func:`_carrier_runtime_kinds`: ``from M import N as cs``
-    binds an arbitrary attribute of ``M``, which can be a real context manager,
-    so it is declined rather than guessed at. See #376.
-    """
-    owners = {}
-    for index, statement in enumerate(getattr(module, "body", [])):
-        carriers = []
-        if isinstance(statement, ast.Import):
-            carriers.extend((alias.asname, "module") for alias in statement.names if alias.asname)
-        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            carriers.append((statement.name, "function"))
-        elif isinstance(statement, ast.ClassDef):
-            carriers.append((statement.name, "type"))
-        for name, kind in carriers:
-            # A later module-level carrier supersedes an earlier one, so this
-            # overwrites rather than using setdefault.
-            owners[name] = (statement, kind, index)
-    return owners
-
-
 def _pattern_is_irrefutable(pattern):
     """Is ``pattern`` a pattern that matches *every* remaining subject?
 
@@ -2406,14 +2344,15 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     if stores is None and module is not None:
         # #359. A carrier bound at module scope leaves no store in the
         # function's own table, so `_stores_of` declines and the header reads
-        # as enforced. A module-level carrier is a real, unconditional store
-        # that runs at import time, before any function is entered, so the
-        # name is bound to a module, a class or a function for the whole
-        # header. It is consulted only when the function's own table is
-        # silent: a store inside the function shadows the module's, and the
-        # rule that the inner store supersedes the outer one is already
-        # settled by the branch above.
-        stores = _module_carrier_stores(name, module)
+        # as enforced. The module body is consulted next, because a
+        # module-level binding is a real store that runs at import time,
+        # before any function is entered.
+        #
+        # It is consulted *only* when the function's own table is silent: a
+        # store inside the function shadows the module's, and the rule that
+        # the inner store supersedes the outer one is already settled by the
+        # branch above.
+        stores = _module_stores(name, module)
     if stores is None:
         return False
     kinds = set()
@@ -2458,8 +2397,8 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             continue
         if isinstance(value, str):
             # #359. A carrier recorded by `_carrier_runtime_kinds`
-            # (function scope) or `_module_carrier_runtime_kinds` (module
-            # scope): the name
+            # (function scope) or `_store_bindings` over the module body
+            # (module scope): the name
             # holds a module, a class or a function, each pinned by the syntax
             # that bound it. None of them has `__enter__`, so entering one
             # raises `TypeError` before the assert is evaluated. The kind is a
@@ -2489,26 +2428,89 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     return bool(kinds) and kinds <= NON_CONTEXT_MANAGER_TYPES
 
 
-def _module_carrier_stores(name, module):
-    """The module-level carrier binding ``name``, shaped like a store entry.
+def _module_stores(name, module):
+    """The module-level stores binding ``name``, resolved the ordinary way.
 
-    Returns ``[(statement, kind, False)]`` when the module binds ``name`` with
-    a carrier, else ``None``. The shape matches what :func:`_entry_is_dead`
-    already reads from :func:`_store_bindings`, so the carrier needs no special
-    case there beyond accepting a plain ``str`` value -- which is what keeps
-    the recorded value attached to the real statement instead of a synthesised
-    node, an error #337's carrier machinery had already learned to avoid.
+    #359. The first cut of this rule read the module body looking for
+    *carriers* only, and answered from whichever carrier it found last. That
+    is the wrong invariant. A name's value is settled by the last **binding**
+    of that name, not the last carrier: given
 
-    ``conditional`` is always ``False``: these statements sit directly in the
-    module body, so they have run by the time any function using the name is
-    entered. A carrier nested in a block is not recorded at all (see
-    :func:`_module_carrier_runtime_kinds`), so no undecidable path reaches here.
+        import os as cs
+        import contextlib
+        cs = contextlib.nullcontext()
+
+    the carrier runs first and is then superseded by a store of a real context
+    manager, so ``with cs:`` succeeds and the assert under it is live. Reading
+    only carriers left the ``import os as cs`` entry standing, reported the
+    name as a module, and answered ``defeated`` -- dropping a real pinned
+    contract. That is the damaging direction, and it is the same one #359 was
+    filed to correct, so a first cut that fixes the carrier rows while
+    regressing these is not a partial success.
+
+    The fix is to resolve the module body through the machinery already used
+    for a function scope -- :func:`_store_bindings`, :func:`_binding_order`
+    and :func:`_stores_of` -- rather than a parallel walk. The carrier needs
+    no special case anywhere in that path: :func:`_store_bindings` already
+    records a carrier as a plain ``str`` value attached to the real statement,
+    and :func:`_entry_is_dead` already reads a ``str`` value as a runtime kind.
+    Keeping the value attached to a real statement is what makes containment
+    and ordering answerable, the mistake #337's carrier machinery had already
+    learned to avoid.
+
+    The header is always evaluated *after* every module-level statement has
+    run -- the name is read when a function is called, long after the import
+    completed -- so the index is one past the last module store and every
+    module binding is in scope. What ``_stores_of`` then does is the same
+    thing it does for a function: it keeps only unconditional stores, because
+    a store nested in a block may not have run.
+
+    That is why a carrier inside a module-level ``if`` is still declined, and
+    why a rebinding inside a module-level ``if``/``else`` is declined too --
+    in both cases the only *unconditional* binding is a value the rule cannot
+    read, and declining is the conservative answer rather than a guess. See
+    :func:`_carrier_runtime_kinds` for what the direct, decidable case buys:
+    a carrier written straight into the module body has run by the time any
+    function is entered, and reading it is what lets the header be judged
+    rather than declined.
+
+    That conservatism is not new to the module path. The function-scope walk
+    already answers the identical shape the same way, because
+    :func:`_stores_of` is what drops conditional stores on *both* sides.
+    Given
+
+        def outer(...):
+            import os as cs
+            if flag:
+                cs = contextlib.nullcontext()
+            else:
+                cs = contextlib.nullcontext()
+            with cs: ...
+
+    the function path keeps the unconditional carrier and answers ``defeated``
+    on master, before this rule existed. The module path now agrees with it
+    rather than inventing a stricter policy for one scope only. Lifting the
+    shared conservatism -- reading a conditional binding as settled -- would
+    mean changing :func:`_stores_of` for every rule at once, and is
+    deliberately not folded in here.
+
+    Returns ``None`` when the module body says nothing usable about ``name``,
+    which is the same "decline" the function path returns and the same answer
+    master gave.
     """
-    entry = _module_carrier_runtime_kinds(module).get(name)
-    if entry is None:
+    if not isinstance(module, ast.Module):
         return None
-    statement, kind, _index = entry
-    return [(statement, kind, False)]
+    bindings, _raw_values = _store_bindings(module, set())
+    if not bindings:
+        return None
+    orders = {
+        id(statement): _binding_order(module, statement)
+        for entries in bindings.values()
+        for statement, _, _ in entries
+    }
+    by_index = {"bindings": bindings, "orders": orders}
+    index = max(orders.values(), default=-1) + 1
+    return _stores_of(name, by_index, index, module)
 
 
 def _literal_runtime_type(value):

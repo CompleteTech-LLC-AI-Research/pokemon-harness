@@ -2273,6 +2273,45 @@ MODULE_CARRIER_SHAPES = (
         "import os as cs\ndef cs():\n    pass",
         False,
     ),
+    # --- #359 supersession family -------------------------------------
+    # A name's value is settled by the last *binding*, not the last carrier.
+    # Each row below binds a module-scope carrier and then rebinds the name
+    # to a real `nullcontext()` by a *different* module-level store form.
+    # Because the later store wins at runtime, `with cs:` succeeds and the
+    # assert is live -- but a rule that reads only carriers still sees the
+    # earlier `import os as cs`, reports the name as a module, and answers
+    # `defeated`, dropping a real pinned contract. Master already answers
+    # these correctly, so they are regression rows, not new repairs.
+    (
+        "a later module-scope plain store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "a later module-scope walrus store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\n(cs := contextlib.nullcontext())",
+        True,
+    ),
+    (
+        "a later module-scope tuple-unpack store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs, other = (contextlib.nullcontext(), 2)",
+        True,
+    ),
+    (
+        "a later module-scope annotated store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs: object = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "a later module-scope for-target store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\nfor cs in (contextlib.nullcontext(),):\n    pass",
+        True,
+    ),
+    (
+        "a later module-scope del-then-store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs = contextlib.nullcontext()\ndel cs\ncs = contextlib.nullcontext()",
+        True,
+    ),
     (
         "CONTROL a module-scope store of a real context manager is live",
         "import contextlib\ncs = contextlib.nullcontext()",
@@ -2449,6 +2488,15 @@ def test_a_module_scope_carrier_defeats_the_assert_below_it(label, prelude, live
     module-scope store of a real context manager is live, and a function-local
     store shadows the module carrier and is live again. Without the second
     control a fix that simply declared every free-name header dead would pass.
+
+    The six **supersession** rows are the other direction, and they are
+    regression rows rather than new repairs: master already answers them
+    correctly. Each binds a module-scope carrier and then rebinds the same
+    name with a different module-level store form, so the *last binding* --
+    not the last carrier -- settles the value, and ``with cs:`` succeeds. A
+    rule that reads only carriers still sees the ``import os as cs``, reports
+    the name as a module, and answers ``defeated``, dropping a live contract.
+    They are what keeps the module rule honest about *which* binding wins.
     """
     if "shadows" in label:
         body = "    from contextlib import nullcontext\n    cs = nullcontext()\n"
