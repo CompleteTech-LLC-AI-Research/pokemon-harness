@@ -2383,6 +2383,57 @@ CAPTURE_SCOPE_BOUNDARY_ROWS = (
     ),
 )
 
+#: #359. A *string-field carrier* binds its name to a value the binding syntax
+#: does not describe, and nothing pinned what the analyzer must answer when a
+#: later ``with cs:`` raises **on entry** because of it.
+#:
+#: ``WALRUS_REBINDING_SHAPES`` above already pins the value-less carriers
+#: (``with ... as cs``, ``except ... as cs``, ``del cs``), because those rows
+#: retire the carried walrus. The five here are the ones it was missing: a
+#: module, a function, a class, and a ``match`` capture are all bound by a
+#: statement that reads as a store, and all four end up in the same
+#: "no readable right-hand side" bucket in ``_entry_is_dead``. That bucket is
+#: what makes the gap easy to lose.
+#:
+#: AC1 asks for each carrier pinned in both positions. The ``second_assert_live``
+#: column is ``False`` for every row here, and it is that value which is the
+#: point: entering raises ``TypeError`` before the body runs, so the second
+#: assert is *unreachable*. Reporting it ``enforced`` is the damaging direction
+#: per #308 criterion 1 -- it certifies a contract that can never fail as
+#: load-bearing.
+#:
+#: AC3 asks for a non-carrier control so a fix cannot pass by disabling the
+#: rule wholesale. Two are included below and both must stay ``True``: a plain
+#: assignment of a real context manager, and a class that *does* implement the
+#: protocol. Neither is in the table above, so neither is a duplicate.
+CARRIER_ENTRY_UNREACHABLE_ROWS = (
+    ("import-as binds the module", "    import os as cs", False),
+    ("import-from-as binds the module", "    from os import path as cs", False),
+    ("def binds a function object", "    def cs():\n        pass", False),
+    ("class binds a type object", "    class cs:\n        pass", False),
+    (
+        "a match capture binds whatever it matched",
+        "    match [1]:\n        case [cs]:\n            pass",
+        False,
+    ),
+    # Controls: these leave the name enterable, so the assert is a real
+    # contract. If either of these reports dead, the rule has been widened past
+    # the carriers and is dropping live asserts.
+    ("CONTROL a plain assign of a real context manager", "    cs = nullcontext()", True),
+    (
+        "CONTROL an instance of a class that implements the protocol",
+        (
+            "    class cs:\n"
+            "        def __enter__(self):\n"
+            "            return self\n"
+            "        def __exit__(self, *exc):\n"
+            "            return False\n"
+            "    cs = cs()"
+        ),
+        True,
+    ),
+)
+
 
 @pytest.mark.parametrize(
     ("label", "nested", "verdict", "runtime_live"),
@@ -2457,6 +2508,162 @@ def test_a_capture_binds_only_the_namespace_it_was_written_in(label, nested, ver
     assert results == [verdict], (
         f"{label}: expected verdicts {[verdict]}, got {results}. A "
         f"store in a nested namespace must not rebind the enclosing name."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "second_assert_live"),
+    CARRIER_ENTRY_UNREACHABLE_ROWS,
+    ids=[row[0] for row in CARRIER_ENTRY_UNREACHABLE_ROWS],
+)
+def test_a_string_field_carrier_cannot_be_entered_so_the_assert_is_unreachable(
+    label, rebind, second_assert_live
+):
+    """A carrier binds the name to something no ``with`` can enter.
+
+    This is #359. The bug it reports is a *coverage* gap rather than a defect
+    on master: master answers every row below correctly, which is exactly why
+    the gap survived. The gap is in what the shipped tables pin, and it is
+    demonstrably load-bearing -- see the mutation note in
+    ``ledger/FINDING_359_GATE_STILL_OPEN_20260928.md``. Reverting the
+    ``_entry_is_dead`` value-less branch so that a carrier no longer reads as
+    a dead entry leaves the whole 273-test sentinel lane **green**, and
+    reproduces the #337 regression this issue was filed about.
+
+    The first assert is the retirement contract and is ``False`` on every row,
+    including the controls: the carried walrus suppressor is entered and
+    swallows it. The second is the entry contract and is what divides.
+
+    AC2 is the reason this test **executes** rather than only reading the
+    checker. Every row is run on CPython and held to ``second_assert_live``
+    through ``_assert_entry_contract``, so a row cannot claim "live" without
+    the interpreter agreeing, and cannot claim "dead" either. That is what
+    makes a table that reads only the checker unable to hide here: the
+    interpreter is in the loop.
+
+    Measured on CPython 3.12.14, with ``x=1`` so ``assert x != 1`` is false:
+
+    * ``import os as cs`` and ``from os import path as cs`` raise
+      ``TypeError: 'module' object does not support the context manager
+      protocol``.
+    * ``def cs(): pass`` raises ``TypeError: 'function' object ...``.
+    * ``class cs: pass`` raises ``TypeError: 'type' object ...``.
+    * ``case [cs]:`` over the subject ``[1]`` binds the integer ``1``, so the
+      capture row raises ``TypeError: 'int' object ...``.
+    * both controls enter cleanly and the assert fires.
+
+    One correction worth recording, because the first draft of the second
+    control got it wrong. The control was written as a ``class cs:`` that
+    *defines* ``__enter__``/``__exit__``, expecting it to be enterable. It is
+    not. ``with cs:`` enters the **class object itself**, and a class is not a
+    context manager no matter what its instances support -- measured on 3.12.14
+    it raises ``TypeError: 'type' object does not support the context manager
+    protocol`` exactly as a bare ``class cs: pass`` does. The name has to hold
+    an *instance*, so the row ends ``cs = cs()``. Defining the dunders is
+    necessary and not sufficient; this is the same reason
+    ``_defines_context_manager_protocol`` reads a class body without
+    concluding the binding is enterable.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A carrier that "
+        f"cannot be entered makes the assert under the header *unreachable*, "
+        f"so reporting it enforced certifies a dead contract as load-bearing."
+    )
+
+
+#: AC1's second position. A carrier can sit in two places relative to the
+#: header that reads it: as a *later sibling* statement (the rows above), or
+#: **inside the header's own scope**, so it has already run by the time the
+#: name is entered. Both are pinned because they are not a superset of one
+#: another -- the first is decided by source order in the binding resolver, the
+#: second by containment in the header, and a rule that handled only one would
+#: pass the table above while leaving this hole open.
+#:
+#: Runtime is identical for both positions: the header's own body rebinds
+#: ``cs`` before the body of the *next* ``with`` is entered, and entering a
+#: module, function, class or the captured ``1`` raises ``TypeError`` in either
+#: arrangement. Measured on CPython 3.12.14 with ``x=1``:
+#:
+#:     with (cs := suppress(AssertionError)):
+#:         import os as cs
+#:     with cs:
+#:         assert x != 1        # TypeError: 'module' object ...
+CARRIER_IN_HEADER_ROWS = (
+    ("import-as inside the header", "        import os as cs", False),
+    (
+        "import-from-as inside the header",
+        "        from os import path as cs",
+        False,
+    ),
+    ("def inside the header", "        def cs():\n            pass", False),
+    ("class inside the header", "        class cs:\n            pass", False),
+    (
+        "a match capture inside the header",
+        "        match [1]:\n            case [cs]:\n                pass",
+        False,
+    ),
+    (
+        "CONTROL a plain assign inside the header",
+        "        cs = nullcontext()",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "second_assert_live"),
+    CARRIER_IN_HEADER_ROWS,
+    ids=[row[0] for row in CARRIER_IN_HEADER_ROWS],
+)
+def test_a_carrier_inside_the_reading_header_leaves_the_name_unenterable(
+    label, rebind, second_assert_live
+):
+    """The carrier ran inside the header, and the header is still unenterable.
+
+    The second half of #359 AC1. Here the rebind happens in the body of the
+    ``with (cs := ...)`` header itself, so the carried suppressor is entered
+    and exits *after* the rebind has already replaced the name. The following
+    ``with cs:`` therefore reads the carrier's value, not the suppressor, and
+    the position cannot be decided by the source ordering the sibling rows use.
+
+    Like the table above, every row is executed and checked against CPython
+    through ``_assert_entry_contract`` (AC2), and the control row is a plain
+    assignment of a real context manager that must stay live (AC3).
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A carrier that "
+        f"cannot be entered makes the assert unreachable, not load-bearing."
     )
 
 
