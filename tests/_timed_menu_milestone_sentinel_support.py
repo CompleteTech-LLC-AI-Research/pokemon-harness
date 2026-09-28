@@ -3198,31 +3198,53 @@ def _runs_before_end_of(top, statement):
     skipped, so it does not. The only container whose body is guaranteed to run
     is a ``with``/``async with``: its body is not conditional, so anything
     written directly in it has run by the time ``top`` returns.
+
+    Every hop on the way down has to be guaranteed, not just the innermost one.
+    A store under an ``if``/loop/``try`` *inside* a ``with`` body may still be
+    skipped, even though the ``with`` body itself always runs:
+
+        with contextlib.nullcontext():
+            if flag:
+                with contextlib.nullcontext():
+                    cs = contextlib.nullcontext()
+
+    With ``flag`` false the rebind never happens, the name still holds the
+    ``suppress`` an earlier statement bound, and the ``with cs:`` below it
+    swallows the assert. Judging only the innermost hop called that store
+    settled, retired the ``suppress``, and reported the swallowed assert
+    ENFORCED -- the damaging direction (#308 criterion 1). So the walk carries
+    whether *every* edge crossed so far was guaranteed, and no descendant of an
+    unguaranteed edge can be settled.
     """
     if statement is top:
         return False
-    # Find the chain of bodies from `top` down to `statement`; every hop must
-    # be a with-body, never a branch body.
-    current = [top]
+    current = [(top, True)]
     while current:
         nxt = []
-        for node in current:
+        for node, guaranteed_so_far in current:
             for field in ("body", "orelse", "finalbody", "handlers", "items"):
                 children = getattr(node, field, None) or []
                 if isinstance(children, ast.AST):
                     children = [children]
+                edge = _edge_is_guaranteed(node, field)
                 for child in children:
                     if child is statement:
-                        # Reached through `orelse`/`finalbody`/`handlers` ->
-                        # not a guaranteed with-body.
-                        if field == "orelse" and isinstance(
-                            node, (ast.For, ast.AsyncFor, ast.While)
-                        ):
-                            return _loop_else_always_runs(node)
-                        return field == "body" and isinstance(node, (ast.With, ast.AsyncWith))
-                    nxt.append(child)
+                        # The store is a child of `node` through `field`, so
+                        # this last hop is judged like every other one.
+                        return guaranteed_so_far and edge
+                    nxt.append((child, guaranteed_so_far and edge))
         current = nxt
     return False
+
+
+def _edge_is_guaranteed(node, field):
+    """Does ``node``'s ``field`` child always run when ``node`` runs?"""
+    if field == "orelse" and isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        return _loop_else_always_runs(node)
+    # `orelse`, `finalbody`, `handlers` and `items` are branches or
+    # alternatives: a `with`'s own `orelse`, a `try`'s handler, and a `with`
+    # item's `vars` all may not run. Only a `with` body is unconditional.
+    return field == "body" and isinstance(node, (ast.With, ast.AsyncWith))
 
 
 def _loop_else_always_runs(loop):
