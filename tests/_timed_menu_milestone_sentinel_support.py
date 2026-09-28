@@ -3101,26 +3101,37 @@ def _binds_a_null_returning_context(expression, bound):
     ``__enter__`` result, and the manager is only *known* to return ``None``
     where that is decided by the call itself rather than by an argument:
 
-    * ``contextlib.suppress`` -- and the ``asyncio`` spelling -- has a
-      ``__enter__`` that is a bare ``pass``, so it returns ``None`` however
-      it is called.
-    * ``contextlib.nullcontext`` returns ``None`` only when it is called
-      *without* an ``enter_result``. Given one it returns that argument, so
-      the bound value is whatever the caller passed -- an object, in every
-      case that matters here.
+    * ``contextlib.suppress`` has a ``__enter__`` that is a bare ``pass``, so
+      it returns ``None`` however it is called. That is why its arguments are
+      not inspected: it takes its exceptions as arguments, and excluding the
+      call for carrying one would give up the ``suppress(AssertionError)``
+      spelling.
+    * ``contextlib.nullcontext`` passes its ``enter_result`` straight
+      through, so the bound value is whatever the argument evaluates to.
 
-    That is why the arguments are consulted for that one member of the set and
-    not for the other: ``suppress`` takes its exceptions as arguments, so
-    requiring an empty argument list would exclude the
-    ``suppress(AssertionError)`` spelling that the other half of this set is
-    there for. *Both* argument forms have to be checked -- ``enter_result`` is
-    a keyword-only parameter, so a call carrying it has an empty
-    ``expression.args`` and would otherwise read as the no-argument form:
+    The second member is why a truthiness or emptiness test is not enough.
+    Measured on CPython 3.12.14 across the whole ``enter_result`` space, only
+    a *knowably enterable* argument leaves a value a later ``with cs:`` can
+    enter:
 
-        with contextlib.nullcontext(enter_result=CM()) as cs:
+        nullcontext()                      -> None   (not enterable)
+        nullcontext(enter_result=0)       -> 0      (not enterable)
+        nullcontext(enter_result=())      -> ()     (not enterable)
+        nullcontext(enter_result=(CM(),)) -> tuple  (not enterable)
+        nullcontext(enter_result=[CM()])  -> list   (not enterable)
+        nullcontext(enter_result=CM())    -> CM     (ENTERABLE)
+        nullcontext(CM())                 -> CM     (ENTERABLE)
+        nullcontext(*[CM()])              -> CM     (ENTERABLE)
 
-    returns ``CM()`` and leaves an enterable value bound. A positional-only
-    check therefore did not exclude the call it was written to exclude.
+    The tuple and list rows are the ones a truthiness test gets wrong: the
+    container holds a context manager and is still not one. So the argument
+    has to be *typed*, not merely evaluated -- see
+    :func:`_null_context_binds_an_enterable`.
+
+    A call that binds its parameter twice, or names one that does not exist,
+    is a ``TypeError`` at the call: the statement raises before it can bind
+    anything, so there is no store to exclude. That is
+    :func:`_null_context_call_raises`.
     """
     if not isinstance(expression, ast.Call):
         return False
@@ -3129,17 +3140,130 @@ def _binds_a_null_returning_context(expression, bound):
         return False
     if dotted == "contextlib.suppress":
         return True
-    if expression.args:
-        return False
-    # `enter_result` is keyword-only, so a call carrying it has an *empty*
-    # `args` and reads as the no-argument form unless `keywords` is consulted
-    # too. The value decides it, so a literal `None` is still the null
-    # context -- it is the same object the no-argument spelling produces --
-    # and anything else is an `enter_result` the header would be entered with.
-    return all(
-        keyword.arg == "enter_result" and _falsy_literal(keyword.value)
-        for keyword in expression.keywords
+    if _null_context_call_raises(expression):
+        # `enter_result` is the *only* parameter, so a second value for it is
+        # a `TypeError` at the call. The whole `with` statement raises before
+        # the header is entered, so there is no store here to exclude and the
+        # assert under it is unreachable. Counting the call as a superseding
+        # store would decline the header and report a dead assert as
+        # load-bearing, so it keeps the exclusion.
+        return True
+    return not _null_context_binds_an_enterable(expression)
+
+
+#: Expressions whose value is *knowably* enterable, and so can leave a
+#: ``nullcontext`` holding something a later ``with cs:`` can enter.
+#:
+#: The question is not "is this value ``None``" but "can a header be entered
+#: with it". Measured on CPython 3.12.14 over the whole ``enter_result``
+#: space, those are different: ``nullcontext(enter_result=0)`` returns ``0``,
+#: and ``nullcontext(enter_result=(CM(),))`` returns a *tuple* holding a
+#: context manager. Neither is ``None`` and neither can be entered either, so
+#: a truthiness test would have called the second a live superseder.
+#:
+#: Only a call is listed. A bare name could be bound to anything at runtime,
+#: which is the case this module declines rather than guesses, and the
+#: ``None``/falsy/``*()`` forms that leave ``None`` bound are already covered
+#: by :func:`_entry_is_dead` reading the literal, so they do not reach here.
+_ENTERABLE_CALLS = (ast.Call,)
+
+
+def _null_context_binds_an_enterable(expression):
+    """Does this ``nullcontext`` call provably bind something enterable?
+
+    ``nullcontext`` passes its ``enter_result`` straight through, so the bound
+    value is whatever the argument evaluates to and nothing about the *spelling*
+    decides it. Only a value whose type the source pins settles the question,
+    and the pinned-enterable cases are narrow: an ``enter_result`` written as a
+    bare call, or a literal container whose single element is such a call
+    (``nullcontext(enter_result=[CM()])`` binds the *list*, which cannot be
+    entered, and ``nullcontext(enter_result=(CM(),))`` binds the *tuple*,
+    likewise).
+
+    Everything else is reported as *not* provably enterable, which is the
+    conservative direction for the rule this feeds: the store is not counted
+    as a superseder, so the header keeps reading from the carrier. A value
+    that turns out to be enterable costs a declined header, and a value that
+    turns out not to be costs a carrier read -- and the second of those is the
+    damaging one, so it is the one this avoids.
+    """
+    for argument in _null_context_enter_results(expression):
+        if isinstance(argument, _ENTERABLE_CALLS):
+            return True
+        if isinstance(argument, ast.Tuple) and len(argument.elts) == 1:
+            return _null_context_binds_an_enterable(argument.elts[0])
+    return False
+
+
+def _null_context_enter_results(expression):
+    """The ``enter_result`` values this ``nullcontext`` call is given.
+
+    Only the two forms that name the parameter *syntactically* are read: a
+    positional argument, and a keyword written ``enter_result=``. A ``**``
+    unpacking is a dict whose keys are computed at runtime, so the mapping is
+    not knowable from the source -- ``nullcontext(**{})`` binds ``None`` and
+    ``nullcontext(**{"enter_result": CM()})`` binds a manager, from text that
+    differs only in a literal this helper cannot read. The unresolved form is
+    declined, which is the same answer the rest of this module gives a value
+    it cannot see.
+    """
+    results = []
+    for argument in expression.args:
+        if isinstance(argument, ast.Starred) and _is_literal_sequence(argument.value):
+            # `nullcontext(*[CM()])` unpacks a literal, so the element is right
+            # there in the source. A starred argument is otherwise unreadable
+            # -- `*args` could hold anything -- so it is resolved only where
+            # the container is a literal the checker can open. Each element
+            # is then the argument `enter_result` receives.
+            results.extend(argument.value.elts)
+        else:
+            results.append(argument)
+    results.extend(
+        keyword.value for keyword in expression.keywords if keyword.arg == "enter_result"
     )
+    for keyword in expression.keywords:
+        if keyword.arg is None and _dict_literal_value(keyword.value, "enter_result") is not None:
+            # `**{"enter_result": CM()}` names the parameter in a dict literal,
+            # and a literal dict is as readable as a keyword argument. A `**`
+            # of anything computed stays unresolved below, which is the
+            # answer this module gives a value it cannot see.
+            results.append(_dict_literal_value(keyword.value, "enter_result"))
+    return results
+
+
+def _is_literal_sequence(node):
+    """Is this a literal list or tuple the checker can read elements from?"""
+    return isinstance(node, (ast.List, ast.Tuple))
+
+
+def _dict_literal_value(node, key):
+    """The value a literal dict stores under ``key``, or ``None`` if unreadable."""
+    if not isinstance(node, ast.Dict):
+        return None
+    for literal_key, value in zip(node.keys, node.values):
+        if isinstance(literal_key, ast.Constant) and literal_key.value == key:
+            return value
+    return None
+
+
+def _null_context_call_raises(expression):
+    """Does this ``nullcontext`` call pass ``enter_result`` more than once?
+
+    ``nullcontext.__init__(self, enter_result=None)`` is the whole signature,
+    so a second value for the parameter -- a second positional argument, or a
+    positional argument beside the keyword -- is a ``TypeError`` raised at the
+    call. The ``with`` statement then fails before it binds anything.
+
+    Measured on CPython 3.12.14 with ``nullcontext(CM(), enter_result=CM())``:
+    ``TypeError: nullcontext.__init__() got multiple values for argument
+    'enter_result'``. The distinction matters because the assert below such a
+    header never runs, so a rule that counted the call as a live superseder
+    would certify a dead contract.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    keywords = [keyword for keyword in expression.keywords if keyword.arg == "enter_result"]
+    return len(expression.args) + len(keywords) > 1
 
 
 def _stores_of(name, by_index, index, function):

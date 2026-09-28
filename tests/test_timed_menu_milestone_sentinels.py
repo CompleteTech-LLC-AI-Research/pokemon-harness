@@ -3065,6 +3065,77 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         ),
         False,
     ),
+    # A second value for the same parameter is a `TypeError` at the call, so
+    # the `with` statement raises before the header is entered and the assert
+    # under it never runs. Counting the call as a superseding store would
+    # report that dead assert as load-bearing.
+    (
+        "a conditional nullcontext-with bound twice is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext(CM(), enter_result=CM()) as cs:\n"
+            "            pass\n"
+        ),
+        False,
+    ),
+    # A starred argument unpacks a literal, so the value is right there in the
+    # source and is not the unreadable case a keyword `enter_result` is.
+    (
+        "a conditional nullcontext-with unpacking its enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[CM()]) as cs:\n            pass\n",
+        True,
+    ),
+    # A falsy `enter_result` is not `None`: measured on 3.12.14,
+    # `nullcontext(enter_result=0).__enter__()` returns `0`, not `None`. The
+    # store is therefore counted -- a *decline* would report the assert live,
+    # and here the header raises on `0` -- while the end-to-end verdict is
+    # still `defeated`, because `0` cannot be entered either. That is the
+    # point of the row: "cannot be entered" and "is the null context" are
+    # different questions, and this rule answers the second.
+    (
+        "a conditional nullcontext-with a falsy enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=0) as cs:\n            pass\n",
+        False,
+    ),
+    # A container holding a manager is still not a manager, and a *literal*
+    # one is the case a truthiness test gets wrong: `enter_result=(CM(),)`
+    # is truthy and binds a tuple that cannot be entered.
+    (
+        "a conditional nullcontext-with a tuple enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(CM(),)) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a list enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=[CM()]) as cs:\n            pass\n",
+        False,
+    ),
+    # A `**` unpacking of a *literal dict* is as readable as the keyword
+    # itself, and a manager inside one does leave an enterable value bound.
+    (
+        "a conditional nullcontext-with a dict-literal enter_result is live",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            '        with contextlib.nullcontext(**{"enter_result": CM()}) as cs:\n'
+            "            pass\n"
+        ),
+        True,
+    ),
+    # Naming a parameter that does not exist is a `TypeError` at the call, so
+    # the statement raises before it binds anything.
+    (
+        "a conditional nullcontext-with an unknown keyword is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(foo=CM()) as cs:\n            pass\n",
+        False,
+    ),
+    # An empty star unpacks to nothing, which is the no-argument form.
+    (
+        "a conditional nullcontext-with an empty star unpacking is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*()) as cs:\n            pass\n",
+        False,
+    ),
     # The name is bound by a *different* item of the same `with`, so the
     # non-enterable sibling says nothing about what `cs` received. Searching
     # the whole statement for a known-`None` manager excluded a store that
