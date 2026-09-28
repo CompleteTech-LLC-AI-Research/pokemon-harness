@@ -2468,6 +2468,82 @@ BINDING_FORM_SHAPES = (
         True,
         None,
     ),
+    # #359, residual found by the 09:00Z lead triage and confirmed on this
+    # head: the container does not have to be a *literal* at the destructuring
+    # site. A name already bound to one is the common spelling, and picking the
+    # element out of the right-hand side saw a bare `Name` instead of a
+    # container, so the suppressor was never extracted and the swallowed assert
+    # came back `enforced`. All four were damaging.
+    (
+        "a tuple target over a named container reads the element",
+        (
+            "    t = (contextlib.suppress(AssertionError),)\n"
+            "    cs, = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a first-of-two target over a named container reads the element",
+        (
+            "    t = (contextlib.suppress(AssertionError), 2)\n"
+            "    cs, other = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a second-of-two target over a named container reads the element",
+        (
+            "    t = (2, contextlib.suppress(AssertionError))\n"
+            "    other, cs = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested target over a named container reads the nested element",
+        (
+            "    t = (2, (contextlib.suppress(AssertionError), 3))\n"
+            "    other, (cs, third) = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a list target over a named container reads the element",
+        (
+            "    t = [contextlib.suppress(AssertionError)]\n"
+            "    [cs] = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    # The same element reached through two hops has to survive both. Only the
+    # first link is a destructuring one, so a rule that stopped after one step
+    # would answer "enforced" here while the assert is swallowed.
+    (
+        "a target over an aliased named container reads the element",
+        (
+            "    t = (contextlib.suppress(AssertionError), 2)\n"
+            "    u = t\n"
+            "    cs, other = u\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
 )
 
 

@@ -1147,16 +1147,35 @@ def _store_bindings(function, bound):
         else:
             conditional = statement not in function.body
         for name in _store_target_names(targets):
+            # Order is load-bearing. The element a destructuring target
+            # receives has to be picked out of the value the right-hand side
+            # *actually resolves to*, and that is two steps, in this order:
+            #
+            #     t = (contextlib.suppress(AssertionError),)
+            #     cs, = t                 # `cs` is the element, not `t`
+            #     with cs:
+            #         assert x != 1      # swallowed
+            #
+            # Picking the element first sees a bare `Name` rather than a
+            # container, so `_value_bound_by` returns the name unchanged and
+            # the suppressor is never extracted. Dereferencing afterwards does
+            # not recover it either, because `_deref_alias` resolves a name to
+            # a *value* and this one is a container, not a suppression call --
+            # so the header reads as unreadable and the swallowed assert is
+            # reported live. Every one of the four named-container spellings
+            # (single element, first of two, second of two, nested) was
+            # damaging until the two steps were swapped. Deref first.
+            resolved = _deref_alias(
+                value,
+                raw_values,
+                orders,
+                _binding_order(function, statement),
+                name,
+            )
             bindings.setdefault(name, []).append(
                 (
                     statement,
-                    _deref_alias(
-                        _value_bound_by(targets, value, name),
-                        raw_values,
-                        orders,
-                        _binding_order(function, statement),
-                        name,
-                    ),
+                    _value_bound_by(targets, resolved, name),
                     conditional,
                 )
             )
