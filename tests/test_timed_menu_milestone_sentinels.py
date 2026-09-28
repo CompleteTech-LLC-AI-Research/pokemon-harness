@@ -3136,6 +3136,25 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*()) as cs:\n            pass\n",
         False,
     ),
+    # A builtin container call is a *call*, and "a call binds something
+    # enterable" is wrong for every one of these -- each binds an object with
+    # no `__enter__`, so the header raises. Reading the argument's type
+    # rather than its spelling is what tells `list()` from `CM()`.
+    (
+        "a conditional nullcontext-with a builtin container enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=list()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a frozenset enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=frozenset()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a range enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=range(3)) as cs:\n            pass\n",
+        False,
+    ),
     # The name is bound by a *different* item of the same `with`, so the
     # non-enterable sibling says nothing about what `cs` received. Searching
     # the whole statement for a known-`None` manager excluded a store that

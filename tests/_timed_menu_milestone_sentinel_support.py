@@ -3151,8 +3151,7 @@ def _binds_a_null_returning_context(expression, bound):
     return not _null_context_binds_an_enterable(expression)
 
 
-#: Expressions whose value is *knowably* enterable, and so can leave a
-#: ``nullcontext`` holding something a later ``with cs:`` can enter.
+#: Bare names whose call is *knowably* an enterable value.
 #:
 #: The question is not "is this value ``None``" but "can a header be entered
 #: with it". Measured on CPython 3.12.14 over the whole ``enter_result``
@@ -3161,11 +3160,40 @@ def _binds_a_null_returning_context(expression, bound):
 #: context manager. Neither is ``None`` and neither can be entered either, so
 #: a truthiness test would have called the second a live superseder.
 #:
-#: Only a call is listed. A bare name could be bound to anything at runtime,
-#: which is the case this module declines rather than guesses, and the
-#: ``None``/falsy/``*()`` forms that leave ``None`` bound are already covered
-#: by :func:`_entry_is_dead` reading the literal, so they do not reach here.
-_ENTERABLE_CALLS = (ast.Call,)
+#: An arbitrary call is the opposite error: ``nullcontext(enter_result=list())``
+#: binds a list, and treating every call as enterable declared that live.
+#: Only calls the source pins to a class are asked, and of those only the
+#: ones that are not a builtin container. A call to a *user* class is
+#: enterable by the protocol (``CM()`` above), and a class spelled by a bare
+#: name is the readable spelling -- an attribute, a subscript or a call to an
+#: opaque helper is not, and is declined.
+_ENTERABLE_CLASS_NAMES = (ast.Name,)
+
+#: Builtin containers and scalars whose instances have no ``__enter__``.
+#:
+#: ``frozenset``, ``set``, ``dict``, ``list``, ``tuple``, ``range``,
+#: ``enumerate``, ``zip``, ``map``, ``filter`` and the numeric/``bytes``
+#: builtins are all *calls* that bind something a ``with`` cannot enter, so
+#: the "a call is enterable" rule would have declared every one of them live.
+#: Measured on CPython 3.12.14 by entering each result.
+_NON_ENTERABLE_BUILTIN_CALLS = frozenset(
+    {
+        "bytes",
+        "dict",
+        "enumerate",
+        "filter",
+        "float",
+        "frozenset",
+        "int",
+        "list",
+        "map",
+        "range",
+        "set",
+        "str",
+        "tuple",
+        "zip",
+    }
+)
 
 
 def _null_context_binds_an_enterable(expression):
@@ -3188,11 +3216,31 @@ def _null_context_binds_an_enterable(expression):
     damaging one, so it is the one this avoids.
     """
     for argument in _null_context_enter_results(expression):
-        if isinstance(argument, _ENTERABLE_CALLS):
+        if _is_a_call_to_an_enterable_class(argument):
             return True
         if isinstance(argument, ast.Tuple) and len(argument.elts) == 1:
             return _null_context_binds_an_enterable(argument.elts[0])
     return False
+
+
+def _is_a_call_to_an_enterable_class(node):
+    """Is this a call whose callee the source pins to a class that enters?
+
+    ``CM()`` is the readable spelling: the callee is a bare name, and CPython
+    calls it, so the result is an instance of whatever it names. A name that
+    is a known non-enterable builtin is excluded first, because
+    ``nullcontext(enter_result=list())`` binds a list and the protocol test
+    would otherwise have called it enterable.
+
+    Anything less direct -- an attribute (``CM.make()``), a subscript, a call
+    to an opaque helper -- could return anything at runtime, and this module
+    declines a value it cannot read rather than assuming the damaging answer.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if not isinstance(node.func, _ENTERABLE_CLASS_NAMES):
+        return False
+    return node.func.id not in _NON_ENTERABLE_BUILTIN_CALLS
 
 
 def _null_context_enter_results(expression):
