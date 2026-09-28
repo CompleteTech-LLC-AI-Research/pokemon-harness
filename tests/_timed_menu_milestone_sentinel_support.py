@@ -882,6 +882,25 @@ def _module_carrier_runtime_kinds(module):
     because whether they ran is not decidable from the syntax, and an
     undecidable value must be declined.
 
+    "Skipped" is worth being precise about, because it is a *narrowing* and
+    not a no-op. A carrier nested in a module-level ``if``/``try``/loop leaves
+    the name with **no** recorded store, so :func:`_module_carrier_stores`
+    returns ``None`` and the rule falls back to ``enforced`` -- the same answer
+    master gave. That is conservative in the safe direction, but it does mean a
+    block-nested module carrier is *not* repaired by this rule:
+
+        if flag:
+            import os as cs
+        def outer():
+            with cs:                  # TypeError on entry, assert unreachable
+                assert x != 1         # still reported `enforced`
+
+    The narrowing is deliberate. Reading a conditional binding as settled
+    would claim a certainty the source does not carry, and the whole point of
+    the direct case being decidable is that it is *unconditional*. Closing the
+    conditional case is a separate rule with its own mutation matrix, not
+    something to fold in here.
+
     A function or class *definition* at module scope is the one carrier that
     can legitimately nest: its body is a new scope, but the ``def``/``class``
     statement itself always runs. So definitions are taken from the module
