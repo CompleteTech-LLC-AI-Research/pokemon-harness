@@ -787,14 +787,19 @@ def _pattern_is_irrefutable(pattern):
     where it does.
 
     An ``ast.MatchOr`` is the one compound that could be irrefutable, and only
-    when every alternative is. In practice CPython rejects that shape -- an
-    all-capture ``case x | y:`` fails with "name capture 'x' makes remaining
-    patterns unreachable" -- so the branch is defensive rather than exercised.
-    It is kept because the rule has to be right for the AST it is handed, not
-    only for the subset ``compile`` happens to accept, and requiring *all*
-    alternatives keeps it an over-approximation: a subject this cannot
-    classify falls on the "capture may not have run" side, which keeps a
-    carried suppressor in force rather than retiring a binding nothing made.
+    when every alternative is. CPython rejects a *bare*-capture all-alternatives
+    shape -- ``case x | y:`` fails with "name capture 'x' makes remaining
+    patterns unreachable" -- but that is not the whole story, and the earlier
+    claim here was too broad. ``case [*cs] | [*cs]:`` followed by another
+    clause **does** compile on CPython 3.12.14, because neither alternative is
+    a bare name capture on its own.
+
+    Such a pattern is still *refutable*: both alternatives are sequence
+    patterns, so a non-sequence subject skips the clause entirely and the
+    capture never runs. The `all(...)` requirement is what makes that fall on
+    the "capture may not have run" side, which keeps a carried suppressor in
+    force rather than retiring a binding nothing made -- the damaging
+    direction this whole issue is about.
     """
     if isinstance(pattern, ast.MatchAs):
         return pattern.pattern is None or _pattern_is_irrefutable(pattern.pattern)
@@ -830,8 +835,11 @@ def _capture_always_binds(match, name):
     pattern is irrefutable -- ``case _ as cs:`` followed by anything is
     rejected with "wildcard makes remaining patterns unreachable", a bare
     ``case cs:`` with "name capture 'cs' makes remaining patterns
-    unreachable", and an all-capture ``case a | b:`` likewise. So an
-    irrefutable capture is always the last clause in a program that compiles.
+    unreachable", and a bare-name all-alternatives ``case a | b:`` likewise.
+    (A *sequence* capture in every alternative, ``case [*cs] | [*cs]:``,
+    compiles -- but that pattern is refutable, so it does not reach this
+    branch; see :func:`_pattern_is_irrefutable`.) So an irrefutable capture is
+    always the last clause in a program that compiles.
     The check is kept because it is the *reason* the answer is safe, it costs
     one comparison, and dropping it would make the function wrong for an AST
     that ``ast.parse`` accepts even though ``compile`` would not -- which is

@@ -2821,10 +2821,19 @@ def test_a_capture_reaches_a_header_nested_in_its_own_clause_body(label, body, e
     """The capture is not a store *statement*, so the block holding a header
     sees no store at all and would fall back to the carried suppressor.
 
-    A header written inside the capturing ``case`` body must instead read the
-    capture, so that assert is reported enforced. A header in a clause that
-    captures nothing must still read the carried suppressor, so that one is
-    reported swallowed.
+    Every row here is read as ``defeated``, and that is the point. A
+    *refutable* capture cannot be decided from the source: the same program
+    admits a subject that selects the capture -- leaving a real, possibly
+    live, context manager at the nested header -- and a subject that does not,
+    which leaves the carried suppressor in force and swallows the assert.
+    Since this module answers a source-level question, one admitting subject
+    is enough to refuse to certify the assert, and ``defeated`` is the safe
+    direction (#308 criterion 1).
+
+    So a header inside the capturing clause body is *not* promoted back to
+    ``enforced`` just because the clause was written to capture, and a header
+    in a non-capturing clause is not reported swallowed for the same reason.
+    Both are ``defeated`` because the capture may not have run.
     """
     source = (
         "def outer(x, flag, helper):\n"
