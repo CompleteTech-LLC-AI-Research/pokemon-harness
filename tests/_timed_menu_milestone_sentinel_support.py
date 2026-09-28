@@ -716,6 +716,47 @@ def _store_target_names(targets):
     return names
 
 
+def _binds_in_nested_scope(function, statement):
+    """Does ``statement`` bind a name in a namespace other than ``function``'s?
+
+    A nested ``def``, ``async def``, ``lambda`` or ``class`` body executes in
+    its own namespace, so a store written there binds *that* namespace's name
+    and leaves ``function``'s local untouched:
+
+        def outer(x):
+            with (cs := suppress(AssertionError)):
+                pass
+            class C:
+                import os as cs      # binds C.cs, NOT outer's cs
+            with cs:                  # outer's cs is still the suppressor
+                assert x != 1        # swallowed -> correct verdict is False
+
+    ``_scope_body_nodes`` already refuses to walk into those bodies (#350).
+    This asks the same question of a node that a *different*, scope-blind walk
+    has already reached, which is why it is asked separately rather than by
+    changing that walk: the walk feeds several pre-existing branches whose
+    behaviour is pinned, and narrowing it wholesale would move all of them.
+
+    ``function`` itself is not a nested scope, and neither is a ``def``/
+    ``class`` written directly in its body: both bind ``function``'s own name,
+    which is the case the carrier rule exists to record. Only a store strictly
+    *inside* one of those bodies binds elsewhere.
+    """
+    # ``ast.walk(node)`` reports the boundary node *itself* as well as its
+    # descendants, so a plain ``in`` test would answer ``True`` for a
+    # ``def cs``/``class cs`` written directly in ``function``'s body. Those bind
+    # ``function``'s own name and are exactly what the carrier rule must
+    # record, so the boundary node is excluded and only true descendants match.
+    nested_scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    for node in ast.walk(function):
+        if node is function or not isinstance(node, nested_scope_types):
+            continue
+        descendants = (child for child in ast.walk(node) if child is not node)
+        if any(child is statement for child in descendants):
+            return True
+    return False
+
+
 def _scope_body_nodes(function):
     """Walk `function`'s own scope, stopping at nested function boundaries.
 
@@ -1157,6 +1198,15 @@ def _store_bindings(function, bound):
             # not a store *of* itself. Every other branch is safe from this
             # because no node type it matches can be the enclosing function.
             #
+            # #354 follow-up: as with the import branch below, a `def` written
+            # in a NESTED namespace binds that namespace's name. A `def cs`
+            # inside a `class` body is an attribute of the class, so recording
+            # it as a store of the enclosing function's `cs` retired a
+            # carried suppressor that was still in force and reported a
+            # swallowed assert as enforced.
+            if _binds_in_nested_scope(function, statement):
+                continue
+            #
             # #354: a `def` or `class` statement binds its own name to a
             # function or a class object. Neither implements the context
             # manager protocol, so a later `with cs:` raises `TypeError` while
@@ -1175,6 +1225,29 @@ def _store_bindings(function, bound):
         elif isinstance(statement, (ast.Import, ast.ImportFrom)):
             # #354: `import os as cs` and `from os import path as cs` bind the
             # name to a *module*, which is likewise not a context manager.
+            #
+            # This branch reads a name out of whatever scope the walk reached
+            # it in, so it must not attribute a nested namespace's import to
+            # `function`:
+            #
+            #     def outer(x):
+            #         with (cs := suppress(AssertionError)):
+            #             pass
+            #         class C:
+            #             import os as cs    # binds C.cs, NOT outer's cs
+            #         with cs:                # outer's cs is still the suppressor
+            #             assert x != 1      # swallowed -> correct verdict False
+            #
+            # Recording it here retired the carried suppressor and reported that
+            # assert as enforced -- a dead contract certified as load-bearing.
+            # `_scope_body_nodes` already stops at `def`/`lambda`/`class`
+            # boundaries for exactly this reason (#350); this walk is the other
+            # one, and the carrier branch is new here, so it has to ask the
+            # same question. Scoping the whole walk instead would change every
+            # pre-existing branch's behaviour, which is a much larger change
+            # than this defect needs.
+            if _binds_in_nested_scope(function, statement):
+                continue
             #
             # The two statements bind different things, and conflating them
             # invents a name that does not exist:

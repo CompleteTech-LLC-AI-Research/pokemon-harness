@@ -2329,6 +2329,17 @@ CARRIER_UNENTERABLE_SHAPES = (
         True,
         ENTRY,
     ),
+    # CONTROL. An import in the function's OWN body does bind `cs`, so the
+    # assert under the following `with cs:` is unreachable and the verdict is
+    # False. The companion rows for *nested* namespaces live in
+    # `NESTED_CARRIER_SCOPE_ROWS` below, which needs a carried suppressor to
+    # make the question meaningful.
+    (
+        "CONTROL an import in the function's own body still binds the name",
+        "    import os as cs",
+        False,
+        ENTRY,
+    ),
 )
 
 
@@ -2903,6 +2914,89 @@ def test_a_capture_binds_only_the_namespace_it_was_written_in(label, nested, ver
     assert results == [verdict], (
         f"{label}: expected verdicts {[verdict]}, got {results}. A "
         f"store in a nested namespace must not rebind the enclosing name."
+    )
+
+
+#: #354 follow-up, surfaced by rebasing onto #350 (`c304256`). A carrier
+#: written in a NESTED namespace binds that namespace's name and must not
+#: retire the enclosing function's:
+#:
+#:     def outer(x):
+#:         with (cs := suppress(AssertionError)):
+#:             pass
+#:         class C:
+#:             import os as cs    # binds C.cs, NOT outer's cs
+#:         with cs:                # outer's cs is still the suppressor
+#:             assert x != 1      # swallowed -> correct verdict False
+#:
+#: #350 taught `_scope_body_nodes` to stop at a `ClassDef`, but the carrier
+#: branch added by #354 reads from a *different*, scope-blind walk. Recording
+#: the nested import as a store of `outer`'s `cs` retired the carried
+#: suppressor and reported the assert `enforced` -- a dead contract certified
+#: as load-bearing, the damaging direction.
+#:
+#: Neither fix is wrong alone, so this only fails once both are on one tree.
+#: The rows need the carried suppressor: without it the header would raise
+#: `NameError` and the question would not arise.
+NESTED_CARRIER_SCOPE_ROWS = (
+    ("an aliased import in a class body", "    class C:\n        import os as cs\n", False),
+    (
+        "a from-import in a class body",
+        "    class C:\n        from os import path as cs\n",
+        False,
+    ),
+    ("a def carrier in a class body", "    class C:\n        def cs():\n            pass\n", False),
+    ("an import in a nested function", "    def inner():\n        import os as cs\n", False),
+    # CONTROL. The same import in the function's OWN body does bind `cs`, so
+    # the carried suppressor really is retired and the assert really is
+    # swallowed. Reporting False here proves the guard is scoped to nested
+    # namespaces and has not simply disabled the carrier rule.
+    ("CONTROL an import in the function's own body", "    import os as cs\n", False),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "nested", "verdict"),
+    NESTED_CARRIER_SCOPE_ROWS,
+    ids=[row[0] for row in NESTED_CARRIER_SCOPE_ROWS],
+)
+def test_a_nested_carrier_does_not_retire_the_enclosing_name(label, nested, verdict):
+    """A carrier in a nested namespace binds that namespace, not the function.
+
+    #354 follow-up. Every row is executed, so the ground truth is what
+    CPython does with the carried suppressor rather than the analyzer's
+    opinion: an escaping ``AssertionError`` means the assert ran.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + nested + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    from contextlib import nullcontext
+
+    try:
+        namespace["outer"](1, False, nullcontext, [])
+        ran = False
+    except AssertionError:
+        ran = True
+    except (TypeError, UnboundLocalError, NameError):
+        ran = False
+    assert ran is verdict, (
+        f"{label}: CPython says the assert {'ran' if ran else 'did not run'}, "
+        f"but the row expects {verdict}."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [verdict], (
+        f"{label}: expected verdicts {[verdict]}, got {results}. A carrier in "
+        f"a nested namespace must not retire the enclosing function's name."
     )
 
 
