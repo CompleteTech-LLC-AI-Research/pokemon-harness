@@ -2996,6 +2996,38 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         ),
         False,
     ),
+    # The grandchild need not be a direct child of the owner. Wrapped in an
+    # `if`, the declaration is still the grandchild's alone, and a boundary
+    # that only stopped at *directly* nested scopes reached straight through
+    # the wrapper. Review finding on `de23eea`.
+    (
+        "a nonlocal declared in a grandchild under an if is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        def inner():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            if True:\n"
+            "                def grandchild():\n"
+            "                    nonlocal cs\n"
+            "        inner()\n"
+        ),
+        False,
+    ),
+    (
+        "a global declared in a grandchild under an if is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        def inner():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            while False:\n"
+            "                def grandchild():\n"
+            "                    global cs\n"
+            "        inner()\n"
+        ),
+        False,
+    ),
     # `contextlib.nullcontext(CM())` returns its `enter_result`, so the
     # header is entered with `CM()` and the assert fires. Excluding every
     # `nullcontext` call regardless of arguments reported `defeated` on a
@@ -3004,6 +3036,34 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         "a conditional nullcontext-with carrying enter_result is live",
         "    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM()) as cs:\n            pass\n",
         True,
+    ),
+    # The same argument with the `enter_result` spelled the only way it can
+    # be, since the parameter is keyword-only: a call carrying it has an
+    # *empty* positional argument list, so checking `args` alone read it as
+    # the no-argument form. Review finding on `de23eea`.
+    (
+        "a conditional nullcontext-with carrying a keyword enter_result is live",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext(enter_result=CM()) as cs:\n"
+            "            pass\n"
+        ),
+        True,
+    ),
+    # A literal `None` is the value the no-argument form produces, so the
+    # keyword spelling of it is the same null context and must keep the
+    # exclusion. Without this the fix above would over-claim and report a
+    # dead assert as load-bearing.
+    (
+        "a conditional nullcontext-with carrying a None enter_result is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext(enter_result=None) as cs:\n"
+            "            pass\n"
+        ),
+        False,
     ),
     # The name is bound by a *different* item of the same `with`, so the
     # non-enterable sibling says nothing about what `cs` received. Searching
@@ -3309,31 +3369,54 @@ FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES = (
     (
         "an if/else after a function-scope carrier is still declined",
         "    import os as cs\n    if flag:\n        cs = contextlib.nullcontext()\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
     ),
     (
         "an if/elif/else after a function-scope carrier is still declined",
         "    import os as cs\n    if flag:\n        cs = contextlib.nullcontext()\n    elif flag:\n        cs = contextlib.nullcontext()\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
     ),
     (
         "a conditional del-then-store after a function-scope carrier is still declined",
         "    import os as cs\n    if flag:\n        del cs\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    # A `with` that binds the same name from two items leaves the store table
+    # with two entries for it, so #308 reads the name as ambiguous and answers
+    # before the carrier decline is consulted. `with nullcontext() as cs, CM()
+    # as cs:` really does leave `cs` enterable -- the last item wins -- so
+    # `defeated` is the wrong end-to-end answer here, and it is the wrong
+    # answer on `ed9d9b0` too. Held here for the same reason as the rows above:
+    # the #388 repair must not widen it, and closing it belongs to #308.
+    (
+        "a with rebinding the name from two items is still declined",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext() as cs, CM() as cs:\n"
+            "            pass\n"
+        ),
+        True,
     ),
 )
 
 
 @pytest.mark.parametrize(
-    ("label", "body"),
+    ("label", "body", "live"),
     FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES,
     ids=[shape[0] for shape in FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES],
 )
-def test_a_function_carrier_supersession_limit_is_still_declined(label, body):
+def test_a_function_carrier_supersession_limit_is_still_declined(label, body, live):
     """Pin the known limit of this repair, so it cannot widen silently.
 
-    With `flag=True` the store runs on every path, ``with cs:`` succeeds and
-    the assert fires, so `defeated` is the **wrong** answer for all three --
-    they drop a live pinned contract. They are held to `defeated` here anyway,
+    With `flag=True` the store runs on every path and ``with cs:`` succeeds on
+    every row, so `defeated` is the **wrong** answer for all of them -- they
+    drop a live pinned contract. They are held to `defeated` here anyway,
     because that is what the analyzer actually says; a test asserting the
-    *right* answer would be a failing test rather than a pin.
+    *right* answer would be a failing test rather than a pin. The `live`
+    column is what keeps that claim honest: it is read from the interpreter
+    rather than assumed, and it is per-row because a `with` that binds the
+    same name twice leaves a different value behind than the store forms do.
 
     The row is not claiming the verdict is correct. It pins **where this
     repair stops**: the #308 ambiguity rule answers these shapes first, so
@@ -3349,9 +3432,14 @@ def test_a_function_carrier_supersession_limit_is_still_declined(label, body):
     """
     source = (
         "import contextlib\n"
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return False\n"
         "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
     )
-    _assert_entry_contract(label, source, False, True)
+    _assert_entry_contract(label, source, False, live)
     tree = ast.parse(source)
     function = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"

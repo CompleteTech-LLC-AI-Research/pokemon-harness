@@ -2941,7 +2941,24 @@ def _declares(scope, names, kind):
     ``def`` binds that ``def``'s stores, so it has no say over a store sitting
     in ``scope`` itself -- and ``ast.walk`` cannot draw that line, since it
     descends straight through the nested scope. :func:`_scope_body_nodes` is
-    the boundary this module draws everywhere else, so it is what asks.
+    the boundary this module draws everywhere else, so it is what asks, and
+    the nodes it yields are read *directly*.
+
+    Reading them directly is what makes the boundary hold at any depth. A
+    second walk over each yielded node re-enters a nested scope reached
+    through a wrapper, so a ``nonlocal`` in a grandchild written under an
+    ``if`` was still attributed to its grandparent:
+
+        def inner():
+            cs = contextlib.nullcontext()
+            if True:
+                def grandchild():
+                    nonlocal cs
+
+    ``_scope_body_nodes`` yields the ``FunctionDef`` and stops, and the check
+    is a type test on the node itself, so the declaration inside it is never
+    reached. A wrapper changes nothing, because ``_scope_body_nodes``
+    descends through statements and yields the nested scope wherever it sits.
 
     Neither declaration takes effect unless the name is actually bound
     somewhere in the scope, so the answer here is the necessary half of the
@@ -2951,16 +2968,8 @@ def _declares(scope, names, kind):
     if not wanted:
         return False
     for node in _scope_body_nodes(scope):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            # `_scope_body_nodes` yields the nested scope and then stops, so
-            # the boundary is already drawn here. Walking *into* it would
-            # re-open the hole this exists to close: a grandchild's
-            # declaration governs the grandchild's own stores, not the
-            # enclosing scope's.
-            continue
-        for child in ast.walk(node):
-            if isinstance(child, kind) and wanted.intersection(child.names):
-                return True
+        if isinstance(node, kind) and wanted.intersection(node.names):
+            return True
     return False
 
 
@@ -3052,13 +3061,37 @@ def _with_binds_a_known_non_enterable(statement, name, bound=None):
     ``as`` clause) binds nothing, so no item here matches the name and the
     answer is ``False`` -- the store is not a rebind of the name at all, and
     :func:`_store_bindings` only records items that carry an ``optional_vars``.
+
+    When *several* items bind the same name, the **last** one is what the
+    header goes on to enter, because CPython processes the items in order:
+
+        with contextlib.nullcontext() as cs, CM() as cs:
+            pass
+
+    leaves ``cs`` holding ``CM().__enter__()``, not ``None``. Reading any
+    qualifying item as the answer excluded the whole statement, so a name an
+    enterable item re-bound last was reported as a ``None``. Only the last
+    binder is asked about, and a ``with`` that rebinds the name more than once
+    is not claimed by the first item to match.
+
+    Reading the *last* binder still does not make this rule reach the end-to-end
+    verdict on such a statement. A ``with`` that binds the same name twice
+    leaves ``_store_bindings`` with two entries for it, and #308 reads a name
+    bound by several stores as ambiguous and reports the assert as swallowed
+    before this rule is consulted at all. That is the pre-existing answer on
+    ``ed9d9b0`` for this shape, it is pinned at
+    ``FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES``, and it is not introduced
+    here. What this rule controls is narrower and is what the decline asks:
+    whether *the* store can be a superseding one, and it now answers from the
+    binder whose value survives.
     """
+    binding = None
     for item in statement.items:
-        if item.optional_vars is None or name not in _store_target_names([item.optional_vars]):
-            continue
-        if _binds_a_null_returning_context(item.context_expr, bound or {}):
-            return True
-    return False
+        if item.optional_vars is not None and name in _store_target_names([item.optional_vars]):
+            binding = item
+    if binding is None:
+        return False
+    return _binds_a_null_returning_context(binding.context_expr, bound or {})
 
 
 def _binds_a_null_returning_context(expression, bound):
@@ -3076,11 +3109,18 @@ def _binds_a_null_returning_context(expression, bound):
       the bound value is whatever the caller passed -- an object, in every
       case that matters here.
 
-    That is why the argument list is consulted for that one member of the set
-    and not for the other: ``suppress`` takes its exceptions as positional
-    arguments, so requiring an empty argument list would exclude the
+    That is why the arguments are consulted for that one member of the set and
+    not for the other: ``suppress`` takes its exceptions as arguments, so
+    requiring an empty argument list would exclude the
     ``suppress(AssertionError)`` spelling that the other half of this set is
-    there for.
+    there for. *Both* argument forms have to be checked -- ``enter_result`` is
+    a keyword-only parameter, so a call carrying it has an empty
+    ``expression.args`` and would otherwise read as the no-argument form:
+
+        with contextlib.nullcontext(enter_result=CM()) as cs:
+
+    returns ``CM()`` and leaves an enterable value bound. A positional-only
+    check therefore did not exclude the call it was written to exclude.
     """
     if not isinstance(expression, ast.Call):
         return False
@@ -3089,7 +3129,17 @@ def _binds_a_null_returning_context(expression, bound):
         return False
     if dotted == "contextlib.suppress":
         return True
-    return not expression.args
+    if expression.args:
+        return False
+    # `enter_result` is keyword-only, so a call carrying it has an *empty*
+    # `args` and reads as the no-argument form unless `keywords` is consulted
+    # too. The value decides it, so a literal `None` is still the null
+    # context -- it is the same object the no-argument spelling produces --
+    # and anything else is an `enter_result` the header would be entered with.
+    return all(
+        keyword.arg == "enter_result" and _falsy_literal(keyword.value)
+        for keyword in expression.keywords
+    )
 
 
 def _stores_of(name, by_index, index, function):
