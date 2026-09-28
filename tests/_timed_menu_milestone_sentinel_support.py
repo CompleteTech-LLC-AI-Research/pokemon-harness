@@ -1147,24 +1147,28 @@ def _store_bindings(function, bound):
         else:
             conditional = statement not in function.body
         for name in _store_target_names(targets):
-            # Order is load-bearing. The element a destructuring target
-            # receives has to be picked out of the value the right-hand side
-            # *actually resolves to*, and that is two steps, in this order:
+            # Order is load-bearing, and it is three steps, not two. The value a
+            # destructuring target receives can be reached through a name at
+            # either level, and each level needs its own deref:
             #
             #     t = (contextlib.suppress(AssertionError),)
-            #     cs, = t                 # `cs` is the element, not `t`
+            #     cs, = t                 # the RHS is a Name bound to a container
             #     with cs:
             #         assert x != 1      # swallowed
             #
-            # Picking the element first sees a bare `Name` rather than a
-            # container, so `_value_bound_by` returns the name unchanged and
-            # the suppressor is never extracted. Dereferencing afterwards does
-            # not recover it either, because `_deref_alias` resolves a name to
-            # a *value* and this one is a container, not a suppression call --
-            # so the header reads as unreadable and the swallowed assert is
-            # reported live. Every one of the four named-container spellings
-            # (single element, first of two, second of two, nested) was
-            # damaging until the two steps were swapped. Deref first.
+            #     a, b = b, a             # the *element* is itself a Name
+            #     with a:
+            #         assert x != 1      # swallowed, after the swap
+            #
+            # Deref-first alone fixes the first shape and breaks the second: on
+            # `(b, a)` the deref is a no-op (a tuple is not a name), so the
+            # element `b` is selected but left as a bare `Name`, which is not a
+            # readable suppressor and reports the assert live (#381/#382).
+            # Select-first alone fixes the second and breaks the first, because
+            # the RHS reads as a bare `Name` and no container is ever found
+            # (#374). So the right-hand side is dereferenced first, the element
+            # is picked out of that resolved container, and the element is
+            # dereferenced in turn when it is itself a name.
             resolved = _deref_alias(
                 value,
                 raw_values,
@@ -1172,10 +1176,23 @@ def _store_bindings(function, bound):
                 _binding_order(function, statement),
                 name,
             )
+            element = _value_bound_by(targets, resolved, name)
+            if isinstance(element, ast.Name):
+                # The selected element is a name, so it stands for whatever it
+                # was bound to rather than for itself. Resolving it here is what
+                # keeps a swapped pair -- where both names already hold
+                # suppressors -- from reading as a non-suppressor element.
+                element = _deref_alias(
+                    element,
+                    raw_values,
+                    orders,
+                    _binding_order(function, statement),
+                    name,
+                )
             bindings.setdefault(name, []).append(
                 (
                     statement,
-                    _value_bound_by(targets, resolved, name),
+                    element,
                     conditional,
                 )
             )

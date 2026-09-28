@@ -21,6 +21,7 @@ backstop that keeps them from being quietly removed.
 
 import ast
 import asyncio
+import contextlib
 import inspect
 
 import pytest
@@ -2518,6 +2519,42 @@ BINDING_FORM_SHAPES = (
         False,
         "contextlib.nullcontext()",
     ),
+    # #381/#382: the element a destructuring target receives can be a *Name*,
+    # and then it stands for whatever that name holds rather than for itself.
+    # A swap makes that unavoidable -- both elements are names -- and it is the
+    # shape that decides the verdict, because the answer depends entirely on
+    # which name lands on the target. The two rows below are one pair: same
+    # spelling, elements exchanged, opposite verdicts. A rule that reported
+    # "defeated" for every name element, or "live" for every name element,
+    # passes one of them and fails the other, which is the point.
+    (
+        "a swapped element that lands a suppressor is defeated",
+        (
+            "    a = contextlib.nullcontext()\n"
+            "    b = contextlib.suppress(AssertionError)\n"
+            "    a, b = b, a\n"
+            "    with a:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        # Each swap row is the other's control: exchanging the two elements
+        # flips the verdict, and a rule that cannot tell them apart fails one.
+        # A `nullcontext()` substitution would not help here, because the whole
+        # question is *which* element the target receives.
+        None,
+    ),
+    (
+        "a swapped element that lands a live manager is enforced",
+        (
+            "    a = contextlib.suppress(AssertionError)\n"
+            "    b = contextlib.nullcontext()\n"
+            "    a, b = b, a\n"
+            "    with a:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        None,
+    ),
     (
         "a list target over a named container reads the element",
         (
@@ -2573,16 +2610,21 @@ def test_a_binding_form_reads_the_value_that_lands_on_the_name(
     namespace = {}
     exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
     outer = namespace["outer"]
-    # A helper whose `items()` yields nothing, so the unreadable-iterable row
-    # runs its body zero times and cannot swallow an assert of its own.
-    helper = type("H", (), {"items": staticmethod(lambda: ())})()
+    # A helper whose `items()` yields exactly one *non-suppressing* manager.
+    # Yielding nothing was the original spelling and it made this fixture
+    # vacuous: the unreadable-iterable row ran its body zero times, never
+    # reached the assert, and passed its runtime check without executing the
+    # code it claims to pin. With one real element the body really runs, the
+    # assert really is reached, and because the element is a `nullcontext` it
+    # cannot swallow anything -- so a rule that answered "defeated" for every
+    # unreadable iterable now fails here instead of passing silently.
+    _yielded = [contextlib.nullcontext()]
+    helper = type("H", (), {"items": staticmethod(lambda: _yielded)})()
+    fired = False
     try:
         outer(1, helper)
     except AssertionError:
-        raise AssertionError(
-            f"{label}: the assert fired, so this row does not exercise a "
-            f"suppressor. Check the binding form before trusting the verdict."
-        ) from None
+        fired = True
     except (NameError, TypeError, UnboundLocalError) as error:
         raise AssertionError(
             f"{label}: the fixture raised {type(error).__name__} instead of "
@@ -2593,6 +2635,19 @@ def test_a_binding_form_reads_the_value_that_lands_on_the_name(
     function = tree.body[0]
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     assert asserts, f"{label}: fixture declared no assert to check"
+    # The runtime half is a cross-check against the verdict this row expects,
+    # not a one-sided "it did not fire" test. A row that claims the assert is
+    # swallowed must be shown CPython swallowing it, and a row that claims the
+    # assert is live must be shown the failure actually escaping -- otherwise a
+    # fixture that never reaches its assert passes either way. `fired` and
+    # `expected_live` describe the same two states, so they must be equal, and
+    # that also keeps the live rows honest: they are the ones that were
+    # previously vacuous.
+    assert fired is expected_live, (
+        f"{label}: expected the assert to "
+        f"{'fire' if expected_live else 'be swallowed'}, but it "
+        f"{'did not fire' if expected_live else 'was swallowed'}."
+    )
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
 
@@ -2769,8 +2824,13 @@ def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, s
     namespace = {}
     exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
     fired = False
+    # One real, non-suppressing element, for the same reason as the
+    # binding-form table: an empty `items()` made the `with cs:` body
+    # unreachable, so `fired` stayed False for every row regardless of what
+    # the analyzer said and the runtime half of this test proved nothing.
+    _yielded = [contextlib.nullcontext()]
     try:
-        namespace["outer"](1, type("H", (), {"items": staticmethod(lambda: ())})())
+        namespace["outer"](1, type("H", (), {"items": staticmethod(lambda: _yielded)})())
     except AssertionError:
         fired = True
     except (NameError, TypeError, UnboundLocalError) as error:
