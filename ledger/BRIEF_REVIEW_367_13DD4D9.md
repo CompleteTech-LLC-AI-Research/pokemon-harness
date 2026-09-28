@@ -6,6 +6,10 @@ task source for this slot. Do NOT fall back to `REVIEW_THIS.md`,
 (`b9902a2`, `082ceae`, `bd78e85`, `d6599c9`) and using them caused a recorded
 hijack incident. Verify the head yourself before doing anything.
 
+Write your report to `ledger/REVIEW_367_13DD4D9_<yourname>.md` on your own
+branch or scratch tree, and also return the handoff below in your final
+message.
+
 ## Target
 
 - PR: #393 — https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/393
