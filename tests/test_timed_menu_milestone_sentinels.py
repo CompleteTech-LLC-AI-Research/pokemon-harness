@@ -1704,6 +1704,70 @@ WALRUS_REENTRY_SHAPES = (
     # so both asserts are swallowed. The rule recorded the bare `base` node,
     # `_is_readable_suppressor` accepts only an `ast.Call`, and both headers
     # were reported live -- a disarmed contract certified as load-bearing.
+    # #348: the SAME name on both sides. Every row above aliases a *distinct*
+    # name, so none of them reaches this. The alias walk followed the name to
+    # its LAST binding anywhere in the function, and for a self-alias the last
+    # binding of `cs` is the walrus being resolved -- so the walk became
+    # self-referential, tripped its own cycle guard, and handed back an
+    # unresolved name. An unresolved name is unreadable, so both headers were
+    # reported live while the interpreter swallows both.
+    (
+        "a walrus of the same name it rebinds re-enters",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The same self-reference written as an ordinary store.
+    (
+        "a plain assignment of a name to itself re-enters",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = cs\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # #348: the other direction of the same bug. The read happens BEFORE the
+    # rebind, so the value in force is the suppressor -- but a function-wide
+    # "last binding wins" resolves the header to the `nullcontext()` store that
+    # has not run yet, leaving the header unreadable and a swallowed assert
+    # reported live. This is what makes the resolution positional rather than
+    # merely "skip names already seen".
+    (
+        "a walrus of a name rebound after the header re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    with (cs := first):\n"
+            "        assert x != 1\n"
+            "    first = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The control for the row above: same shape, but the later store is ALSO a
+    # suppressor, so both readings agree and the row must stay defeated. If a
+    # fix simply ignored later stores, this row would still pass -- which is
+    # why the previous row, where the later store differs, is the one that
+    # discriminates.
+    (
+        "a walrus of a name rebound to a suppressor after the header re-enters",
+        (
+            "    first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1\n"
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
     (
         "a walrus of a pre-bound suppressor name re-enters",
         (
