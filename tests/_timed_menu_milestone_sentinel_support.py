@@ -2494,6 +2494,38 @@ def _module_stores(name, module):
     mean changing :func:`_stores_of` for every rule at once, and is
     deliberately not folded in here.
 
+    A *conditional non-carrier* store is the one case where dropping it is
+    not safe here, and it is handled separately. A store nested in a block may
+    not have run -- but it may have, and if it did it can have replaced the
+    carrier with an enterable value:
+
+        import os as cs
+        import contextlib
+        def _rebind():
+            global cs
+            cs = contextlib.nullcontext()
+        _rebind()
+        def outer(x, flag, helper):
+            with cs:                # succeeds: cs is a real nullcontext()
+                assert x != 1       # live
+
+    The carrier is unconditional, so :func:`_stores_of` keeps it and answers
+    ``defeated`` -- dropping a live assert. Measured on ``8f4395b``, and wrong
+    where ``master`` is right. So a conditional non-carrier store that comes
+    *after* the last unconditional carrier leaves the value undecidable, and
+    this returns ``None`` (decline) instead.
+
+    The ordering test is what keeps this narrow. A conditional store *before*
+    the last carrier really is superseded by it and needs no special case:
+
+        def _rebind():
+            global cs
+            cs = contextlib.nullcontext()
+        _rebind()
+        import os as cs            # runs last; the name is a module again
+
+    That answers ``defeated`` correctly, because the later carrier wins.
+
     Returns ``None`` when the module body says nothing usable about ``name``,
     which is the same "decline" the function path returns and the same answer
     master gave.
@@ -2508,6 +2540,36 @@ def _module_stores(name, module):
         for entries in bindings.values()
         for statement, _, _ in entries
     }
+    name_entries = bindings.get(name)
+    if name_entries:
+        # #359. `_stores_of` keeps only unconditional stores, so a carrier
+        # that is unconditional survives a *conditional* non-carrier store
+        # that follows it. That store may have run and replaced the carrier
+        # with an enterable value, in which case the carrier is stale and
+        # answering from it would drop a live assert. When that happens the
+        # value is genuinely undecidable, so decline rather than guess.
+        #
+        # `except ... as cs:` is excluded because it *unbinds* rather than
+        # supersedes: CPython deletes the name when the handler exits, so the
+        # earlier carrier is what remains in force. `_stores_of` makes the same
+        # exception for the same reason, and without it here a try/except that
+        # merely mentions the name would flip a correct `defeated` to
+        # `enforced`.
+        carrier_orders = [
+            orders[id(statement)]
+            for statement, value, conditional in name_entries
+            if not conditional and isinstance(value, str)
+        ]
+        if carrier_orders:
+            last_carrier = max(carrier_orders)
+            if any(
+                conditional
+                and not isinstance(value, str)
+                and not isinstance(statement, ast.ExceptHandler)
+                and orders[id(statement)] > last_carrier
+                for statement, value, conditional in name_entries
+            ):
+                return None
     by_index = {"bindings": bindings, "orders": orders}
     index = max(orders.values(), default=-1) + 1
     return _stores_of(name, by_index, index, module)

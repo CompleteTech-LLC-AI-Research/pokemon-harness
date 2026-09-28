@@ -2572,6 +2572,87 @@ def test_a_block_nested_module_carrier_is_still_declined():
 
 
 @pytest.mark.parametrize(
+    ("label", "rebind", "live"),
+    [
+        (
+            "a global rebind run at import time supersedes the carrier",
+            "def _rebind():\n    global cs\n    cs = contextlib.nullcontext()\n_rebind()\n",
+            True,
+        ),
+        (
+            "CONTROL a global rebind that runs before the carrier is superseded by it",
+            "def _rebind():\n    global cs\n    cs = contextlib.nullcontext()\n_rebind()\n",
+            False,
+        ),
+    ],
+    ids=[
+        "a global rebind run at import time supersedes the carrier",
+        "CONTROL a global rebind that runs before the carrier is superseded by it",
+    ],
+)
+def test_a_conditional_module_store_after_a_carrier_is_declined(label, rebind, live):
+    """A carrier followed by a *conditional* store leaves the value undecided.
+
+    ``_stores_of`` keeps only unconditional stores, so an unconditional
+    carrier survives a conditional store that follows it. That is the right
+    answer when the conditional store merely *mentions* the name, but not when
+    it can have replaced the carrier with something enterable:
+
+        import os as cs
+        import contextlib
+        def _rebind():
+            global cs
+            cs = contextlib.nullcontext()
+        _rebind()
+        def outer(x, flag, helper):
+            with cs:            # succeeds: cs is a real nullcontext()
+                assert x != 1   # live
+
+    The store is nested in a function body, so whether it ran is not decidable
+    from the carrier's point of view -- but it *can* have run, and if it did the
+    carrier is stale. Answering from the carrier drops a live assert, so the
+    rule declines instead.
+
+    The control is the same source with the call moved *before* the carrier. A
+    conditional store that precedes the last carrier really is superseded by
+    it, so ``defeated`` is correct there and no decline is warranted. Without
+    the control, a fix that simply declined every shape containing a
+    conditional store would pass.
+
+    This is deliberately not a row in :data:`MODULE_CARRIER_SHAPES`: that
+    table's fixture is ``prelude + "def outer(...)"``, which cannot express a
+    helper *call* between the carrier and the header.
+    """
+    carrier = "import os as cs\nimport contextlib\n"
+    if "before" in label:
+        source = (
+            "import contextlib\n"
+            + rebind
+            + carrier
+            + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+        )
+    else:
+        source = (
+            carrier + rebind + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+        )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A conditional "
+        f"store after the last carrier can have replaced it with an enterable "
+        f"value, so the header must be declined rather than judged on a store "
+        f"that may be stale."
+    )
+
+
+@pytest.mark.parametrize(
     ("label", "rebind", "is_async", "second_assert_live"),
     WALRUS_REBINDING_SHAPES,
     ids=[shape[0] for shape in WALRUS_REBINDING_SHAPES],
