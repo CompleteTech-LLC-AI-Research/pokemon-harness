@@ -768,6 +768,157 @@ def _match_capture_names(function):
     return owners
 
 
+def _pattern_is_irrefutable(pattern):
+    """Is ``pattern`` a pattern that matches *every* remaining subject?
+
+    Two spellings qualify, and both are ``ast.MatchAs``:
+
+    * a bare capture (``case name:``) and the wildcard (``case _:``), which
+      parse to a ``MatchAs`` whose inner ``pattern`` is ``None``;
+    * a capture of an already-irrefutable pattern (``case _ as name:``), which
+      parses to a ``MatchAs`` wrapping *another* ``MatchAs`` -- the outer one
+      is the capture, the inner one is the pattern it captures. Reading only
+      ``pattern is None`` misses this form, which is exactly the irrefutable
+      capture the shipped suite exercises.
+
+    Every other pattern -- a value, a sequence, a mapping, a class pattern, a
+    starred capture, or a value pattern wrapped in an ``as`` -- can fail to
+    match, and a clause built on one of those is only *selected* on the path
+    where it does.
+
+    An ``ast.MatchOr`` is the one compound that could be irrefutable, and only
+    when every alternative is. CPython rejects a *bare*-capture all-alternatives
+    shape -- ``case x | y:`` fails with "name capture 'x' makes remaining
+    patterns unreachable" -- but that is not the whole story, and the earlier
+    claim here was too broad. ``case [*cs] | [*cs]:`` followed by another
+    clause **does** compile on CPython 3.12.14, because neither alternative is
+    a bare name capture on its own.
+
+    Such a pattern is still *refutable*: both alternatives are sequence
+    patterns, so a non-sequence subject skips the clause entirely and the
+    capture never runs. The `all(...)` requirement is what makes that fall on
+    the "capture may not have run" side, which keeps a carried suppressor in
+    force rather than retiring a binding nothing made -- the damaging
+    direction this whole issue is about.
+    """
+    if isinstance(pattern, ast.MatchAs):
+        return pattern.pattern is None or _pattern_is_irrefutable(pattern.pattern)
+    if isinstance(pattern, ast.MatchOr):
+        return all(_pattern_is_irrefutable(alternative) for alternative in pattern.patterns)
+    return False
+
+
+def _pattern_binds(pattern, name):
+    """Does ``pattern`` bind ``name`` in any clause it can be selected for?"""
+    for node in ast.walk(pattern):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+    return False
+
+
+def _capture_always_binds(match, name):
+    """Is ``name`` bound by ``match`` on *every* path that reaches it?
+
+    A capture is a side effect of its clause being *selected*, and a clause is
+    only selected when the patterns before it all fail. So a capture is
+    guaranteed to bind only in the one position where nothing can come before
+    it and nothing can stop it:
+
+    * that clause's pattern is irrefutable, so the match cannot fall through
+      to "no clause matched" and a later clause cannot take it instead.
+
+    The last-clause half of that condition is *checked* rather than assumed,
+    but on CPython 3.12.14 it is not independently reachable: a capture in a
+    clause that is followed by another is a compile error whenever the
+    pattern is irrefutable -- ``case _ as cs:`` followed by anything is
+    rejected with "wildcard makes remaining patterns unreachable", a bare
+    ``case cs:`` with "name capture 'cs' makes remaining patterns
+    unreachable", and a bare-name all-alternatives ``case a | b:`` likewise.
+    (A *sequence* capture in every alternative, ``case [*cs] | [*cs]:``,
+    compiles -- but that pattern is refutable, so it does not reach this
+    branch; see :func:`_pattern_is_irrefutable`.) So an irrefutable capture is
+    always the last clause in a program that compiles.
+    The check is kept because it is the *reason* the answer is safe, it costs
+    one comparison, and dropping it would make the function wrong for an AST
+    that ``ast.parse`` accepts even though ``compile`` would not -- which is
+    exactly the input this module is handed.
+
+    A **guard** is deliberately not a condition, because the name is bound as
+    soon as the pattern matches and is never unbound when the guard turns out
+    to be false. That was measured rather than assumed: starting from a
+    pre-existing value, ``case _ as cs if False:`` leaves ``cs`` holding the
+    *subject*, not the value it had before, so a guard cannot undo a binding
+    that has already happened. Treating a guard as a blocker would have retired
+    an alias that the capture really did supersede.
+
+    Anything else is a capture that *may* not have run. That distinction is
+    what #342 is about: retiring a carried alias for a capture that never
+    executed leaves the suppressor in force in reality while the analyzer
+    reports the assert live.
+
+    Measuring all six shipped capture forms against CPython 3.12.14 over ten
+    subjects each, this predicate separates 38 dangerous verdicts from the
+    remainder: without it every refutable shape reported a swallowed assert
+    as enforced, because a no-match subject left the carried suppressor bound
+    and nothing in the walk could see that the capture had not run.
+    """
+    if not match.cases:
+        return False
+    last = match.cases[-1]
+    return _pattern_is_irrefutable(last.pattern) and _pattern_binds(last.pattern, name)
+
+
+def _store_retires(statement, name):
+    """Does this store settle ``name``, or may it simply not have run?
+
+    Every store form the walk collects binds its name whenever control reaches
+    it, and :func:`_resolve_bindings` already separates the ones that can be
+    skipped (``conditional``). A ``match`` capture is the one form that is
+    *always* recorded as unconditional yet can still fail to run, because its
+    clause may not be selected. Left unfiltered it retires a carried alias on
+    a path where the capture never happened, so the stale suppressor reaches
+    the next ``with`` -- and the assert under it is really swallowed, while
+    the analyzer calls it enforced.
+    """
+    return not isinstance(statement, ast.Match) or _capture_always_binds(statement, name)
+
+
+def _entry_may_be_an_unrun_capture(entry):
+    """Is this entry a ``match`` capture that is not guaranteed to have bound?
+
+    The narrow companion to :func:`_store_retires`, asked of a whole
+    ``(statement, value, conditional)`` entry rather than of a statement and a
+    name. It exists because the name is not carried on the entry itself, and
+    the caller that has to decide whether a single competing store is ambiguous
+    only has the entry.
+
+    A ``match`` statement can capture several names, so the name is recovered
+    by asking which of the captures it owns is the one this entry records --
+    a capture that is guaranteed to bind for *some* name is still a capture
+    that may not bind for the name in question, so every owned name is
+    checked and any one of them being undecidable makes the entry so.
+    """
+    statement = entry[0]
+    if not isinstance(statement, ast.Match):
+        return False
+    return not all(
+        _capture_always_binds(statement, name) for name in _match_capture_names_for(statement)
+    )
+
+
+def _match_capture_names_for(statement):
+    """The names a single ``ast.Match`` statement captures."""
+    names = []
+    for node in ast.walk(statement):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+            names.append(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            names.append(node.rest)
+    return names
+
+
 def _assigned_suppressors(function, bound):
     """Map each statement index to the suppressor names bound *by* it.
 
@@ -1002,16 +1153,17 @@ def _store_bindings(function, bound):
     # A `match` capture is the one store form that is not reachable from a
     # statement's target list, so it cannot ride along in the loop above.
     #
-    # `conditional` is False, not True. A `match` clause that matches always
-    # binds the captured name, and a clause that does not match leaves the
-    # previous binding in force -- so from the point of view of "which store
-    # runs last and retires the carried suppressor", a capture is exactly the
-    # unconditional store the supersession rule is built around. Marking it
-    # conditional made it merely *compete* with the earlier walrus instead of
-    # superseding it, so `_resolve_bindings` still resolved the name to the
-    # carried suppressor and a live assert was reported as swallowed.
+    # `conditional` is False only when the capture is *guaranteed* to run --
+    # a last, irrefutable, unguarded clause (`_capture_always_binds`). For the
+    # refutable shapes the capture is marked conditional instead, because a
+    # clause that is not selected never binds anything. Marking those
+    # unconditional (the original #324 behaviour) made the capture supersede
+    # the earlier walrus on every path, so a subject that matched no clause at
+    # all still retired the carried suppressor and reported the assert below it
+    # as live while it was really swallowed. See #342.
     for name, statement in _match_capture_names(function).items():
-        bindings.setdefault(name, []).append((statement, None, False))
+        conditional = not _store_retires(statement, name)
+        bindings.setdefault(name, []).append((statement, None, conditional))
     # A name bound by exactly one readable suppressor is a known alias. A name
     # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
     # and must NOT be resolved by source order. It is recorded as an
@@ -1068,12 +1220,29 @@ def _resolve_bindings(entries, bound, orders):
     competing = [
         entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
     ]
-    if len(competing) > 1:
+    if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
         # `AMBIGUOUS` marker rather than dropped: dropping it would fall back
         # to "this name is not a known suppressor", which reports the assert as
         # *enforced* -- the damaging direction.
+        #
+        # A *single* `match` capture is the #342 case and it is decided the
+        # same way, because the question is identical: the clause may simply
+        # not be selected, so the name at this header is either the captured
+        # value or the one it supersedes. Which is in force is not decidable
+        # from the source, and picking the later store would retire a
+        # suppressor that is still bound on the path that skipped it.
+        # `AMBIGUOUS` keeps the answer on the safe side: the name is treated
+        # as a possible suppressor, so the assert is reported defeated even
+        # though one of the two readings is a live contract.
+        #
+        # A single *non-capture* conditional store is deliberately NOT
+        # ambiguous. A plain `if flag: cs = nullcontext()` supersedes a
+        # carried walrus on the path that runs, and the shipped rows pin the
+        # assert under the following `with` as live. Widening the rule to
+        # every single competing store regressed two of those rows, so the
+        # widening is scoped to captures.
         return AMBIGUOUS_SUPPRESSOR
     # Otherwise nothing competes with anything: the stores that can be last are
     # a single one, so the highest-ordered entry is what the `with` enters.
