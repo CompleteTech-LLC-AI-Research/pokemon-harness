@@ -2376,7 +2376,7 @@ def _entry_is_dead(expression, by_index, index, function, bound):
     if stores is None:
         return False
     kinds = set()
-    for statement, value, _conditional in stores:
+    for statement, value, _conditional, carrier in stores:
         if value is None:
             # A store with no readable right-hand side. Which store it is
             # decides the answer, and each of these cannot leave a usable
@@ -2392,15 +2392,23 @@ def _entry_is_dead(expression, by_index, index, function, bound):
             # the rule cannot read that element without running the loop, so
             # it is declined below rather than assumed.
             #
-            # A `match` capture is excluded outright. It is recorded with no
-            # value because the capture is not reachable from a target list at
-            # all, but the name it binds is whatever was *matched* -- arbitrary,
-            # and very often a real context manager. Reading its missing value
-            # as `None` would claim the later `with cs:` always raises, when the
-            # shipped tests pin the opposite (a capture retires the carried
-            # suppressor and leaves the assert live). That direction is the
-            # safe one, so the rule declines to touch captures.
-            if isinstance(statement, ast.Match):
+            # A `match` capture and a string-field carrier are excluded
+            # outright, by the carrier test below.
+            if carrier is not None:
+                # A binding that carries its name on a *string field* -- a
+                # `match` capture, `import ... as cs`, `def cs`, `class cs` --
+                # is not reachable from a target list, so it is recorded with
+                # no readable value and with the binding node as its carrier.
+                # The value is whatever was matched, imported, defined or
+                # otherwise supplied, and nothing in the syntax says what:
+                # a capture is very often a real context manager, and
+                # `import os as cs` binds the `os` **module**, which is not a
+                # context manager at all. Reading the missing value as `None`
+                # would claim the later `with cs:` always raises, when in the
+                # module case the shipped tests pin the opposite (the carrier
+                # retires the carried suppressor and the assert stays live).
+                # Both directions are undecidable from the value, so the rule
+                # declines to touch carriers rather than guessing.
                 return False
             if isinstance(statement, (ast.For, ast.AsyncFor)):
                 # A loop target binds the *next element* of the iterable, and
