@@ -2610,6 +2610,18 @@ def test_a_block_nested_module_carrier_is_still_declined():
             "    if flag:\n        cs = contextlib.nullcontext()\n    import os as cs\n",
             False,
         ),
+        (
+            "CONTROL an except-as target unbinds rather than supersedes",
+            "import os as cs\nimport contextlib\n",
+            (
+                "    if flag:\n"
+                "        try:\n"
+                "            pass\n"
+                "        except Exception as cs:\n"
+                "            pass\n"
+            ),
+            False,
+        ),
     ],
     ids=[
         "a function-scope carrier superseded by a conditional store",
@@ -2618,6 +2630,7 @@ def test_a_block_nested_module_carrier_is_still_declined():
         "a function-scope carrier superseded by a conditional for-target",
         "CONTROL a function-scope carrier alone is still defeated",
         "CONTROL a conditional store before the carrier is superseded by it",
+        "CONTROL an except-as target unbinds rather than supersedes",
     ],
 )
 def test_a_conditional_function_store_after_a_carrier_is_declined(label, prelude, body, live):
@@ -2651,7 +2664,7 @@ def test_a_conditional_function_store_after_a_carrier_is_declined(label, prelude
     resolves the alias to a suppressor. They are out of scope here and are not
     pinned as fixed, because a fix for this issue does not reach them.
 
-    Two controls, because the guard is an *ordering* test and not a blanket
+    Three controls, because the guard is an *ordering* test and not a blanket
     decline. A carrier on its own is genuinely unenterable and must stay
     ``defeated``; and a conditional store that runs *before* the carrier is
     superseded by it, so that shape is also ``defeated``. Without the second
@@ -2663,6 +2676,15 @@ def test_a_conditional_function_store_after_a_carrier_is_declined(label, prelude
     one puts the conditional store at index 1 and the carrier at index 2, the
     mirror image of the first row, and stays ``defeated`` because the later
     carrier is what is in force at the ``with``.
+
+    The third control pins the ``except ... as cs:`` exclusion, which the
+    guard's own docstring makes part of its contract. ``except ... as`` *unbinds*
+    the name -- CPython deletes it when the handler exits -- so it supersedes
+    nothing and the earlier carrier is what remains in force. Without the
+    ``isinstance(statement, ast.ExceptHandler)`` clause the guard would treat
+    this as a superseding store and decline; measured on this row, deleting the
+    clause flips the verdict from ``defeated`` to ``enforced`` while the whole
+    suite still passes. The row exists so that removal is not silent.
     """
     source = (
         prelude
