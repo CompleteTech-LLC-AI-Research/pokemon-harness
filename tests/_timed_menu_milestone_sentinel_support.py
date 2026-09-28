@@ -2745,7 +2745,7 @@ def _may_bind_something_enterable(statement, value, name=None, bound=None, funct
         # nested store -- is what decides the header.
         return False
     if isinstance(statement, (ast.With, ast.AsyncWith)):
-        return not _with_binds_a_known_non_enterable(statement, value, bound)
+        return not _with_binds_a_known_non_enterable(statement, name, bound)
     # `*cs, = (...)` binds a list. Entering a list raises, so the header cannot
     # run the assert. `_literal_runtime_type` reads the same `ast.Starred` as a
     # `list` for the ordinary store path; the carrier path has to find the
@@ -2790,11 +2790,58 @@ def _store_is_in_scope(statement, function):
     question and answer `defeated` on an assert CPython evaluates. So the
     nested scope is only a real boundary for a name that is *not* declared in
     an enclosing scope from within it.
+
+    A declaration only moves a store out of the nested scope when it targets
+    the scope that actually *owns* the queried carrier. ``global cs`` names the
+    module namespace, so it supersedes a module-level ``cs`` and nothing else:
+
+        def outer(x, flag):
+            import os as cs
+            if flag:
+                def inner():
+                    global cs        # writes the MODULE's cs
+                    cs = contextlib.nullcontext()
+            with cs:                # `outer`'s own local cs -> TypeError
+                assert x != 1
+
+    Here ``outer``'s ``cs`` is a function local, the nested store lands in the
+    module, and the header is entered with the module -- so it raises on both
+    paths and the assert is dead. Reading the ``global`` as if it governed
+    ``outer``'s binding made the checker report that dead assert as live.
+    ``nonlocal`` is the mirror image: it names a *function* scope, so it
+    supersedes a function-scope carrier and says nothing about a module one.
+    The two are told apart by the scope being queried, which is why this test
+    reads ``function`` and not just the store.
+
+    Only the declarations that *govern* the owning scope count. ``ast.walk``
+    descends into scopes of its own, and a declaration in a grandchild says
+    nothing about the store beside it:
+
+        def outer(x, flag):
+            import os as cs
+            if flag:
+                def inner():
+                    cs = contextlib.nullcontext()      # inner's local
+                    def grandchild():
+                        global cs                      # no effect on inner
+            with cs:                                  # still the module
+                assert x != 1
+
+    :func:`_scope_body_nodes` draws the boundary, and it is asked here by
+    iteration rather than by re-walking, so the two rules cannot drift apart
+    on what counts as a nested scope.
     """
     if any(node is statement for node in _scope_body_nodes(function)):
         return True
     owner = _owning_scope_of(statement, function)
-    return owner is not None and _declares_global(owner, _store_target_names_of(statement))
+    if owner is None:
+        return False
+    # `global` and `nonlocal` are told apart by the namespace they name: a
+    # module-level carrier is the one a `global` can supersede, and a
+    # function-scope carrier is the one a `nonlocal` can. Asking the
+    # declaration alone would have each of them claim the other's case.
+    declaration = ast.Global if isinstance(function, ast.Module) else ast.Nonlocal
+    return _declares(owner, _store_target_names_of(statement), declaration)
 
 
 def _target_is_starred(statement, name):
@@ -2880,27 +2927,40 @@ def _nearest_scope_containing(scope, statement):
     return None
 
 
-def _declares_global(scope, names):
-    """Does ``scope`` declare any of ``names`` global (or non-local)?
+def _declares(scope, names, kind):
+    """Does ``scope`` govern its own stores with a ``kind`` declaration?
 
-    ``global`` is the declaration that makes a nested store write to an outer
-    scope's binding, and it is what separates #375's ``_rebind`` -- whose
-    store really does supersede a module carrier -- from a nested ``def``
-    that merely shadows the name.
+    ``global cs`` is the declaration that makes a nested store write to the
+    *module's* binding, and it is what separates #375's ``_rebind`` -- whose
+    store really does supersede a module carrier -- from a nested ``def`` that
+    merely shadows the name. ``nonlocal cs`` does the same for the nearest
+    *enclosing function* instead. The caller picks between them by the scope it
+    is reasoning about, because the two name different namespaces.
 
-    ``nonlocal`` is accepted for the same reason and with the same caveat: it
-    also writes to an enclosing scope rather than to a local, so a store
-    guarded by one is not a nested-scope store either. Neither declaration
-    takes effect unless the name is actually bound somewhere in the scope, so
-    the answer here is the necessary half of the test and the target list is
-    what supplies the other.
+    Only declarations that govern ``scope`` are read. A ``global`` in a nested
+    ``def`` binds that ``def``'s stores, so it has no say over a store sitting
+    in ``scope`` itself -- and ``ast.walk`` cannot draw that line, since it
+    descends straight through the nested scope. :func:`_scope_body_nodes` is
+    the boundary this module draws everywhere else, so it is what asks.
+
+    Neither declaration takes effect unless the name is actually bound
+    somewhere in the scope, so the answer here is the necessary half of the
+    test and the target list is what supplies the other.
     """
     wanted = set(names)
     if not wanted:
         return False
-    for node in ast.walk(scope):
-        if isinstance(node, (ast.Global, ast.Nonlocal)) and wanted.intersection(node.names):
-            return True
+    for node in _scope_body_nodes(scope):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            # `_scope_body_nodes` yields the nested scope and then stops, so
+            # the boundary is already drawn here. Walking *into* it would
+            # re-open the hole this exists to close: a grandchild's
+            # declaration governs the grandchild's own stores, not the
+            # enclosing scope's.
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, kind) and wanted.intersection(child.names):
+                return True
     return False
 
 
@@ -2912,12 +2972,28 @@ def _declares_global(scope, names):
 #: for a closed set of callables whose ``__enter__`` is known to return
 #: ``None``:
 #:
+#: * ``contextlib.suppress.__enter__`` is a bare ``pass``, so the call returns
+#:   ``None`` implicitly however the manager was built.
 #: * ``contextlib.nullcontext.__enter__`` is ``return None`` -- it is
-#:   documented to return None and that is what makes it a *null* context.
-#: * ``contextlib.suppress.__enter__`` (and the ``asyncio`` spelling) is a
-#:   bare ``pass``, so the call returns ``None`` implicitly. These are already
-#:   :data:`SUPPRESSING_CONTEXTS`, which is why the set is spelled in terms of
-#:   them rather than duplicating their names.
+#:   documented to return None and that is what makes it a *null* context --
+#:   but *only* when the manager was built with no ``enter_result``. Given one
+#:   it returns that argument, so the spelling alone does not settle the
+#:   bound value. :func:`_binds_a_null_returning_context` therefore asks about
+#:   the call rather than the name.
+#:
+#: The ``asyncio`` spelling from :data:`SUPPRESSING_CONTEXTS` is deliberately
+#: **not** inherited here, and the reason is a measured one. ``asyncio`` has no
+#: ``suppress`` in CPython 3.12.14, so the name is only ever whatever the
+#: program put there:
+#:
+#:     asyncio.suppress = CM       # `CM.__enter__` returns self
+#:     with asyncio.suppress() as cs:
+#:         pass                    # `cs` is a CM -- `with cs:` enters
+#
+#: A module attribute is rebindable, and reading the spelling as a fixed
+#: ``None``-returning callable excluded a store that really does bind an
+#: enterable value. ``contextlib.suppress`` has no such spelling problem: the
+#: name resolves to the library object.
 #:
 #: Nothing else belongs here. A user-defined ``CM()`` whose ``__enter__``
 #: returns ``self`` is syntactically identical to one that returns ``None``,
@@ -2936,22 +3012,38 @@ def _declares_global(scope, names):
 #: header is declined, which is the direction this module takes when a value
 #: cannot be read: a decline reports the assert live, and calling a live
 #: assert dead is the damaging direction.
-NULL_RETURNING_CONTEXTS = ("contextlib.nullcontext",) + SUPPRESSING_CONTEXTS
+NULL_RETURNING_CONTEXTS = ("contextlib.nullcontext", "contextlib.suppress")
 
 
-def _with_binds_a_known_non_enterable(statement, value, bound=None):
+def _with_binds_a_known_non_enterable(statement, name, bound=None):
     """Does this ``with`` bind a name to a provably non-enterable value?
 
     ``with EXPR as cs:`` binds ``EXPR.__enter__()``. When ``EXPR`` resolves to
-    one of :data:`NULL_RETURNING_CONTEXTS` the bound value is ``None`` and
-    cannot be entered, so the store cannot supersede a carrier with anything
-    enterable and the carrier stays in force. Every other manager -- a custom
-    class, a bare name, an attribute, an opaque helper -- may return an
-    enterable object and is reported as a genuine superseder.
+    one of :data:`NULL_RETURNING_CONTEXTS` -- and binds no ``enter_result`` --
+    the bound value is ``None``, cannot be entered, and so cannot supersede a
+    carrier with anything enterable; the carrier stays in force. Every other
+    manager may return an enterable object and is reported as a genuine
+    superseder.
 
-    ``value`` is the store's recorded right-hand side, which for a ``with`` is
-    ``None`` (the manager, not its ``__enter__`` result, is the item
-    expression), so the context expression is read from ``statement`` itself.
+    Only the item that binds ``name`` is asked about. A ``with`` binds each of
+    its items independently, so a non-enterable *sibling* says nothing about
+    the item the queried name came from:
+
+        with CM() as cs, contextlib.nullcontext() as other:
+            pass
+
+    ``cs`` receives ``CM().__enter__()`` -- a real object -- and ``other``'s
+    ``None`` is not what the header goes on to enter. Reading the whole
+    statement instead of the one item excluded a store that *can* bind an
+    enterable value, which is the damaging direction: a decline reports the
+    assert live, so a dead assert was certified as load-bearing.
+
+    ``contextlib.nullcontext(CM())`` is the same argument one level in. The
+    argument is the value its ``__enter__`` returns, so this call binds
+    ``CM()`` and the header is entered with an object. Only the no-argument
+    spelling returns ``None``, and requiring an empty argument list is what
+    keeps the two apart.
+
     The alias map resolves every spelling: ``contextlib.nullcontext()``,
     ``from contextlib import nullcontext as nc`` and a re-exported attribute
     all collapse to the same dotted path before the comparison.
@@ -2962,12 +3054,42 @@ def _with_binds_a_known_non_enterable(statement, value, bound=None):
     :func:`_store_bindings` only records items that carry an ``optional_vars``.
     """
     for item in statement.items:
-        if item.optional_vars is None:
+        if item.optional_vars is None or name not in _store_target_names([item.optional_vars]):
             continue
-        dotted = _resolved_dotted(item.context_expr, bound or {})
-        if dotted in NULL_RETURNING_CONTEXTS:
+        if _binds_a_null_returning_context(item.context_expr, bound or {}):
             return True
     return False
+
+
+def _binds_a_null_returning_context(expression, bound):
+    """Does ``expression`` call a known ``None``-returning manager outright?
+
+    A call in :data:`NULL_RETURNING_CONTEXTS` binds its manager's
+    ``__enter__`` result, and the manager is only *known* to return ``None``
+    where that is decided by the call itself rather than by an argument:
+
+    * ``contextlib.suppress`` -- and the ``asyncio`` spelling -- has a
+      ``__enter__`` that is a bare ``pass``, so it returns ``None`` however
+      it is called.
+    * ``contextlib.nullcontext`` returns ``None`` only when it is called
+      *without* an ``enter_result``. Given one it returns that argument, so
+      the bound value is whatever the caller passed -- an object, in every
+      case that matters here.
+
+    That is why the argument list is consulted for that one member of the set
+    and not for the other: ``suppress`` takes its exceptions as positional
+    arguments, so requiring an empty argument list would exclude the
+    ``suppress(AssertionError)`` spelling that the other half of this set is
+    there for.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    dotted = _resolved_dotted(expression, bound)
+    if dotted not in NULL_RETURNING_CONTEXTS:
+        return False
+    if dotted == "contextlib.suppress":
+        return True
+    return not expression.args
 
 
 def _stores_of(name, by_index, index, function):

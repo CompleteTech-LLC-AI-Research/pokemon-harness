@@ -2948,6 +2948,89 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         "    import os as cs\n    if flag:\n        def _rebind():\n            nonlocal cs\n            cs = contextlib.nullcontext()\n        _rebind()\n",
         True,
     ),
+    # `global cs` names the *module* namespace, so it cannot supersede a
+    # function-scope carrier -- and this store does not bind a local either,
+    # so the nested scope is a real boundary for it. Reading the declaration
+    # without asking which scope it governs excluded the store, and the
+    # checker answered `enforced` on a header that raises `TypeError` on both
+    # paths. Regression on `bee3e78`; a review finding on #388.
+    (
+        "a global-scoped store in a nested def after a function carrier is defeated",
+        "    import os as cs\n    if flag:\n        def _rebind():\n            global cs\n            cs = contextlib.nullcontext()\n        _rebind()\n",
+        False,
+    ),
+    # The same question asked through a *class* body, so the boundary cannot
+    # be satisfied by special-casing `def` alone. A class body is its own
+    # namespace, so `global cs` there is a module declaration that never
+    # touches `outer`'s local -- third spelling of the same answer.
+    (
+        "a global-scoped store in a nested class body is defeated",
+        "    import os as cs\n    if flag:\n        class C:\n            global cs\n            cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    # A declaration in a scope nested *inside* the owner says nothing about
+    # the store sitting in the owner. `ast.walk` cannot tell them apart, so
+    # this reads `enforced` unless the walk stops at the nested boundary.
+    # Regression on `bee3e78`; a review finding on #388.
+    (
+        "a global declared only in a grandchild does not govern the owner's store",
+        "    import os as cs\n    if flag:\n        def inner():\n            cs = contextlib.nullcontext()\n            def grandchild():\n                global cs\n        inner()\n",
+        False,
+    ),
+    # A `nonlocal` in the grandchild fails the same way, and pins that the
+    # exclusion is not keyed on the declaration being present at all. The
+    # declaration needs a real enclosing binding to name, so `outer` is given
+    # a second local of the same name and `inner` is made to read *that* one
+    # rather than the carrier -- otherwise `nonlocal cs` inside `inner` would
+    # be a `SyntaxError` and the row would test nothing.
+    (
+        "a nonlocal declared only in a grandchild does not govern the owner's store",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        def inner():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            def grandchild():\n"
+            "                nonlocal cs\n"
+            "        inner()\n"
+        ),
+        False,
+    ),
+    # `contextlib.nullcontext(CM())` returns its `enter_result`, so the
+    # header is entered with `CM()` and the assert fires. Excluding every
+    # `nullcontext` call regardless of arguments reported `defeated` on a
+    # live contract. Pre-existing before #388; a review finding on #388.
+    (
+        "a conditional nullcontext-with carrying enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM()) as cs:\n            pass\n",
+        True,
+    ),
+    # The name is bound by a *different* item of the same `with`, so the
+    # non-enterable sibling says nothing about what `cs` received. Searching
+    # the whole statement for a known-`None` manager excluded a store that
+    # binds an enterable value. Pre-existing before #388.
+    (
+        "a conditional with whose nullcontext sibling binds another name is live",
+        "    import os as cs\n    if flag:\n        with CM() as cs, contextlib.nullcontext() as other:\n            pass\n",
+        True,
+    ),
+    # `asyncio` has no `suppress` in CPython 3.12.14, so the name is whatever
+    # the program put there. Inheriting the spelling into the
+    # `None`-returning set excluded a store bound to a real manager. The
+    # rebind is written in the row itself because that *is* the case: a
+    # module attribute can be replaced, and the exclusion has to notice.
+    (
+        "a conditional with on a rebound asyncio-suppress is live",
+        (
+            "    import os as cs\n"
+            "    import asyncio\n"
+            "    asyncio.suppress = CM\n"
+            "    if flag:\n"
+            "        with asyncio.suppress() as cs:\n"
+            "            pass\n"
+        ),
+        True,
+    ),
 )
 
 
@@ -2964,6 +3047,13 @@ def test_a_function_carrier_decline_ignores_non_enterable_stores(label, body, li
     them can leave `cs` bound to something `with` can enter. Counting one of
     them would decline the header, and a decline reports the assert live, so
     the error would be a dead assert certified as load-bearing.
+
+    The `with` exclusion is the narrowest of the four and the rows below it are
+    what keep it narrow: it applies to the item that binds *the queried name*,
+    and only when that item is a `None`-returning call outright. A sibling
+    item's manager, an `enter_result` argument, and a rebound `asyncio` spelling
+    each put an enterable value on the name, and each of those is a row here
+    rather than a gap.
 
     The controls matter as much as the rows. A `with` on a *custom* manager and
     a `nonlocal`-scoped store both leave an enterable value bound to the
@@ -2994,6 +3084,89 @@ def test_a_function_carrier_decline_ignores_non_enterable_stores(label, body, li
         f"{label}: expected verdicts {expected}, got {results}. A store that "
         f"cannot bind an enterable value must not decline the header, and a "
         f"store that can must."
+    )
+
+
+#: #388 review: the ``global``/``nonlocal`` pair, asked from module scope.
+#:
+#: Telling those two declarations apart by the scope they target only works if
+#: the module path is still covered, and the module path is the one the fix
+#: could plausibly have broken: it is what makes #375's `_rebind` shape live.
+#: The function-scope table above cannot reach it -- every row there binds the
+#: carrier *inside* `outer`, which is exactly the case `global cs` does not
+#: reach -- so these rows are written against module-scope sources.
+MODULE_SCOPED_DECLARATION_SHAPES = (
+    (
+        "a module carrier superseded by a global-scoped store is live",
+        (
+            "import os as cs\n"
+            "def _rebind():\n"
+            "    global cs\n"
+            "    cs = contextlib.nullcontext()\n"
+            "_rebind()\n"
+        ),
+        True,
+    ),
+    # The mirror: a `nonlocal` inside a nested def names a *function* scope, so
+    # it cannot supersede a module-level carrier, and the nested def is a real
+    # boundary for it. This is the same pair the function table pins, read from
+    # the other side. The inner `def` reads a *function* local rather than the
+    # module name, because `nonlocal cs` needs a real enclosing function
+    # binding to name -- a `nonlocal` that resolved to the module would be a
+    # `SyntaxError`, and a `global` spelling would be the row above.
+    (
+        "a module carrier is not superseded by a nonlocal-scoped store",
+        (
+            "import os as cs\n"
+            "def _rebind():\n"
+            "    cs = os\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        cs = contextlib.nullcontext()\n"
+            "    inner()\n"
+            "_rebind()\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "live"),
+    MODULE_SCOPED_DECLARATION_SHAPES,
+    ids=[shape[0] for shape in MODULE_SCOPED_DECLARATION_SHAPES],
+)
+def test_a_module_carrier_reads_global_and_nonlocal_apart(label, prelude, live):
+    """``global`` supersedes a module carrier; ``nonlocal`` does not.
+
+    The scope test that keeps a nested store from counting has to let a
+    declaration *through* when the declaration really does name the queried
+    carrier's namespace, or #375's `_rebind` regresses to `defeated` on a live
+    header. Reading the declaration without asking which scope it targets
+    breaks it the other way -- on a function-local carrier, where neither
+    spelling reaches -- which is the other half of the pair.
+
+    Every row is executed, so `live` is held to CPython rather than asserted
+    about the checker.
+    """
+    source = (
+        "import contextlib\n"
+        "import os\n"
+        + prelude
+        + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [live], (
+        f"{label}: expected {[live]}, got {results}. `global` names the module "
+        f"and `nonlocal` names an enclosing function, so exactly one of them "
+        f"can supersede a module-level carrier."
     )
 
 
