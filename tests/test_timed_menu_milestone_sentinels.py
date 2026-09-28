@@ -1637,6 +1637,54 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [False, True],
     ),
+    # #348 follow-on: the store that HAS run is not always the last one
+    # `ast.walk` visits. `ast.walk` is breadth-first, so a store written
+    # directly in the body is recorded before a store nested in an EARLIER
+    # top-level statement. Picking the last recorded entry therefore returns
+    # the nested one, which is stale -- and the verdict it produces is the
+    # damaging one, a live contract reported as defeated.
+    #
+    # Here `if flag:` does not run, so `first` is the `nullcontext()` below
+    # it. `nullcontext()` is a working context manager, so the assert really
+    # runs and is live -- it must be reported enforced. Resolving the chain to
+    # the nested `suppress(...)` instead makes it look swallowed.
+    #
+    # The second assert re-enters `first` directly rather than through the
+    # chain, as the control: the same stale pick governs it, so a rule that
+    # ignored ordering entirely -- returning `entries[-1]` -- would report
+    # that one defeated too, and the fixture would read [False, False].
+    (
+        "a two-hop alias resolves to the store that actually ran, not the last walked",
+        (
+            "    if flag:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "    first = contextlib.nullcontext()\n"
+            "    second = first\n"
+            "    with (cs := second):\n"
+            "        assert x != 1\n"
+            "    with second:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
+    # The same mis-ordering reached through a one-hop alias rather than a
+    # two-hop chain, so pinning only the chain spelling would leave the
+    # direct one unpinned. Both asserts are live for the same reason as the
+    # row above, and both are certified only by picking the store that ran.
+    (
+        "an alias read picks the store that ran even when a nested store was walked later",
+        (
+            "    if flag:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "    first = contextlib.nullcontext()\n"
+            "    alias = first\n"
+            "    with (cs := alias):\n"
+            "        assert x != 1\n"
+            "    with first:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
     # Two walruses of the same name in sequence: the later one supersedes the
     # earlier, so the third assert runs under a `nullcontext` and is live.
     (
