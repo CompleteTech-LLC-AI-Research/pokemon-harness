@@ -2192,6 +2192,466 @@ WALRUS_REBINDING_SHAPES = (
 )
 
 
+#: #359: a ``with``-header bound by a carrier that is not a target.
+#:
+#: Three binding forms bind their name as a *string field* of a node rather
+#: than as a target: ``import os as cs`` (``Import.asname``), ``def cs()`` and
+#: ``class cs``. The name therefore holds a module, a class or a function --
+#: none of which has ``__enter__`` -- so ``with cs:`` raises ``TypeError``
+#: while evaluating the header, before the assert under it is ever reached.
+#:
+#: ``from M import N as cs`` is **not** here. It looks identical but binds an
+#: arbitrary attribute of ``M``; see :data:`UNDECIDABLE_IMPORT_FROM_SHAPES`
+#: and #376.
+#:
+#: This table exists separately from ``WALRUS_REBINDING_SHAPES`` because that
+#: table's fixture *wraps* its rebind in a preceding
+#: ``with (cs := contextlib.suppress(...))``. A carrier row added there is
+#: **vacuous**: the walrus already makes the second assert's verdict
+#: ``[False]``, so deleting the whole carrier implementation leaves the row
+#: green. These rows carry no walrus, so the carrier alone decides the
+#: verdict and the fixture fails if the rule stops reading them.
+#:
+#: ``live`` is the per-row entry contract, held to CPython by
+#: ``_assert_entry_contract`` rather than merely asserted about the checker.
+CARRIER_ONLY_SHAPES = (
+    (
+        "an import-as carrier leaves a module",
+        "    import os as cs",
+        False,
+    ),
+    (
+        "a def carrier leaves a function",
+        "    def cs():\n        pass",
+        False,
+    ),
+    (
+        "a class carrier leaves a class",
+        "    class cs:\n        pass",
+        False,
+    ),
+    (
+        "CONTROL a plain store leaves a real context manager",
+        "    cs = nullcontext()",
+        True,
+    ),
+)
+
+
+#: #359: the same carriers bound at **module** scope.
+#:
+#: A module-scope carrier binds the name for the whole file, so a ``with``
+#: header inside a function reads it as a *free* name. The function-scoped
+#: walk behind :func:`_carrier_runtime_kinds` cannot see it, so before #359
+#: the store table was silent and the header read as ``enforced`` -- on an
+#: assert the interpreter never evaluates. This is the residue that was left
+#: behind when #354's factual claim was refuted and closed.
+#:
+#: These rows are separate from :data:`CARRIER_ONLY_SHAPES` because the name
+#: is bound in a *different scope*, and that is the whole difference: the same
+#: source gives two different verdicts on master depending only on where the
+#: carrier is written. ``MODULE_CARRIER_SHAPES`` is in the module body;
+#: ``CARRIER_ONLY_SHAPES`` is inside the function.
+MODULE_CARRIER_SHAPES = (
+    (
+        "a module-scope import-as carrier leaves a module",
+        "import os as cs",
+        False,
+    ),
+    (
+        "a module-scope def carrier leaves a function",
+        "def cs():\n    pass",
+        False,
+    ),
+    (
+        "a module-scope class carrier leaves a class",
+        "class cs:\n    pass",
+        False,
+    ),
+    (
+        "a later module-scope def supersedes an earlier carrier",
+        "import os as cs\ndef cs():\n    pass",
+        False,
+    ),
+    # --- #359 supersession family -------------------------------------
+    # A name's value is settled by the last *binding*, not the last carrier.
+    # Each row below binds a module-scope carrier and then rebinds the name
+    # to a real `nullcontext()` by a *different* module-level store form.
+    # Because the later store wins at runtime, `with cs:` succeeds and the
+    # assert is live -- but a rule that reads only carriers still sees the
+    # earlier `import os as cs`, reports the name as a module, and answers
+    # `defeated`, dropping a real pinned contract. Master already answers
+    # these correctly, so they are regression rows, not new repairs.
+    (
+        "a later module-scope plain store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "a later module-scope walrus store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\n(cs := contextlib.nullcontext())",
+        True,
+    ),
+    (
+        "a later module-scope tuple-unpack store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs, other = (contextlib.nullcontext(), 2)",
+        True,
+    ),
+    (
+        "a later module-scope annotated store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs: object = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "a later module-scope for-target store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\nfor cs in (contextlib.nullcontext(),):\n    pass",
+        True,
+    ),
+    (
+        "a later module-scope del-then-store supersedes an earlier carrier",
+        "import os as cs\nimport contextlib\ncs = contextlib.nullcontext()\ndel cs\ncs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "CONTROL a module-scope store of a real context manager is live",
+        "import contextlib\ncs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "CONTROL a function-local store shadows the module carrier and is live",
+        "import os as cs",
+        True,
+    ),
+)
+
+#: #376: ``from M import N as cs`` binds an attribute, not a module.
+#:
+#: It looks exactly like ``import os as cs`` -- a name carried in a string
+#: field of an import node -- but the two are not the same claim. ``import
+#: os as cs`` binds the module ``os``, and the language gives that spelling
+#: one meaning. ``from M import N as cs`` binds whatever attribute ``N`` is on
+#: ``M``, and one spelling produces every runtime type (measured):
+#:
+#:     from os import path as cs         -> os.path   a module
+#:     from os import sep as cs          -> os.sep    a str
+#:     from decimal import Decimal as cs -> a class
+#:     from mymod import ctx as cs       -> WHATEVER mymod.ctx is
+#:
+#: The last row is the point. ``mymod.ctx`` is a real ``nullcontext()``, so
+#: ``with cs:`` **succeeds** and the assert is live. Recording the shape as a
+#: module would report that live assert as dead and drop a real pinned
+#: contract -- the damaging direction, introduced by the very rule meant to
+#: fix it. So the rule **declines** it, and the analyzer answers ``enforced``.
+#:
+#: Declining costs the one genuinely dead ``os.path`` row, which is the right
+#: trade: a wrong "dead" is unrecoverable, and a conservative "enforced" is
+#: the same answer master already gave.
+UNDECIDABLE_IMPORT_FROM_SHAPES = (
+    (
+        "an import-from-as binding a module is declined, not guessed",
+        "from os import path as cs",
+    ),
+    (
+        "an import-from-as binding a str is declined, not guessed",
+        "from os import sep as cs",
+    ),
+    (
+        "an import-from-as binding a class is declined, not guessed",
+        "from decimal import Decimal as cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "bind"),
+    UNDECIDABLE_IMPORT_FROM_SHAPES,
+    ids=[shape[0] for shape in UNDECIDABLE_IMPORT_FROM_SHAPES],
+)
+def test_an_import_from_as_is_declined_rather_than_read_as_a_module(label, bind):
+    """``from M import N`` must not be answered as "a module".
+
+    Each row is a real ``import from`` whose bound value is genuinely
+    unenterable, so ``defeated`` would be right for all three -- the same
+    answer ``os.path`` alone would give. The rule declines anyway and so
+    answers ``enforced``: wrong for these three, and the price of not being
+    wrong for the fourth.
+
+    This is not a coverage hole because of the control in
+    :func:`test_an_import_from_as_can_bind_a_real_context_manager`: the same
+    spelling, over a module that exports an actual context manager, is live.
+    A rule answering "module" there would drop a real contract.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n    " + bind + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}: expected the rule to DECLINE, i.e. [True], got {results}. "
+        f"The value bound by `from M import N` is not readable off the syntax."
+    )
+
+
+def test_an_import_from_as_can_bind_a_real_context_manager():
+    """The control that makes the decline above necessary rather than cautious.
+
+    ``mymod.ctx`` is a real ``contextlib.nullcontext()`` instance, so
+    ``from mymod import ctx as cs`` binds an **enterable** value, ``with cs:``
+    succeeds, the assert is live, and the verdict must be ``enforced``.
+
+    Nothing in the source distinguishes this from
+    ``from os import path as cs``, which binds an unenterable module. That is
+    the whole argument for declining the shape: the syntax fixes the value for
+    ``import ... as`` and does not fix it for ``from ... import ... as``.
+
+    Executed rather than asserted about the analyzer, so the row cannot pass
+    by the checker and the claim being wrong together.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    from tests._import_from_carrier_support import ctx as cs\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract("an import-from-as binding a real context manager", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True] -- the assert is live -- got {results}. A rule that "
+        f"answered 'dead' here would drop a real pinned contract."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "bind", "live"),
+    CARRIER_ONLY_SHAPES,
+    ids=[shape[0] for shape in CARRIER_ONLY_SHAPES],
+)
+def test_a_with_header_bound_by_a_carrier_is_dead_entry(label, bind, live):
+    """A module, class or function in a ``with`` header defeats the assert.
+
+    The fixture binds the name in one syntactic form and immediately enters
+    it, with **no** walrus suppressor anywhere -- so the carrier is the only
+    thing that can make the assert unreachable.
+
+    The four carrier rows are dead entry: ``with cs:`` raises ``TypeError``
+    in the header, so the assert under it never runs and reporting it as
+    load-bearing certifies a contract the interpreter never applies. The
+    ``CONTROL`` row binds a real context manager with a plain store and is
+    therefore live, and exists so that the four rows cannot be made to pass
+    by simply declaring every carrier-shaped header dead -- the control is
+    the row that would break under that shortcut.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n" + bind + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    # Two module-level imports precede `def outer`, so it is the last body
+    # node, not `tree.body[1]`.
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The carrier "
+        f"alone decides this verdict, so the two must agree."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "live"),
+    MODULE_CARRIER_SHAPES,
+    ids=[shape[0] for shape in MODULE_CARRIER_SHAPES],
+)
+def test_a_module_scope_carrier_defeats_the_assert_below_it(label, prelude, live):
+    """A carrier bound at module scope defeats an assert in any function.
+
+    The carrier is written in the module body and the assert lives in
+    ``outer``, so the name reaches the ``with`` header as a free name. Nothing
+    inside the function binds it, which is exactly the case the function-scoped
+    walk cannot see.
+
+    The five dead rows are held to CPython by ``_assert_entry_contract``. The
+    two controls pin both ways a carrier must *not* be over-read: a
+    module-scope store of a real context manager is live, and a function-local
+    store shadows the module carrier and is live again. Without the second
+    control a fix that simply declared every free-name header dead would pass.
+
+    The six **supersession** rows are the other direction, and they are
+    regression rows rather than new repairs: master already answers them
+    correctly. Each binds a module-scope carrier and then rebinds the same
+    name with a different module-level store form, so the *last binding* --
+    not the last carrier -- settles the value, and ``with cs:`` succeeds. A
+    rule that reads only carriers still sees the ``import os as cs``, reports
+    the name as a module, and answers ``defeated``, dropping a live contract.
+    They are what keeps the module rule honest about *which* binding wins.
+    """
+    if "shadows" in label:
+        body = "    from contextlib import nullcontext\n    cs = nullcontext()\n"
+    else:
+        body = ""
+    source = (
+        prelude + "\ndef outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A module-scope "
+        f"carrier is a real store that runs at import time, so the header "
+        f"must be judged on it rather than declined."
+    )
+
+
+def test_a_block_nested_module_carrier_is_still_declined():
+    """Pin the *known* limit of the module-scope rule, so it cannot widen silently.
+
+    A carrier written directly in the module body is an unconditional store:
+    it has run by the time any function is entered, so the rule can judge the
+    header on it. A carrier nested in a module-level ``if`` has run only on
+    some paths, and nothing in the syntax says which -- so the rule declines
+    and the answer stays ``enforced``.
+
+    That is the **wrong** answer for this fixture: at runtime ``sys.platform``
+    is truthy, the carrier binds, and ``with cs:`` raises ``TypeError`` before
+    the assert. The row is here precisely because it is wrong, and it is kept
+    out of :data:`MODULE_CARRIER_SHAPES` because that table's ``live`` column is
+    held to CPython and this row must not claim otherwise.
+
+    What the row buys is that the narrowing is *pinned*. If a later change
+    starts reading conditional module bindings as settled, this fails and the
+    widening has to be argued for on its own mutation matrix rather than
+    arriving as a side effect. It is the same reason #359's criterion 3 wants
+    a control: a rule that is merely "conservative" is indistinguishable from
+    one that is broken until something says which it is.
+    """
+    source = (
+        "import sys\n"
+        "if sys.platform:\n"
+        "    import os as cs\n"
+        "def outer(x, flag, helper):\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    # The interpreter half, so the gap is documented as a real one.
+    _assert_entry_contract(
+        "a block-nested module carrier (runtime: unreachable)",
+        source,
+        False,
+        False,
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected the rule to DECLINE a conditional module binding, i.e. "
+        f"[True], got {results}. CPython disagrees on this row (the assert is "
+        f"unreachable), so a change that reads it as settled has to update "
+        f"this test and justify the widening -- not land silently."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "live"),
+    [
+        (
+            "a global rebind run at import time supersedes the carrier",
+            "def _rebind():\n    global cs\n    cs = contextlib.nullcontext()\n_rebind()\n",
+            True,
+        ),
+        (
+            "CONTROL a global rebind that runs before the carrier is superseded by it",
+            "def _rebind():\n    global cs\n    cs = contextlib.nullcontext()\n_rebind()\n",
+            False,
+        ),
+    ],
+    ids=[
+        "a global rebind run at import time supersedes the carrier",
+        "CONTROL a global rebind that runs before the carrier is superseded by it",
+    ],
+)
+def test_a_conditional_module_store_after_a_carrier_is_declined(label, rebind, live):
+    """A carrier followed by a *conditional* store leaves the value undecided.
+
+    ``_stores_of`` keeps only unconditional stores, so an unconditional
+    carrier survives a conditional store that follows it. That is the right
+    answer when the conditional store merely *mentions* the name, but not when
+    it can have replaced the carrier with something enterable:
+
+        import os as cs
+        import contextlib
+        def _rebind():
+            global cs
+            cs = contextlib.nullcontext()
+        _rebind()
+        def outer(x, flag, helper):
+            with cs:            # succeeds: cs is a real nullcontext()
+                assert x != 1   # live
+
+    The store is nested in a function body, so whether it ran is not decidable
+    from the carrier's point of view -- but it *can* have run, and if it did the
+    carrier is stale. Answering from the carrier drops a live assert, so the
+    rule declines instead.
+
+    The control is the same source with the call moved *before* the carrier. A
+    conditional store that precedes the last carrier really is superseded by
+    it, so ``defeated`` is correct there and no decline is warranted. Without
+    the control, a fix that simply declined every shape containing a
+    conditional store would pass.
+
+    This is deliberately not a row in :data:`MODULE_CARRIER_SHAPES`: that
+    table's fixture is ``prelude + "def outer(...)"``, which cannot express a
+    helper *call* between the carrier and the header.
+    """
+    carrier = "import os as cs\nimport contextlib\n"
+    if "before" in label:
+        source = (
+            "import contextlib\n"
+            + rebind
+            + carrier
+            + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+        )
+    else:
+        source = (
+            carrier + rebind + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+        )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A conditional "
+        f"store after the last carrier can have replaced it with an enterable "
+        f"value, so the header must be declined rather than judged on a store "
+        f"that may be stale."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "rebind", "is_async", "second_assert_live"),
     WALRUS_REBINDING_SHAPES,
