@@ -2246,6 +2246,22 @@ CARRIER_UNREACHABLE_ROWS = (
             "    else:\n        import os as cs"
         ),
     ),
+    # A carrier in a *later sibling of the header's own block*, with the
+    # header nested inside that block. Every row above puts the carrier in a
+    # different block from the header; this one puts them in the same one, so
+    # a containment walk over the block finds the carrier and retires the
+    # suppressor -- but the carrier is written *after* the header and has not
+    # run yet. The assert is still swallowed.
+    #
+    # This is the row that makes `_runs_before`'s earlier-sibling scan
+    # load-bearing. Replacing it with whole-block containment returns
+    # `enforced` here while the runtime swallows, which is why the scan cannot
+    # be simplified away. Found in review round 4; the three rows above all
+    # pass under that mutation, so none of them pins it.
+    (
+        "a carrier in a later sibling of the header's own block",
+        "    if flag:\n        with cs:\n            assert x != 1\n        import os as cs",
+    ),
 )
 
 
