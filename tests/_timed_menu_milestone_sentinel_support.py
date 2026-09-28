@@ -447,6 +447,45 @@ _MILESTONES_TREE = None
 #: built once per parsed file and outlives the call.
 _MODULE_FOR_FUNCTION = {}
 
+#: Statements that open a *block* without opening a new name scope. A binding
+#: inside one of these still runs in the module scope, so the module walk has
+#: to descend through them; every other child is either a binding itself or the
+#: body of a nested scope, and neither is descended into.
+_MODULE_LEVEL_BLOCKS = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+    ast.Match,
+)
+
+
+def _block_body(statement):
+    """The statements a block statement runs, in source order.
+
+    ``Try`` and ``Match`` run several bodies, so every one of them is included;
+    a binding in any of them is a module binding on the path that runs. A
+    ``match`` clause is flattened to its statements rather than returned as a
+    ``Case`` node, because ``Case`` is not one of the block types this walk
+    knows how to open -- a ``def`` inside a case is still a module binding on
+    the path that matches, and reading past it reported a header DEAD that
+    CPython enters.
+    """
+    if isinstance(statement, ast.Try):
+        return [*statement.body, *statement.orelse, *statement.finalbody]
+    if isinstance(statement, ast.Match):
+        return [nested for case in statement.cases for nested in case.body]
+    if isinstance(statement, (ast.If, ast.While)):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return list(statement.body)
+    return []
+
 
 def milestones_tree():
     """The parsed milestones module, cached for repeated name resolution."""
@@ -2439,7 +2478,7 @@ def _builtin_constructor_kind(value, function=None):
     ``nullcontext()`` really does return a context manager, and declining to
     read it keeps a live header live.
     """
-    if isinstance(value, ast.Call) and _callee_is_shadowed(value.func, function):
+    if isinstance(value, ast.Call) and _callee_is_shadowed(value.func, function, value):
         return None
     if not isinstance(value, ast.Call):
         # A constructor called with arguments may return a subclass or a
@@ -2490,7 +2529,7 @@ def _name_is_shadowed_in(func, function):
     return False
 
 
-def _callee_is_shadowed(func, function):
+def _callee_is_shadowed(func, function, call=None):
     """Is ``func`` a call target that does not reach the real builtin?
 
     This is the full shadowing question, and it is a strict superset of
@@ -2516,11 +2555,23 @@ def _callee_is_shadowed(func, function):
     scope by some callers -- and a caller that does not know the scope cannot
     prove the name is the builtin either, so it is answered the same
     conservative way rather than as "not shadowed".
+
+    ``call`` is the ``ast.Call`` whose callee ``func`` is, when the caller has
+    it. It only tells the module walk where to stop, so it is optional.
     """
     if isinstance(func, ast.Attribute):
         # `builtins.int` only means the builtin when `builtins` itself is not
-        # rebound, so the question moves to the attribute's own base name.
-        return _callee_is_shadowed(func.value, function)
+        # rebound, so the question moves to the attribute's own base name --
+        # with one exception. `import builtins` is not a *rebinding* of the
+        # name, it is the ordinary import that brings the real module in, and
+        # every other `import x` in the file is exactly the spelling that means
+        # "this is the module named x". Recursing into the attribute's base
+        # therefore made the canonical way of naming a builtin read as
+        # shadowed, and `cs = builtins.list()` came back LIVE where CPython
+        # raises `TypeError`.
+        if isinstance(func.value, ast.Name) and func.value.id == "builtins":
+            return False
+        return _callee_is_shadowed(func.value, function, call)
     if not isinstance(func, ast.Name):
         return False
     if function is None:
@@ -2531,7 +2582,7 @@ def _callee_is_shadowed(func, function):
         return True
     if _name_is_shadowed_in(func, function):
         return True
-    return _module_binds_name(function, func.id)
+    return _module_binds_name(function, func.id, call)
 
 
 def _signature_bound_names(function):
@@ -2556,21 +2607,59 @@ def _signature_bound_names(function):
     return frozenset(names)
 
 
-def _module_binds_name(function, name):
-    """Does the module holding ``function`` bind ``name`` at module scope?
+def _module_binds_name(function, name, call=None):
+    """Does the module holding ``function`` bind ``name`` at module scope, and
+    does that binding run before ``function`` does?
 
     A module-level ``def int(): ...``, ``import int`` or ``int = ...`` rebinds
     the name for every function in the file, and a module-level ``cs = int()``
-    is a real store that has already run by the time any header reads it. The
-    walk descends into module-level blocks -- a binding inside a module-level
-    ``if`` still binds the name whenever that branch is taken -- while a
-    nested ``def``/``class`` *body* stays a separate scope, matching
+    is a real store that has already run by the time any header reads it.
+
+    Two things have to be true, and asking for either alone was a false-live:
+
+    * the binding must be in the **module** scope. This walk starts at the
+      module's own statements, so ``outer``'s own ``def list(): ...`` -- a
+      binding one scope *below* the module -- is never consulted here. Before
+      this walk existed the question was reached through the module, so a
+      function-local definition was answered twice: once correctly by
+      :func:`_name_is_shadowed_in` and once, wrongly, from here.
+    * the binding must come **before the call runs**. A name bound later is
+      not yet bound where the call is evaluated, so the call still reaches the
+      builtin:
+
+          cs = list()             # the builtin -- runs first
+          def list(): return None # too late to matter for the line above
+
+      Reading that ``cs`` as shadowed reported a ``TypeError``-raising header
+      as LIVE. The cut is placed at the earlier of the two relevant points:
+      the module statement holding the call, and the ``def`` that introduces
+      the function. A call inside a function body is only reached once the
+      whole module has executed, so every binding up to its ``def`` counts;
+      a call written at module scope is reached as the module runs, so the
+      statements after it do not count.
+
+    The walk descends into module-level blocks -- a binding inside a
+    module-level ``if`` still binds the name whenever that branch is taken --
+    while a nested ``def``/``class`` *body* stays a separate scope, matching
     :func:`_own_scope_bindings`' discipline.
+
+    ``call`` is the ``ast.Call`` node the question is being asked about, when
+    the caller has it. It only decides *where* the walk stops, so omitting it
+    is safe -- it just falls back to stopping at the function's own ``def``,
+    which is the conservative choice for a function-body call.
     """
     module = _module_for_function(function)
     if module is None:
         return False
-    for statement in getattr(module, "body", []):
+    body = getattr(module, "body", [])
+    for statement in body:
+        if statement is function or _contains(statement, call):
+            # A binding written after this point has not run where the call is
+            # evaluated, and a binding inside the function is not a module
+            # binding at all. The module store itself is the statement that
+            # holds the call, so its own targets are still counted -- the walk
+            # checks the statement before stopping.
+            break
         if any(_names_bound_by_statement(statement, name)):
             return True
         for node in _module_level_bindings(statement):
@@ -2580,9 +2669,38 @@ def _module_binds_name(function, name):
 
 
 def _module_level_bindings(statement):
-    """Bindings inside one module-level statement, excluding nested scopes."""
+    """Bindings inside one module-level statement, excluding nested scopes.
+
+    Only *blocks* are descended into, because a block runs in the scope that
+    encloses it:
+
+        if flag:
+            def list(): return None      # still a module binding
+
+    A nested ``def``/``class`` **body** is a separate scope and is never
+    entered, which is what keeps
+
+        def unrelated():
+            def list(): return None
+
+    from answering for ``list`` at module scope: ``unrelated``'s body binds
+    ``list`` only when ``unrelated`` is called, and nothing here has run it.
+    """
     found = []
-    stack = list(ast.iter_child_nodes(statement))
+    # The statement's own body list, so a block is entered at its statements
+    # rather than at its own child nodes: descending from the block itself
+    # would push its `If.test`/body onto the stack unfiltered, which is how a
+    # `def` inside a module `if` was skipped. A `def`/`class` is not a block, so
+    # this is empty for one and nothing inside it is entered:
+    #
+    #     def unrelated():
+    #         def list(): return None
+    #
+    # `list` is bound in `unrelated`'s locals, when `unrelated` is called.
+    # Descending made the module answer for a name no module store has written,
+    # and read the `TypeError` a real call raises as a callable the header
+    # enters.
+    stack = list(reversed(_block_body(statement)))
     while stack:
         current = stack.pop()
         if isinstance(current, (ast.Lambda,)):
@@ -2608,10 +2726,12 @@ def _module_level_bindings(statement):
         ):
             found.append(current)
             if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                # Its body is a separate scope; only the statement's own name
-                # is a module-level binding.
+                # Recorded for its own name -- `def list()` inside a module
+                # `if` really does bind the module name -- then left alone:
+                # its body is a separate scope.
                 continue
-        stack.extend(ast.iter_child_nodes(current))
+        if isinstance(current, _MODULE_LEVEL_BLOCKS):
+            stack.extend(reversed(_block_body(current)))
     return found
 
 

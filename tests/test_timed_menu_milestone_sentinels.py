@@ -4661,6 +4661,64 @@ SHADOWED_CALLEE_SOURCES = (
         (),
         {"x": 1},
     ),
+    # #388-5d. The positive half of the module-scope rule, and the case a
+    # naive "only descend into plain statements" fix would break: a `def`
+    # inside a module-level `if` is still a **module** binding, because the
+    # block runs in the scope that encloses it. The branch has run by the time
+    # `cs = list()` is evaluated, so the call really is the shadow and the
+    # header really is LIVE. This is what stops the false-lives above from
+    # being "fixed" by simply refusing to look inside any block.
+    (
+        "a module-level if branch defining the shadowing constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x, flag, helper):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "flag": True, "helper": None},
+    ),
+    # #388-5d. The same binding one level deeper: a block inside a block. A
+    # walk that only descends one level reports the name unshadowed and retires
+    # a header CPython enters, so the descent has to be recursive.
+    (
+        "a shadowing constructor defined in a nested module if",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    if True:\n"
+            "        def list():\n"
+            "            return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x, flag, helper):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "flag": True, "helper": None},
+    ),
+    # #388-5d. A `match` clause runs in the scope that encloses it, exactly as
+    # an `if` body does. `Case` is not one of the block shapes the walk opens,
+    # so the clause has to be flattened to its statements; reading past it made
+    # this a false-dead on an earlier draft of the repair.
+    (
+        "a shadowing constructor defined in a module match case",
+        (
+            "from contextlib import nullcontext\n"
+            "match 1:\n"
+            "    case 1:\n"
+            "        def list():\n"
+            "            return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x, flag, helper):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "flag": True, "helper": None},
+    ),
 )
 
 
@@ -4678,6 +4736,126 @@ def _shadowed_callee_reaches_assert(label, source, arguments, keywords):
         f"{label}: the fixture returned normally, so neither the assert nor an "
         f"entry failure was observed and the row proves nothing."
     ) from None
+
+
+#: The round-5 review's findings against `d921aac`, all **false-live**: the tool
+#: reported a header LIVE where CPython raises before the assert. The direction
+#: is the mild one -- a header reported as enterable when it is not -- but these
+#: were *introduced* by the module-scope shadowing that #388-5b added, so they
+#: are regressions against `86fab6d` and had to be repaired.
+#:
+#: Each row is executed first: `x=2` makes `assert x != 1` true, so a clean
+#: return proves the with-body was entered (LIVE) and any exception proves it
+#: was not (DEAD). The expected verdict is DEAD in all four.
+MODULE_SCOPE_FALSE_LIVE_SOURCES = (
+    # #388-5d(f1). `cs = list()` runs BEFORE the `def list()` below it, so the
+    # call is still the real builtin and binds the empty list -- which cannot be
+    # entered. Scanning the whole module regardless of order called the name
+    # shadowed, and a `TypeError`-raising header came back LIVE.
+    (
+        "a module binding that runs after the call",
+        "cs = list()\ndef list():\n    return None\ndef outer(x):\n    with cs:\n        assert x != 1\n",
+    ),
+    # #388-5d(f1b). The same, with the later binding inside a module-level `if`
+    # rather than at the top level. The branch has not run when `cs = list()`
+    # is evaluated, so it does not count either.
+    (
+        "a later module binding inside a module if",
+        (
+            "cs = list()\n"
+            "if True:\n"
+            "    def list():\n"
+            "        return None\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    # #388-5d(f2). `list` is bound in `unrelated`'s LOCALS, when `unrelated` is
+    # called. Nothing has called it, so the module never binds `list` and
+    # `cs = list()` is still the builtin. Descending into a nested function body
+    # read the `TypeError` a real call raises as a callable the header enters.
+    (
+        "a binding in another function's body",
+        (
+            "def unrelated():\n"
+            "    def list(): return None\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    # #388-5d(f2b). A `class` body is a separate scope for the same reason: a
+    # method named `list` does not bind the module name.
+    (
+        "a binding in a class body",
+        (
+            "class Holder:\n"
+            "    def list(self): return None\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    # #388-5d(f3). `import builtins` is the ordinary import that brings the
+    # real module in -- the same `import x` spelling that everywhere else in
+    # this file means "this is the module named x". Treating it as a rebinding
+    # of the name `builtins` made `cs = builtins.list()`, the canonical way of
+    # naming a builtin, read as shadowed.
+    (
+        "a qualified builtin call through the builtins module",
+        "import builtins\ncs = builtins.list()\ndef outer(x):\n    with cs:\n        assert x != 1\n",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    MODULE_SCOPE_FALSE_LIVE_SOURCES,
+    ids=[shape[0] for shape in MODULE_SCOPE_FALSE_LIVE_SOURCES],
+)
+def test_a_name_the_module_does_not_bind_at_call_time_is_reported_dead(label, source):
+    """A name is shadowed only by a module binding that has actually run.
+
+    #388-5d. #388-5b added a module-scope shadowing rule, and reading the whole
+    module without regard to *when* the binding runs, or to *which scope* it is
+    written in, produced false-lives on `d921aac`:
+
+    * a binding written **after** the call, which has not run yet;
+    * a binding inside **another function's** or a **class body**, which binds
+      a local, not the module name;
+    * `import builtins`, which is an ordinary import rather than a rebinding,
+      so the qualified `builtins.list()` was read as shadowed.
+
+    Every row is executed before its verdict is checked, so the DEAD
+    expectation is CPython's own answer rather than an assumption. A row whose
+    fixture turns out to reach the assert fails here rather than passing
+    vacuously.
+    """
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](2)
+    except AssertionError:
+        pytest.fail(
+            f"{label}: CPython reached the assert, so this row cannot pin a DEAD "
+            f"verdict. Either the fixture is wrong or the expectation is."
+        )
+    except (AttributeError, IndexError, KeyError, NameError, TypeError, UnboundLocalError):
+        pass
+    else:
+        pytest.fail(f"{label}: the fixture returned normally, so it proves nothing.")
+
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    assert [_is_enforced(function, asserts[0], tree)] == [False], (
+        f"{label}: expected the header to be reported DEAD. A binding that has "
+        f"not run, or that binds another scope's name, leaves the call reaching "
+        f"the real builtin, and the empty list it returns cannot be entered."
+    )
 
 
 @pytest.mark.parametrize(
