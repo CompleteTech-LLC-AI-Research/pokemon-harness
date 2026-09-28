@@ -179,12 +179,77 @@ because a surviving mutant is a coverage gap, not a pass.
 
 ## Independent review
 
-**Outstanding.** The head must be independently reviewed before merge. The
-author may not approve their own change, and only the lead merges.
+### Round 1 -- `13dd4d9` -- REQUEST CHANGES
+
+`ledger/REVIEW_367_13DD4D9_codex1.md`, reviewer `codex1`, verdict **REQUEST
+CHANGES**.
+
+| finding | severity | disposition |
+|---|---|---|
+| F1 `_runs_before_end_of` judges only the innermost hop | blocking | **repaired** in `99cce88` |
+| F2 all five new fixture rows pass against base | blocking | **already repaired** by the #395 round (`2df00cd`) |
+| F3 the ancestry comment claims every hop, code checks one | non-blocking | **repaired** with F1 |
+
+Reviewer-measured and lead-reproduced:
+
+* Suite reproduced at 391 from JUnit XML; ruff check and format clean;
+  `git diff --check` clean; both ledger SHA-256 hashes match.
+* Mutations **B** and **G** re-run and killed (2 failures among the new rows
+  each), file restored byte-identically.
+* F2 reproduced on `13dd4d9` and **no longer reproduces** at `cf59407`: two
+  rows now fail against `ed9d9b0`, including the loop-`else` row that the
+  reviewer's base run showed passing. The other five rows still pass on base,
+  which is expected -- they pin behaviour base already had.
+
+The reviewer's GitHub access failed, so it could not verify the live PR head or
+read the issue comments. The lead verified both.
+
+### F1 disposition -- repaired, and its second half filed as #397
+
+`_runs_before_end_of` decided settlement from the **last** hop alone, so a
+store under an `if`/loop/`try` *inside* a `with` body was called settled. The
+walk now carries whether **every** edge crossed so far was guaranteed, and
+`_edge_is_guaranteed` names the test in one place.
+
+The reviewer's shape also has a `flag=False` half that this repair does **not**
+and should not change: with `flag` false the branch store never runs, `cs` is
+still the `suppress`, and the assert is swallowed. That disagreement is
+**identical on `ed9d9b0`**, where it arrives by a different route, so it is
+pre-existing rather than a regression from this repair. Filed as **#397**
+rather than folded in, because closing it means treating a single unsettled
+conditional store as ambiguous instead of as a supersession -- which
+contradicts the pinned **#324 criterion 2** row
+(`a later rebind inside an if wins over a carried walrus value`, `[False,
+True]`). That row is analysed statically and pins only the `flag=True` input;
+its `flag=False` input is already wrong on base. Re-deciding an accepted
+criterion is not a repair this PR may make silently.
+
+## Round 3 -- `99cce88` commands and results
+
+    $ python -m pytest tests/test_timed_menu_milestone_sentinels.py \
+                        tests/test_timed_menu_milestones.py -q \
+                        --junitxml=/tmp/fix367_v3.xml
+    393 tests, 0 errors, 0 failures, 0 skipped        (exit 0)
+
+    $ python -m ruff check <both files>            All checks passed!
+    $ python -m ruff format --check <both files>   2 files already formatted
+    $ git diff --check                             clean
+
+Execution probes over the F1 shape, each with its live control, on
+CPython 3.12.14 (`x=2`):
+
+| shape | input | runtime | analyzer | verdict |
+|---|---|---|---|---|
+| `if` branch holding a nested `with` | `flag=False` | SUPPRESSED | DEFEATED | correct (safe) |
+| same | `flag=True` | LIVE | DEFEATED | safe; input-dependent |
+| empty loop | `rows=()` | SUPPRESSED | DEFEATED | correct (safe) |
+| one iteration | `rows=(1,)` | LIVE | DEFEATED | safe; input-dependent |
+| direct `with`-body rebind | -- | LIVE | ENFORCED | **still certified** |
+| plain later store | -- | LIVE | ENFORCED | **still certified** |
 
 ## Next action
 
-Commit, push `fix/367-tied-store-ambiguity`, open the PR for #367, obtain a
-genuine independent review of the exact pushed head, then merge with a
-head-SHA guard after refreshing `origin/master` and re-running the affected
-lane. Close #367 only after the merge is verified on master.
+Push `99cce88`, obtain a fresh independent review of that exact head, then
+merge with a head-SHA guard after refreshing `origin/master` and re-running the
+affected lane. Close #367 only after the merge is verified on master. #397
+stays open and is not closed by this PR.
