@@ -4199,6 +4199,62 @@ DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
         "    class cs:\n        pass",
         "    if flag:\n        first, *cs = pair",
     ),
+    # The rows below are the second review round. The first cut of this repair
+    # declined any conditional store whose value it could not read as a literal,
+    # and that is true too often: a builtin constructor call, an element taken
+    # from a literal container, and a store inside a branch that provably never
+    # runs are each decidable, and declining them reported a dead header live
+    # where CPython raises on every path.
+    (
+        "a builtin constructor call after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = int()",
+    ),
+    (
+        "a builtin constructor call after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = list()",
+    ),
+    (
+        "a builtin constructor with an argument",
+        "    import os as cs",
+        "    if flag:\n        cs = bool(1)",
+    ),
+    (
+        "an element of a literal container",
+        "    import os as cs",
+        "    if flag:\n        cs, other = (None, 1)",
+    ),
+    (
+        "a list-target element of a literal container",
+        "    import os as cs",
+        "    if flag:\n        [cs] = [None]",
+    ),
+    (
+        "a literal element inside a nested pattern",
+        "    import os as cs",
+        "    if flag:\n        cs, (other, third) = (None, (1, 2))",
+    ),
+    (
+        "a loop over a literal container of None",
+        "    import os as cs",
+        "    if flag:\n        for cs in (None,):\n            pass",
+    ),
+    (
+        "a store in a literally false branch",
+        "    import os as cs",
+        "    if False:\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a conjunctively false branch",
+        "    import os as cs",
+        "    if flag and False:\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a false branch after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag and False:\n        cs = nullcontext()",
+    ),
 )
 
 
@@ -4304,7 +4360,7 @@ def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
         # to be able to run the fixture for the entry contract to mean
         # anything. `_assert_entry_contract` calls `outer(1, True, None)`, so
         # the extra names take their defaults.
-        "def outer(x, flag, helper, other=None, pair=(1, 2), first=None, rest=None, a=None, b=None):\n"
+        "def outer(x, flag, helper, other=None, pair=(1, 2), first=None, rest=None, a=None, b=None, third=None):\n"
         + carrier
         + "\n"
         + conditional

@@ -2307,6 +2307,104 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
     }
 )
 
+#: Bare builtin constructors whose result is a value no ``with`` can enter.
+#:
+#: ``cs = int()`` and ``cs = list()`` are decided by the *name being called*,
+#: not by the call being a call. Every entry here is a builtin type object
+#: spelled without a module prefix, so a call of it returns a fresh instance of
+#: the corresponding :data:`NON_CONTEXT_MANAGER_TYPES` entry and nothing else.
+#: Reading these as "a call is a call" reports a dead header as live.
+#:
+#: Only the *unqualified* spellings are listed. ``builtins.int()`` is
+#: recognised separately by :func:`_builtin_constructor_kind`, and a
+#: user-shadowed ``int`` is a different binding entirely -- shadowing is not
+#: modelled here, so the conservative direction is taken for a name this
+#: module cannot prove is the builtin.
+_BUILTIN_CONSTRUCTOR_TYPES = {
+    "int": "int",
+    "float": "float",
+    "complex": "complex",
+    "str": "str",
+    "bytes": "bytes",
+    "bool": "bool",
+    "list": "list",
+    "tuple": "tuple",
+    "set": "set",
+    "frozenset": "frozenset",
+    "dict": "dict",
+    "bytearray": "bytearray",
+    "range": "range",
+}
+
+
+def _builtin_constructor_kind(value):
+    """The type name a zero-argument builtin constructor call produces.
+
+    ``int()`` is decided by the callee's name, so this is the *call* form of
+    :func:`_literal_runtime_type`: a bare ``ast.Name`` callee drawn from
+    :data:`_BUILTIN_CONSTRUCTOR_TYPES`, or the same spelled as ``builtins.int``.
+
+    Returns ``None`` for every other call, so the caller's existing "a call is
+    a call" rule stays in force. That rule is the safe direction: a
+    ``nullcontext()`` really does return a context manager, and declining to
+    read it keeps a live header live.
+    """
+    if not isinstance(value, ast.Call):
+        # A constructor called with arguments may return a subclass or a
+        # different object entirely (``bool(1)`` is still bool, but
+        # ``range(3)`` is a range and ``str(b"")`` is a str, while a future
+        # spelling need not be). The constructors below are read through
+        # :func:`_builtin_constructor_arguments_are_ignorable` instead, which
+        # admits the argument forms that cannot change the result type.
+        return None
+    func = value.func
+    if isinstance(func, ast.Name):
+        kind = _BUILTIN_CONSTRUCTOR_TYPES.get(func.id)
+    elif (
+        isinstance(func, ast.Attribute)
+        and func.attr in _BUILTIN_CONSTRUCTOR_TYPES
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "builtins"
+    ):
+        kind = _BUILTIN_CONSTRUCTOR_TYPES[func.attr]
+    else:
+        return None
+    if kind is None or not _builtin_constructor_arguments_are_ignorable(func, value):
+        return None
+    return kind
+
+
+def _builtin_constructor_arguments_are_ignorable(func, call):
+    """Can these arguments turn the constructor call into a different type?
+
+    ``int()``, ``int("3")`` and ``int(b"\\x03")`` all return an ``int``.
+    ``list()`` and ``list((1, 2))`` both return a ``list``. But ``range(3)``
+    is a ``range`` while ``range()`` is not a range at all, and a *shadowed*
+    ``int`` may be any callable, so the question is asked per name rather than
+    assumed for the whole set.
+
+    :data:`_BUILTIN_CONSTRUCTOR_TYPES` is consulted with that in mind: an
+    entry is only read when its arguments provably cannot select a different
+    type, which is decided here from the constructor's own signature-free
+    property that the accepted arguments are *inputs to a conversion* rather
+    than *selectors of a different class*.
+    """
+    name = func.id if isinstance(func, ast.Name) else func.attr
+    if name == "range":
+        # `range(stop)`, `range(start, stop)` and `range(start, stop, step)`
+        # are all ranges, but `range()` with no argument is a TypeError, so
+        # the call may not run at all -- which leaves the carrier in force.
+        return bool(call.args)
+    # An unpacked argument list may carry anything, including a value that
+    # makes the call fail, so it is treated as unreadable.
+    return not (
+        any(isinstance(argument, ast.Starred) for argument in call.args)
+        or any(
+            isinstance(keyword, ast.keyword) and keyword.arg is None for keyword in call.keywords
+        )
+    )
+    return None
+
 
 def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     """Is the value this ``with`` header binds to ``expression`` unenterable?
@@ -2653,6 +2751,152 @@ def _binds_a_starred_name(statement, name):
     return any(starred(target) for target in statement.targets)
 
 
+def _element_kind_readable_from(statement, value, name):
+    """The type ``name`` receives from a destructuring of a literal container.
+
+    The complement of the "element is unreadable" rule in
+    :func:`_store_may_bind_enterable`. When the right-hand side is a literal
+    container *of literals*, the element this target receives is readable, and
+    declining it reports a dead header as live:
+
+        if flag:
+            cs, other = (None, 1)
+
+    ``cs`` receives ``None``. ``with cs:`` raises ``TypeError`` on both paths,
+    so the assert is dead, but the unreadable-element rule declined and
+    reported it live.
+
+    The target is walked in lockstep with the container's elements, because
+    that is what Python's unpacking does. A star target breaks the lockstep
+    and is answered by :func:`_binds_a_starred_name` before this is reached.
+
+    Returns the element's type name, or ``None`` when the element is not
+    statically readable -- an unreadable element falls back to the caller's
+    "possibly enterable" rule, which is the safe direction.
+    """
+    if not isinstance(statement, ast.Assign) or not isinstance(value, (ast.Tuple, ast.List)):
+        return None
+    elements = list(value.elts)
+    for target in statement.targets:
+        kind = _pattern_kind(target, elements)
+        if kind is not None and _pattern_binds_name(target, name):
+            return kind
+    return None
+
+
+def _pattern_binds_name(target, name):
+    """Does this assignment target list bind ``name``, however deeply nested?"""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_pattern_binds_name(element, name) for element in target.elts)
+    if isinstance(target, ast.Starred):
+        return _pattern_binds_name(target.value, name)
+    return False
+
+
+def _pattern_kind(target, elements):
+    """The type ``target`` receives from ``elements``, or ``None`` if unreadable.
+
+    Walks the assignment pattern in lockstep with the right-hand side's
+    elements, because that is what Python's unpacking does. A star consumes a
+    variable-length run and breaks the lockstep, so it answers ``None`` and is
+    left to :func:`_binds_a_starred_name`. A pattern that runs out of elements
+    raises at runtime, so the verdict is not readable either.
+    """
+    if isinstance(target, ast.Starred):
+        return None
+    if isinstance(target, (ast.Tuple, ast.List)):
+        if any(_pattern_kind(element, elements) is None for element in target.elts):
+            return None
+        consumed = len(target.elts)
+        if consumed > len(elements):
+            return None
+        return "tuple" if isinstance(target, ast.Tuple) else "list"
+    if isinstance(target, ast.Name):
+        return _literal_runtime_type(elements[0]) if elements else None
+    return None
+
+
+def _statement_never_runs(statement, function):
+    """Is this store written inside a branch that provably never executes?
+
+    ``if False: cs = nullcontext()`` never runs its body, so a carrier written
+    earlier is still the settled value and the header still raises. Reading the
+    store as a possible supersession declines the header and reports a dead
+    assert as live, which is the damaging direction.
+
+    The test is the loop spelling and the conjunction spelling of the
+    ``if False:`` defeat the module already closes elsewhere:
+    :func:`_falsy_literal` for a literal-false condition, and
+    :func:`_is_empty_literal_iterable` for a loop over a container that yields
+    nothing. A conjunction counts as false when *any* operand is a literal
+    false, because ``flag and False`` is false for every value of ``flag``.
+
+    Only shapes whose non-execution is decidable from the syntax are matched.
+    A condition this cannot read is treated as possibly-true, which is the
+    conservative direction.
+    """
+    # The recorded statement is the store itself -- the `cs = ...` assignment
+    # inside the branch -- not the branch that encloses it, so the enclosing
+    # blocks are found by walking *out* to the function and asking which of its
+    # bodies contain this statement.
+    for enclosing in _enclosing_blocks(statement, function):
+        if isinstance(enclosing, ast.If) and _condition_is_never_true(enclosing.test):
+            return True
+        if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
+            enclosing.iter
+        ):
+            return True
+    for node in ast.walk(statement):
+        if isinstance(node, ast.If) and _condition_is_never_true(node.test):
+            return True
+        if isinstance(node, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(node.iter):
+            return True
+    return False
+
+
+def _enclosing_blocks(statement, function):
+    """Every block node between ``statement`` and the top of ``function``."""
+    if function is None:
+        return ()
+    found = []
+    for node in ast.walk(function):
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith)):
+            for child in ast.iter_child_nodes(node):
+                if child is statement or _contains(child, statement):
+                    found.append(node)
+                    break
+    return found
+
+
+def _condition_is_never_true(node):
+    """A condition that is false for every binding, so its body never runs."""
+    if _falsy_literal(node):
+        return True
+    if isinstance(node, ast.BoolOp):
+        return any(_condition_is_never_true(value) for value in node.values)
+    return False
+
+
+def _is_bare_name(target, name):
+    """Is this loop target the plain name ``name``, with no unpacking?"""
+    return isinstance(target, ast.Name) and target.id == name
+
+
+def _loop_first_element_kind(iterable):
+    """The type of the first element a literal loop iterable yields, or ``None``.
+
+    ``for cs in (None,):`` yields ``None`` first, so the name holds ``None``
+    and cannot be entered. An empty or non-literal iterable answers ``None``,
+    which leaves the caller's "possibly enterable" rule in force -- the safe
+    direction, since a later element may be a context manager.
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List, ast.Set)) or not iterable.elts:
+        return None
+    return _literal_runtime_type(iterable.elts[0])
+
+
 def _store_may_bind_enterable(entry, name):
     """Could this store leave ``name`` holding something a ``with`` accepts?
 
@@ -2699,6 +2943,13 @@ def _store_may_bind_enterable(entry, name):
     if isinstance(value, str):
         # A carrier: a module, a function or a class, none enterable.
         return False
+    constructor = _builtin_constructor_kind(value)
+    if constructor is not None:
+        # `cs = int()` is decided by the callee, not by the call. Reading every
+        # call as possibly-enterable is right for `nullcontext()` and wrong for
+        # the builtin constructors, so a header the head reported live where
+        # CPython raises `TypeError` on both paths is recovered here.
+        return constructor not in NON_CONTEXT_MANAGER_TYPES
     if _binds_a_starred_name(statement, name):
         # A starred target pins the name to a **list** whatever the elements
         # are, so the right-hand side does not have to be readable at all:
@@ -2718,6 +2969,14 @@ def _store_may_bind_enterable(entry, name):
         # A loop target binds the next element of an iterable this rule cannot
         # read, so it is declined as unreadable below rather than assumed.
         if isinstance(statement, (ast.For, ast.AsyncFor)):
+            # A loop over a *literal* container yields a literal element, so
+            # `for cs in (None,):` binds `None` and `with cs:` raises before
+            # the assert. Declining every loop target left this one reported
+            # live where CPython raises on both paths.
+            if _is_bare_name(statement.target, name):
+                element = _loop_first_element_kind(statement.iter)
+                if element is not None:
+                    return element not in NON_CONTEXT_MANAGER_TYPES
             return True
         return bool(isinstance(statement, ast.Match))
     if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
@@ -2745,6 +3004,9 @@ def _store_may_bind_enterable(entry, name):
         # happened" and returning early for both got that wrong in six
         # fixtures. The starred half is answered above, before the literal
         # checks, because it does not depend on the right-hand side at all.
+        element = _element_kind_readable_from(statement, value, name)
+        if element is not None:
+            return element not in NON_CONTEXT_MANAGER_TYPES
         return True
     kind = _literal_runtime_type(value)
     if kind is None:
@@ -2851,6 +3113,7 @@ def _stores_of(name, by_index, index, function):
         entry[2]
         and not isinstance(entry[0], ast.ExceptHandler)
         and orders[id(entry[0])] > latest
+        and not _statement_never_runs(entry[0], function)
         and _store_may_bind_enterable(entry, name)
         for entry in entries
     ):
