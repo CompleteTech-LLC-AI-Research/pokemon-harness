@@ -22,6 +22,7 @@ backstop that keeps them from being quietly removed.
 import ast
 import asyncio
 import inspect
+import textwrap
 
 import pytest
 
@@ -2422,6 +2423,219 @@ def test_an_unaliased_dotted_import_binds_its_first_component_only():
     bindings, _raw = support._store_bindings(function, None)
     assert "os" in bindings, "import os.path must bind `os`"
     assert "path" not in bindings, "import os.path must not invent a `path` local"
+
+
+#: #354 follow-up: a *carrier* competing with another conditional store must
+#: not turn a live assert into a reported defeat.
+#:
+#: Recording carriers (the `CARRIER_UNENTERABLE_SHAPES` table above) is the
+#: repair #354 asked for, but it introduced a second-order defect. A carrier is
+#: unenterable only when it is the value in force at the header. When it
+#: *competes* with a sibling conditional store, the sibling's path is still
+#: open, and if that path leaves a real context manager bound the assert runs
+#: there:
+#:
+#:     if flag:
+#:         def cs(): pass        # carrier: `TypeError` on entry
+#:     else:
+#:         cs = nullcontext()    # real context manager: the assert RUNS
+#:     with cs:
+#:         assert x != 1         # LIVE whenever `flag` is false
+#:
+#: The two stores share a binding order (both nest inside the same top-level
+#: `if`/loop), so `_resolve_bindings` saw two competing entries and returned
+#: `AMBIGUOUS_SUPPRESSOR` -- the marker for "this name *may* be a suppressor".
+#: `_aliased_suppressions` read that as possible suppression and `_is_enforced`
+#: returned `False`. A genuinely live contract was dropped, and the damage was
+#: introduced by the head that fixed #354, not present in the base (which never
+#: saw the carrier at all).
+#:
+#: Each row's `live` value is read off the interpreter, not asserted from the
+#: checker: the fixture is executed before its verdict is trusted.
+COMPETING_CARRIER_SHAPES = (
+    (
+        "a conditional function carrier loses to a live context manager",
+        """
+        if flag:
+            def cs():
+                pass
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    (
+        "a conditional class carrier loses to a live context manager",
+        """
+        if flag:
+            class cs:
+                pass
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    (
+        "a conditional async function carrier loses to a live context manager",
+        """
+        if flag:
+            async def cs():
+                pass
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    (
+        "a conditional aliased-import carrier loses to a live context manager",
+        """
+        if flag:
+            import os as cs
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    (
+        "a conditional from-import carrier loses to a live context manager",
+        """
+        if flag:
+            from os import path as cs
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    (
+        "a for-else carrier loses to a live context manager",
+        """
+        for item in items:
+            def cs():
+                pass
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    (
+        "a while-else carrier loses to a live context manager",
+        """
+        while flag:
+            def cs():
+                pass
+            flag = False
+        else:
+            cs = nullcontext()
+        """,
+        True,
+    ),
+    # A carrier and a *later* call rebind, in one function, with no branch at
+    # all. The call is unconditional and runs last, so the header is entered
+    # for real -- but the carrier store is recorded too, and a resolution that
+    # counted it as competing would report a defeat.
+    (
+        "a sequential carrier then call rebind stays a live context manager",
+        """
+        def cs():
+            pass
+        cs = nullcontext()
+        """,
+        True,
+    ),
+    # CONTROL. The sibling really is a readable suppressor, so the assert is
+    # defeated on the path that runs it and the carrier's `TypeError` covers
+    # the other path. `False` is correct here, and the row is what proves the
+    # carrier is not simply ignored: a rule that always answered "not a
+    # suppressor" whenever a carrier was present would flip this row.
+    (
+        "CONTROL a carrier competing with a real suppressor stays defeated",
+        """
+        if flag:
+            def cs():
+                pass
+        else:
+            cs = suppress(AssertionError)
+        """,
+        False,
+    ),
+    # CONTROL. Two readable suppressors, no carrier: the pre-existing ambiguity
+    # rule must be untouched by the carrier fix.
+    (
+        "CONTROL two competing suppressors are still ambiguous",
+        """
+        if flag:
+            cs = suppress(AssertionError)
+        else:
+            cs = suppress(AssertionError)
+        """,
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    COMPETING_CARRIER_SHAPES,
+    ids=[shape[0] for shape in COMPETING_CARRIER_SHAPES],
+)
+def test_a_competing_carrier_does_not_defeat_a_live_assert(label, body, live):
+    """A carrier is proof of a *non*-manager, not evidence of suppression.
+
+    #354 follow-up, from the review of ``d6599c9``. When two conditional stores
+    compete and one is a carrier, ``AMBIGUOUS_SUPPRESSOR`` is no longer the
+    safe reading: that marker means "this name *may* be a suppressor", which is
+    only sound while every candidate could be one. A carrier cannot be, so the
+    remaining candidates decide.
+
+    The verdict is taken from the interpreter. The fixture is executed and the
+    assert's fate read off what escapes: an ``AssertionError`` means the assert
+    ran on the live path and the correct answer is ``True``; a ``TypeError``
+    (the carrier path) or no error at all (the suppressor path) means
+    ``False``.
+    """
+    # The row body is a triple-quoted block so the table reads as the code it
+    # is rather than as escaped `\n` runs. `dedent` strips the table's own
+    # indentation and the re-indent puts each statement back inside `outer`,
+    # the same way the other tables in this module build their fixtures.
+    source = (
+        "def outer(x, flag, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        + "\n".join(f"    {line}" for line in textwrap.dedent(body).strip("\n").splitlines())
+        + "\n"
+        + ENTRY
+        + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, want 1"
+
+    # Ground truth by execution, on the same fixture the checker is asked
+    # about. Called with `flag=False` and `items=[]` so the *sibling* path is
+    # the one that runs -- that is the path the analyzer must not write off.
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, False, [])
+    except AssertionError:
+        observed = True
+    except (TypeError, UnboundLocalError, NameError):
+        observed = False
+    else:
+        observed = False
+
+    assert observed is live, (
+        f"{label}: the interpreter disagrees with the row. "
+        f"{'AssertionError escaped' if observed else 'the assert never ran'}, "
+        f"so the correct verdict is {live}."
+    )
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [live], (
+        f"{label}: expected the analyzer to report {[live]}, got {results}. "
+        f"A carrier competing with a live context manager must not certify a "
+        f"genuinely live assert as defeated -- that drops a real contract."
+    )
 
 
 @pytest.mark.parametrize(

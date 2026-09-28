@@ -1326,6 +1326,37 @@ def _resolve_bindings(entries, bound, orders):
         # assert under the following `with` as live. Widening the rule to
         # every single competing store regressed two of those rows, so the
         # widening is scoped to captures.
+        # #354 follow-up (review of d6599c9): a carrier is not evidence of
+        # suppression, it is evidence to the CONTRARY. `AMBIGUOUS` means "this
+        # name may be a suppressor", and that is only a safe reading while
+        # every candidate could be one. A `def`/`class`/`import` pins the name
+        # to something that is provably NOT a context manager, so it cannot be
+        # part of that "may be":
+        #
+        #     if flag:
+        #         def cs(): pass
+        #     else:
+        #         cs = nullcontext()
+        #     with cs:
+        #         assert x != 1        # LIVE whenever `flag` is false
+        #
+        # Reporting that as a defeat drops a real contract, which is the
+        # damaging direction. Base got it right only because it never saw the
+        # carrier, so the head introduced the error.
+        #
+        # So the carrier is weighed on its own: if some *other* candidate
+        # really is a readable suppressor then the assert is dead on every
+        # path (the carrier path raises `TypeError` before the assert, the
+        # suppressor path swallows it) and the defeat is correct. If none is,
+        # then some path leaves a working context manager in the name, the
+        # assert runs there, and the honest answer is "not a suppressor" --
+        # the same answer the single-candidate case gives.
+        carrier = _competing_carrier(competing)
+        has_other_suppressor = carrier is not None and any(
+            entry is not carrier and _is_readable_suppressor(entry[1], bound) for entry in competing
+        )
+        if carrier is not None and not has_other_suppressor:
+            return None
         return AMBIGUOUS_SUPPRESSOR
     # Otherwise nothing competes with anything: the stores that can be last are
     # a single one, so the highest-ordered entry is what the `with` enters.
@@ -2406,6 +2437,34 @@ def _carrier_runtime_kind(value):
         return "class"
     if isinstance(value, (ast.Import, ast.ImportFrom)):
         return "module"
+    return None
+
+
+def _competing_carrier(competing):
+    """The first of ``competing`` that a ``def``/``class``/``import`` pins.
+
+    #354 follow-up. A *carrier* is a store whose right-hand side is fixed by
+    its syntax to something that is provably not a context manager. When two
+    conditional stores compete for a name and one of them is a carrier, the
+    usual "this name may be a suppressor" reading is no longer safe: the
+    carrier is proof the *other* path is the only one that can be live.
+
+        if flag:
+            def cs(): pass          # carrier
+        else:
+            cs = nullcontext()      # a real context manager
+        with cs:
+            assert x != 1           # LIVE whenever `flag` is false
+
+    Returns the entry itself (not its value) so the caller can ask whether any
+    *other* candidate is a readable suppressor, and ``None`` when no candidate
+    is a carrier. The first carrier is enough: callers only need to know
+    whether one exists, and a name cannot be bound by two different carriers on
+    the same path without the later one superseding the earlier anyway.
+    """
+    for entry in competing:
+        if _carrier_runtime_kind(entry[1]) is not None:
+            return entry
     return None
 
 
