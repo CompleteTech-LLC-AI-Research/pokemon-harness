@@ -928,7 +928,18 @@ RESIDUAL_DEFEAT_SHAPES = (
     # A module used as a context manager is not a suppressor. This is the
     # control for SUPPRESSOR_SPELLINGS: taking every component of the dotted
     # path would put `contextlib` in the set and fire here.
-    ("module object as a context manager", "    with contextlib:\n        assert x != 1", True),
+    #
+    # #354 corrected the expected verdict on this row. It was pinned `True`
+    # -- "enforced" -- but a module implements neither `__enter__` nor
+    # `__exit__`, so `with contextlib:` raises `TypeError` while entering and
+    # the assert never runs. Executed on the pinned interpreter the failure is
+    # a `TypeError`, not an escaping `AssertionError`, so the correct verdict
+    # is *not enforced* (`False`). This is a correction of a wrong pin, not a
+    # weakening: the row's control over `SUPPRESSOR_SPELLINGS` is checked by
+    # `_module_is_not_read_as_a_suppressor_spelling`, which reads the
+    # suppressor-name table directly and so keeps covering the misspelled
+    # version of this row, which is now the row that is actually live.
+    ("module object as a context manager", "    with contextlib:\n        assert x != 1", False),
 )
 
 
@@ -2190,6 +2201,227 @@ WALRUS_REBINDING_SHAPES = (
         False,
     ),
 )
+
+
+class _ContextManager:
+    """A minimal enterable object, for the control row's ground truth."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _returns_context_manager():
+    """A real context manager, so the call-binding control's "live" is a fact.
+
+    The control row binds ``cs = helper()``. Whether the analyzer may read a
+    call is exactly the question that row asks, so the interpreter needs a
+    ``helper`` that genuinely returns something enterable -- otherwise "live"
+    would be an accident of the fixture rather than a property of the shape.
+    """
+
+    return _ContextManager()
+
+
+#: The prelude every #354 fixture needs: the spelling table's own imports, so
+#: a control row can bind `nullcontext()` and a defect row can bind a carrier
+#: without any row having to add an import of its own.
+CARRIER_PREAMBLE = "    import contextlib\n    from contextlib import suppress, nullcontext\n"
+
+
+#: The ``with`` header and the assert under it. Kept beside the prelude so a
+#: control row may bind a *different* name and name it in its own entry block.
+ENTRY = "    with cs:\n        assert x != 1"
+
+
+#: #354: a ``def``, a ``class`` and an ``import`` bind a name to an object
+#: that is not a context manager, so a ``with`` header naming it raises
+#: ``TypeError`` while entering and the assert beneath it never runs.
+#:
+#: These are the shapes the shipped tables could not see. A function, a class
+#: and a module all bind a name, but none of them is an ``ast.Assign``, so the
+#: store walk never recorded them: the header was never judged unenterable and
+#: the assert was reported ``enforced`` on a header that raises. That is the
+#: damaging direction -- a disarmed contract certified as load-bearing.
+#:
+#: Each row is executed before its verdict is trusted. The defect rows expect
+#: ``False`` because the header raises before the assert is evaluated; the two
+#: control rows expect ``True`` and are what prove the rule is not simply
+#: reporting every unenterable-looking header as dead.
+#:
+#: The fourth element is the ``with`` block a row is judged through, and it
+#: is per-row because two rows bind a name other than ``cs``. One fixed block
+#: would leave ``cs`` unbound in those two, and their ``UnboundLocalError``
+#: reads as the same ``False`` the defect rows expect -- so they would pass
+#: without ever proving that a real context manager stays live.
+#:
+#: The walrus-rebinding table is deliberately not reused here. Its rows all
+#: begin with a carried walrus, and the retirement half of that contract
+#: already answers ``False`` on every binding form -- so those rows pass with
+#: or without #354's repair and cannot detect it. That was measured, not
+#: assumed: see the mutation note in the report.
+CARRIER_UNENTERABLE_SHAPES = (
+    (
+        "a function definition is not a context manager",
+        "    def cs():\n        pass",
+        False,
+        ENTRY,
+    ),
+    (
+        "a class definition is not a context manager",
+        "    class cs:\n        pass",
+        False,
+        ENTRY,
+    ),
+    (
+        "an aliased import binds a module, which is not a context manager",
+        "    import os as cs",
+        False,
+        ENTRY,
+    ),
+    (
+        "an aliased from-import binds a module, which is not a context manager",
+        "    from os import path as cs",
+        False,
+        ENTRY,
+    ),
+    (
+        "an unaliased import binds the module's own name",
+        "    import os",
+        False,
+        "    with os:\n        assert x != 1",
+    ),
+    (
+        "an unaliased dotted import binds its FIRST component, not its last",
+        "    import os.path",
+        False,
+        "    with os:\n        assert x != 1",
+    ),
+    (
+        "an async function definition is not a context manager",
+        "    async def cs():\n        pass",
+        False,
+        ENTRY,
+    ),
+    (
+        "two aliases in one import bind the same name once",
+        "    import os as cs, sys as cs",
+        False,
+        ENTRY,
+    ),
+    # CONTROL. `nullcontext` IS a context manager, so the header succeeds and
+    # the assert runs for real. If the repaired rule reported every carrier as
+    # dead, this row would flip to False and fail.
+    (
+        "CONTROL a nullcontext binding is still a live context manager",
+        "    cs = nullcontext()",
+        True,
+        ENTRY,
+    ),
+    # CONTROL. A plain call binding is left alone -- `helper()` may well return
+    # a real context manager and the rule cannot read a call.
+    (
+        "CONTROL a call binding is not readable and is left alone",
+        "    cs = helper()",
+        True,
+        ENTRY,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected", "entry"),
+    CARRIER_UNENTERABLE_SHAPES,
+    ids=[shape[0] for shape in CARRIER_UNENTERABLE_SHAPES],
+)
+def test_a_carrier_that_is_not_a_context_manager_leaves_the_assert_unreachable(
+    label, body, expected, entry
+):
+    """A ``with`` header bound to a non-manager must not certify a dead assert.
+
+    #354. The verdict is taken from the interpreter, not from the checker: the
+    fixture is executed and the assert's fate is read off what actually
+    escapes. A ``TypeError`` on entry means the assert never ran, so it is not
+    a contract and the answer is ``False``. An escaping ``AssertionError``
+    means it did run, and the answer is ``True``.
+    """
+    # The carrier rows bind `cs`, but the last two control rows bind other
+    # names, so the entry block is part of each row rather than fixed. Writing
+    # it once here would have made those two controls test nothing: `cs` would
+    # be an unbound local in their fixture, the call to `outer` would die on
+    # `UnboundLocalError`, and `live` would come back `False` -- which is the
+    # defect rows' own expected value, so the controls would have passed
+    # without ever proving that a real context manager stays live.
+    source = "def outer(x, flag, helper, items):\n" + CARRIER_PREAMBLE + body + "\n" + entry + "\n"
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, want 1"
+
+    # Ground truth by execution, on the same fixture the checker is asked about.
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, False, _returns_context_manager, [])
+    except AssertionError:
+        # The assert ran and its failure escaped: a real contract.
+        live = True
+    except TypeError:
+        # The header could not be entered, so the assert never ran. This is a
+        # different state from "swallowed" and it must be read as its own
+        # outcome -- conflating the two is how a correct repair gets read as a
+        # regression.
+        live = False
+    else:
+        live = False
+
+    assert live is expected, (
+        f"{label}: the interpreter disagrees with the row. The header "
+        f"{'raised before the assert ran' if not live else 'let the assert run'}, "
+        f"so the correct verdict is {expected}."
+    )
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [expected], (
+        f"{label}: expected the analyzer to report {[expected]}, got {results}. "
+        f"Reporting `enforced` for a header that raises on entry certifies a "
+        f"disarmed contract as load-bearing."
+    )
+
+
+def test_a_module_name_is_not_a_suppressor_spelling():
+    """``SUPPRESSOR_SPELLINGS`` must name suppressors, not module components.
+
+    #354. The "module object as a context manager" row stopped being a control
+    for this rule when its verdict was corrected to ``False`` -- the assert
+    beneath ``with contextlib:`` is genuinely unreachable, so the row now
+    reports the unenterable header rather than the spelling table. The control
+    therefore has to be asserted directly, or a future change that widened
+    ``SUPPRESSOR_SPELLINGS`` to every component of a dotted path would put
+    ``contextlib`` in the set and quietly mark live asserts dead.
+    """
+    assert "contextlib" not in support.SUPPRESSOR_SPELLINGS
+    assert "asyncio" not in support.SUPPRESSOR_SPELLINGS
+    # ...and the components that ARE suppressors stay, so this is a check on
+    # the widening and not a table that has been emptied.
+    assert "suppress" in support.SUPPRESSOR_SPELLINGS
+
+
+def test_an_unaliased_dotted_import_binds_its_first_component_only():
+    """``import a.b`` binds ``a``; a walk reading the last component invents one.
+
+    #354. The carrier store walk records whatever an ``import`` binds so the
+    name can be judged unenterable. Getting the bound name wrong is the
+    damaging direction: recording ``path`` for ``import os.path`` would let a
+    ``with path:`` header be answered ``False`` from a binding that does not
+    exist, certifying an assert as dead on a line that raises ``NameError``
+    instead -- and it would look like the repair working.
+    """
+    function = ast.parse("def outer():\n    import os.path\n").body[0]
+    bindings, _raw = support._store_bindings(function, None)
+    assert "os" in bindings, "import os.path must bind `os`"
+    assert "path" not in bindings, "import os.path must not invent a `path` local"
 
 
 @pytest.mark.parametrize(

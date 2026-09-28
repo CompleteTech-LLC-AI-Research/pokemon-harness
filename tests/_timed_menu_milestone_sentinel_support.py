@@ -1149,6 +1149,62 @@ def _store_bindings(function, bound):
             # earlier binding of that name.
             targets = list(statement.targets)
             value = None
+        elif statement is not function and isinstance(
+            statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            # `ast.walk` yields `function` itself first, and a `FunctionDef`
+            # branch would otherwise match it -- the function under analysis is
+            # not a store *of* itself. Every other branch is safe from this
+            # because no node type it matches can be the enclosing function.
+            #
+            # #354: a `def` or `class` statement binds its own name to a
+            # function or a class object. Neither implements the context
+            # manager protocol, so a later `with cs:` raises `TypeError` while
+            # entering and the assert under it never runs -- yet the name was
+            # invisible to the store walk, so the assert was certified
+            # `enforced`. This is the damaging direction: a disarmed contract
+            # reported as load-bearing.
+            #
+            # The value is the class *statement* itself, which
+            # `_carrier_runtime_kind` reads to produce "function"/"class".
+            # It is deliberately not `None`: a `None` value means "a store with
+            # no readable right-hand side", and #342's capture work and
+            # `ExceptHandler` both depend on that distinction.
+            targets = [ast.Name(id=statement.name, ctx=ast.Store())]
+            value = statement
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            # #354: `import os as cs` and `from os import path as cs` bind the
+            # name to a *module*, which is likewise not a context manager.
+            #
+            # The two statements bind different things, and conflating them
+            # invents a name that does not exist:
+            #
+            #   import os.path      binds `os`   -- the TOP component
+            #   from os import path binds `path` -- the imported name
+            #
+            # `import a.b` only puts `a` in the local namespace; `b` is an
+            # attribute of it. Reading the last component here would record a
+            # `path` store that never happens, and a header naming it would
+            # then be answered from a binding the runtime does not have.
+            #
+            # The value is the whole statement so `_carrier_runtime_kind` can
+            # see which spelling was used, but only the names it actually
+            # binds are recorded.
+            for alias in statement.names:
+                if alias.name == "*":
+                    # `from os import *` binds whatever the module exports,
+                    # which is not knowable from this syntax. It cannot name a
+                    # single store, so nothing is recorded; reading it as a
+                    # name called `*` would invent a binding.
+                    continue
+                if isinstance(statement, ast.Import):
+                    bound_name = alias.asname or alias.name.partition(".")[0]
+                else:
+                    bound_name = alias.asname or alias.name
+                bindings.setdefault(bound_name, []).append(
+                    (statement, statement, statement not in function.body)
+                )
+            continue
         else:
             continue
         # A store written directly in the function body runs on every path;
@@ -2198,7 +2254,25 @@ def _entered_suppressions(node, bound):
 #: header, before the body runs, so an assert in that body is unreachable
 #: (#336).
 NON_CONTEXT_MANAGER_TYPES = frozenset(
-    {"NoneType", "bool", "int", "float", "complex", "str", "bytes", "list", "tuple", "set", "dict"}
+    {
+        "NoneType",
+        "bool",
+        "int",
+        "float",
+        "complex",
+        "str",
+        "bytes",
+        "list",
+        "tuple",
+        "set",
+        "dict",
+        # #354: a `def`, a `class` and an `import` bind a name to a function,
+        # a class or a module. None of the three implements `__enter__`, so
+        # entering one raises `TypeError` and the assert never runs.
+        "function",
+        "class",
+        "module",
+    }
 )
 
 
@@ -2277,6 +2351,15 @@ def _entry_is_dead(expression, by_index, index, function, bound):
                 return False
             kinds.add("NoneType")
             continue
+        # #354: a `def`/`class`/`import` carrier is pinned by its syntax to a
+        # function, a class or a module. It is decidable without evaluating
+        # anything, which is why it is answered here rather than declined the
+        # way a call is. Checked BEFORE the literal test below, because the
+        # recorded value is the statement, not a literal.
+        carrier = _carrier_runtime_kind(value)
+        if carrier is not None:
+            kinds.add(carrier)
+            continue
         if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
             # A call is a call: `nullcontext()` returns a real context manager
             # and must not be read as a non-manager here.
@@ -2297,6 +2380,33 @@ def _entry_is_dead(expression, by_index, index, function, bound):
         kinds.add(kind)
     kinds.discard("element")
     return bool(kinds) and kinds <= NON_CONTEXT_MANAGER_TYPES
+
+
+def _carrier_runtime_kind(value):
+    """The runtime type a *carrier* statement pins its name to, or ``None``.
+
+    #354. A ``def``, a ``class`` and an ``import ... as`` each bind their name
+    to an object that is not a context manager, so a later ``with cs:`` raises
+    ``TypeError`` on entry and the assert beneath it never runs. The three
+    value forms below are recognised by their AST node type, which the syntax
+    fixes exactly -- there is no call to evaluate and no inference to guess at.
+
+    Returns ``"function"``, ``"class"`` or ``"module"``, all of which are in
+    :data:`NON_CONTEXT_MANAGER_TYPES`. Anything else returns ``None`` so the
+    caller leaves the store alone.
+
+    A ``match`` capture is deliberately *not* handled here. What a capture
+    binds is whatever was matched -- very often a real context manager -- so
+    reading it as a carrier would claim a live assert is dead. That is #342's
+    scope, and #345 owns it.
+    """
+    if isinstance(value, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return "function"
+    if isinstance(value, ast.ClassDef):
+        return "class"
+    if isinstance(value, (ast.Import, ast.ImportFrom)):
+        return "module"
+    return None
 
 
 def _literal_runtime_type(value):
