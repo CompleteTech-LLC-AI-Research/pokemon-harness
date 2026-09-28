@@ -441,6 +441,12 @@ def _swallows_assertion_error(handler):
 
 _MILESTONES_TREE = None
 
+#: ``id(function) -> module tree or None``. Memoises the module a function was
+#: defined in, which :func:`_module_binds_name` needs per condition and which
+#: costs a full tree walk to answer. Keyed by node identity because the AST is
+#: built once per parsed file and outlives the call.
+_MODULE_FOR_FUNCTION = {}
+
 
 def milestones_tree():
     """The parsed milestones module, cached for repeated name resolution."""
@@ -1110,7 +1116,7 @@ def _assigned_suppressors(function, bound):
             seen = [entry for entry in entries if orders[id(entry[0])] <= index]
             if not seen:
                 continue
-            value = _resolve_bindings(seen, bound, orders)
+            value = _resolve_bindings(seen, bound, orders, function)
             if value is not None:
                 assigned.setdefault(index, {})[name] = value
     # The raw table has to be built for the whole function, not assembled as
@@ -1305,11 +1311,13 @@ def _store_bindings(function, bound):
     return bindings, raw_values
 
 
-def _resolve_bindings(entries, bound, orders):
+def _resolve_bindings(entries, bound, orders, function=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
     ``entries`` are ``(statement, value, conditional)`` triples, already
     filtered to the stores that run at or before the ``with`` in question.
+    ``function`` is the scope they belong to, needed to tell a real builtin
+    from a name the function rebinds.
     """
     # An unconditional store runs on *every* path, so the last one of those is
     # the value in force unless some conditional store comes after it. Only the
@@ -1346,22 +1354,27 @@ def _resolve_bindings(entries, bound, orders):
     # manager whenever the loop runs. The target is dropped from the competing
     # set when its own body rebinds the name, leaving the body's store as the
     # single conditional binding -- which supersedes the carried carrier.
-    body_rebound_targets = {
-        id(entry[0].target)
-        for entry in competing
-        if isinstance(entry[0], (ast.For, ast.AsyncFor))
-        and isinstance(entry[0].target, ast.Name)
-        and _loop_body_rebinds_the_name(entry[0], entry[0].target.id)
-    }
-    if body_rebound_targets:
-        competing = [
-            entry
-            for entry in competing
-            if not (
-                isinstance(entry[0], (ast.For, ast.AsyncFor))
-                and id(entry[0].target) in body_rebound_targets
-            )
-        ]
+    #
+    # The collapse is only sound while the body's own store is what actually
+    # answers the header, and that store is not always readable. Dropping the
+    # target while the body binds `contextlib.suppress(AssertionError)` and
+    # then answering from the *target* retired a suppressor that is really in
+    # force on the path where the loop runs:
+    #
+    #     cs = None
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = contextlib.suppress(AssertionError)
+    #
+    # Once the target is out of the competing set, the body's store is the one
+    # answer, so the collapse is kept only when the body's last rebind is a
+    # store this can read. An unreadable one leaves the target in place, and
+    # the two competing bindings are then reported ambiguous -- which is the
+    # safe direction, because the name is genuinely a suppressor on the path
+    # where the loop runs.
+    collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
+    if collapsed:
+        competing = collapsed_entries
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
@@ -1388,7 +1401,24 @@ def _resolve_bindings(entries, bound, orders):
         return AMBIGUOUS_SUPPRESSOR
     # Otherwise nothing competes with anything: the stores that can be last are
     # a single one, so the highest-ordered entry is what the `with` enters.
-    last = max(entries, key=lambda entry: orders[id(entry[0])])[1]
+    #
+    # The sort runs over the *surviving* candidates, not over every entry. A
+    # loop target that its own body rebinds shares the body's source order --
+    # both are ordered by the top-level `for` that contains them -- so taking
+    # the maximum over all entries let the retired target win a tie it should
+    # not have been in, and the suppressor stored by the body was dropped in
+    # favour of the element the target yielded:
+    #
+    #     cs = None
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = contextlib.suppress(AssertionError)
+    #
+    # The collapse above is what makes the body's store the only candidate, so
+    # the candidate set has to be the same one the collapse produced. Reading
+    # `entries` here reinstated the very binding that was just retired.
+    candidates = competing if competing else entries
+    last = max(candidates, key=lambda entry: orders[id(entry[0])])[1]
     return last if _is_readable_suppressor(last, bound) else None
 
 
@@ -2409,11 +2439,7 @@ def _builtin_constructor_kind(value, function=None):
     ``nullcontext()`` really does return a context manager, and declining to
     read it keeps a live header live.
     """
-    if (
-        isinstance(value, ast.Call)
-        and function is not None
-        and _name_is_shadowed_in(value.func, function)
-    ):
+    if isinstance(value, ast.Call) and _callee_is_shadowed(value.func, function):
         return None
     if not isinstance(value, ast.Call):
         # A constructor called with arguments may return a subclass or a
@@ -2462,6 +2488,193 @@ def _name_is_shadowed_in(func, function):
             if bound:
                 return True
     return False
+
+
+def _callee_is_shadowed(func, function):
+    """Is ``func`` a call target that does not reach the real builtin?
+
+    This is the full shadowing question, and it is a strict superset of
+    :func:`_name_is_shadowed_in`. That helper only ever looked inside the
+    function's *body*, which missed the two bindings that are not written in
+    the body at all:
+
+    * a **parameter** -- ``def f(int=None): cs = int()`` binds ``int`` for the
+      whole call, so the call is whatever the caller passed. Reading it as the
+      builtin ``int`` reports ``cs`` as a zero that cannot be entered;
+    * a **module-level** binding -- ``def int(): ...`` at module scope binds
+      ``int`` for every function in the file, and a module-level
+      ``cs = int()`` is a store that has already run by the time any header
+      reads it.
+
+    Both were read as the builtin, so a header CPython enters was reported
+    dead. A parameter or a module binding can only make the call *less*
+    determinate, so the answer here is always the conservative one: treat the
+    callee as shadowed and let the caller's ordinary "a call is a call" rule
+    keep the header live.
+
+    ``function`` may be ``None`` -- the condition path is handed no enclosing
+    scope by some callers -- and a caller that does not know the scope cannot
+    prove the name is the builtin either, so it is answered the same
+    conservative way rather than as "not shadowed".
+    """
+    if isinstance(func, ast.Attribute):
+        # `builtins.int` only means the builtin when `builtins` itself is not
+        # rebound, so the question moves to the attribute's own base name.
+        return _callee_is_shadowed(func.value, function)
+    if not isinstance(func, ast.Name):
+        return False
+    if function is None:
+        # No enclosing scope to consult. A name the caller could not resolve
+        # is not provably the builtin, so it is answered as shadowed.
+        return True
+    if func.id in _signature_bound_names(function):
+        return True
+    if _name_is_shadowed_in(func, function):
+        return True
+    return _module_binds_name(function, func.id)
+
+
+def _signature_bound_names(function):
+    """Every name the function's own signature binds when it is called.
+
+    The positional parameters, the keyword-only parameters, ``*args`` and
+    ``**kwargs`` all bind for the duration of the call, so each of them
+    shadows the builtin of the same name inside the body. ``*args`` and
+    ``**kwargs`` are matched through their own attribute, because ``ast``
+    records those under ``vararg``/``kwarg`` rather than in the flat ``args``
+    list -- a filter reading only ``args`` saw a call whose shadow arrives
+    through ``*values`` as an un-shadowed builtin.
+    """
+    args = getattr(function, "args", None)
+    if args is None:
+        return frozenset()
+    names = {argument.arg for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return frozenset(names)
+
+
+def _module_binds_name(function, name):
+    """Does the module holding ``function`` bind ``name`` at module scope?
+
+    A module-level ``def int(): ...``, ``import int`` or ``int = ...`` rebinds
+    the name for every function in the file, and a module-level ``cs = int()``
+    is a real store that has already run by the time any header reads it. The
+    walk descends into module-level blocks -- a binding inside a module-level
+    ``if`` still binds the name whenever that branch is taken -- while a
+    nested ``def``/``class`` *body* stays a separate scope, matching
+    :func:`_own_scope_bindings`' discipline.
+    """
+    module = _module_for_function(function)
+    if module is None:
+        return False
+    for statement in getattr(module, "body", []):
+        if any(_names_bound_by_statement(statement, name)):
+            return True
+        for node in _module_level_bindings(statement):
+            if any(_names_bound_by_statement(node, name)):
+                return True
+    return False
+
+
+def _module_level_bindings(statement):
+    """Bindings inside one module-level statement, excluding nested scopes."""
+    found = []
+    stack = list(ast.iter_child_nodes(statement))
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.Lambda,)):
+            # A bare lambda has no name of its own and its body is a separate
+            # scope, so there is nothing here that binds in the module scope.
+            continue
+        if isinstance(
+            current,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.Assign,
+                ast.AnnAssign,
+                ast.AugAssign,
+                ast.Import,
+                ast.ImportFrom,
+                ast.For,
+                ast.AsyncFor,
+                ast.With,
+                ast.AsyncWith,
+            ),
+        ):
+            found.append(current)
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # Its body is a separate scope; only the statement's own name
+                # is a module-level binding.
+                continue
+        stack.extend(ast.iter_child_nodes(current))
+    return found
+
+
+def _module_for_function(function):
+    """The parsed module ``function`` was defined in, or ``None``.
+
+    The tree is the one the caller is actually analysing, so a module-level
+    binding is read from the file the assert lives in rather than from
+    whichever module happens to be importable. The result is memoised by node
+    identity because the AST is built once per parsed file and outlives the
+    call, and because this runs per condition in a large tree.
+    """
+    if function is None:
+        return None
+    if id(function) in _MODULE_FOR_FUNCTION:
+        return _MODULE_FOR_FUNCTION[id(function)]
+    module = None
+    for tree in _candidate_module_trees():
+        if any(node is function for node in ast.walk(tree)):
+            module = tree
+            break
+    _MODULE_FOR_FUNCTION[id(function)] = module
+    return module
+
+
+def _remember_module_for_function(function, module):
+    """Record the module ``function`` was found in, so lookups can reuse it.
+
+    The caller that resolved the module -- :func:`_is_enforced`, which takes
+    the tree from its own caller -- knows the answer exactly. Recording it
+    keeps :func:`_module_binds_name` from re-deriving it by walking two module
+    trees per condition, and it is what makes the module pass answer for a
+    probe tree rather than for the importable milestones module.
+    """
+    if function is not None and module is not None:
+        _MODULE_FOR_FUNCTION[id(function)] = module
+
+
+def _candidate_module_trees():
+    """Every parsed module a function could have been defined in.
+
+    Each tree is read through :func:`_owning_module`'s own pair, and a tree
+    that cannot be produced at all is skipped rather than raised: this runs
+    inside a decision function called once per condition, and a decision
+    function must answer for the node it is handed instead of crashing the
+    analyzer. The real production path always finds the milestones tree; the
+    skip only matters when the source is unavailable.
+    """
+    candidates = []
+    for produce in (_module_tree, milestones_tree):
+        try:
+            candidates.append(produce())
+        except (OSError, TypeError, AttributeError):
+            # The source cannot be read back, so the tree is unavailable. The
+            # module pass then has nothing to contribute and the answer stays
+            # conservative, which is the safe direction. Only the failures
+            # `inspect.getsource` actually raises are caught, so a genuine
+            # bug in a producer still surfaces instead of being swallowed.
+            continue
+    for tree in candidates:
+        if tree is None:
+            continue
+        yield tree
 
 
 def _own_scope_bindings(function):
@@ -3004,9 +3217,9 @@ def _statement_never_runs(statement, function):
     # blocks are found by walking *out* to the function and asking which of its
     # bodies contain this statement.
     for enclosing in _enclosing_blocks(statement, function):
-        if isinstance(enclosing, ast.If) and _condition_is_never_true(enclosing.test):
+        if isinstance(enclosing, ast.If) and _condition_is_never_true(enclosing.test, function):
             return True
-        if isinstance(enclosing, ast.While) and _condition_is_never_true(enclosing.test):
+        if isinstance(enclosing, ast.While) and _condition_is_never_true(enclosing.test, function):
             # `while False:` is the loop spelling of `if False:` -- the body
             # never runs, so it is never the last element either.
             return True
@@ -3015,7 +3228,7 @@ def _statement_never_runs(statement, function):
         ):
             return True
     for node in ast.walk(statement):
-        if isinstance(node, ast.If) and _condition_is_never_true(node.test):
+        if isinstance(node, ast.If) and _condition_is_never_true(node.test, function):
             return True
         if isinstance(node, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(node.iter):
             return True
@@ -3036,9 +3249,18 @@ def _enclosing_blocks(statement, function):
     return found
 
 
-def _condition_is_never_true(node):
-    """A condition that is false for every binding, so its body never runs."""
-    if _falsy_literal(node):
+def _condition_is_never_true(node, function=None):
+    """A condition that is false for every binding, so its body never runs.
+
+    ``function`` is the scope the condition appears in. It is not optional
+    decoration: the ``set()``/``list()`` spelling of a falsy condition is only
+    falsy while the name reaches the *builtin* constructor, so a function that
+    rebinds the name locally -- ``def set(): return nullcontext()`` -- makes
+    ``if set():`` a condition this cannot decide. Without the scope threaded
+    in, that call was read as the builtin and a body CPython enters was
+    reported as never running.
+    """
+    if _falsy_literal(node, function):
         return True
     if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
         # `a and b` is false when *any* operand is false, so one literal-false
@@ -3046,14 +3268,14 @@ def _condition_is_never_true(node):
         # true whenever `flag` is, so a false operand there says nothing and
         # the body can still run. Reading both the same way made
         # `if flag or False: cs = nullcontext()` report a live header dead.
-        return any(_condition_is_never_true(value) for value in node.values)
+        return any(_condition_is_never_true(value, function) for value in node.values)
     if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
         # `a or b` is true when *any* operand is true, so it is never-true
         # only when **every** operand is false. `flag or False` has a live
         # operand and stays reachable; `(False or ())` has none and never
         # runs its body. Reading an `or` like an `and` missed the second case
         # and reported a genuinely dead header live.
-        return all(_condition_is_never_true(value) for value in node.values)
+        return all(_condition_is_never_true(value, function) for value in node.values)
     return False
 
 
@@ -3105,6 +3327,136 @@ def _loop_body_rebinds_the_name(statement, name):
         if _nested_rebinds(node, name):
             return True
     return False
+
+
+def _collapse_loop_targets_into_bodies(entries):
+    """Drop a loop target when its own body is the store that answers.
+
+    A ``for cs in ...:`` target and an assignment to ``cs`` in that loop's
+    body are not two competing bindings: the body runs *after* the target on
+    every pass, so whatever the body stores is the value left behind and the
+    target's element is gone. Returning the target as one of two competitors
+    made
+
+        import os as cs
+        if flag:
+            for cs in (None,):
+                cs = nullcontext()
+
+    ambiguous and reported a live header dead, where the name really is a
+    context manager whenever the loop runs.
+
+    The collapse is only sound when the body's store is what the caller will
+    then answer from, and that requires the body's **last** rebind to be one
+    this can read. A body whose final rebind is itself unreadable -- a second
+    loop over something undecidable, a ``match`` capture -- leaves the value
+    genuinely undecided, so the target stays and the two competitors make the
+    answer ambiguous, which is the safe direction.
+
+    Readable here means the same thing it means everywhere else: the body ends
+    in a value this module can pin down by type (including a carrier and the
+    builtin constructors, both of which :func:`_store_may_bind_enterable`
+    reads). A suppressor call is the important case -- it *is* readable, so
+    the collapse is kept and the suppressor survives to answer the header,
+    which is exactly what a version that collapsed unconditionally and then
+    answered from the retired target got wrong.
+
+    A call that is *neither* a pinned type nor a resolved suppressor also
+    counts as readable, and it has to: ``for cs in (None,): cs =
+    nullcontext()`` leaves the name holding a real context manager on the path
+    where the loop runs, so the target is definitively gone and the body is
+    the only binding. Refusing to collapse such a store -- because a call has
+    no pinned *type* -- left the target and the body competing, made the name
+    ambiguous, and read the ambiguity as a possible suppressor, which retires
+    a live header. That is the original #388 regression, so "has no readable
+    type" cannot mean "not readable" here.
+    """
+    rebinding_targets = {
+        id(entry[0].target): entry
+        for entry in entries
+        if isinstance(entry[0], (ast.For, ast.AsyncFor))
+        and isinstance(entry[0].target, ast.Name)
+        and _loop_body_rebinds_the_name(entry[0], entry[0].target.id)
+    }
+    if not rebinding_targets:
+        return entries, False
+    kept = []
+    for entry in entries:
+        statement = entry[0]
+        if not (
+            isinstance(statement, (ast.For, ast.AsyncFor))
+            and id(statement.target) in rebinding_targets
+        ):
+            kept.append(entry)
+            continue
+        name = statement.target.id
+        if _loop_body_last_store_is_readable(statement, name):
+            continue
+        kept.append(entry)
+    return kept, len(kept) != len(entries)
+
+
+def _loop_body_last_store_is_readable(loop, name):
+    """Is the final store this loop's body makes to ``name`` one we can read?
+
+    The body's statements are scanned in source order and the last binding of
+    ``name`` wins, matching the way the binding table itself resolves "which
+    store ran last".
+
+    Only two shapes are *not* readable, and both are shapes whose surviving
+    value depends on a decision this function would have to make twice:
+
+    * a ``match`` capture, whose value is only bound when the clause is
+      selected at runtime;
+    * a nested ``for`` target, which recurses through this same question and
+      so defers rather than answering.
+
+    Everything else -- a literal, a carrier, a builtin constructor, an
+    arbitrary call, even a ``del`` -- leaves the target definitively gone,
+    because the body ran after it on every pass and rebinding is what remains.
+    Restricting this to stores whose *type* can be pinned was the mistake that
+    regressed #388: ``cs = nullcontext()`` has no pinned type, so refusing to
+    collapse it kept the loop target in the competing set, made the name
+    ambiguous, and read that ambiguity as a possible suppressor.
+    """
+    last = None
+    for statement in _statements_binding_name(loop.body, name):
+        last = statement
+    if last is None:
+        return False
+    if isinstance(last, (ast.For, ast.AsyncFor)):
+        # A nested loop rebinds the name under the same question this function
+        # answers, so it is deferred rather than answered here. The outer
+        # target stays in the competing set, which is the safe direction: two
+        # candidates read as ambiguous, and ambiguous keeps the name a
+        # possible suppressor instead of retiring one.
+        return _loop_body_last_store_is_readable(last, name)
+    # A `match` capture is the one shape whose value is only bound when the
+    # clause is selected at runtime, so it is the one body store that is not
+    # readable here.
+    return not isinstance(last, (ast.Match, ast.MatchAs, ast.MatchStar))
+
+
+def _statements_binding_name(body, name):
+    """Statements in ``body`` that bind ``name``, in source order.
+
+    Nested scopes are skipped for the same reason
+    :func:`_names_bound_in_scope` skips them: a ``def`` inside the loop body
+    binds its own names, not the enclosing function's. Blocks *within* the body
+    are still walked, because a store inside an ``if`` in the body is a
+    rebind that happens on some pass and the last one written is the one that
+    decides the question.
+    """
+    found = []
+    stack = list(reversed(body))
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if any(_names_bound_by_statement(current, name)):
+            found.append(current)
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+    return found
 
 
 def _names_bound_in_scope(node, name):
@@ -3223,9 +3575,13 @@ def _store_may_bind_enterable(entry, name, function=None):
             # An empty *builtin* container yields nothing, so the name is never
             # bound at all and the header raises `UnboundLocalError`; the
             # carrier never gets the chance to be superseded either way.
-            empty_builtin = (
-                _builtin_constructor_kind(statement.iter, function) in _EMPTY_CONSTRUCTOR_TYPES
-            )
+            #
+            # Only the *no-argument* form is empty, for the same reason
+            # `_falsy_literal` requires it: `for cs in set([1]):` binds the
+            # element `1` and the loop runs once, so the name is very much
+            # bound. Reading the argument-bearing call as empty here reported
+            # a live header dead.
+            empty_builtin = _is_zero_argument_empty_container(statement.iter, function)
             if _is_bare_name(statement.target, name) and empty_builtin:
                 # `for cs in set():` and `for cs in ():` iterate zero times, so
                 # the loop never binds the name. The carrier is untouched and
@@ -3515,7 +3871,7 @@ def _in_body(branch, target):
     return any(_contains(statement, target) for statement in branch.body)
 
 
-def _falsy_literal(node):
+def _falsy_literal(node, function=None):
     """A condition that is a literal false, so its body can never run."""
     if isinstance(node, ast.Constant) and not node.value:
         return True
@@ -3536,9 +3892,44 @@ def _falsy_literal(node):
         return not node.keys
     # A zero-argument call that builds an *empty* container is falsy for the
     # same runtime reason `()` is: `if set():` never enters its body, exactly
-    # like `if ():`. Only the no-argument form is decided, because `set([1])`
-    # is non-empty and reading it as empty would report a live header dead.
-    return _builtin_constructor_kind(node) in _EMPTY_CONSTRUCTOR_TYPES
+    # like `if ():`.
+    #
+    # **Only** the no-argument form is decided. An argument-bearing call of the
+    # same constructor is truthy whenever the argument produces an element:
+    # `if set([1]):`, `if list((1,)):` and `if bytearray(b"x"):` all enter
+    # their bodies in CPython, and `if dict(a=1):` does too. Reading them as
+    # empty reported a live header dead -- the damaging direction -- because
+    # :func:`_builtin_constructor_kind` answers the *type* a call produces and
+    # the emptiness question was asked of that type rather than of the
+    # argument list. The check belongs here, next to the container literals it
+    # sits beside, and it is a property of the call's own argument list.
+    return _is_zero_argument_empty_container(node, function)
+
+
+def _is_zero_argument_empty_container(node, function=None):
+    """Is ``node`` a ``set()``-shaped call that provably builds an empty one?
+
+    Two properties have to hold together, and both were needed for the answer
+    to be right:
+
+    * the call must carry **no arguments**. `set([1])`, `list((1,))`,
+      `dict(a=1)` and `bytearray(b"x")` are all non-empty, and reading them as
+      empty reported a live header dead -- in a *condition* and in a *loop
+      iterable* alike, because both call sites asked the type question through
+      :func:`_builtin_constructor_kind` and never looked at the argument list;
+    * the callee must be the real **builtin**, which
+      :func:`_callee_is_shadowed` decides from the enclosing scope. A local
+      ``def set(): return nullcontext()`` makes the call a different one, and
+      a false "empty" there retires a header CPython enters.
+
+    Both spellings of "empty builtin container" are decided from this one
+    function, so the condition form and the loop form cannot disagree -- which
+    is the property :data:`_EMPTY_CONSTRUCTOR_TYPES` was introduced to
+    guarantee and an argument-blind helper would have broken.
+    """
+    if not isinstance(node, ast.Call) or node.args or node.keywords:
+        return False
+    return _builtin_constructor_kind(node, function) in _EMPTY_CONSTRUCTOR_TYPES
 
 
 def _is_empty_literal_iterable(node):
@@ -3975,6 +4366,13 @@ def _is_enforced(function, target, tree=None):
     """
     owning = tree if tree is not None else _owning_module(function)
     bound = _bound_names(owning, function)
+    # The shadowing rules below have to answer "is this name the real builtin",
+    # and that question includes bindings written at *module* scope. The module
+    # the caller just resolved is exactly that answer, so it is registered
+    # here rather than rediscovered per callee -- which also means a probe
+    # built by a test is classified against the tree the caller passed, not
+    # against whichever module happens to be importable.
+    _remember_module_for_function(function, owning)
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
@@ -3996,7 +4394,7 @@ def _is_enforced(function, target, tree=None):
                 return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
-            and _falsy_literal(ancestor.test)
+            and _falsy_literal(ancestor.test, function)
             and _in_body(ancestor, target)
         ):
             # `if False:` / `while False:` -- the body never runs. Only the `if

@@ -21,6 +21,7 @@ backstop that keeps them from being quietly removed.
 
 import ast
 import asyncio
+import contextlib
 import inspect
 
 import pytest
@@ -4140,6 +4141,51 @@ STALE_LOCAL_CARRIER_SHAPES = (
         "    import os as cs\n    cs = None",
         "    if flag:\n        cs = nullcontext()",
     ),
+    # The row below is the fifth review round's one *live* carrier row. A fresh
+    # review of `86fab6d` reproduced all four findings by execution; this one is
+    # the case where CPython genuinely enters the header, so the correct verdict
+    # is LIVE.
+    #
+    # #388-5c. The condition path was handed no enclosing scope at all, so a
+    # *locally* defined `list()` was read as the builtin and `if list():` was
+    # decided as the empty builtin -- retiring a branch CPython enters, because
+    # the local definition returns a real context manager.
+    (
+        "a locally shadowed constructor guarding a branch",
+        "    import os as cs\n    def list():\n        return nullcontext()",
+        "    if list():\n        cs = nullcontext()",
+    ),
+    # #388-5a's discriminating half. The row above pins the *zero-argument*
+    # form, whose branch genuinely never runs. These four pin the
+    # **argument-bearing** forms, whose branches CPython *does* enter because
+    # the argument produces an element. Emptiness was decided from the
+    # constructor *type* rather than from the call's argument list, so every
+    # one of them was read as the empty builtin and the branch was retired --
+    # a false-dead, which is the damaging direction.
+    #
+    # Each row is therefore executed under CPython with `flag` true, so the
+    # fixture proves the branch really is entered before the LIVE verdict is
+    # checked.
+    (
+        "a branch guarded by a set built from a literal",
+        "    import os as cs",
+        "    if set([1]):\n        cs = nullcontext()",
+    ),
+    (
+        "a branch guarded by a list built from a tuple",
+        "    import os as cs",
+        "    if list((1,)):\n        cs = nullcontext()",
+    ),
+    (
+        "a branch guarded by a dict built from a keyword",
+        "    import os as cs",
+        "    if dict(a=1):\n        cs = nullcontext()",
+    ),
+    (
+        "a branch guarded by a bytearray built from bytes",
+        "    import os as cs",
+        "    if bytearray(b'x'):\n        cs = nullcontext()",
+    ),
 )
 
 
@@ -4370,6 +4416,46 @@ DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
         "    import os as cs",
         "    if {}:\n        cs = nullcontext()",
     ),
+    # The rows below are the fifth review round's remaining carrier rows. A
+    # fresh review of `86fab6d` reproduced all four findings by execution, and
+    # these three are the ones where CPython raises before the assert anyway, so
+    # the correct verdict is DEAD. A regression here shows up as a row flipping
+    # to LIVE -- the mild direction, but still a row claiming an entry works
+    # when it cannot.
+    #
+    # #388-5a. Emptiness was decided from the constructor *type* rather than from
+    # the call's argument list, so `set([1])`, `list((1,))`, `dict(a=1)` and
+    # `bytearray(b"x")` -- all truthy -- were read as empty containers and their
+    # branch was treated as one that never runs.
+    (
+        "a set built from a literal is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = set([1])",
+    ),
+    (
+        "a list built from a tuple is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = list((1,))",
+    ),
+    (
+        "a dict built from a keyword is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = dict(a=1)",
+    ),
+    (
+        "a bytearray built from bytes is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = bytearray(b'x')",
+    ),
+    # #388-5d. Collapsing a loop target into its body's rebind retired the
+    # target, and the resolution then still sorted over *every* entry, so the
+    # retired target won the source-order tie against the body's store and the
+    # suppressor was dropped in favour of the element the target yielded.
+    (
+        "a loop body rebinding the target to a suppressor",
+        "    import os as cs\n    cs = None",
+        "    if flag:\n        for cs in (None,):\n            cs = suppress(AssertionError)",
+    ),
 )
 
 
@@ -4492,4 +4578,151 @@ def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
         f"{label}: expected verdicts [False], got {results}. A conditional store "
         f"that is itself pinned non-enterable cannot make the header enterable, "
         f"so the carrier still settles the name and the assert stays unreachable."
+    )
+
+
+#: The fifth review round's signature- and module-scope shadowing rows.
+#:
+#: These cannot live in either carrier table, because both build their fixture
+#: with a **fixed** signature ``outer(x, flag, helper)``. A row that needs the
+#: *callee's own name* to be a parameter cannot be expressed through a carrier
+#: string at all, and a module-level binding cannot be either. Each row
+#: therefore supplies its whole source, which is what lets both halves of
+#: #388-5b be expressed:
+#:
+#: * a **parameter** binds for the whole call, so ``def outer(list, x)`` calls
+#:   whatever the caller passed -- never the builtin ``list``. Positional,
+#:   keyword-only, ``*args`` and ``**kwargs`` each bind in their own way, and
+#:   ``ast`` records the last two under ``vararg``/``kwarg`` rather than in the
+#:   flat ``args`` list, so a filter reading only ``args`` misses them.
+#: * a **module-level** ``def list(): ...`` binds the name for every function
+#:   in the file, and a module-scope ``cs = list()`` is a store that has already
+#:   run by the time any header reads it.
+#:
+#: Each row is **executed** before its verdict is asserted, so no row can pin a
+#: verdict the interpreter does not agree with.
+SHADOWED_CALLEE_SOURCES = (
+    (
+        "a positional parameter shadowing a builtin constructor",
+        ("def outer(list, x):\n    cs = list()\n    with cs:\n        assert x != 1\n"),
+        (contextlib.nullcontext,),
+        {"x": 1},
+    ),
+    (
+        "a keyword-only parameter shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x, *, list=nullcontext):\n"
+            "    cs = list()\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1},
+    ),
+    (
+        "a vararg parameter shadowing a builtin constructor",
+        "def outer(*list, x):\n    cs = list[0]()\n    with cs:\n        assert x != 1\n",
+        (contextlib.nullcontext,),
+        {"x": 1},
+    ),
+    (
+        "a kwarg parameter shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x, **list):\n"
+            "    cs = list['k']()\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "k": contextlib.nullcontext},
+    ),
+    (
+        "a module-level def shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "def list():\n"
+            "    return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1},
+    ),
+    (
+        "a module-level assignment shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "list = nullcontext\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1},
+    ),
+)
+
+
+def _shadowed_callee_reaches_assert(label, source, arguments, keywords):
+    """Does CPython reach the assert in this row? Executed, never assumed."""
+    namespace = {"nullcontext": contextlib.nullcontext}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](*arguments, **keywords)
+    except AssertionError:
+        return True
+    except (TypeError, AttributeError, KeyError, IndexError, NameError, UnboundLocalError):
+        return False
+    raise AssertionError(
+        f"{label}: the fixture returned normally, so neither the assert nor an "
+        f"entry failure was observed and the row proves nothing."
+    ) from None
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "arguments", "keywords"),
+    SHADOWED_CALLEE_SOURCES,
+    ids=[shape[0] for shape in SHADOWED_CALLEE_SOURCES],
+)
+def test_a_constructor_callee_shadowed_outside_the_body_is_reported_live(
+    label, source, arguments, keywords
+):
+    """A callee shadowed by a parameter or a module binding is not a builtin.
+
+    #388-5b. The shadowing check looked only inside the function body, so two
+    bindings that are never *written* in the body were invisible:
+
+    * the **signature** -- a parameter binds for the whole call, so
+      ``def outer(list, x): cs = list()`` calls whatever the caller passed and
+      never the builtin ``list``;
+    * **module scope** -- a module-level ``def list(): ...`` binds the name for
+      every function in the file, and a module-level ``cs = list()`` has
+      already run by the time any header reads it.
+
+    Both were read as the builtin, and both are a **false-dead** when the shadow
+    happens to return a real context manager: the tool reported the header DEAD
+    where CPython enters it and the assert is genuinely reachable. That is the
+    damaging direction -- it certifies a live contract as swallowed -- so it is
+    the direction these rows pin.
+
+    Every row is executed first, so the LIVE verdict is checked against CPython's
+    own answer rather than asserted from the fixture's shape. A row whose
+    fixture does not actually reach the assert fails here rather than passing
+    vacuously.
+    """
+    assert _shadowed_callee_reaches_assert(label, source, arguments, keywords) is True, (
+        f"{label}: CPython does not reach the assert here, so the row cannot "
+        f"pin a LIVE verdict. Either the fixture is wrong or the expectation is."
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    assert [_is_enforced(function, asserts[0], tree)] == [True], (
+        f"{label}: expected the header to be reported LIVE. A callee shadowed "
+        f"by a parameter or a module binding is a different callable, so the "
+        f"store must be read as possibly-enterable and the assert kept."
     )
