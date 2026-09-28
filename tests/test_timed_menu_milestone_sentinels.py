@@ -2318,6 +2318,149 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
     )
 
 
+#: #350. Which nesting forms bind the *enclosing* function's local, and which
+#: bind their own.
+#:
+#: A ``match`` capture inside a nested ``def``/``lambda``/``class`` body runs
+#: in that body's namespace. Only a capture in the function's own scope retires
+#: the carried suppressor. Every row here is executed, so "does not retire" is
+#: backed by CPython swallowing the assert rather than by the analyzer's
+#: opinion.
+CAPTURE_SCOPE_BOUNDARY_ROWS = (
+    # The filed shape. `class C:` opens a new namespace; the capture binds
+    # `C.cs`, and `outer`'s `cs` is still the suppressor, so the second assert
+    # is swallowed and the verdict is False.
+    #
+    # The clause is the IRREFUTABLE `case cs:` from the issue's reproduction.
+    # That spelling matters. The first draft of this row used the *refutable*
+    # `case nullcontext() as cs:`, and it passed against the unfixed support
+    # module for the wrong reason: a refutable capture over an opaque
+    # `helper()` is already declined (#369), so the buggy path and the correct
+    # one both answered `False` and the row could not see the bug at all.
+    # Measured on unfixed master: `case cs:` -> analyzer `True` against runtime
+    # `False`; `case nullcontext() as cs:` -> `False` against `False`, i.e.
+    # accidentally correct. Only the irrefutable form discriminates.
+    (
+        "a capture in a class body binds the class, not the function",
+        ("    class C:\n        match helper():\n            case cs:\n                pass\n"),
+        False,
+        False,
+    ),
+    # Same, for a plain import rather than a capture -- the other walk that
+    # used the same boundary (`_own_imports`).
+    (
+        "an import in a class body binds the class, not the function",
+        "    class C:\n        import os as cs\n",
+        False,
+        False,
+    ),
+    # Controls: these must NOT change. A nested function is the pre-existing
+    # correct behaviour, so a fix that simply stopped resolving captures
+    # anywhere would fail this row.
+    (
+        "CONTROL a capture in a nested function does not bind the function",
+        ("    def inner():\n        match helper():\n            case cs:\n                pass\n"),
+        False,
+        False,
+    ),
+    # The row that would break if the boundary were over-widened: a capture in
+    # the function's OWN body does retire the suppressor, and `with cs:`
+    # successfully enters the nullcontext, so the assert is live and the
+    # correct verdict is `True`.
+    #
+    # This row is unchanged by the fix (it answered `True` before and after),
+    # which is exactly its purpose: a repair that added `ClassDef` to the
+    # boundary but also broke function-body captures would go red here.
+    #
+    # Note the difference from the sibling refutable rows elsewhere in this
+    # file. `case cs:` is irrefutable, so this is decidable and `True` is
+    # sound. The refutable spelling of the same shape is declined instead --
+    # that is #369, filed and open, and it is why those rows pin `False`.
+    (
+        "CONTROL a capture in the function body does retire the suppressor",
+        "    match helper():\n        case cs:\n            pass\n",
+        True,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "nested", "verdict", "runtime_live"),
+    CAPTURE_SCOPE_BOUNDARY_ROWS,
+    ids=[row[0] for row in CAPTURE_SCOPE_BOUNDARY_ROWS],
+)
+def test_a_capture_binds_only_the_namespace_it_was_written_in(label, nested, verdict, runtime_live):
+    """A store in a nested namespace cannot rebind the enclosing function's name.
+
+    This is #350. ``_scope_body_nodes`` stopped walking at a nested ``def``,
+    ``async def`` or ``lambda`` but not at a ``ClassDef``, so a ``match``
+    capture written in a class body was attributed to the enclosing function
+    and retired its carried suppressor. The assert under the following
+    ``with cs:`` was therefore reported *enforced* when it is really swallowed
+    -- a dead contract certified as load-bearing.
+
+    Measured on CPython 3.12.14 with ``x=1`` and ``helper()`` returning a
+    ``nullcontext()``:
+
+    * class body, capture      -> assert swallowed (correct verdict ``False``)
+    * class body, ``import``   -> assert swallowed (correct ``False``)
+    * nested ``def``, capture  -> assert swallowed (correct ``False``)
+    * function body, capture   -> assert **live**
+
+    The last row is what makes the fix safe. It answers ``True`` both before
+    and after, so a repair that added ``ClassDef`` to the boundary but also
+    broke function-body captures would go red here rather than passing every
+    ``False`` row on the strength of the fix alone.
+
+    An earlier draft of this row passed ``None`` as ``helper()``'s result,
+    which made the capture bind ``None``, raised on entry, and failed the
+    executed check for the wrong reason. The helper now returns a real
+    ``nullcontext()``, so the capture binds an actual context manager and the
+    ``with cs:`` really is entered.
+    """
+    source = (
+        "def outer(x, flag, items, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + nested + "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    from contextlib import nullcontext
+
+    try:
+        namespace["outer"](1, None, [1], nullcontext)
+    except AssertionError:
+        ran = True
+    except (TypeError, UnboundLocalError, NameError):
+        # Entering a non-manager raises before the body runs. Deliberately
+        # narrow, matching `_assert_entry_contract`: a broader catch would let
+        # a fixture that fails for an unrelated reason still pass this row.
+        ran = False
+    else:
+        # Returned normally: the suppressor was still in force and swallowed
+        # the assert.
+        ran = False
+    assert ran is runtime_live, (
+        f"{label}: CPython says the second assert "
+        f"{'ran' if ran else 'did not run'}, but the row's measured ground "
+        f"truth says it should "
+        f"{'run' if runtime_live else 'not run'}."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [verdict], (
+        f"{label}: expected verdicts {[verdict]}, got {results}. A "
+        f"store in a nested namespace must not rebind the enclosing name."
+    )
+
+
 #: #359: the binding forms whose right-hand side is an *element* of a
 #: container, or a loop's next element, rather than the whole value.
 #:
@@ -3265,6 +3408,20 @@ MATCH_CAPTURE_SCOPE_ROWS = (
     (
         "a capture in a nested function does not retire the outer binding",
         ("    def inner():\n        match flag:\n            case [cs]:\n                pass\n"),
+        [False, False],
+    ),
+    # #350. A class body is a namespace too, and the walk that finds captures
+    # used to stop at nested `def`/`lambda` but not at `ClassDef`. So a capture
+    # written in a class body retired the *enclosing function's* local and
+    # reported the assert under the later `with cs:` as enforced.
+    #
+    # The subject is `[1]`, so the capture binds the integer 1: entering it
+    # raises TypeError before the assert. The nested-function row above is the
+    # control -- it was already correct, so the two together prove the class
+    # row is not passing for the same reason as a pre-existing decline.
+    (
+        "a capture in a nested class body does not retire the outer binding",
+        ("    class Inner:\n        match flag:\n            case [cs]:\n                pass\n"),
         [False, False],
     ),
     (

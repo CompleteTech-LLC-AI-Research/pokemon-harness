@@ -734,12 +734,39 @@ def _scope_body_nodes(function):
     function* must not see those. Comprehensions are left in: a walrus inside a
     comprehension binds in the enclosing scope, which is exactly why
     ``_walrus_is_conditional`` has to reason about them at all.
+
+    ``ClassDef`` is a boundary for the same reason, and was missing until
+    #350. A class body executes in its own namespace, so a ``match`` capture
+    written there binds the *class's* attribute, not ``function``'s local.
+    Walking into one retired the enclosing name and certified a genuinely
+    swallowed assert as enforced -- the damaging direction.
+
+        def outer(x):
+            with (cs := suppress(AssertionError)):
+                pass
+            class C:
+                match nullcontext():
+                    case cs:          # binds C.cs, NOT outer()'s cs
+                        pass
+            with cs:                # outer()'s cs is still the suppressor
+                assert x != 1      # swallowed -> correct verdict is False
+
+    Executed on CPython 3.12.14 with ``x=1``: the assert does not fire, because
+    ``outer``'s ``cs`` still points at the suppressor, while the analyzer
+    reported ``True`` -- a live contract certified where none exists.
+
+    A class body is not a *function* scope, so excluding it here is what makes
+    ``_own_imports`` and ``_match_capture_names`` agree: both walk the same
+    boundary, and neither now attributes a nested class body's binding to the
+    enclosing function. The nested ``def``/``lambda`` case was already correct
+    and is unchanged; it is kept as a control row in the shipped test so the
+    two boundaries cannot drift apart.
     """
     stack = list(ast.iter_child_nodes(function))
     while stack:
         node = stack.pop()
         yield node
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             continue
         stack.extend(ast.iter_child_nodes(node))
 
