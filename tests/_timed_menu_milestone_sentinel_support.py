@@ -1257,9 +1257,12 @@ def _binding_order(function, statement):
     directly in the body has its own index. A nested one has none, so it is
     ordered by the top-level statement that contains it -- the earliest point
     at which it can possibly have run, and the only position that is true on
-    every path. Two stores inside one top-level statement would therefore
-    compare equal, which is fine: they are in the same block, and if both are
-    conditional the name is already ambiguous by the caller.
+    every path. Two stores inside one top-level statement therefore compare
+    equal, which is fine: they are in the same block, and if both are
+    conditional the name is already ambiguous by the caller. Callers that
+    need to break the tie use ``max`` over this key -- see
+    :func:`_last_store_before` -- and must not read it as source order, since
+    equal keys carry no ordering information at all.
     """
     for index, top in enumerate(function.body):
         if top is statement:
@@ -1443,10 +1446,36 @@ def _last_store_before(entries, orders, index, exclude=None):
 
     Ordering is by :func:`_binding_order`, so a store nested inside another
     top-level statement sorts at that statement's position -- the earliest
-    point at which it can have run. A read and the store being resolved that
-    share an order are inside one top-level statement, so neither precedes
-    the other; the earlier entry in source order wins there, which keeps
-    ``second = first`` resolvable when both sit in one statement.
+    point at which it can have run. Among the stores that are visible, the
+    one with the *greatest* order is the one that has actually run last, and
+    that is the entry returned.
+
+    The pick is ``max`` over ``orders`` rather than the last entry in
+    ``raw_values``, and the two are not the same list. :func:`_raw_store_values`
+    accumulates with ``ast.walk``, which is *breadth*-first, so a store
+    written directly in the body is recorded before a store nested in an
+    earlier top-level statement. Taking the last accumulated entry therefore
+    returns the nested one -- a value that is stale the moment the enclosing
+    statement is not the one that ran. That is the damaging direction, and it
+    is silent:
+
+        if flag:
+            first = contextlib.suppress(AssertionError)
+        first = contextlib.nullcontext()      # always runs
+        second = first
+        with (cs := second):
+            assert 1 == 2
+
+    The interpreter is LIVE here: ``first`` is the ``nullcontext()``, which is
+    a working context manager, so the assert runs and any failure escapes.
+    Resolving to the nested ``suppress(...)`` instead makes the chain look
+    swallowable, and the header reports a live contract as defeated.
+
+    When two stores share an order they are inside one top-level statement, so
+    neither provably precedes the other and the value is genuinely ambiguous.
+    ``max`` returns the first such entry, which keeps ``second = first``
+    resolvable when both sit in one statement; the existing
+    :func:`_binding_order` docstring records that ambiguity.
 
     Without ``orders``/``index`` -- the call sites that genuinely have no
     position to reason from -- this falls back to the whole-function last
@@ -1461,7 +1490,9 @@ def _last_store_before(entries, orders, index, exclude=None):
         and orders[id(entry[0])] <= index
         and entry is not exclude
     ]
-    return (visible[-1] if visible else entries[-1])[1]
+    if not visible:
+        return entries[-1][1]
+    return max(visible, key=lambda entry: orders[id(entry[0])])[1]
 
 
 def _raw_store_values(function):
