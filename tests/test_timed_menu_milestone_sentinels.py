@@ -2855,6 +2855,263 @@ def test_a_conditional_function_store_after_a_carrier_is_declined(label, body, l
     )
 
 
+#: #388 follow-up: which competing stores the decline must **not** count.
+#:
+#: A decline reports the assert live, so counting a store that cannot possibly
+#: have installed an enterable value reports a *dead* assert as load-bearing.
+#: These rows are the four categories that cannot, and the two controls that
+#: keep each exclusion from being applied more widely than it was measured.
+#:
+#: Every row is executed by `_assert_entry_contract`, so `live` is held to
+#: CPython rather than asserted about the checker. Two of the rows depend on a
+#: class defined in the prelude -- a `with` on an arbitrary manager and a
+#: starred unpack -- which is why this table builds its own source rather than
+#: reusing the prelude of :data:`FUNCTION_CARRIER_SUPERSESSION_SHAPES`.
+FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
+    # `with EXPR as cs:` binds `EXPR.__enter__()`, so whether the name still
+    # holds something enterable is a question about the *manager*, not about
+    # the syntax of the `with`. `nullcontext.__enter__` is `return None`, so
+    # the header is entered with `None` and raises before the assert runs --
+    # on both paths, since the carrier is a module on the other one. The
+    # carrier therefore stays in force and the header is dead.
+    (
+        "a conditional nullcontext-with after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext() as cs:\n            pass\n",
+        False,
+    ),
+    # The same argument for `suppress`, whose `__enter__` is a bare `pass`
+    # and so returns None implicitly. Kept as a separate row so the two
+    # spellings of "provably None" cannot drift apart silently.
+    (
+        "a conditional suppress-with after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.suppress(AssertionError) as cs:\n            pass\n",
+        False,
+    ),
+    # The control that makes the two rows above *mean* something. A custom
+    # manager's `__enter__` returns `self`, which IS enterable, so the same
+    # `with ... as cs:` form leaves a live header on the flag=True path. A
+    # blanket exclusion of every `With` store -- which is what a first cut
+    # did -- answers `defeated` here and drops a live pinned contract. This
+    # is the row that rules that implementation out.
+    (
+        "CONTROL a conditional custom-manager-with after a carrier is live",
+        "    import os as cs\n    if flag:\n        with CM() as cs:\n            pass\n",
+        True,
+    ),
+    # `*cs, = (...)` builds a list, and entering a list raises. Note this is
+    # the *starred* target only: `cs, *rest = (...)` leaves `cs` holding the
+    # first element, which is very often a real context manager, so it is a
+    # control below rather than part of this exclusion.
+    (
+        "a conditional starred-unpack after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        *cs, = (contextlib.nullcontext(),)\n",
+        False,
+    ),
+    # The named control for the row above.
+    (
+        "CONTROL a conditional element store after a carrier is live",
+        "    import os as cs\n    if flag:\n        cs, rest = (contextlib.nullcontext(), 2)\n",
+        True,
+    ),
+    # A nested `def` owns its locals, so the store binds *that* scope's `cs`
+    # and the carrier is untouched. The header is dead on both paths, exactly
+    # as it is for the `nullcontext` rows, but for a different reason: there
+    # is no competing binding at all rather than a competing non-binding one.
+    (
+        "a conditional store in a nested def after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        def inner():\n            cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    (
+        "a conditional store in a nested lambda after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        f = lambda: (cs := contextlib.nullcontext())\n",
+        False,
+    ),
+    # A class body is its own namespace, so `C.cs` is bound and `outer`'s
+    # `cs` is still the module. Same conclusion, third spelling of the
+    # boundary.
+    (
+        "a conditional store in a nested class body after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        class C:\n            cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    # A `nonlocal` store is the control for the three rows above: it writes an
+    # *enclosing* scope's `cs` rather than its own local, so the nested scope
+    # is not a boundary for it and the carrier really is superseded. The
+    # inner function is a genuine closure here -- `outer` holds `cs` -- so
+    # `nonlocal cs` binds the very name the carrier set. This is the case a
+    # scope test that stopped at the nested boundary would wrongly exclude,
+    # and it is the pair that makes "nested scope" mean "a different local"
+    # rather than merely "a nested node".
+    (
+        "CONTROL a conditional nonlocal-scoped store after a carrier is live",
+        "    import os as cs\n    if flag:\n        def _rebind():\n            nonlocal cs\n            cs = contextlib.nullcontext()\n        _rebind()\n",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS,
+    ids=[shape[0] for shape in FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS],
+)
+def test_a_function_carrier_decline_ignores_non_enterable_stores(label, body, live):
+    """The decline must not count a store that cannot bind an enterable value.
+
+    The four exclusions -- unbinding, a known `None`-returning `with`, a
+    starred unpack, and a nested-scope store -- all share one property: none of
+    them can leave `cs` bound to something `with` can enter. Counting one of
+    them would decline the header, and a decline reports the assert live, so
+    the error would be a dead assert certified as load-bearing.
+
+    The controls matter as much as the rows. A `with` on a *custom* manager and
+    a `nonlocal`-scoped store both leave an enterable value bound to the
+    outer name, so both must be counted; and a non-starred element store
+    (`cs, rest = (...)`) leaves `cs` holding a real `nullcontext()`. Together
+    they pin each exclusion to the category it was measured on, so the next
+    change cannot widen one of them into its neighbourhood.
+    """
+    source = (
+        "import contextlib\n"
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return False\n"
+        "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A store that "
+        f"cannot bind an enterable value must not decline the header, and a "
+        f"store that can must."
+    )
+
+
+#: Each non-enterable category, paired with the helper that excludes it.
+#:
+#: The table above holds the end-to-end verdict to CPython. That is not
+#: enough to show the exclusions are load-bearing, and the reason is worth
+#: recording: for three of these four shapes the verdict is *already* correct
+#: without the decline at all, because `_stores_of` drops the conditional
+#: store and the unconditional carrier is what settles the name. So an
+#: end-to-end row cannot move when the exclusion is taken away -- it was never
+#: the rule deciding that row.
+#:
+#: What decides them is the decline, and the decline is only observable
+#: directly. These rows therefore assert the decline itself: that each helper
+#: is what keeps its category from counting as a superseding store, and that
+#: removing the helper makes it count. The end-to-end consequence is pinned
+#: separately, and only where it exists, by the control rows.
+NON_ENTERABLE_EXCLUSION_ROWS = (
+    (
+        "the known-None with exclusion keeps its store out of the decline",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext() as cs:\n            pass\n",
+        "_with_binds_a_known_non_enterable",
+        False,
+    ),
+    (
+        "the starred-target exclusion keeps its store out of the decline",
+        "    import os as cs\n    if flag:\n        *cs, = (contextlib.nullcontext(),)\n",
+        "_target_is_starred",
+        False,
+    ),
+    (
+        "the nested-scope exclusion keeps its store out of the decline",
+        "    import os as cs\n    if flag:\n        def inner():\n            cs = contextlib.nullcontext()\n",
+        "_store_is_in_scope",
+        True,
+    ),
+)
+
+
+def _decline_fires_for(source):
+    """Does the #388 decline fire on the ``with cs:`` header in `source`?"""
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    header = next(
+        node
+        for node in function.body
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Name) and item.context_expr.id == "cs"
+            for item in node.items
+        )
+    )
+    index = function.body.index(header)
+    bindings, _raw = support._store_bindings(function, set())
+    orders = {
+        id(statement): support._binding_order(function, statement)
+        for entries in bindings.values()
+        for statement, _value, _conditional in entries
+    }
+    return support._carrier_may_have_been_superseded(
+        bindings.get("cs", ()),
+        orders,
+        index,
+        support._bound_names(tree, function),
+        function,
+        "cs",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "helper", "neutralised"),
+    NON_ENTERABLE_EXCLUSION_ROWS,
+    ids=[row[0] for row in NON_ENTERABLE_EXCLUSION_ROWS],
+)
+def test_each_non_enterable_exclusion_is_load_bearing(
+    label, body, helper, neutralised, monkeypatch
+):
+    """Neutralising an exclusion must make its store count in the decline.
+
+    The helper is replaced with one that reports the opposite of what it
+    normally reports, which turns its exclusion off. The decline has to go from
+    silent to firing, because a store that cannot bind an enterable value must
+    not be read as a stale carrier.
+
+    The value that removes an exclusion is not the same for every helper, and
+    working that out is part of what these rows pin. Two of the helpers are
+    consulted positively -- "is this store in the same scope", "is the name the
+    starred target" -- so `True` removes the exclusion for the scope test and
+    `False` removes it for the starred test, because the caller negates the
+    scope answer and not the starred one. The `with` helper is a negative test
+    whose answer is negated by its caller, so `False` removes that exclusion
+    too. Each row's value is written in the table rather than derived from a
+    rule, because deriving it is what got this wrong twice while writing it.
+
+    The first assertion also matters: it pins that the row is *silent* to begin
+    with. Without it, a shape whose decline already fired would satisfy the
+    second assertion for the wrong reason, and the row would stop testing the
+    exclusion it names.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    assert _decline_fires_for(source) is False, (
+        f"{label}: the decline already fires for this row, so the exclusion it "
+        f"names is not what keeps the store out."
+    )
+    monkeypatch.setattr(support, helper, lambda *args, **kwargs: neutralised)
+    assert _decline_fires_for(source) is True, (
+        f"{label}: neutralising `{helper}` did not make the store count, so "
+        f"the exclusion is not load-bearing -- the decline is answering for "
+        f"some other reason and this row is not testing it."
+    )
+
+
 #: #388: the shapes this repair does **not** reach, and why.
 #:
 #: These three also read `defeated` against a live assert, and they read that

@@ -2350,7 +2350,12 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     # here the function scope is the only one that answers from a carrier a
     # conditional store may have superseded, which is the damaging direction.
     if stores is not None and _carrier_may_have_been_superseded(
-        by_index["bindings"].get(name, ()), by_index["orders"], index
+        by_index["bindings"].get(name, ()),
+        by_index["orders"],
+        index,
+        bound,
+        function,
+        name,
     ):
         return False
     if stores is None and module is not None:
@@ -2549,7 +2554,9 @@ def _module_stores(name, module):
         for statement, _, _ in entries
     }
     name_entries = bindings.get(name)
-    if name_entries and _carrier_may_have_been_superseded(name_entries, orders):
+    if name_entries and _carrier_may_have_been_superseded(
+        name_entries, orders, None, _bound_names(module, module), module, name
+    ):
         return None
     by_index = {"bindings": bindings, "orders": orders}
     index = max(orders.values(), default=-1) + 1
@@ -2588,7 +2595,9 @@ def _binds_element_of(statement, name):
     )
 
 
-def _carrier_may_have_been_superseded(entries, orders, index=None):
+def _carrier_may_have_been_superseded(
+    entries, orders, index=None, bound=None, function=None, name=None
+):
     """May a store a conditional binding performed have replaced the carrier?
 
     #388. :func:`_stores_of` keeps only *unconditional* stores, because a
@@ -2642,6 +2651,21 @@ def _carrier_may_have_been_superseded(entries, orders, index=None):
     into a purportedly load-bearing one, the opposite error from the one this
     rule exists to prevent. Reviewed as a blocking finding on #388.
 
+    The same reasoning settles the other forms that cannot leave an enterable
+    value, and settling them by *category* rather than one at a time is the
+    point. The question this predicate has to answer is not "is this store
+    conditional?" but **"can this store leave something enterable bound to
+    ``name``?"** Anything that cannot is excluded, because counting it would
+    decline the header and manufacture a dead assert.
+
+    ``bound`` and ``function`` are what let :func:`_may_bind_something_enterable`
+    answer the one category that is not decidable from the store node alone. A
+    ``with ... as cs:`` binds ``__enter__``'s return value, so *which* value
+    depends on the context expression, and that expression is only readable
+    with the import-alias map. ``function`` is the owning scope, needed for
+    the same reason ``_scope_body_nodes`` takes it: to tell a store that binds
+    *this* name from one that binds a nested scope's local of the same name.
+
     ``index`` restricts the question to the stores that precede the queried
     ``with`` header, so a later store cannot be read backwards into an earlier
     one. It is ``None`` for the module path, where the header is evaluated
@@ -2659,13 +2683,291 @@ def _carrier_may_have_been_superseded(entries, orders, index=None):
     last_carrier = max(carriers)
     return any(
         conditional
-        and not isinstance(value, str)
-        and not isinstance(statement, ast.ExceptHandler)
-        and not isinstance(statement, ast.Delete)
+        and _may_bind_something_enterable(statement, value, name, bound, function)
         and orders[id(statement)] > last_carrier
         and (index is None or orders[id(statement)] <= index)
         for statement, value, conditional in entries
     )
+
+
+def _may_bind_something_enterable(statement, value, name=None, bound=None, function=None):
+    """Can this store leave a name bound to something ``with`` can enter?
+
+    #388. The decline in :func:`_carrier_may_have_been_superseded` is only
+    safe when the competing store genuinely might have replaced the carrier
+    with an *enterable* value. Counting a store that cannot would decline the
+    header, and a decline reports ``enforced`` -- so it would manufacture a
+    dead assert, the opposite error from the one the decline exists to
+    prevent.
+
+    Four families cannot, and each was measured against CPython 3.12.14 by
+    executing the header rather than by reasoning about it:
+
+    - ``except ... as cs:`` and ``del cs`` **unbind**. CPython deletes the
+      name, so the earlier carrier is what remains in force.
+    - A store inside a nested ``def``/``lambda``/``class`` body binds *that*
+      scope's local, not this function's name. This is the boundary
+      :func:`_scope_body_nodes` already draws elsewhere in this module.
+    - A ``with ... as cs:`` whose context expression is a **known
+      ``None``-returning** context manager. See
+      :func:`_with_binds_a_known_non_enterable`.
+    - ``*cs, = (...)`` builds a **list**, which cannot be entered. The
+      starred target is not visible on the recorded value, so it is read off
+      the statement's target list.
+
+    Everything else -- a call, a walrus, a loop target, a capture, a
+    destructuring element, and a ``with`` on an arbitrary expression -- *may*
+    bind something enterable, so it counts and the header is declined.
+    """
+    if isinstance(value, str):
+        # A carrier recorded by `_carrier_runtime_kinds`: a module, a class
+        # or a function. None of those has `__enter__`.
+        return False
+    if isinstance(statement, (ast.ExceptHandler, ast.Delete)):
+        # Both *unbind*. `del cs` removes the name outright, and CPython
+        # deletes an `except ... as cs` name when the handler exits, so
+        # neither can install an enterable value over the carrier.
+        return False
+    if function is not None and not _store_is_in_scope(statement, function):
+        # A nested `def`/`lambda`/`class` body has its own locals. A store
+        # there binds *that* scope's `cs`, so the carrier in the enclosing
+        # scope is untouched and still in force. Measured:
+        #
+        #     def outer(x, flag):
+        #         import os as cs
+        #         if flag:
+        #             def inner():
+        #                 cs = contextlib.nullcontext()
+        #         with cs:          # cs is still the module -> TypeError
+        #             assert x != 1
+        #
+        # The assert never runs on either path, so the carrier -- not the
+        # nested store -- is what decides the header.
+        return False
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return not _with_binds_a_known_non_enterable(statement, value, bound)
+    # `*cs, = (...)` binds a list. Entering a list raises, so the header cannot
+    # run the assert. `_literal_runtime_type` reads the same `ast.Starred` as a
+    # `list` for the ordinary store path; the carrier path has to find the
+    # starred target on the statement itself, because the recorded value is
+    # the whole right-hand side.
+    return name is None or not _target_is_starred(statement, name)
+
+
+def _store_is_in_scope(statement, function):
+    """Is ``statement`` part of ``function``'s own scope?
+
+    ``_store_bindings`` records a store nested in a nested ``def``/``lambda``/
+    ``class`` as an ordinary conditional binding of the same *spelling* of the
+    name, because the name it binds really is called ``cs``. What differs is
+    the *scope* it lands in: a class body is its own namespace and a nested
+    ``def`` owns its locals, so neither rebinds the enclosing function's
+    ``cs``. Measured:
+
+        def outer(x, flag):
+            import os as cs
+            if flag:
+                def inner():
+                    cs = contextlib.nullcontext()
+            with cs:          # cs is still the module -> TypeError, dead
+                assert x != 1
+
+    The boundary is the same one :func:`_scope_body_nodes` draws, and it is
+    asked here by membership in that set rather than by re-walking, so the two
+    rules cannot drift apart on what counts as a nested scope.
+
+    A ``global`` (or ``nonlocal``) declaration moves the store *out* of the
+    nested scope. At module level the ``global`` spelling is the whole of
+    #375's `_rebind` shape:
+
+        def _rebind():
+            global cs
+            cs = contextlib.nullcontext()
+
+    writes the *module's* ``cs``, so the carrier really is superseded and the
+    header really is live. Reading it as a nested local -- which is what
+    membership alone would do -- would exclude the only store that decides the
+    question and answer `defeated` on an assert CPython evaluates. So the
+    nested scope is only a real boundary for a name that is *not* declared in
+    an enclosing scope from within it.
+    """
+    if any(node is statement for node in _scope_body_nodes(function)):
+        return True
+    owner = _owning_scope_of(statement, function)
+    return owner is not None and _declares_global(owner, _store_target_names_of(statement))
+
+
+def _target_is_starred(statement, name):
+    """Does this store bind the name through an ``ast.Starred`` target?
+
+    ``*cs, = (...)`` builds a list, and ``cs, *rest = (...)`` does not bind
+    the starred name at all. Only the first shape binds a non-enterable value,
+    so the two are told apart by asking whether ``name`` is *the* starred
+    target -- which is why the name is a parameter. Matching any ``Starred``
+    in the target list would exclude the second shape too, and there the
+    starred element is discarded while ``cs`` keeps a perfectly enterable
+    value, so excluding it would be wrong in the damaging direction.
+
+    The recorded ``value`` is the whole right-hand side, so the starred
+    *target* has to be read off the statement; :func:`_literal_runtime_type`
+    sees the ``ast.Starred`` from the opposite direction, on the value, and
+    reads the same list type for the non-carrier path.
+    """
+    targets = []
+    if isinstance(statement, (ast.AnnAssign, ast.NamedExpr)):
+        targets = [statement.target]
+    elif isinstance(statement, ast.Assign):
+        targets = statement.targets
+    return any(
+        isinstance(node, ast.Starred) and isinstance(node.value, ast.Name) and node.value.id == name
+        for target in targets
+        for node in ast.walk(target)
+    )
+
+
+def _store_target_names_of(statement):
+    """The names a single store statement binds, or ``[]`` for a non-store.
+
+    Thin wrapper over :func:`_store_target_names` so the scope test can ask
+    the question in terms of one statement. A node that is not one of the
+    store forms binds nothing here and is reported as binding nothing, which
+    keeps the caller from having to enumerate the forms a second time.
+    """
+    if isinstance(statement, ast.Assign):
+        return _store_target_names(statement.targets)
+    if isinstance(statement, ast.AnnAssign):
+        return _store_target_names([statement.target])
+    if isinstance(statement, ast.NamedExpr):
+        return _store_target_names([statement.target])
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return _store_target_names([statement.target])
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return _store_target_names(
+            [item.optional_vars for item in statement.items if item.optional_vars is not None]
+        )
+    if isinstance(statement, ast.Delete):
+        return _store_target_names(statement.targets)
+    if isinstance(statement, ast.ExceptHandler):
+        return [statement.name] if statement.name is not None else []
+    return []
+
+
+def _owning_scope_of(statement, function):
+    """The nested ``def``/``lambda``/``class`` that ``statement`` sits inside.
+
+    ``None`` when the statement is part of ``function``'s own body, or when
+    no single nested scope contains it. Only the *nearest* enclosing scope is
+    returned, because a ``global`` declaration in an inner scope says nothing
+    about an intermediate one, and a doubly-nested store writes to whichever
+    scope declared its name.
+    """
+    return _nearest_scope_containing(function, statement)
+
+
+def _nearest_scope_containing(scope, statement):
+    """The innermost scope strictly inside ``scope`` that contains ``statement``."""
+    for node in ast.iter_child_nodes(scope):
+        if any(child is statement for child in ast.walk(node)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                # An inner scope wins: descend and prefer whatever is closest.
+                return _nearest_scope_containing(node, statement) or node
+            # `node` is a plain statement that contains the store, so the
+            # scope boundary is further out; keep looking among the siblings
+            # that also contain it.
+            deeper = _nearest_scope_containing(node, statement)
+            if deeper is not None:
+                return deeper
+    return None
+
+
+def _declares_global(scope, names):
+    """Does ``scope`` declare any of ``names`` global (or non-local)?
+
+    ``global`` is the declaration that makes a nested store write to an outer
+    scope's binding, and it is what separates #375's ``_rebind`` -- whose
+    store really does supersede a module carrier -- from a nested ``def``
+    that merely shadows the name.
+
+    ``nonlocal`` is accepted for the same reason and with the same caveat: it
+    also writes to an enclosing scope rather than to a local, so a store
+    guarded by one is not a nested-scope store either. Neither declaration
+    takes effect unless the name is actually bound somewhere in the scope, so
+    the answer here is the necessary half of the test and the target list is
+    what supplies the other.
+    """
+    wanted = set(names)
+    if not wanted:
+        return False
+    for node in ast.walk(scope):
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and wanted.intersection(node.names):
+            return True
+    return False
+
+
+#: Dotted paths whose ``__enter__`` provably returns ``None``.
+#:
+#: ``with EXPR as cs:`` binds ``EXPR.__enter__()``, so whether the header
+#: still holds an *enterable* value is a question about the manager's
+#: ``__enter__``, not about the syntax of the ``with``. It is decidable only
+#: for a closed set of callables whose ``__enter__`` is known to return
+#: ``None``:
+#:
+#: * ``contextlib.nullcontext.__enter__`` is ``return None`` -- it is
+#:   documented to return None and that is what makes it a *null* context.
+#: * ``contextlib.suppress.__enter__`` (and the ``asyncio`` spelling) is a
+#:   bare ``pass``, so the call returns ``None`` implicitly. These are already
+#:   :data:`SUPPRESSING_CONTEXTS`, which is why the set is spelled in terms of
+#:   them rather than duplicating their names.
+#:
+#: Nothing else belongs here. A user-defined ``CM()`` whose ``__enter__``
+#: returns ``self`` is syntactically identical to one that returns ``None``,
+#: so treating *any* ``with`` as non-enterable would report the header dead
+#: on an assert CPython really evaluates. Measured on CPython 3.12.14:
+#
+#:     def outer(x, flag):
+#:         import os as cs
+#:         if flag:
+#:             with CM() as cs:      # flag -> cs is the CM, `with cs:` enters
+#:                 pass
+#:         with cs:                  # and `assert x != 1` FIRES
+#:             assert x != 1
+#
+#: An unrecognised manager therefore *counts* as a superseding store and the
+#: header is declined, which is the direction this module takes when a value
+#: cannot be read: a decline reports the assert live, and calling a live
+#: assert dead is the damaging direction.
+NULL_RETURNING_CONTEXTS = ("contextlib.nullcontext",) + SUPPRESSING_CONTEXTS
+
+
+def _with_binds_a_known_non_enterable(statement, value, bound=None):
+    """Does this ``with`` bind a name to a provably non-enterable value?
+
+    ``with EXPR as cs:`` binds ``EXPR.__enter__()``. When ``EXPR`` resolves to
+    one of :data:`NULL_RETURNING_CONTEXTS` the bound value is ``None`` and
+    cannot be entered, so the store cannot supersede a carrier with anything
+    enterable and the carrier stays in force. Every other manager -- a custom
+    class, a bare name, an attribute, an opaque helper -- may return an
+    enterable object and is reported as a genuine superseder.
+
+    ``value`` is the store's recorded right-hand side, which for a ``with`` is
+    ``None`` (the manager, not its ``__enter__`` result, is the item
+    expression), so the context expression is read from ``statement`` itself.
+    The alias map resolves every spelling: ``contextlib.nullcontext()``,
+    ``from contextlib import nullcontext as nc`` and a re-exported attribute
+    all collapse to the same dotted path before the comparison.
+
+    A ``with`` whose *unbound* value is the queried name (``with cs:`` with no
+    ``as`` clause) binds nothing, so no item here matches the name and the
+    answer is ``False`` -- the store is not a rebind of the name at all, and
+    :func:`_store_bindings` only records items that carry an ``optional_vars``.
+    """
+    for item in statement.items:
+        if item.optional_vars is None:
+            continue
+        dotted = _resolved_dotted(item.context_expr, bound or {})
+        if dotted in NULL_RETURNING_CONTEXTS:
+            return True
+    return False
 
 
 def _stores_of(name, by_index, index, function):
