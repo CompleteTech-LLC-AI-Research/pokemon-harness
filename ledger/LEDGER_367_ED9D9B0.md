@@ -253,3 +253,119 @@ Push `99cce88`, obtain a fresh independent review of that exact head, then
 merge with a head-SHA guard after refreshing `origin/master` and re-running the
 affected lane. Close #367 only after the merge is verified on master. #397
 stays open and is not closed by this PR.
+
+## Round 4 -- independent review of `f1c1038` (REQUEST CHANGES)
+
+Round 2 reviewed `f1c1038` and returned **REQUEST CHANGES**
+(`ledger/REVIEW_367_F1C1038_codex1.md`). The round-1 multi-hop finding (F1) was
+confirmed repaired, and the reviewer confirmed 2 of the 7 tied-store rows still
+fail against base. The blocking finding is new and is *not* the deferral this
+ledger argued for in round 3:
+
+> `_resolve_bindings` counted a single unsettled conditional store written
+> after an unconditional one as a **supersession**, so the name read as "bound
+> here, carries no suppressor" even on the path where the branch never ran.
+> The carried suppressor was still in force there and the assert under it was
+> swallowed, so the analyzer certified a defeated contract as load-bearing.
+
+The reviewer is right, and the round-3 deferral was wrong. The round-3 note
+argued that treating one unsettled conditional store as ambiguous contradicts
+the pinned **#324 criterion 2** row. It does not have to. The repair scopes
+the ambiguity to the case where a suppressor is actually in play, and leaves
+the settled stores that #323 depends on alone:
+
+```python
+if (
+    len(competing) == 1
+    and latest is not None
+    and index is not None
+    and not _store_is_settled_before(competing[0], orders, index, function)
+    and any(_is_readable_suppressor(entry[1], bound) for entry in entries)
+):
+    return AMBIGUOUS_SUPPRESSOR
+```
+
+The two guards are each independently necessary, which the mutation matrix
+below establishes: dropping `_store_is_settled_before` costs the ordinary
+positive certifications, and dropping the suppressor guard makes the rule fire
+on names that were never swallowing anything (the over-careful error).
+
+### Pinned-row correction
+
+`a later rebind inside an if wins over a carried walrus value` moves from
+`[False, True]` to `[False, False]`. Measured on CPython 3.12.14 that fixture
+genuinely disagrees across inputs -- `flag=True` is LIVE, `flag=False` is
+SUPPRESSED -- and it is analysed statically, so it could only ever have been
+reporting the `flag=True` reading. One static verdict cannot represent both;
+DEFEATED is the only non-damaging answer. The execution-backed rows below
+replace the static pin for this shape.
+
+### New execution-backed rows
+
+`CONDITIONAL_SUPERSESSION_ROWS` runs each shape on the input that skips the
+branch and the one that takes it, proves the two disagree by real execution,
+then requires the static verdict to be DEFEATED. Each row also carries a
+non-suppressor control that must stay ENFORCED, so the table cannot be passed
+by declining everything. Three shapes: a plain `if` rebind, a rebind under a
+nested `with` inside an `if` (the round-1 F1 shape), and a loop-body rebind
+over an empty iterable.
+
+### Commands and results
+
+    $ python -m pytest tests/test_timed_menu_milestone_sentinels.py \
+                        tests/test_timed_menu_milestones.py -q \
+                        --junitxml=/tmp/fix367_final.xml
+    tests=399 failures=0 errors=0 skipped=0            (exit 0)
+
+    $ python -m ruff check <both files>            All checks passed!
+    $ python -m ruff format --check <both files>   2 files already formatted
+    $ git diff --check                             clean
+
+`sha256sum`: support `692d0d4093dd717a56fd915b27cb1ba8bc60029d4f0064147b557034b7a136b4`;
+sentinel test `d73142e03d046d501390a70f03d878554b0f01a60697c1f8931b7fe12586ce2e`.
+
+### Mutation matrix
+
+Each mutation is applied once to the working tree, run against the full
+399-test lane, and the tree is then restored and confirmed byte-identical.
+
+| # | mutation | killed by | result |
+|---|---|---|---|
+| M1 | whole new branch removed | 3 conditional-supersession rows + 1 pinned walrus row | **killed** |
+| M2 | `and any(_is_readable_suppressor(...))` dropped | 3 conditional-supersession rows | **killed** |
+| M3 | `_store_is_settled_before` forced to always `True` | 13 tests across 6 test functions | **killed** |
+
+M3 is deliberately the blunt version. Narrowing it to the single
+`and not _store_is_settled_before(competing[0], ...)` conjunct on the new
+branch **survives** the lane, because the same predicate is consulted from four
+other call sites (lines 1183, 1645, 1686, 3149, 3163) that mask the removal
+there. The blunt form is what actually pins the predicate; the narrow form
+surviving is recorded here so the next reviewer does not mistake it for a
+coverage gap in the new branch, which M1 and M2 already cover.
+
+An earlier narrow attempt at M1 recorded no failures; that run was wrong and is
+superseded. It reported the lane green because of the same masking described
+above, and the corrected matrix above is the one that counts.
+
+### Execution oracle
+
+| shape | input | runtime | verdict | control |
+|---|---|---|---|---|
+| `if` rebind | skipped | SUPPRESSED | DEFEATED | ENFORCED |
+| `if` rebind | taken | LIVE | DEFEATED | ENFORCED |
+| nested `with` in `if` | skipped | SUPPRESSED | DEFEATED | ENFORCED |
+| nested `with` in `if` | taken | LIVE | DEFEATED | ENFORCED |
+| loop-body rebind | empty | SUPPRESSED | DEFEATED | ENFORCED |
+| loop-body rebind | one iteration | LIVE | DEFEATED | ENFORCED |
+
+DEFEATED on the taken input is deliberate over-carefulness, not a miss: the
+analyzer emits one verdict per AST, and a shape whose runtime depends on an
+input it does not fix has no verdict that is right on both. The controls prove
+ordinary positive certification is unaffected.
+
+## Next action
+
+Commit this repair, push, and obtain a fresh independent review of that exact
+pushed head before any merge. #397 stays open: this PR repairs the
+branch-resolver defect at its root, but the class-body and decorator binding
+shapes the round-2 reviewer noted alongside it remain outstanding.

@@ -21,6 +21,7 @@ backstop that keeps them from being quietly removed.
 
 import ast
 import asyncio
+import contextlib
 import inspect
 
 import pytest
@@ -1553,6 +1554,26 @@ WALRUS_REENTRY_SHAPES = (
         [False, True],
     ),
     # ... and a rebind nested in an `if`, which is conditional.
+    #
+    # #397. This row was `[False, True]`, which is right only for `flag=True`.
+    # Measured on CPython 3.12.14, the two inputs genuinely disagree:
+    #
+    #     flag=True   ->  the rebind runs, `cs` is the nullcontext, LIVE
+    #     flag=False  ->  the rebind never runs, `cs` is still the carried
+    #                    suppress, and the assert is SWALLOWED
+    #
+    # The analyzer returns one verdict per AST and this fixture is analysed
+    # statically, never executed, so it could only ever be reporting the
+    # `flag=True` reading. That made it a shipped false ENFORCED -- a contract
+    # the interpreter defeats reported as load-bearing, the direction #308
+    # criterion 1 calls damaging.
+    #
+    # The unconditional rows above keep `[False, True]`: they run on every
+    # path, so there is a single answer and it is ENFORCED. This one is
+    # conditional, so the answer depends on an input the source does not fix,
+    # and the only verdict that is not wrong on one of the two is DEFEATED.
+    # `_control_oracle_row` below pins that against real execution on both
+    # inputs, so the decline is earned rather than asserted.
     (
         "a later rebind inside an if wins over a carried walrus value",
         (
@@ -1561,7 +1582,7 @@ WALRUS_REENTRY_SHAPES = (
             "        cs = nullcontext()\n"
             "    with cs:\n        assert x != 2"
         ),
-        [False, True],
+        [False, False],
     ),
     # #324 criterion 3: a walrus whose value is not a suppressor never yields
     # a defeated verdict, even when the name is re-entered. This is the
@@ -4359,4 +4380,130 @@ def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
     assert _is_enforced(probe, target, tree), (
         "a module-scope lookup descended into an unrelated function body and "
         "adopted its binding; a live assert was reported as defeated"
+    )
+
+
+#: #397. The conditional-supersession rows above are analysed statically, so
+#: they can only pin ONE reading of a shape whose runtime depends on an input.
+#: These rows execute the shape on every input and require the analyzer's single
+#: verdict to be the safe one -- which for an input-dependent shape means
+#: DEFEATED, and for a shape with one answer means matching it exactly.
+#:
+#: Each row carries a non-suppressor control that must stay ENFORCED, so a
+#: module which merely declines everything cannot pass this table.
+CONDITIONAL_SUPERSESSION_ROWS = (
+    (
+        "a rebind in an if leaves the carried suppressor in force when it is skipped",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with contextlib.nullcontext():\n"
+            "        if flag:\n"
+            "            cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        ((False, ()), "SUPPRESSED"),
+        ((True, ()), "LIVE"),
+    ),
+    (
+        "a rebind under a nested with inside an if is skipped the same way",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with contextlib.nullcontext():\n"
+            "        if flag:\n"
+            "            with contextlib.nullcontext():\n"
+            "                cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        ((False, ()), "SUPPRESSED"),
+        ((True, ()), "LIVE"),
+    ),
+    (
+        "a rebind in a loop body that never iterates is skipped",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with contextlib.nullcontext():\n"
+            "        for _ in rows:\n"
+            "            cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        ((True, ()), "SUPPRESSED"),
+        ((True, (1,)), "LIVE"),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "skipped", "taken"),
+    CONDITIONAL_SUPERSESSION_ROWS,
+    ids=[row[0] for row in CONDITIONAL_SUPERSESSION_ROWS],
+)
+def test_an_unrun_conditional_rebind_never_certifies_a_swallowed_assert(
+    label, body, skipped, taken
+):
+    """A store that may never run cannot retire the suppressor it shadows.
+
+    #397. `_resolve_bindings` counted a single conditional store written after
+    an unconditional one as a *supersession*, so the name read as "bound here,
+    carries no suppressor" even on the path where the branch never ran. The
+    carried suppressor was still in force there, and the assert under it was
+    swallowed -- so the analyzer certified a defeated contract as load-bearing,
+    which is the direction #308 criterion 1 calls damaging.
+
+    The analyzer produces one verdict per AST, so for a shape whose runtime
+    differs across inputs there is no verdict that is right on both. The only
+    non-damaging answer is the ambiguity marker, which reports a defeat. Each
+    row therefore executes the shape on the input that skips the branch and on
+    the one that takes it, proves the two really disagree, and then requires
+    the static verdict to be DEFEATED.
+
+    The control is the same shape with the initial binding replaced by a
+    `nullcontext`, which is live on every input. It must stay ENFORCED -- that
+    is what stops this rule from being satisfied by declining everything.
+    """
+    source = "def outer(x, flag, rows):\n    import contextlib\n" + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert"
+
+    # The two inputs must genuinely disagree, or the row proves nothing.
+    observed = []
+    for call in (skipped, taken):
+        flag, rows = call[0]
+        namespace = {"contextlib": contextlib}
+        exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+        try:
+            namespace["outer"](1, flag, rows)
+        except AssertionError:
+            observed.append("LIVE")
+        else:
+            observed.append("SUPPRESSED")
+    assert observed == [skipped[1], taken[1]], (
+        f"{label}: expected the two inputs to disagree, got {observed}. "
+        f"A row whose inputs agree does not test an input-dependent verdict."
+    )
+
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results[-1] is False, (
+        f"{label}: expected the verdict [False], got {results}. A name whose "
+        f"value depends on a branch the source does not fix cannot be certified."
+    )
+
+    # Control: a non-suppressor initial binding is live on every input and
+    # must keep its ENFORCED verdict.
+    control_source = source.replace(
+        "contextlib.suppress(AssertionError)", "contextlib.nullcontext()", 1
+    )
+    control_tree = ast.parse(control_source)
+    control_function = control_tree.body[0]
+    control_asserts = [node for node in ast.walk(control_function) if isinstance(node, ast.Assert)]
+    control_results = [
+        _is_enforced(control_function, node, control_tree) for node in control_asserts
+    ]
+    assert control_results == [True], (
+        f"{label}: the non-suppressor control expected [True], got "
+        f"{control_results}. The rule must not be satisfied by declining everything."
     )
