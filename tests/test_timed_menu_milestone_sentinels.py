@@ -1923,6 +1923,28 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [False, False],
     ),
+    # #328 acceptance criterion 4 names a THREE-link chain explicitly
+    # ("a = suppress(...); b = a; c = b"), and the shipped table only pinned
+    # two. Three links is past the point where a hand-written "follow one or
+    # two" rule would still look correct, so the row is here to make the bound
+    # a tested property rather than an accident of how far the fixture reached.
+    #
+    # The walrus twin of this shape already exists two rows up; this one is the
+    # ordinary `with` spelling, which resolves at the store site instead of the
+    # header and so is reached by a different call path.
+    (
+        "a plain three-hop suppressor alias re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    second = first\n"
+            "    third = second\n"
+            "    with third:\n"
+            "        assert x != 1\n"
+            "    with third:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
     # The control for the ordinary path: following the chain must stop at a
     # context manager that does not suppress, rather than report a defeat
     # because a suppressor appeared somewhere earlier in the chain.
