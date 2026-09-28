@@ -2192,6 +2192,287 @@ WALRUS_REBINDING_SHAPES = (
 )
 
 
+#: #359: a ``with``-header bound by a carrier that is not a target.
+#:
+#: Three binding forms bind their name as a *string field* of a node rather
+#: than as a target: ``import os as cs`` (``Import.asname``), ``def cs()`` and
+#: ``class cs``. The name therefore holds a module, a class or a function --
+#: none of which has ``__enter__`` -- so ``with cs:`` raises ``TypeError``
+#: while evaluating the header, before the assert under it is ever reached.
+#:
+#: ``from M import N as cs`` is **not** here. It looks identical but binds an
+#: arbitrary attribute of ``M``; see :data:`UNDECIDABLE_IMPORT_FROM_SHAPES`
+#: and #376.
+#:
+#: This table exists separately from ``WALRUS_REBINDING_SHAPES`` because that
+#: table's fixture *wraps* its rebind in a preceding
+#: ``with (cs := contextlib.suppress(...))``. A carrier row added there is
+#: **vacuous**: the walrus already makes the second assert's verdict
+#: ``[False]``, so deleting the whole carrier implementation leaves the row
+#: green. These rows carry no walrus, so the carrier alone decides the
+#: verdict and the fixture fails if the rule stops reading them.
+#:
+#: ``live`` is the per-row entry contract, held to CPython by
+#: ``_assert_entry_contract`` rather than merely asserted about the checker.
+CARRIER_ONLY_SHAPES = (
+    (
+        "an import-as carrier leaves a module",
+        "    import os as cs",
+        False,
+    ),
+    (
+        "a def carrier leaves a function",
+        "    def cs():\n        pass",
+        False,
+    ),
+    (
+        "a class carrier leaves a class",
+        "    class cs:\n        pass",
+        False,
+    ),
+    (
+        "CONTROL a plain store leaves a real context manager",
+        "    cs = nullcontext()",
+        True,
+    ),
+)
+
+
+#: #359: the same carriers bound at **module** scope.
+#:
+#: A module-scope carrier binds the name for the whole file, so a ``with``
+#: header inside a function reads it as a *free* name. The function-scoped
+#: walk behind :func:`_carrier_runtime_kinds` cannot see it, so before #359
+#: the store table was silent and the header read as ``enforced`` -- on an
+#: assert the interpreter never evaluates. This is the residue that was left
+#: behind when #354's factual claim was refuted and closed.
+#:
+#: These rows are separate from :data:`CARRIER_ONLY_SHAPES` because the name
+#: is bound in a *different scope*, and that is the whole difference: the same
+#: source gives two different verdicts on master depending only on where the
+#: carrier is written. ``MODULE_CARRIER_SHAPES`` is in the module body;
+#: ``CARRIER_ONLY_SHAPES`` is inside the function.
+MODULE_CARRIER_SHAPES = (
+    (
+        "a module-scope import-as carrier leaves a module",
+        "import os as cs",
+        False,
+    ),
+    (
+        "a module-scope def carrier leaves a function",
+        "def cs():\n    pass",
+        False,
+    ),
+    (
+        "a module-scope class carrier leaves a class",
+        "class cs:\n    pass",
+        False,
+    ),
+    (
+        "a later module-scope def supersedes an earlier carrier",
+        "import os as cs\ndef cs():\n    pass",
+        False,
+    ),
+    (
+        "CONTROL a module-scope store of a real context manager is live",
+        "import contextlib\ncs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "CONTROL a function-local store shadows the module carrier and is live",
+        "import os as cs",
+        True,
+    ),
+)
+
+#: #376: ``from M import N as cs`` binds an attribute, not a module.
+#:
+#: It looks exactly like ``import os as cs`` -- a name carried in a string
+#: field of an import node -- but the two are not the same claim. ``import
+#: os as cs`` binds the module ``os``, and the language gives that spelling
+#: one meaning. ``from M import N as cs`` binds whatever attribute ``N`` is on
+#: ``M``, and one spelling produces every runtime type (measured):
+#:
+#:     from os import path as cs         -> os.path   a module
+#:     from os import sep as cs          -> os.sep    a str
+#:     from decimal import Decimal as cs -> a class
+#:     from mymod import ctx as cs       -> WHATEVER mymod.ctx is
+#:
+#: The last row is the point. ``mymod.ctx`` is a real ``nullcontext()``, so
+#: ``with cs:`` **succeeds** and the assert is live. Recording the shape as a
+#: module would report that live assert as dead and drop a real pinned
+#: contract -- the damaging direction, introduced by the very rule meant to
+#: fix it. So the rule **declines** it, and the analyzer answers ``enforced``.
+#:
+#: Declining costs the one genuinely dead ``os.path`` row, which is the right
+#: trade: a wrong "dead" is unrecoverable, and a conservative "enforced" is
+#: the same answer master already gave.
+UNDECIDABLE_IMPORT_FROM_SHAPES = (
+    (
+        "an import-from-as binding a module is declined, not guessed",
+        "from os import path as cs",
+    ),
+    (
+        "an import-from-as binding a str is declined, not guessed",
+        "from os import sep as cs",
+    ),
+    (
+        "an import-from-as binding a class is declined, not guessed",
+        "from decimal import Decimal as cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "bind"),
+    UNDECIDABLE_IMPORT_FROM_SHAPES,
+    ids=[shape[0] for shape in UNDECIDABLE_IMPORT_FROM_SHAPES],
+)
+def test_an_import_from_as_is_declined_rather_than_read_as_a_module(label, bind):
+    """``from M import N`` must not be answered as "a module".
+
+    Each row is a real ``import from`` whose bound value is genuinely
+    unenterable, so ``defeated`` would be right for all three -- the same
+    answer ``os.path`` alone would give. The rule declines anyway and so
+    answers ``enforced``: wrong for these three, and the price of not being
+    wrong for the fourth.
+
+    This is not a coverage hole because of the control in
+    :func:`test_an_import_from_as_can_bind_a_real_context_manager`: the same
+    spelling, over a module that exports an actual context manager, is live.
+    A rule answering "module" there would drop a real contract.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n    " + bind + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}: expected the rule to DECLINE, i.e. [True], got {results}. "
+        f"The value bound by `from M import N` is not readable off the syntax."
+    )
+
+
+def test_an_import_from_as_can_bind_a_real_context_manager():
+    """The control that makes the decline above necessary rather than cautious.
+
+    ``mymod.ctx`` is a real ``contextlib.nullcontext()`` instance, so
+    ``from mymod import ctx as cs`` binds an **enterable** value, ``with cs:``
+    succeeds, the assert is live, and the verdict must be ``enforced``.
+
+    Nothing in the source distinguishes this from
+    ``from os import path as cs``, which binds an unenterable module. That is
+    the whole argument for declining the shape: the syntax fixes the value for
+    ``import ... as`` and does not fix it for ``from ... import ... as``.
+
+    Executed rather than asserted about the analyzer, so the row cannot pass
+    by the checker and the claim being wrong together.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    from tests._import_from_carrier_support import ctx as cs\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract("an import-from-as binding a real context manager", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True] -- the assert is live -- got {results}. A rule that "
+        f"answered 'dead' here would drop a real pinned contract."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "bind", "live"),
+    CARRIER_ONLY_SHAPES,
+    ids=[shape[0] for shape in CARRIER_ONLY_SHAPES],
+)
+def test_a_with_header_bound_by_a_carrier_is_dead_entry(label, bind, live):
+    """A module, class or function in a ``with`` header defeats the assert.
+
+    The fixture binds the name in one syntactic form and immediately enters
+    it, with **no** walrus suppressor anywhere -- so the carrier is the only
+    thing that can make the assert unreachable.
+
+    The four carrier rows are dead entry: ``with cs:`` raises ``TypeError``
+    in the header, so the assert under it never runs and reporting it as
+    load-bearing certifies a contract the interpreter never applies. The
+    ``CONTROL`` row binds a real context manager with a plain store and is
+    therefore live, and exists so that the four rows cannot be made to pass
+    by simply declaring every carrier-shaped header dead -- the control is
+    the row that would break under that shortcut.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n" + bind + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    # Two module-level imports precede `def outer`, so it is the last body
+    # node, not `tree.body[1]`.
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. The carrier "
+        f"alone decides this verdict, so the two must agree."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "live"),
+    MODULE_CARRIER_SHAPES,
+    ids=[shape[0] for shape in MODULE_CARRIER_SHAPES],
+)
+def test_a_module_scope_carrier_defeats_the_assert_below_it(label, prelude, live):
+    """A carrier bound at module scope defeats an assert in any function.
+
+    The carrier is written in the module body and the assert lives in
+    ``outer``, so the name reaches the ``with`` header as a free name. Nothing
+    inside the function binds it, which is exactly the case the function-scoped
+    walk cannot see.
+
+    The five dead rows are held to CPython by ``_assert_entry_contract``. The
+    two controls pin both ways a carrier must *not* be over-read: a
+    module-scope store of a real context manager is live, and a function-local
+    store shadows the module carrier and is live again. Without the second
+    control a fix that simply declared every free-name header dead would pass.
+    """
+    if "shadows" in label:
+        body = "    from contextlib import nullcontext\n    cs = nullcontext()\n"
+    else:
+        body = ""
+    source = (
+        prelude + "\ndef outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A module-scope "
+        f"carrier is a real store that runs at import time, so the header "
+        f"must be judged on it rather than declined."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "rebind", "is_async", "second_assert_live"),
     WALRUS_REBINDING_SHAPES,

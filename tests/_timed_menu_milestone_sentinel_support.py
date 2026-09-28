@@ -768,6 +768,120 @@ def _match_capture_names(function):
     return owners
 
 
+def _carrier_runtime_kinds(function):
+    """Every ``(name, (owning statement, runtime kind))`` from a string field.
+
+    Three binding forms carry the bound name as a plain ``str`` on a node that
+    is not a target at all, so a walk over ``statement.targets`` cannot see
+    them and ``_store_bindings`` recorded nothing for the name at all:
+
+        import os as cs                # Import.asname    -> a module
+        def cs(): ...                  # FunctionDef.name -> a function
+        class cs: ...                  # ClassDef.name    -> a class
+
+    With no store entry, :func:`_entry_is_dead` had no value to read, so a
+    later ``with cs:`` was reported *enforced* while the interpreter was
+    already raising ``TypeError: 'module'/'type'/'function' object does not
+    support the context manager protocol`` on entry. The assert is never
+    evaluated, so calling it load-bearing is the **damaging** direction -- a
+    dead contract certified as live. #359.
+
+    ``from M import N as cs`` is deliberately **absent**, and that is the
+    sharp edge of this function rather than an oversight. ``import os as cs``
+    binds the module ``os`` and nothing else, so the syntax decides the value.
+    But ``from M import N as cs`` binds whatever attribute ``N`` happens to be
+    on ``M``, and one spelling produces several runtime types (measured, #376):
+
+        from os import path as cs           -> os.path   (a module)
+        from os import sep as cs            -> os.sep    (a str)
+        from decimal import Decimal as cs   -> a class
+        from mymod import ctx as cs         -> WHATEVER mymod.ctx is
+
+    A module that exports a real context manager makes the identical statement
+    decide the *other* way -- ``with cs:`` succeeds and the assert is live.
+    Recording it as ``"module"`` would report that live assert as dead and
+    **drop a real pinned contract**, which is the damaging direction this rule
+    exists to correct. So the ``ImportFrom`` half is declined here, exactly as
+    the module declines every other value it cannot read off the syntax.
+    Resolving it would mean reading the attribute off the owning tree, which
+    is a different and considerably larger rule.
+
+    The runtime kind is returned rather than a synthetic ``ast.Name`` so the
+    value stays attached to the real store: a synthesised node is a child of
+    nothing, so containment and ordering both become unanswerable, which is
+    the mistake #337's carrier machinery already learned to avoid.
+
+    A ``match`` capture is deliberately *not* here: it binds whatever was
+    matched, which is arbitrary and very often a real context manager, and
+    #342 owns that decision. Only the forms whose value is fixed by the
+    syntax are listed.
+
+    Only bindings in `function`'s own scope count, for the reason
+    ``_match_capture_names`` gives: a ``def cs`` in a nested scope binds that
+    scope's name, and retiring the outer binding on it would report a
+    swallowed assert as live -- the opposite error.
+    """
+    owners = {}
+    for statement in _scope_body_nodes(function):
+        carriers = []
+        if isinstance(statement, ast.Import):
+            # One statement binds several names, and only the `asname`
+            # spelling retires a name *different* from the one imported.
+            # `import a.b as cs` binds the module `a.b`, and the language
+            # gives this one spelling exactly one meaning, so it is decidable.
+            carriers.extend((alias.asname, "module") for alias in statement.names if alias.asname)
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            carriers.append((statement.name, "function"))
+        elif isinstance(statement, ast.ClassDef):
+            carriers.append((statement.name, "type"))
+        for name, kind in carriers:
+            owners.setdefault(name, (statement, kind))
+    return owners
+
+
+def _module_carrier_runtime_kinds(module):
+    """The same carriers, read from a *module* body rather than a function's.
+
+    #359. A carrier written at module scope binds the name for the whole file,
+    so a ``with`` header inside any function reads it as a free name. Before
+    this the function-scoped walk saw no store for that name at all, so
+    :func:`_stores_of` returned ``None`` and the rule declined -- reporting a
+    dead assert as *enforced*, which is the damaging direction.
+
+    Only the last carrier of a name counts, exactly as for a function body:
+    module-level statements run in source order at import time, so a later
+    carrier replaces an earlier one before any function is called. Carriers
+    nested in a block (``if``/``try``/loop) are skipped rather than recorded,
+    because whether they ran is not decidable from the syntax, and an
+    undecidable value must be declined.
+
+    A function or class *definition* at module scope is the one carrier that
+    can legitimately nest: its body is a new scope, but the ``def``/``class``
+    statement itself always runs. So definitions are taken from the module
+    body directly rather than through a scope walk that would descend into
+    them.
+
+    ``ast.ImportFrom`` is excluded here for the same reason and with the same
+    consequence as in :func:`_carrier_runtime_kinds`: ``from M import N as cs``
+    binds an arbitrary attribute of ``M``, which can be a real context manager,
+    so it is declined rather than guessed at. See #376.
+    """
+    owners = {}
+    for index, statement in enumerate(getattr(module, "body", [])):
+        carriers = []
+        if isinstance(statement, ast.Import):
+            carriers.extend((alias.asname, "module") for alias in statement.names if alias.asname)
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            carriers.append((statement.name, "function"))
+        elif isinstance(statement, ast.ClassDef):
+            carriers.append((statement.name, "type"))
+        for name, kind in carriers:
+            # A later module-level carrier supersedes an earlier one, so this
+            # overwrites rather than using setdefault.
+            owners[name] = (statement, kind, index)
+    return owners
+
+
 def _pattern_is_irrefutable(pattern):
     """Is ``pattern`` a pattern that matches *every* remaining subject?
 
@@ -1164,6 +1278,20 @@ def _store_bindings(function, bound):
     for name, statement in _match_capture_names(function).items():
         conditional = not _store_retires(statement, name)
         bindings.setdefault(name, []).append((statement, None, conditional))
+    # #359. The four string-field carriers (`import os as cs`, `def cs`,
+    # `class cs`, ...) bind a name the loop above never sees, because their
+    # name is a string field of a node rather than a target. They are recorded
+    # here with the runtime kind their value is pinned to, so that
+    # `_entry_is_dead` can rule on them the way it rules on a literal: a module,
+    # a class and a function are not context managers, so entering one raises
+    # before the assert runs.
+    #
+    # `conditional` is the same test the target-list loop uses -- a binding
+    # nested in a block may not have run -- so a carrier inside an `if` cannot
+    # be read as having retired the name on a path where it never executed.
+    for name, (statement, kind) in _carrier_runtime_kinds(function).items():
+        conditional = statement not in function.body
+        bindings.setdefault(name, []).append((statement, kind, conditional))
     # A name bound by exactly one readable suppressor is a known alias. A name
     # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
     # and must NOT be resolved by source order. It is recorded as an
@@ -2171,11 +2299,32 @@ def _entered_suppressions(node, bound):
 #: header, before the body runs, so an assert in that body is unreachable
 #: (#336).
 NON_CONTEXT_MANAGER_TYPES = frozenset(
-    {"NoneType", "bool", "int", "float", "complex", "str", "bytes", "list", "tuple", "set", "dict"}
+    {
+        "NoneType",
+        "bool",
+        "int",
+        "float",
+        "complex",
+        "str",
+        "bytes",
+        "list",
+        "tuple",
+        "set",
+        "dict",
+        # #359. A name bound by a string field of a node that is not a target
+        # at all holds an object that cannot be entered: a module, a class or
+        # a function. Entering one raises `TypeError` *before* the assert under
+        # the `with` is evaluated, so the assert is defeated -- and the
+        # analyzer, with no store entry to read, was certifying it as
+        # load-bearing. The damaging direction.
+        "module",
+        "type",
+        "function",
+    }
 )
 
 
-def _entry_is_dead(expression, by_index, index, function, bound):
+def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     """Is the value this ``with`` header binds to ``expression`` unenterable?
 
     #336. Every other rule in this module answers "does this context *suppress*
@@ -2208,6 +2357,17 @@ def _entry_is_dead(expression, by_index, index, function, bound):
         return False
     name = expression.id
     stores = _stores_of(name, by_index, index, function)
+    if stores is None and module is not None:
+        # #359. A carrier bound at module scope leaves no store in the
+        # function's own table, so `_stores_of` declines and the header reads
+        # as enforced. A module-level carrier is a real, unconditional store
+        # that runs at import time, before any function is entered, so the
+        # name is bound to a module, a class or a function for the whole
+        # header. It is consulted only when the function's own table is
+        # silent: a store inside the function shadows the module's, and the
+        # rule that the inner store supersedes the outer one is already
+        # settled by the branch above.
+        stores = _module_carrier_stores(name, module)
     if stores is None:
         return False
     kinds = set()
@@ -2250,6 +2410,17 @@ def _entry_is_dead(expression, by_index, index, function, bound):
                 return False
             kinds.add("NoneType")
             continue
+        if isinstance(value, str):
+            # #359. A carrier recorded by `_carrier_runtime_kinds`
+            # (function scope) or `_module_carrier_runtime_kinds` (module
+            # scope): the name
+            # holds a module, a class or a function, each pinned by the syntax
+            # that bound it. None of them has `__enter__`, so entering one
+            # raises `TypeError` before the assert is evaluated. The kind is a
+            # plain string rather than a synthesised AST node, so the store
+            # stays attached to the real statement it came from.
+            kinds.add(value)
+            continue
         if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
             # A call is a call: `nullcontext()` returns a real context manager
             # and must not be read as a non-manager here.
@@ -2270,6 +2441,28 @@ def _entry_is_dead(expression, by_index, index, function, bound):
         kinds.add(kind)
     kinds.discard("element")
     return bool(kinds) and kinds <= NON_CONTEXT_MANAGER_TYPES
+
+
+def _module_carrier_stores(name, module):
+    """The module-level carrier binding ``name``, shaped like a store entry.
+
+    Returns ``[(statement, kind, False)]`` when the module binds ``name`` with
+    a carrier, else ``None``. The shape matches what :func:`_entry_is_dead`
+    already reads from :func:`_store_bindings`, so the carrier needs no special
+    case there beyond accepting a plain ``str`` value -- which is what keeps
+    the recorded value attached to the real statement instead of a synthesised
+    node, an error #337's carrier machinery had already learned to avoid.
+
+    ``conditional`` is always ``False``: these statements sit directly in the
+    module body, so they have run by the time any function using the name is
+    entered. A carrier nested in a block is not recorded at all (see
+    :func:`_module_carrier_runtime_kinds`), so no undecidable path reaches here.
+    """
+    entry = _module_carrier_runtime_kinds(module).get(name)
+    if entry is None:
+        return None
+    statement, kind, _index = entry
+    return [(statement, kind, False)]
 
 
 def _literal_runtime_type(value):
@@ -2335,7 +2528,7 @@ def _stores_of(name, by_index, index, function):
     return [entry for entry in decidable if orders[id(entry[0])] == latest]
 
 
-def _entered_name_is_dead(header, function, bound):
+def _entered_name_is_dead(header, function, bound, module=None):
     """Does this ``with`` enter a name whose value cannot be a context manager?
 
     Locates the ``with`` among the function's top-level statements, rebuilds the
@@ -2368,7 +2561,7 @@ def _entered_name_is_dead(header, function, bound):
             if candidate is not header:
                 continue
             return any(
-                _entry_is_dead(item.context_expr, by_index, index, function, bound)
+                _entry_is_dead(item.context_expr, by_index, index, function, bound, module)
                 for item in header.items
             )
     return False
@@ -2898,7 +3091,7 @@ def _is_enforced(function, target, tree=None):
                 return False
             if _is_user_defined_swallowing_with(ancestor, bound, function, owning):
                 return False
-            if function is not None and _entered_name_is_dead(ancestor, function, bound):
+            if function is not None and _entered_name_is_dead(ancestor, function, bound, owning):
                 return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
