@@ -220,6 +220,17 @@ def _count_comparison(tree, node, comparison):
 
 
 def _enclosing_function(tree, target):
+    """The *name* of the function that owns ``target`` in ``tree``.
+
+    Name is load-bearing here: :func:`count_comparisons` keys its triples by
+    it, and :func:`retention_sites_observed` filters on membership of
+    ``RETENTION_COUNT_SITES``. A redefinition of this name with a different
+    signature silently returns ``None`` for every lookup and empties the
+    observed set, which fails the retention-count pins as "observed []" with
+    no other symptom. The #355 work needs an enclosing-function *node* for a
+    different purpose and lives in :func:`_nonlocal_parent_function`; do not
+    fold the two together.
+    """
     for func in tree.body:
         if isinstance(func, ast.FunctionDef) and any(child is target for child in ast.walk(func)):
             return func.name
@@ -1771,7 +1782,7 @@ def _loop_value_source(statement):
     return UNREADABLE_VALUE
 
 
-def _aliased_suppressions(node, function, bound):
+def _aliased_suppressions(node, function, bound, owning=None):
     """Suppressors reached through a bare ``Name`` in a ``with`` header.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -1790,9 +1801,12 @@ def _aliased_suppressions(node, function, bound):
 
     Only names bound by an assignment that *precedes* the ``with`` qualify, and
     only when that assignment's right-hand side is a *readable* suppressor. A
-    name from an outer scope is deliberately not followed: assuming an
-    arbitrary call returns a suppressor would report live asserts as dead on
-    every context manager this check cannot trace.
+    name from an outer scope is deliberately not followed *by default*:
+    assuming an arbitrary call returns a suppressor would report live asserts
+    as dead on every context manager this check cannot trace. The one exception
+    is a name the function explicitly declares ``nonlocal``, which the language
+    guarantees refers to an enclosing function's binding -- see
+    :func:`_nonlocal_suppressors` and #355.
 
     An assignment expression in the header is the same defeat with the binding
     folded into the ``with`` itself:
@@ -1912,8 +1926,31 @@ def _aliased_suppressions(node, function, bound):
                     )
                     if _is_readable_suppressor(resolved, bound):
                         entered.append(resolved)
+                    elif isinstance(walrus.value, ast.Name):
+                        # A `nonlocal` self-alias resolves to nothing locally:
+                        #
+                        #     def inner():
+                        #         nonlocal cs
+                        #         with (cs := cs):   # `cs` is the parent's
+                        #             assert 1 == 2  # suppressor -> swallowed
+                        #
+                        # `raw_values` is built from `inner` alone, and
+                        # `inner` stores no `cs`, so the dereference above
+                        # returns the bare name. The enclosing function's
+                        # binding is the real answer (#355).
+                        entered.extend(
+                            _nonlocal_suppressors(walrus.value.id, function, bound, owning)
+                        )
                 if isinstance(expression, ast.Name) and expression.id in live:
                     entered.append(live[expression.id])
+                elif isinstance(expression, ast.Name):
+                    # The name is not bound by anything this function can see.
+                    # A `nonlocal` declaration says it *is* bound in an
+                    # enclosing function, and this module walks one function
+                    # at a time, so a suppressor sitting in the parent scope is
+                    # invisible here even though the header really enters it
+                    # (#355).
+                    entered.extend(_nonlocal_suppressors(expression.id, function, bound, owning))
                 if not isinstance(expression, ast.Call) or not isinstance(
                     expression.func, ast.Attribute
                 ):
@@ -1938,6 +1975,116 @@ def _encloses(header, node):
     if header is node:
         return True
     return any(child is node for child in ast.walk(header))
+
+
+def _nonlocal_declared(function):
+    """The names ``function`` declares ``nonlocal``, or empty.
+
+    A ``nonlocal`` statement is a declaration, not an assignment: it performs
+    no store and binds nothing. It is the one place the source states outright
+    that a name belongs to an enclosing function rather than to this one, so
+    it is exactly the permission needed to look outward -- and it is what
+    keeps the search narrow. A name that is merely inherited by closure, or
+    read from a module global, is *not* listed and is still not followed.
+    """
+    if function is None:
+        return frozenset()
+    declared = set()
+    for node in ast.walk(function):
+        names = getattr(node, "names", None)
+        if isinstance(node, ast.Nonlocal) and names:
+            declared.update(names)
+    return frozenset(declared)
+
+
+def _nonlocal_suppressors(name, function, bound, owning=None):
+    """A readable suppressor this function reaches through a ``nonlocal``.
+
+    ``nonlocal cs`` makes ``cs`` inside ``function`` an alias for the
+    *enclosing* function's variable, so this:
+
+        def outer():
+            cs = contextlib.suppress(AssertionError)
+            def inner():
+                nonlocal cs
+                with (cs := cs):    # `cs` is the parent's suppressor
+                    assert 1 == 2   # swallowed
+            inner()
+
+    really does enter a suppressor and swallow the assert. The walk that
+    classifies headers is handed ``inner`` alone, and ``inner`` contains no
+    store of ``cs``, so the name resolved to nothing and the swallowed assert
+    was certified load-bearing. That is the damaging direction, and it is
+    pre-existing on master (#355, #356).
+
+    Two gates keep this from becoming the over-reading the surrounding rule
+    refuses:
+
+    * The name must be declared ``nonlocal`` *in this function*. A closure
+      variable the source never declared, or a module global, is still not
+      followed -- an arbitrary outer binding is as untraceable as any other.
+    * The enclosing store must resolve to a **readable** suppressor through
+      exactly the same rules used everywhere else. An ordinary call, a
+      parameter, or a ``nullcontext()`` binding contributes nothing, so a live
+      assert stays live.
+
+    Only the immediately enclosing function is consulted. A name declared
+    ``nonlocal`` must exist in some enclosing scope, and the nearest one is
+    the one a read resolves to; if the nearest does not bind it, the read
+    either raises or reaches further out, and neither is a swallowed assert
+    this rule can prove.
+    """
+    if name not in _nonlocal_declared(function):
+        return ()
+    parent = _nonlocal_parent_function(function, owning)
+    if parent is None:
+        return ()
+    _, raw_values = _assigned_suppressors(parent, bound)
+    entries = raw_values.get(name)
+    if not entries:
+        return ()
+    orders = {
+        id(statement): _binding_order(parent, statement)
+        for values in raw_values.values()
+        for statement, _ in values
+    }
+    # The parent's own `with` headers can also bind the name, so those are
+    # folded in; a `with ... as cs` is a store of the name all the same.
+    resolved = []
+    for statement, value in entries:
+        deref = _deref_alias(value, raw_values, orders, _binding_order(parent, statement), name)
+        if _is_readable_suppressor(deref, bound):
+            resolved.append(deref)
+    if resolved:
+        return resolved
+    return ()
+
+
+def _nonlocal_parent_function(function, owning=None):
+    """The nearest function definition enclosing ``function``, or ``None``.
+
+    ``ast`` nodes carry no parent pointer, so the chain is recovered by
+    walking the parsed module that owns ``function`` -- the same module
+    :func:`_owning_module` already resolves for import bindings. A parent is
+    accepted only on *identity*: the candidate function must contain this
+    exact ``function`` object somewhere beneath it. That identity check is what
+    makes the walk safe when ``_owning_module`` falls back to the milestones
+    module for a probe whose own tree is not registered: a same-named function
+    in an unrelated file is never mistaken for the real parent.
+    """
+    trees = [owning] if owning is not None else []
+    trees += [milestones_tree(), _module_tree()]
+    for tree in trees:
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node is function:
+                continue
+            if any(child is function for child in ast.walk(node)):
+                return node
+    return None
 
 
 def _bindings_before(header, statement, bound_so_far, own, function=None):
@@ -2664,7 +2811,7 @@ def _entered_name_is_dead(header, function, bound):
     return False
 
 
-def _is_suppressing_with(node, bound, function=None):
+def _is_suppressing_with(node, bound, function=None, owning=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
     if isinstance(node, ast.AsyncWith):
         # `async with` demands an *asynchronous* context manager. Neither
@@ -2697,7 +2844,7 @@ def _is_suppressing_with(node, bound, function=None):
             return True
     if function is None:
         return False
-    for argument in _aliased_suppressions(node, function, bound):
+    for argument in _aliased_suppressions(node, function, bound, owning):
         # An ambiguous binding may be *any* suppressor, so the rule cannot claim
         # the exception is harmless and reports the assert as defeated (#308).
         if argument is AMBIGUOUS_SUPPRESSOR:
@@ -3184,7 +3331,7 @@ def _is_enforced(function, target, tree=None):
         elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
             if not _in_body(ancestor, target):
                 continue
-            if _is_suppressing_with(ancestor, bound, function):
+            if _is_suppressing_with(ancestor, bound, function, owning):
                 return False
             if _is_user_defined_swallowing_with(ancestor, bound, function, owning):
                 return False

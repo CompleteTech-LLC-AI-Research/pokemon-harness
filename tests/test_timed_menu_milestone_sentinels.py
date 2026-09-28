@@ -2701,6 +2701,138 @@ def test_a_walrus_bound_outside_an_assignment_still_reaches_a_later_header(label
     )
 
 
+#: #355 / #356: a ``nonlocal`` name is bound in an ENCLOSING function, and this
+#: module classifies a header by walking one function at a time. The enclosing
+#: binding is therefore invisible, so a swallowed assert was reported
+#: ``enforced`` -- a disarmed contract certified as load-bearing.
+#:
+#: Every row here is built so the suppressor is bound in ``outer`` and the
+#: assert is written in ``inner``, which is the only arrangement that
+#: reproduces the defect. The order of the store relative to ``def inner():``
+#: is NOT cosmetic and both orders are pinned: ``ast`` keeps no parent
+#: pointer, so the parent lookup walks the owning module, and a store written
+#: *before* the nested ``def`` is a genuinely different walk. Each suppressor
+#: row ships with a paired ``nullcontext`` control, because the fix is only
+#: allowed to follow an enclosing binding that resolves to a *readable*
+#: suppressor -- a live context manager must stay live.
+NONLOCAL_SUPPRESSOR_SHAPES = (
+    (
+        "a walrus self-alias, store after the nested def",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1\n"
+            "    cs = {value}\n"
+            "    inner()"
+        ),
+    ),
+    (
+        "a walrus self-alias, store before the nested def",
+        (
+            "    cs = {value}\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1\n"
+            "    inner()"
+        ),
+    ),
+    (
+        "a rebind then a direct read",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        cs = cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    cs = {value}\n"
+            "    inner()"
+        ),
+    ),
+    (
+        "a direct read with no rebind at all",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    cs = {value}\n"
+            "    inner()"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    NONLOCAL_SUPPRESSOR_SHAPES,
+    ids=[shape[0] for shape in NONLOCAL_SUPPRESSOR_SHAPES],
+)
+@pytest.mark.parametrize(
+    ("value", "enforced"),
+    [
+        ("contextlib.suppress(AssertionError)", False),
+        ("contextlib.nullcontext()", True),
+    ],
+    ids=["suppressor-is-defeating", "nullcontext-stays-live"],
+)
+def test_a_nonlocal_name_reaches_its_enclosing_binding(label, body, value, enforced):
+    """A `nonlocal` header reads the enclosing function's binding.
+
+    The assert is scored in `inner`, the scope it is written in. That matters:
+    handed `outer` instead, a whole-module walk finds the assert in the wrong
+    scope and answers a different question (#355 spells this trap out).
+    """
+    source = "def outer(x):\n    import contextlib\n" + body.format(value=value) + "\n"
+    tree = ast.parse(source)
+    inner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "inner"
+    )
+    asserts = [node for node in ast.walk(inner) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(inner, node, tree) for node in asserts]
+    assert results == [enforced], (
+        f"{label}: expected {[enforced]}, got {results}. A `nonlocal` name is "
+        f"an alias for the enclosing function's binding, so the header enters "
+        f"whatever `cs` holds out there."
+    )
+
+
+def test_a_closure_name_that_is_not_declared_nonlocal_is_not_followed():
+    """Following an outer binding is confined to names declared `nonlocal`.
+
+    The rule that consults the enclosing function is gated on the declaration,
+    because a `nonlocal` is the one place the source states outright that a
+    name belongs to an enclosing function. A plain closure read is not
+    followed, and here the enclosing store is a `nullcontext()`, so the assert
+    is live and must stay live. This is the guard on the fix over-reaching.
+    """
+    source = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    def inner():\n"
+        "        with cs:\n"
+        "            assert x != 1\n"
+        "    inner()\n"
+    )
+    tree = ast.parse(source)
+    inner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "inner"
+    )
+    asserts = [node for node in ast.walk(inner) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(inner, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True], got {results}. Nothing declared `cs` nonlocal, so "
+        f"the enclosing store is out of scope for the resolution."
+    )
+
+
 #: #324: a ``match`` capture is a store, and it is not reachable from any
 #: statement's target list -- ``case [cs]:`` parses to an ``ast.MatchAs`` whose
 #: ``name`` is a plain string, not an ``ast`` target, so the target walk that
