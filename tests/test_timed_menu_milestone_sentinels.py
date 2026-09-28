@@ -1885,8 +1885,17 @@ CARRIER_UNREACHABLE_ROWS = (
     # This is the row that makes `_runs_before`'s earlier-sibling scan
     # load-bearing. Replacing it with whole-block containment returns
     # `enforced` here while the runtime swallows, which is why the scan cannot
-    # be simplified away. Found in review round 4; the three rows above all
-    # pass under that mutation, so none of them pins it.
+    # be simplified away. Found in review round 4.
+    #
+    # The other rows also catch the containment mutation, but for a different
+    # reason: their carriers sit in a *different* block from the header, so a
+    # walk over the header's own block already misses them and the mutation
+    # reports the same wrong answer for the wrong reason. Only this row
+    # separates the two implementations, because here the carrier really is
+    # inside the block the containment walk searches. The one row above that
+    # does not catch the mutation at all is "a capture in a block that cannot
+    # run" -- it early-returns as a known-gap pin and never reaches the
+    # assertion.
     (
         "a carrier in a later sibling of the header's own block",
         "    if flag:\n        with cs:\n            assert x != 1\n        import os as cs",
