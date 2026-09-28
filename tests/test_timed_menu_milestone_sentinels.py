@@ -4067,3 +4067,179 @@ def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
         "a module-scope lookup descended into an unrelated function body and "
         "adopted its binding; a live assert was reported as defeated"
     )
+
+
+#: #375 round 4. A **conditional** store that may have superseded a
+#: function-local carrier. The carrier is unconditional and settles the name on
+#: its own, but a later conditional store can replace it with something
+#: enterable, and then the assert under the header is live. The value is
+#: therefore undecidable and the rule must decline.
+#:
+#: Every row is executed under CPython with ``flag`` **true** by
+#: ``_assert_entry_contract``, which is the path on which the store runs and the
+#: assert really fires. These are the four false-dead verdicts ``origin/master``
+#: (``ed9d9b0``) returned for exactly these sources.
+STALE_LOCAL_CARRIER_SHAPES = (
+    (
+        "an import carrier superseded by a conditional store",
+        "    import os as cs",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a def carrier superseded by a conditional store",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a class carrier superseded by a conditional store",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "an import carrier superseded by a loop store",
+        "    import os as cs",
+        "    for _ in (1,):\n        cs = nullcontext()",
+    ),
+)
+
+
+#: The mirror of :data:`STALE_LOCAL_CARRIER_SHAPES`, and the reason a first cut
+#: of the guard above was rejected. A conditional store that is itself pinned
+#: **non-enterable** cannot rescue the header on the path where it runs, so the
+#: carrier still decides every path and the assert is unreachable either way.
+#: Declining these would replace a correct dead verdict with a false-live one
+#: -- a regression against ``origin/master``, not a repair.
+#:
+#: Measured on CPython 3.12.14 with ``outer(1, False, None)`` and
+#: ``outer(1, True, None)``: both raise ``TypeError`` for all four rows, so the
+#: assert is unreachable on both paths and the correct verdict is dead.
+DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
+    (
+        "a None store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = None",
+    ),
+    (
+        "a None store after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = None",
+    ),
+    (
+        "a None store after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = None",
+    ),
+    (
+        "an int store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = 42",
+    ),
+    (
+        "a list store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = [1]",
+    ),
+    (
+        "a str store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = 'x'",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "carrier", "conditional"),
+    STALE_LOCAL_CARRIER_SHAPES,
+    ids=[shape[0] for shape in STALE_LOCAL_CARRIER_SHAPES],
+)
+def test_a_conditional_store_superseding_a_local_carrier_is_declined(label, carrier, conditional):
+    """A carrier a conditional store may have replaced is not still in force.
+
+    The rule must not report the entry dead on the strength of a carrier that
+    a later conditional store may have replaced. Every row is executed under
+    CPython with ``flag`` **true**, which is the path on which the assert is
+    live, so the fixture proves the header really is enterable and the
+    ``enforced`` verdict is the correct answer.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import nullcontext\n"
+        "def outer(x, flag, helper):\n" + carrier + "\n" + conditional + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    # `_assert_entry_contract` calls `outer(1, True, None)`: `x=1` makes the
+    # assert false, and `flag=True` makes the conditional store run, so the
+    # name holds a real context manager and the assert is live.
+    _assert_entry_contract(label, source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}: expected verdicts [True], got {results}. A conditional store "
+        f"that may have superseded the carrier leaves the header's value "
+        f"undecidable, so the rule must decline instead of reporting the "
+        f"entry dead."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "carrier", "conditional"),
+    DEAD_CONDITION_AFTER_CARRIER_SHAPES,
+    ids=[shape[0] for shape in DEAD_CONDITION_AFTER_CARRIER_SHAPES],
+)
+def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
+    label, carrier, conditional
+):
+    """A conditional store that cannot be entered leaves the carrier decisive.
+
+    The counterpart to
+    :func:`test_a_conditional_store_superseding_a_local_carrier_is_declined`.
+    There the later store could bind a real context manager, so the header's
+    value is undecidable; here it is pinned to a module, a class, a function or
+    a non-enterable literal, so *every* path through the header raises before
+    the assert is evaluated. Declining would certify a dead contract as
+    enforced, which is the damaging direction, so the rule must answer from the
+    carrier as usual.
+
+    Both rows are executed under CPython here too -- ``_assert_entry_contract``
+    is called with ``second_assert_live=False``, which requires the fixture to
+    raise something *other* than ``AssertionError``. That is what distinguishes
+    "unreachable" from "swallowed", and it is what makes these rows
+    non-vacuous rather than an assertion about the checker.
+
+    **A known limit this table deliberately does not cover.** A conditional
+    store that is itself a *carrier* --
+
+        def outer(x, flag, helper):
+            import os as cs
+            if flag:
+                import os as cs
+            with cs:
+                assert x != 1
+
+    -- is dead under CPython on both paths, and `origin/master` (``ed9d9b0``)
+    reports it `True` just the same. That is a separate pre-existing gap in
+    `_carrier_runtime_kinds` on the carrier path, unchanged by this repair and
+    not visible to the guard here, which reads the *settled* store. It is left
+    alone rather than folded in: widening this table to cover it would make
+    the non-vacuity proof below depend on a second repair.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import nullcontext\n"
+        "def outer(x, flag, helper):\n" + carrier + "\n" + conditional + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, False)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}: expected verdicts [False], got {results}. A conditional store "
+        f"that is itself pinned non-enterable cannot make the header enterable, "
+        f"so the carrier still settles the name and the assert stays unreachable."
+    )
