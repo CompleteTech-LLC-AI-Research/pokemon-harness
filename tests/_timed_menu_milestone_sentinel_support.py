@@ -1448,6 +1448,25 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     # an already-completed `with` body, or a loop `else` that always runs, has
     # overwritten the earlier value by the time this header is read, so it
     # really is the value in force. `_store_is_settled_before` decides that.
+    #
+    # The suppressor test has to consider only the stores that can still reach
+    # this header -- the latest unconditional binding and any competing
+    # conditional one -- never a store the resolver has already discarded as
+    # overwritten. Scanning `entries` wholesale looks at the whole history and
+    # answers "did this name EVER hold a suppressor", which is the wrong
+    # question. The round-3 reviewer's counterexample makes the difference:
+    #
+    #     cs = contextlib.suppress(AssertionError)
+    #     cs = contextlib.nullcontext()      # unconditional: retires the above
+    #     if flag:
+    #         cs = contextlib.nullcontext()
+    #     with cs:
+    #         assert x != 1
+    #
+    # Both possible values are `nullcontext`, so the assert is live on both
+    # inputs and the verdict has to be ENFORCED. Reading the stale `suppress`
+    # out of the history instead returns the ambiguity marker and reports a
+    # live contract as defeated -- trading one error for its mirror image.
     # Only a name that can actually be swallowing something needs the safe
     # answer. If nothing in play is a suppressor, the assert is live on every
     # path and declining it would be the over-careful error instead -- so the
@@ -1458,7 +1477,11 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
         and latest is not None
         and index is not None
         and not _store_is_settled_before(competing[0], orders, index, function)
-        and any(_is_readable_suppressor(entry[1], bound) for entry in entries)
+        and any(
+            _is_readable_suppressor(entry[1], bound)
+            for entry in entries
+            if orders[id(entry[0])] >= latest
+        )
     ):
         return AMBIGUOUS_SUPPRESSOR
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):

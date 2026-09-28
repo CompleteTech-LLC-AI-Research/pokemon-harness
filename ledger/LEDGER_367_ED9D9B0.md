@@ -369,3 +369,106 @@ Commit this repair, push, and obtain a fresh independent review of that exact
 pushed head before any merge. #397 stays open: this PR repairs the
 branch-resolver defect at its root, but the class-body and decorator binding
 shapes the round-2 reviewer noted alongside it remain outstanding.
+
+## Round 5 -- two independent reviews of `d76722d` (both REQUEST CHANGES)
+
+`d76722d` was pushed and reviewed twice in parallel by two independent
+reviewers reading the same brief. Both returned **REQUEST CHANGES**, and the
+lead reproduced both findings directly before repairing either.
+
+### F1 -- false DEFEATED from a retired suppressor (a regression I introduced)
+
+The primary reviewer's finding, reproduced and confirmed:
+
+    cs = contextlib.suppress(AssertionError)
+    cs = contextlib.nullcontext()      # unconditional: retires the above
+    if flag:
+        cs = contextlib.nullcontext()
+    with cs:
+        assert x != 1
+
+Both values the name can hold are `nullcontext`, so the assert is LIVE on both
+inputs (measured, CPython 3.12.14, `x=1`) and ENFORCED is the only correct
+verdict. Base returns ENFORCED; `d76722d` returned **DEFEATED**.
+
+The cause was my own guard. `any(_is_readable_suppressor(entry[1], bound) for
+entry in entries)` scanned the name's whole binding history, asking "did this
+name *ever* hold a suppressor" instead of "can it hold one here". The
+resolver's own `latest` / `competing` computation had already discarded every
+store the latest unconditional one overwrote. So the repair traded a false
+ENFORCED for its mirror image, on a shape that is live on every input -- the
+same class of error #308 criterion 1 exists to prevent, pointed the other way.
+
+The fix scopes the suppressor test to the stores that can still reach this
+header (`orders[id(entry[0])] >= latest`), and
+`test_a_suppressor_the_name_already_dropped_does_not_make_a_live_assert_defeated`
+raises on both inputs by real execution and then requires ENFORCED.
+
+### F2 -- alias copied after the rebind (pre-existing, incomplete scope)
+
+The cross-check reviewer's finding, also reproduced:
+
+    cs = contextlib.suppress(AssertionError)
+    if flag:
+        cs = contextlib.nullcontext()
+    alias = cs
+    with alias:
+        assert False
+
+`flag=False` is SUPPRESSED, `flag=True` is LIVE, and the analyzer says
+**ENFORCED** -- the damaging direction. `_resolve_bindings` correctly marks the
+direct read of `cs` ambiguous, but `alias = cs` is resolved by a *parallel*
+path (`_store_bindings` -> `_deref_alias` -> `_last_store_before`) that picks
+the later conditional store as though it certainly ran, so the ambiguity
+marker never reaches the final consumer.
+
+**This is not a regression from `d76722d`.** It reproduces identically on base
+`4796c64`; the lead verified the base verdict is also ENFORCED. It is the same
+class of defect the repair addresses, reached by a path the repair does not
+touch, and it belongs to #397, which stays open for exactly this reason. It is
+deliberately not folded in here: the alias path is a separate mechanism, and
+widening this commit would make the diff harder to review for no gain in
+confidence.
+
+### Round-5 gates
+
+    $ python -m pytest tests/test_timed_menu_milestone_sentinels.py \
+                        tests/test_timed_menu_milestones.py -q \
+                        --junitxml=/tmp/fix367_v8.xml
+    tests=400 failures=0 errors=0 skipped=0            (exit 0)
+
+    $ python -m ruff check <both files>            All checks passed!
+    $ python -m ruff format --check <both files>   2 files already formatted
+    $ git diff --check                             clean
+
+### Round-5 mutation matrix
+
+Each is applied once to the working tree, run against the lane, then restored
+and confirmed byte-identical.
+
+| # | mutation | failures | result |
+|---|---|---:|---|
+| M1 | whole new branch removed | 4 | **killed** |
+| M2 | suppressor guard removed | 4 | **killed** |
+| M3 | `_store_is_settled_before` forced always `True` | 13 | **killed** |
+| M4 | F1 reintroduced (guard rescoped to all `entries`) | 1 | **killed** |
+
+M4 is the one that matters most: it is the exact code the round-5 primary
+reviewer caught, and the new regression test is the only thing that detects
+it. M1-M3 are unchanged from round 4.
+
+### Process note
+
+Both round-5 reviewers independently hit the hazard this ledger already
+records: a stale import from another worktree silently yields the *wrong*
+verdict. The cross-check reviewer's report noticed the head worktree changing
+mid-review -- that was the lead's own mutation runs against the same tree, and
+the reviewer was right to exclude those post-change imports and re-derive from
+a committed snapshot. Every verdict in this section is from a worktree whose
+loaded module path was printed and asserted.
+
+## Next action
+
+Push the F1 repair and obtain a fresh independent review of that exact head.
+Merge only on a current approval, refreshing `origin/master` first. #397 stays
+open for the F2 alias path and the class-body / decorator shapes.

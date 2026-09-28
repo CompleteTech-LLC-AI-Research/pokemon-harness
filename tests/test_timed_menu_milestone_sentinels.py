@@ -4507,3 +4507,57 @@ def test_an_unrun_conditional_rebind_never_certifies_a_swallowed_assert(
         f"{label}: the non-suppressor control expected [True], got "
         f"{control_results}. The rule must not be satisfied by declining everything."
     )
+
+
+def test_a_suppressor_the_name_already_dropped_does_not_make_a_live_assert_defeated():
+    """A retired suppressor is history, not a value the name can still hold.
+
+    Round 3 of the independent review caught this on the #397 repair. The
+    new branch asked whether *any* binding of the name was ever a readable
+    suppressor, which is the wrong question: the resolver has already
+    discarded every store the latest unconditional one overwrote, and
+    consulting them anyway re-introduces the error as its mirror image.
+
+        cs = contextlib.suppress(AssertionError)
+        cs = contextlib.nullcontext()      # unconditional: retires the above
+        if flag:
+            cs = contextlib.nullcontext()
+        with cs:
+            assert x != 1
+
+    Both values the name can hold here are `nullcontext`, so the assert is
+    live on *both* inputs and ENFORCED is the only correct verdict. Answering
+    the ambiguity marker here reports a live contract as defeated, which is
+    the same damaging polarity the repair exists to remove -- the assert the
+    project depends on stops being load-bearing in the suite, so a later
+    deletion of it goes unnoticed.
+
+    Measured on CPython 3.12.14, `x=1` raises for both `flag=False` and
+    `flag=True`. Base returns ENFORCED and so must the repair.
+    """
+    source = (
+        "def outer(x, flag):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.suppress(AssertionError)\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if flag:\n"
+        "        cs = contextlib.nullcontext()\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+
+    # Every input must genuinely raise, or the row proves nothing.
+    for flag in (False, True):
+        namespace = {}
+        exec(compile(source, "<retired-suppressor>", "exec"), namespace)  # noqa: S102
+        with pytest.raises(AssertionError):
+            namespace["outer"](1, flag)
+
+    assert _is_enforced(function, target, tree) is True, (
+        "a name that can only hold a nullcontext must stay certified: the "
+        "suppress it briefly held was overwritten unconditionally and is not "
+        "a value this header can still read"
+    )
