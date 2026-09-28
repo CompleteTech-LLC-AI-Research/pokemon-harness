@@ -3111,6 +3111,22 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=[CM()]) as cs:\n            pass\n",
         False,
     ),
+    # A dict *display* binds a dict, exactly as the list and tuple rows above
+    # bind a list and a tuple -- including one that holds a manager, which is
+    # still a dict. These rows exist because the dict arm of the allowlist was
+    # otherwise unexercised: deleting it outright left the whole lane green, so
+    # nothing was pinning it. A `**` of a dict is a different question (it
+    # names parameters) and is answered by the argument model instead.
+    (
+        "a conditional nullcontext-with a dict enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result={"a": CM()}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with an empty dict enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result={}) as cs:\n            pass\n",
+        False,
+    ),
     # A `**` unpacking of a *literal dict* is as readable as the keyword
     # itself, and a manager inside one does leave an enterable value bound.
     (
