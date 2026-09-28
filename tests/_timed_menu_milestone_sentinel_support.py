@@ -1757,7 +1757,7 @@ def _element_for_target(target, elements, name):
 
 
 def _loop_value_source(statement):
-    """The element a loop target will receive, when it can be read.
+    """The element a loop target leaves bound, when it can be read.
 
     A ``for`` target binds the next element of the iterable, not the iterable
     itself, and normally the source cannot say which element that is:
@@ -1783,10 +1783,27 @@ def _loop_value_source(statement):
     that is the only position a bare target can take. A ``Name`` or ``Call``
     iterable returns :data:`UNREADABLE_VALUE`, which is the conservative
     choice for the same reason an arbitrary iterable is undecidable.
+
+    #377: element zero is the element bound *during* the body, which is only
+    also the element left behind when the iterable has exactly one element.
+    A loop over more than one leaves the **last** one:
+
+        for cs in (contextlib.nullcontext(),
+                   contextlib.suppress(AssertionError)):
+            pass
+        with cs:
+            assert x != 1        # swallowed -- `cs` is the last element
+
+    and with the order reversed the assert is live. Returning element zero
+    answered the opposite of the truth in *both* orderings, which is worse
+    than a single missed row: a helper that returns a confident wrong answer
+    in the damaging direction and a wrong one in the over-careful direction
+    at the same time. The last element is what survives the loop, so that is
+    what is read; a single-element literal is unchanged by this.
     """
     iterable = statement.iter
     if isinstance(iterable, (ast.Tuple, ast.List)) and iterable.elts:
-        return iterable.elts[0]
+        return iterable.elts[-1]
     return UNREADABLE_VALUE
 
 
@@ -2057,13 +2074,37 @@ def _is_store_statement(node):
     away because the enclosing statement was not one of the two shapes it
     recognised, so the header saw no binding at all and reported a swallowed
     assert as live. A ``for`` target binds on every iteration that reaches the
-    body, which is exactly the guarantee the other two shapes are listed for,
-    so it belongs in the same set.
+    body, which is the guarantee the other two shapes are listed for, so it
+    belongs in the same set.
 
     ``NamedExpr`` is deliberately still absent: it never appears as a direct
     statement, so it cannot be the ``node`` walked here.
+
+    #378: "on every iteration that reaches the body" is a conditional
+    guarantee, and a literal empty container gives a loop that reaches the body
+    exactly zero times:
+
+        cs = contextlib.nullcontext()
+        if True:
+            for x in ():                       # never iterates
+                cs = contextlib.suppress(AssertionError)   # never executes
+            with cs:                          # `cs` is still the nullcontext
+                assert x != 1                 # live
+
+    Counting the ``for`` as a store that ran admits the unexecuted assignment
+    and answers ``defeated``, dropping a live assert from the sentinel. Master
+    answers ``enforced`` here, which is correct, so counting every loop was a
+    regression rather than a pre-existing gap.
+
+    The test is `_is_empty_literal_iterable`, the same helper the ``for``-defeat
+    rule already uses, so the two agree on what a decidable empty iterable is.
+    A call such as ``range(0)`` is deliberately still counted as having run:
+    settling that means reasoning about builtins, and guessing wrong here
+    drops a live contract, which is the more damaging error.
     """
-    return isinstance(node, (ast.Assign, ast.For, ast.AsyncFor)) or (
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return not _is_empty_literal_iterable(node.iter)
+    return isinstance(node, ast.Assign) or (
         isinstance(node, ast.AnnAssign) and node.value is not None
     )
 

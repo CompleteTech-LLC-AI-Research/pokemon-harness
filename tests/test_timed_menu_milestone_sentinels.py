@@ -2670,6 +2670,130 @@ def _async_loop_target_is_undecidable(label, source):
     raise AssertionError(f"{label}: the hostile variant returned normally; the fixture is stale.")
 
 
+#: #377 and #378, from the independent review of `c6d488d`: rows whose correct
+#: verdict is **live**. They cannot live in ``BINDING_FORM_SHAPES``, because
+#: that table executes every fixture and rejects one whose assert fires -- a
+#: guard that is right for its own rows (a `defeated` expectation is only
+#: credible if the assert really is swallowed) and structurally wrong for these.
+#:
+#: The failure mode is the mirror of the one the module exists to prevent. That
+#: table catches "swallowed but reported live"; this one catches "live but
+#: reported defeated", where a real pinned contract stops being counted. Both
+#: are silent, so this is stated as its own contract with an executed runtime.
+#:
+#: ``expected_live`` is the exact verdict for the marked assert and
+#: ``swallowed`` says whether CPython really swallows it -- asserted here rather
+#: than assumed, so a fixture that stops behaving as described fails loudly
+#: instead of quietly testing nothing.
+LOOP_ELEMENT_LIVE_SHAPES = (
+    (
+        "a multi-element loop with the suppressor first leaves it live",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The pair for the row above. Same shape, elements swapped, so the LAST one
+    # is the suppressor and the assert is really swallowed. Reading element zero
+    # in both directions answered `enforced` where it is swallowed and
+    # `defeated` where it is live -- a confident answer that was wrong in both
+    # directions at once, which one row on its own cannot pin.
+    (
+        "a multi-element loop with the suppressor last swallows",
+        (
+            "    for cs in (contextlib.nullcontext(),\n"
+            "               contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    # #378: a loop over an empty literal reaches its body zero times, so the
+    # store inside it never ran. Counting the `for` as a store that had executed
+    # admitted the dead assignment and reported this live assert as defeated.
+    # Master answers `enforced` here, so this was a regression the change
+    # introduced rather than a pre-existing gap.
+    (
+        "a zero-iteration loop does not count as having run its body",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for x in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The non-empty loop is the control for the row above: one element, so the
+    # body really does run and the assert really is swallowed. Without it a rule
+    # that declined *every* loop would pass both rows.
+    (
+        "a one-iteration loop does count as having run its body",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for x in (1,):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live", "swallowed"),
+    LOOP_ELEMENT_LIVE_SHAPES,
+    ids=[row[0] for row in LOOP_ELEMENT_LIVE_SHAPES],
+)
+def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, swallowed):
+    """A ``for`` over a literal must resolve to what the loop leaves bound.
+
+    Two questions, and both directions are load-bearing. Which element survives
+    a multi-element loop is the LAST one, not the first, and which direction
+    that decides depends on the order. And a loop that provably iterates zero
+    times must not be treated as proof that its body's stores ran.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1, type("H", (), {"items": staticmethod(lambda: ())})())
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+    # Stated, not assumed: a fixture that stops behaving as described fails
+    # loudly rather than quietly testing nothing.
+    assert fired is not swallowed, (
+        f"{label}: expected the assert to "
+        f"{'fire' if not swallowed else 'be swallowed'}, but it "
+        f"{'was swallowed' if not swallowed else 'fired'}."
+    )
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
+
+
 def test_an_except_as_handler_is_decidable_even_after_a_conditional_store():
     """The ``ExceptHandler`` clause in ``_stores_of`` is load-bearing alone.
 
