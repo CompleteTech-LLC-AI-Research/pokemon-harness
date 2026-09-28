@@ -1826,22 +1826,62 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
         if not isinstance(body, list):
             continue
         seen_store = False
-        # Captures owned by this block have run by the time a header inside the
-        # same clause body is reached, even though no store *statement* does.
-        # The owner is the `ast.Match`; the block holding the header is the
-        # `match_case` nested under it, so the test runs the other way round --
-        # does the capturing `match` enclose this block?
+        # Captures that have run by the time a header nested in this block is
+        # reached, even though no store *statement* does. A capture binds as a
+        # side effect of its clause matching, so it is not in any block's body
+        # list and the `seen_store` test below can never see it.
+        #
+        # Two containment directions, because there are two shapes:
+        #
+        # * the capturing `match` **encloses** this block -- the header is
+        #   written inside the `case` body, so the clause must have matched for
+        #   execution to reach the header at all;
+        # * this block **encloses** the capturing `match` -- the header is a
+        #   later sibling in the same block, so the capture ran on the way to
+        #   it.
+        #
+        # Only the first was modelled. The second is the shape that made a live
+        # assert report as swallowed, and base `87a90da` gets it right.
         captures_scope = function if function is not None else statement
         captures = {
             name
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
+            or any(child is owner for child in ast.walk(block))
+        }
+        # The same question for the string-field carriers, and this is a
+        # containment test on the **carrier node**, which is the whole point of
+        # recording it: an `ast.alias` is a real child of its `ast.Import`, so it
+        # can be found inside a block, while the detached `ast.Name` this used
+        # to synthesise could never be found and the row stayed silently wrong.
+        #
+        # This clause is load-bearing and is NOT subsumed by the per-entry `late`
+        # ordering added for the same-header case. That ordering ranks entries
+        # *within one statement*; this decides whether a store in an enclosing
+        # block has run at all by the time a header *nested inside that block*
+        # is read. Deleting it as "redundant" left this shape reporting a live
+        # assert as swallowed:
+        #
+        #     with (cs := suppress(AssertionError)): ...
+        #     with nullcontext():
+        #         import os as cs   # carrier runs here
+        #         with cs:           # cs is the os MODULE -> TypeError -> LIVE
+        #             assert x != 1
+        #
+        # The full mutation matrix said otherwise only because no row exercised
+        # a `with` nested *below* its carrier; see the "inside-header-nested"
+        # position in the carrier test table.
+        carriers_scope = function if function is not None else statement
+        carriers = {
+            name
+            for name, carrier in _carrier_bound_names(carriers_scope).items()
+            if any(child is carrier for child in ast.walk(block))
         }
         for node in body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
-                return dict(own) if seen_store or captures else bound_so_far
+                return dict(own) if seen_store or captures or carriers else bound_so_far
             if isinstance(node, ast.Assign) or (
                 isinstance(node, ast.AnnAssign) and node.value is not None
             ):

@@ -2139,7 +2139,7 @@ CARRIER_REBINDING_SHAPES = (
     CARRIER_REBINDING_SHAPES,
     ids=[row[0] for row in CARRIER_REBINDING_SHAPES],
 )
-@pytest.mark.parametrize("position", ["after", "inside-header"])
+@pytest.mark.parametrize("position", ["after", "inside-header", "inside-header-nested"])
 def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebind, position):
     """A string-field carrier retires the carried suppressor wherever it sits.
 
@@ -2159,16 +2159,47 @@ def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebi
             "    with (cs := suppress(AssertionError)):\n"
             "        pass\n" + textwrap.indent(rebind, "    ")
         )
-    else:
+    elif position == "inside-header":
         walrus_block = "    with (cs := suppress(AssertionError)):\n" + textwrap.indent(
             rebind, "        "
         )
-    source = (
-        "def outer(x, flag, helper, items):\n"
-        "    import contextlib\n"
-        "    from contextlib import suppress, nullcontext\n" + walrus_block + "\n"
-        "    with cs:\n        assert x != 1\n"
-    )
+    else:
+        # The carrier sits in a block of its own, and the header that re-enters
+        # `cs` is nested *below* it inside that same block. This is the position
+        # the per-entry ordering added for the same-header case cannot decide:
+        # that ranks entries within one statement, while this asks whether a
+        # store in an enclosing block has run at all by the time a header nested
+        # inside it is read -- a containment question, decided in
+        # `_bindings_before`.
+        #
+        # The `carriers` clause there was deleted in `997611d` as redundant
+        # because the mutation matrix found no row that failed without it. The
+        # matrix was measuring the test suite, not the input space: no row put
+        # a `with cs:` below its own carrier, so a live rule read as dead and a
+        # **live** assert was reported swallowed. Base `87a90da` gets this right.
+        #
+        # The blank line matters: `match [1]:` and a `case` clause cannot share
+        # a block with an indented `with`, so the carrier is emitted on its own
+        # and the suite is re-entered by the `with` below it.
+        walrus_block = (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with nullcontext():\n" + textwrap.indent(rebind, "        ") + "\n"
+            "        with cs:\n            assert x != 1\n"
+        )
+    if position == "inside-header-nested":
+        source = (
+            "def outer(x, flag, helper, items):\n"
+            "    import contextlib\n"
+            "    from contextlib import suppress, nullcontext\n" + walrus_block
+        )
+    else:
+        source = (
+            "def outer(x, flag, helper, items):\n"
+            "    import contextlib\n"
+            "    from contextlib import suppress, nullcontext\n" + walrus_block + "\n"
+            "    with cs:\n        assert x != 1\n"
+        )
     tree = ast.parse(source)
     outer = tree.body[0]
     asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
