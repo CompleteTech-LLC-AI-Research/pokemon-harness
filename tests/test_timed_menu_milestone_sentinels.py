@@ -3320,6 +3320,77 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": int()}) as cs:\n            pass\n',
         False,
     ),
+    # A builtin call is decided by *name*, not by whether it is a container.
+    # `bool()`, `object()`, `complex()` and `bytearray()` are as fixed as
+    # `list()` -- each binds an object with no `__enter__` -- and the first
+    # cut of the allowlist listed only containers and numbers, so these four
+    # were read as may-enterable and declared a dead header live. Regression
+    # found by an adversarial sweep against base `ed9d9b0`, which got all four
+    # right.
+    (
+        "a conditional nullcontext-with a bool enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=bool()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with an object enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=object()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a complex enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=complex()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a bytearray enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=bytearray()) as cs:\n            pass\n",
+        False,
+    ),
+    # An f-string is a `str` whatever it interpolates, and `ast` gives it an
+    # `ast.JoinedStr` rather than folding it into `ast.Constant`. Left to the
+    # unreadable default it answered "may be enterable" on a value that is
+    # provably a string.
+    (
+        "a conditional nullcontext-with an f-string enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=f"{x}") as cs:\n            pass\n',
+        False,
+    ),
+    # A `*` of a *readable* dict display unpacks to its keys, so `*{}` unpacks
+    # to nothing and supplies no argument at all -- the same no-argument form
+    # as `nullcontext()`, binding `None`. Reading it as an unreadable star made
+    # it supply a "maybe enterable" value instead.
+    (
+        "a conditional nullcontext-with an empty dict star is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*{}) as cs:\n            pass\n",
+        False,
+    ),
+    # A **computed** key is a distinct entry beside a readable `enter_result`
+    # and cannot overwrite it, and `nullcontext` takes one parameter -- so the
+    # call raises whatever the computed key evaluates to. A `**` *spread*
+    # (`{**other}`) is the opposite and can overwrite, so it is not counted as
+    # an extra key. Reading both the same way got the first one backwards.
+    (
+        "a conditional nullcontext-with a computed key beside enter_result is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            '        with contextlib.nullcontext(**{("enter_" + "r"): 1, "enter_result": CM()}) as cs:\n'
+            "            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL a conditional nullcontext-with a mapping spread is live",
+        (
+            "    import os as cs\n"
+            "    other = {'enter_result': CM()}\n"
+            "    if flag:\n"
+            '        with contextlib.nullcontext(**{"enter_result": CM(), **other}) as cs:\n'
+            "            pass\n"
+        ),
+        True,
+    ),
     # The name is bound by a *different* item of the same `with`, so the
     # non-enterable sibling says nothing about what `cs` received. Searching
     # the whole statement for a known-`None` manager excluded a store that

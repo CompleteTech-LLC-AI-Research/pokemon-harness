@@ -3189,9 +3189,20 @@ _ENTERABLE_CLASS_NAMES = (ast.Name,)
 #: rule reading "any call is enterable" would declare every one of them live.
 #: Measured on CPython 3.12.14 by entering each result. This is the call
 #: arm of the allowlist; the display arm is the container literals below.
+#:
+#: The rule is by *name*, not by arity or by category: ``bool()``,
+#: ``object()``, ``complex()`` and ``bytearray()`` are as fixed as ``list()``
+#: even though none of them is a container, and leaving them out made
+#: ``nullcontext(enter_result=bool())`` a live superseder on a header that
+#: raises. Every entry below was measured by entering its zero-argument result
+#: on CPython 3.12.14. Adding a name is a claim that ``NAME()`` has no
+#: ``__enter__``, so it is checked, not assumed.
 _NON_ENTERABLE_BUILTIN_CALLS = frozenset(
     {
+        "bool",
+        "bytearray",
         "bytes",
+        "complex",
         "dict",
         "enumerate",
         "filter",
@@ -3200,6 +3211,7 @@ _NON_ENTERABLE_BUILTIN_CALLS = frozenset(
         "int",
         "list",
         "map",
+        "object",
         "range",
         "set",
         "str",
@@ -3280,6 +3292,14 @@ def _value_may_be_enterable(node, bound):
     """
     if isinstance(node, ast.Constant):
         return not isinstance(node.value, _NON_ENTERABLE_LITERAL_TYPES)
+    if isinstance(node, (ast.JoinedStr, ast.FormattedValue)):
+        # An f-string is a `str` whatever it interpolates, and `ast` gives it
+        # its own node type rather than folding it into `ast.Constant` -- so
+        # `nullcontext(enter_result=f"{x}")` binds a string and cannot be
+        # entered. Left to the fall-through it answered "may be enterable" and
+        # declared a dead header live. Measured on CPython 3.12.14 by entering
+        # the result.
+        return False
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         # A container *display* builds a container, whatever fills it.
         return False
@@ -3389,9 +3409,21 @@ _UNREADABLE_VALUE = ast.Name(id="__unreadable__", ctx=ast.Load())
 
 
 def _literal_star_elements(node):
-    """The elements a starred literal unpacks to, or ``None`` if unreadable."""
+    """The elements a starred literal unpacks to, or ``None`` if unreadable.
+
+    A dict display is included because it is a readable *iterable* here: it
+    unpacks to its **keys**, and the checker does not need to guess what they
+    are to know how many values reach the call. ``nullcontext(*{})`` unpacks
+    to nothing, so it supplies no argument at all -- which is the same
+    no-argument form as ``nullcontext()`` and binds ``None``. Treating it as
+    unreadable made it supply a "maybe enterable" value and declared a dead
+    header live. A dict display with *computed* keys is still unreadable, so
+    only a fully literal one counts.
+    """
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return list(node.elts)
+    if isinstance(node, ast.Dict) and _literal_dict_keys(node) is not None:
+        return [key for key in _literal_dict_keys(node) or ()]
     return None
 
 
@@ -3470,16 +3502,30 @@ def _null_context_call_raises(expression):
         if keyword.arg is not None:
             keywords.append(keyword.arg)
             continue
-        keys = _literal_dict_keys(keyword.value)
-        if keys is None:
-            # A computed mapping may carry any key at all, so this cannot
-            # claim the call raises -- `nullcontext(**values)` with
-            # `values = {"enter_result": CM()}` does not raise, while the same
-            # spelling with an unexpected key does. Both are left to the
-            # *value* question, where an unreadable value is maybe-enterable.
-            # The same reasoning as the unreadable `*` above, in the keyword
-            # position: claiming a raise would exclude a live store.
-            return False
+        state = _dict_literal_key_state(keyword.value)
+        if state is None:
+            # Not a dict display at all, so nothing about it is pinned.
+            return _mapping_may_add_a_key(expression, positional)
+        keys, has_computed, has_spread = state
+        if has_computed and "enter_result" in keys:
+            # A computed key is a *distinct* entry beside a readable
+            # `enter_result`, and `nullcontext` takes one parameter, so the
+            # call raises whatever the computed key evaluates to:
+            #
+            #     nullcontext(**{("enter_" + "r"): 1, "enter_result": CM()})
+            #     -> TypeError: unexpected keyword argument 'enter_r'
+            return True
+        if has_spread:
+            # A `**` spread may *overwrite* a key rather than add one, so it
+            # can leave the mapping with exactly the keys already read:
+            #
+            #     nullcontext(**{"enter_result": CM(), **other})
+            #
+            # binds `CM()` when `other` carries only `enter_result`, and
+            # raises when `other` adds a name. Which one it is depends on a
+            # value the source does not pin, so this claims neither and the
+            # value question takes it from there.
+            continue
         keywords.extend(keys)
     if positional > 1:
         return True
@@ -3507,6 +3553,68 @@ def _literal_dict_keys(node):
             keys.remove(literal_key.value)
         keys.append(literal_key.value)
     return keys
+
+
+def _dict_literal_key_state(node):
+    """``(keys, has_computed_key, has_spread)`` for a dict display, else ``None``.
+
+    The three answers are needed apart because they are not the same claim. A
+    readable key names a parameter. A **computed** key (``("enter_" + "r")``)
+    names one the source does not pin, and it is always a *separate* entry --
+    it cannot overwrite its neighbours, because a dict display evaluates keys
+    left to right and a computed key lands at its own position. A **spread**
+    (``{**other}``) is the opposite: it can overwrite whatever came before it,
+    so it cannot be counted as an extra key at all.
+
+    Returning ``None`` for a non-display means "this is not a mapping the
+    source shows", which the caller treats differently from "a mapping with
+    computed keys" -- the first is a ``Name`` like ``**values`` and pins
+    nothing; the second pins a readable ``enter_result`` *and* hides a key.
+    """
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = []
+    has_computed = False
+    has_spread = False
+    for literal_key in node.keys:
+        if literal_key is None:
+            has_spread = True
+            continue
+        if not isinstance(literal_key, ast.Constant):
+            has_computed = True
+            continue
+        if literal_key.value in keys:
+            keys.remove(literal_key.value)
+        keys.append(literal_key.value)
+    return keys, has_computed, has_spread
+
+
+def _mapping_may_add_a_key(expression, positional):
+    """Could this unreadable ``**`` mapping add a key to the call?
+
+    ``nullcontext`` takes exactly one parameter, so *any* key beyond the one
+    it already supplies is unexpected and raises. The mapping itself may
+    carry nothing, though, so this answers only where the source has already
+    pinned a key elsewhere:
+
+    * ``nullcontext(CM(), **values)`` has a positional already, so a key in
+      ``values`` would be a second value for the same parameter.
+    * ``nullcontext(enter_result=CM(), **values)`` is the same in the keyword
+      position.
+    * ``nullcontext(**values)`` on its own pins nothing: the call may raise or
+      not, so it is left to the value question.
+
+    The *empty* mapping is the boundary and it is measured, not assumed:
+    ``nullcontext(CM(), **{})`` and ``nullcontext(enter_result=CM(), **{})``
+    both build a manager without raising, because an empty mapping adds
+    nothing. The name is unreadable, so this cannot tell it from the populated
+    case, and it does not try -- the two disagree about whether the *call*
+    raises while neither can be decided from the source, so both are left to
+    the value question.
+    """
+    if positional:
+        return True
+    return any(keyword.arg == "enter_result" for keyword in expression.keywords)
 
 
 def _stores_of(name, by_index, index, function):
