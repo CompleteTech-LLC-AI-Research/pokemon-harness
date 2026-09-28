@@ -1960,6 +1960,52 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [True, True],
     ),
+    # #348: the alias name is the SAME as the name being bound. Resolving a
+    # store's right-hand side against the *last* store of that name in the
+    # whole function makes the chain self-referential -- the last store of
+    # `cs` IS the store being resolved -- so the cycle guard trips and hands
+    # back an unreadable name. The header is then not recognised as
+    # suppressing and a swallowed assert is reported `enforced`. Resolving
+    # against the stores that *precede* the binding fixes it. The re-entering
+    # header is included so the two halves cannot disagree again.
+    (
+        "a self-alias walrus carries the suppressor it already held",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    (
+        "a self-alias assignment carries the suppressor it already held",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = cs\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The control that makes the two rows above non-vacuous: a self-alias
+    # over a NON-suppressor must still report live. If resolving against the
+    # preceding store simply declared every self-alias defeated, this row
+    # would be the only thing stopping that over-reach.
+    (
+        "a self-alias over a non-suppressor stays live",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
 )
 
 

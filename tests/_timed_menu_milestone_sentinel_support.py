@@ -977,7 +977,11 @@ def _store_bindings(function, bound):
             conditional = statement not in function.body
         for name in _store_target_names(targets):
             bindings.setdefault(name, []).append(
-                (statement, _deref_alias(value, raw_values), conditional)
+                (
+                    statement,
+                    _deref_alias(value, raw_values, _store_order(statement)),
+                    conditional,
+                )
             )
     # A `match` capture is the one store form that is not reachable from a
     # statement's target list, so it cannot ride along in the loop above.
@@ -1129,7 +1133,7 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
-def _deref_alias(value, raw_values):
+def _deref_alias(value, raw_values, before=None):
     """The value an assignment expression's right-hand side stands for.
 
     A binding can take its value from another name rather than from a call:
@@ -1188,7 +1192,21 @@ def _deref_alias(value, raw_values):
         if not isinstance(current, ast.Name) or current.id in seen:
             return current
         seen.add(current.id)
-        entries = raw_values.get(current.id)
+        # Only stores that *precede* the binding being resolved can be the
+        # value this name already holds. Reading the last store of the name
+        # in the whole function makes a self-alias resolve to itself:
+        #
+        #     cs = contextlib.suppress(AssertionError)
+        #     with (cs := cs):        # RHS is `cs`; the last store IS this one
+        #
+        # `entries[-1]` is then the store being resolved, the chain becomes
+        # `cs -> cs`, the cycle guard trips, and the bare unresolvable name is
+        # handed back. `_is_readable_suppressor` accepts only an `ast.Call`, so
+        # the header is not recognised as suppressing and a swallowed assert is
+        # reported *enforced* (#348). Filtering to the stores that precede the
+        # binding under resolution makes the self-alias resolve to the
+        # suppressor's call, which is what the interpreter sees.
+        entries = [rhs for order, rhs in raw_values.get(current.id, ()) if order < before]
         if not entries:
             return current
         current = entries[-1]
@@ -1234,8 +1252,23 @@ def _raw_store_values(function):
         else:
             continue
         for name in _store_target_names(targets):
-            raw.setdefault(name, []).append(value)
+            raw.setdefault(name, []).append((_store_order(statement), value))
     return raw
+
+
+def _store_order(statement):
+    """A statement's position in source, used to order stores.
+
+    The two components are kept in a tuple rather than summed because
+    ``col_offset`` is a byte offset within the line, and adding it to a line
+    number would let a large column on an earlier line sort after a small
+    column on a later one. The statement object is not usable as a sort key
+    because ``ast`` nodes do not define ``__lt__``.
+    """
+    return (
+        getattr(statement, "lineno", 0),
+        getattr(statement, "col_offset", 0),
+    )
 
 
 def _aliased_suppressions(node, function, bound):
@@ -1361,7 +1394,7 @@ def _aliased_suppressions(node, function, bound):
                     # there. The raw table is the complete set of right-hand
                     # sides, which is what makes a two-hop chain resolvable at
                     # the header performing the binding.
-                    resolved = _deref_alias(walrus.value, raw_values)
+                    resolved = _deref_alias(walrus.value, raw_values, _store_order(walrus))
                     if _is_readable_suppressor(resolved, bound):
                         entered.append(resolved)
                 if isinstance(expression, ast.Name) and expression.id in live:
