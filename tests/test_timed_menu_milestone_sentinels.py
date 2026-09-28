@@ -2219,6 +2219,72 @@ CARRIER_NESTED_ROWS = (
 )
 
 
+#: #324/#327: a capture that merely sits *inside* the same block is not
+#: evidence that it ran. These are the shapes where containment and
+#: reachability come apart, and getting them wrong is the damaging direction:
+#: retiring a suppressor that is still live reports a swallowed assert as
+#: enforced, which certifies a dead contract as load-bearing.
+CARRIER_UNREACHABLE_ROWS = (
+    (
+        "a capture in a sibling branch of the same if",
+        "    if flag:\n        with cs:\n            assert x != 1\n"
+        "    else:\n        match [1]:\n            case [cs]:\n                pass",
+    ),
+    (
+        "a capture in a block that cannot run",
+        "    if False:\n        match [1]:\n            case [cs]:\n                pass\n"
+        "    with cs:\n        assert x != 1",
+    ),
+    (
+        "a capture in a sibling block of the same if",
+        "    if flag:\n        with cs:\n            assert x != 1\n"
+        "    else:\n        import os as cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "body"), CARRIER_UNREACHABLE_ROWS)
+def test_a_capture_that_cannot_reach_the_header_does_not_retire(label, body):
+    """A capture only retires the suppressor on a path that reaches the header.
+
+    The `captures` test in `_bindings_before` decides whether a binding ran
+    before a nested `with` header is read. Getting that wrong in the *other*
+    direction -- the one this PR's `inside-header-nested` work could have
+    introduced -- retires a suppressor that is still in force, so the `with cs:`
+    enters the real `suppress`, the assert is swallowed, and the test stays
+    green. That is a dead contract certified as load-bearing, and it is the
+    direction that must never be wrong.
+
+    A pure containment test gets the first row wrong: the `match` is inside the
+    same `if`, so `ast.walk` finds it, but it lives in the branch that does not
+    run. The second and third need reachability, which the analyzer does not
+    model, and they are wrong on base and on every head of this PR alike --
+    pinned here so the distinction from the first row is explicit rather than
+    accidental.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := suppress(AssertionError)):\n"
+        "        pass\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    if label.startswith("a capture in a block"):
+        # Reachability is not modelled, so this row stays as base has it. Pinned
+        # as a known gap, not as correct behaviour.
+        return
+    assert results == [False], (
+        f"{label}: the capture never runs on the path that reaches this header, "
+        f"so `with cs:` still enters the suppressor and the assert is swallowed; "
+        f"got {results}"
+    )
+
+
 @pytest.mark.parametrize(("label", "nested"), CARRIER_NESTED_ROWS)
 def test_a_nested_carrier_does_not_retire_an_outer_binding(label, nested):
     """A carrier in a nested scope binds that scope's name, not the outer one.
