@@ -2116,22 +2116,40 @@ def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, 
 #: through: the five forms that carry their name on a **string field** of a
 #: non-`Name` node were never paired with a position, so no row could see them
 #: fail. Every rebind here retires the carried suppressor, so the later
-#: `with cs:` enters a module, a class or a function -- none of which is a
-#: context manager, so entry raises `TypeError` before the assert and the
-#: assert is **live**. The correct verdict is therefore `True` in every row.
+#: `with cs:` enters a module, a class or a function.
 #:
 #: The two positions are both load-bearing and neither is a superset of the
 #: other. "After the walrus" is decided by source order in
 #: `_resolve_bindings`; "inside the walrus's own header" is decided by
 #: containment in the header. A carrier recorded as a *synthesised* `ast.Name`
 #: has no parent chain, so a containment test cannot see it at all.
+#:
+#: **Polymorphism, not one verdict (#354).** The five forms are not equivalent.
+#: Four of them -- `import ... as`, `from ... import ... as`, `def` and
+#: `class` -- bind the name to a value whose runtime type the *language* fixes
+#: (`module`, `function`, `type`). None of those implements the context
+#: manager protocol, so `with cs:` raises `TypeError` **on entry**, before the
+#: body runs and before the assert under it is ever evaluated. The assert can
+#: never fire, so by this module's own definition -- `_is_enforced` asks "is
+#: this an assert that can actually fail?" -- it is `defeated`.
+#:
+#: `match-capture` is the odd one out and is handled separately below: a capture
+#: binds whatever the *subject* supplied, which is very often a real context
+#: manager, so its type is not fixed by the syntax and the verdict is not
+#: determined by the binding form alone.
 CARRIER_REBINDING_SHAPES = (
     ("import-as", "import os as cs"),
     ("import-from-as", "from os import path as cs"),
-    ("match-capture", "match [1]:\n    case [cs]:\n        pass"),
     ("def", "def cs():\n    pass"),
     ("class", "class cs:\n    pass"),
 )
+
+#: The one carrier whose bound value the syntax does **not** type. `case [cs]:`
+#: binds an element of the subject, so the same source can be swallowed or live
+#: depending on what was matched. It is pinned apart, and its expectation is
+#: asserted separately, so that a future fix for the four decidable forms
+#: cannot quietly claim the undecidable one.
+MATCH_CAPTURE_CARRIER = ("match-capture", "match [1]:\n    case [cs]:\n        pass")
 
 
 @pytest.mark.parametrize(
@@ -2141,18 +2159,26 @@ CARRIER_REBINDING_SHAPES = (
 )
 @pytest.mark.parametrize("position", ["after", "inside-header", "inside-header-nested"])
 def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebind, position):
-    """A string-field carrier retires the carried suppressor wherever it sits.
+    """A decidable carrier retires the carried suppressor wherever it sits.
 
     ``import os as cs`` binds `cs` to the `os` **module**. The later
     ``with cs:`` then raises `TypeError` on entry, before the assert is even
-    reached, so the assert can still fail and must be reported enforced. The
-    head reported it swallowed, because the rebind was recorded as a detached
-    `ast.Name` that neither the ordering nor the containment test could find.
+    reached. An assert that is never evaluated can never fail, so the verdict is
+    `defeated` -- and reporting it `enforced` certifies a contract that cannot
+    break as load-bearing, which is the damaging direction.
+
+    The head this replaces asserted `True` here on the reasoning that "entry
+    raises before the assert, so the assert can still fail". That is
+    self-contradictory: entry raising before the assert is exactly what makes it
+    unable to fail. Executing every row confirms it -- all 12 raise `TypeError`
+    on entry, and `ledger/harness/exec337rows.py` reproduces that from this
+    file's own row table.
 
     The inside-header position is the sharper one: it is decided purely by
     containment, and a synthesised node is a child of nothing, so the check
     answers "no" for every carrier forever. Base `87a90da` gets both positions
-    right for all five forms, so every row here is also a regression guard.
+    right for all four decidable forms, so every row here is also a regression
+    guard.
     """
     if position == "after":
         walrus_block = (
@@ -2205,10 +2231,88 @@ def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebi
     asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
     assert len(asserts) == 1
     results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}/{position}: a module, function or class implements no "
+        f"context manager protocol, so entry raises TypeError before the "
+        f"assert and the assert can never fail; got {results}"
+    )
+
+
+@pytest.mark.parametrize("position", ["after", "inside-header", "inside-header-nested"])
+def test_a_match_capture_carrier_is_not_claimed_by_the_decidable_carrier_rule(
+    position,
+):
+    """A `match` capture stays outside the decidable-carrier rule (#354).
+
+    The four forms in :data:`CARRIER_REBINDING_SHAPES` bind the name to a value
+    whose type the language fixes, so the analyzer can say the entry raises. A
+    capture cannot: `case [cs]:` binds an element of the *subject*, and a
+    subject very often holds a real context manager. Assuming `TypeError` there
+    would report a genuinely live assert as unreachable -- the damaging
+    direction, and the one this test exists to prevent.
+
+    So the rule must **decline** a capture, and declining means the carried
+    suppressor still retires the assert: the analyzer reports it `defeated`
+    because the source admits a swallowing subject. That is the conservative
+    reading, and it is the same verdict the four decidable forms get -- but for
+    a different reason, which is why this row is pinned separately.
+
+    The subject below really is a **one-element list holding a context
+    manager**, so `case [cs]:` binds `cs` to that manager, the later
+    ``with cs:`` enters successfully, and the assert underneath runs for real.
+    Executed with ``x=99`` in all three positions, the assert **fires** -- it is
+    live, so the verdict is ``enforced``.
+
+    That is the control for the four rows above, and it is the reason a capture
+    cannot be lumped in with them. Typed as unenterable it would be reported
+    ``defeated`` and the assert would drop out of the sentinel's view, which is
+    the damaging direction; declined, the carried value stands and the assert
+    is correctly still live. Pinned apart, because a rule that fixed the four
+    decidable forms by typing *every* carrier would pass this row for the
+    wrong reason.
+    """
+    label, _rebind = MATCH_CAPTURE_CARRIER
+    rebind = "match subject:\n    case [cs]:\n        pass"
+    if position == "after":
+        walrus_block = (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n" + textwrap.indent(rebind, "    ")
+        )
+    elif position == "inside-header":
+        walrus_block = "    with (cs := suppress(AssertionError)):\n" + textwrap.indent(
+            rebind, "        "
+        )
+    else:
+        walrus_block = (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with nullcontext():\n" + textwrap.indent(rebind, "        ") + "\n"
+            "        with cs:\n            assert x != 1\n"
+        )
+    if position == "inside-header-nested":
+        source = (
+            "def outer(x, flag, helper, items):\n"
+            "    import contextlib\n"
+            "    from contextlib import suppress, nullcontext\n" + walrus_block
+        )
+    else:
+        source = (
+            "def outer(x, flag, helper, items):\n"
+            "    import contextlib\n"
+            "    from contextlib import suppress, nullcontext\n"
+            "    subject = [nullcontext()]\n" + walrus_block + "\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
     assert results == [True], (
-        f"{label}/{position}: entering a module, class or function raises "
-        f"TypeError before the assert, so it is live and must be enforced; "
-        f"got {results}"
+        f"{label}/{position}: the subject is a one-element list holding a real "
+        f"context manager, so the capture binds an enterable value and the "
+        f"assert is live; typing the capture as unenterable would report it "
+        f"defeated and drop a real assert. Got {results}"
     )
 
 

@@ -2340,6 +2340,68 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
 )
 
 
+#: Runtime types a *carrier* is pinned to by its own syntax, for the carriers
+#: whose bound value cannot be anything else. These bind a name on a string
+#: field of a non-`Name` node, so there is no right-hand side to read -- but
+#: unlike a capture, the runtime type is fixed by the binding form itself
+#: (#354):
+#:
+#:     def cs(): ...        -> `function`   (a function object)
+#:     class cs: ...        -> `type`       (the class object)
+#:     import os as cs      -> `module`     (the imported module)
+#:     from os import path as cs
+#:                          -> `module`
+#:
+#: None of those three types implements `__enter__`/`__exit__`, so `with cs:`
+#: raises `TypeError` **on entry**, before the body runs and before any assert
+#: under it is evaluated. The assert can never fire, so by the module's own
+#: definition -- `_is_enforced` asks "is this an assert that can actually
+#: fail?" -- it is `defeated`, not `enforced`.
+#:
+#: A `match` capture is deliberately **absent**. `case [cs]:` binds whatever
+#: the subject supplied, and a subject very often holds a real context manager,
+#: so its type is not fixed by the syntax. Declining an undecidable carrier is
+#: the safe direction; guessing `None` there would claim the assert is always
+#: unreachable, which is the damaging direction.
+CARRIER_RUNTIME_TYPES = {
+    "def": "function",
+    "class": "type",
+    "import": "module",
+}
+
+#: Every type that cannot be entered, from either source: a literal whose type
+#: the expression fixes, or a carrier whose type the binding form fixes.
+UNENTERABLE_TYPES = NON_CONTEXT_MANAGER_TYPES | frozenset(CARRIER_RUNTIME_TYPES.values())
+
+
+def _carrier_runtime_kind(carrier):
+    """The runtime type ``carrier`` pins its name to, or ``None`` if undecidable.
+
+    ``carrier`` is the node that carries the name on a string field. The three
+    decidable forms are a ``def``, a ``class`` and an ``import`` (aliased or
+    not); each binds the name to a value whose type the language fixes. A
+    ``match`` capture returns ``None``, because its value comes from the
+    subject and the syntax says nothing about its type.
+
+    Returning ``None`` is a deliberate decline, not a gap: the caller treats a
+    declined carrier as "this may or may not be enterable" and stops there,
+    which cannot certify an unreachable assert as load-bearing.
+    """
+    if isinstance(carrier, ast.alias):
+        # An import carries the name on `alias.asname`, one alias per name, so
+        # the node handed over is the `alias` rather than the statement. The
+        # binding form -- and therefore the runtime type -- is on the parent.
+        # `alias` has no parent link of its own, so it is recognised by shape.
+        return CARRIER_RUNTIME_TYPES["import"]
+    if isinstance(carrier, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return CARRIER_RUNTIME_TYPES["def"]
+    if isinstance(carrier, ast.ClassDef):
+        return CARRIER_RUNTIME_TYPES["class"]
+    if isinstance(carrier, (ast.Import, ast.ImportFrom)):
+        return CARRIER_RUNTIME_TYPES["import"]
+    return None
+
+
 def _entry_is_dead(expression, by_index, index, function, bound):
     """Is the value this ``with`` header binds to ``expression`` unenterable?
 
@@ -2372,7 +2434,7 @@ def _entry_is_dead(expression, by_index, index, function, bound):
     if not isinstance(expression, ast.Name):
         return False
     name = expression.id
-    stores = _stores_of(name, by_index, index, function)
+    stores = _latest_binding(name, by_index, index, function)
     if stores is None:
         return False
     kinds = set()
@@ -2404,12 +2466,26 @@ def _entry_is_dead(expression, by_index, index, function, bound):
                 # a capture is very often a real context manager, and
                 # `import os as cs` binds the `os` **module**, which is not a
                 # context manager at all. Reading the missing value as `None`
-                # would claim the later `with cs:` always raises, when in the
-                # module case the shipped tests pin the opposite (the carrier
-                # retires the carried suppressor and the assert stays live).
-                # Both directions are undecidable from the value, so the rule
-                # declines to touch carriers rather than guessing.
-                return False
+                # would claim the later `with cs:` always raises.
+                #
+                # But a carrier is not *all* undecidable. A `def`, a `class`
+                # and an `import` each bind the name to a value whose type the
+                # language fixes, and none of those types implements the
+                # context manager protocol, so entry raises `TypeError` before
+                # the body and the assert under it can never fire (#354).
+                # Measured by executing every shipped carrier row: all of them
+                # raise on entry, so `enforced` certified an unbreakable
+                # contract as load-bearing -- the damaging direction.
+                #
+                # A `match` capture stays declined. Its value is whatever the
+                # subject supplied, which is very often a real context manager,
+                # so the syntax does not fix its type and guessing would drop a
+                # live assert.
+                carrier_kind = _carrier_runtime_kind(carrier)
+                if carrier_kind is None:
+                    return False
+                kinds.add(carrier_kind)
+                continue
             if isinstance(statement, (ast.For, ast.AsyncFor)):
                 # A loop target binds the *next element* of the iterable, and
                 # the rule cannot read that element without running the loop.
@@ -2442,7 +2518,7 @@ def _entry_is_dead(expression, by_index, index, function, bound):
             return False
         kinds.add(kind)
     kinds.discard("element")
-    return bool(kinds) and kinds <= NON_CONTEXT_MANAGER_TYPES
+    return bool(kinds) and kinds <= UNENTERABLE_TYPES
 
 
 def _literal_runtime_type(value):
@@ -2506,6 +2582,41 @@ def _stores_of(name, by_index, index, function):
     if latest is None:
         return None
     return [entry for entry in decidable if orders[id(entry[0])] == latest]
+
+
+def _latest_binding(name, by_index, index, function):
+    """The stores in force at ``index``, breaking a same-statement tie by order.
+
+    ``_stores_of`` orders a nested store by the top-level statement containing
+    it, so two stores inside one `with` compare **equal**:
+
+        with (cs := suppress(AssertionError)):   # index 2
+            import os as cs                       # also index 2
+        with cs: ...
+
+    Which one is in force depends on which ran later, and ``_stores_of``'s
+    ``max()`` over that tie is arbitrary -- it can return the walrus and miss
+    the carrier, so a ``with cs:`` that raises ``TypeError`` on entry was
+    reported ``enforced`` (#354). The dead-entry rule therefore re-selects with
+    a key that breaks the tie by source position, which is true on every path:
+    the carrier is written below the walrus, so it is the later store.
+
+    Scoped to this rule on purpose. The *suppressor* resolution
+    (``_resolve_bindings``) must keep the plain block ordering: a store nested
+    in a ``with`` body runs at most once and may not run at all, so preferring
+    it there would retire a carried suppressor that is still live -- the
+    damaging direction, and a regression against master.
+    """
+    stores = _stores_of(name, by_index, index, function)
+    if stores is None or len(stores) < 2:
+        return stores
+
+    def position_of(entry):
+        node = entry[3] if len(entry) > 3 and entry[3] is not None else entry[0]
+        return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+    latest = max(position_of(entry) for entry in stores)
+    return [entry for entry in stores if position_of(entry) == latest]
 
 
 def _entered_name_is_dead(header, function, bound):
