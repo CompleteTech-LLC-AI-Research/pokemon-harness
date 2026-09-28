@@ -111,6 +111,72 @@ byte-identical copy afterwards (`diff -q` clean, `RESTORED-CLEAN`).
 
 Diff size: 2 files, 853 insertions, 21 deletions.
 
+
+## Round 2 — #395 repair (lead finding on the for/else row)
+
+The lead found that `TIED_STORE_ROWS[0]`, the branch's flagship row, rested on
+a false statement about Python: a `for`'s `else` runs whenever the loop
+completes *without* `break* -- for any iteration count -- so it is not the
+"loop was empty" branch. Both arms run for a non-empty iterable, the `else` is
+written last, and the assert FIRES on every input. The row pinned `[False]`
+and therefore pinned the damaging verdict.
+
+| tree | analyzer | measured | correct? |
+|---|---|---|---|
+| `ed9d9b0` base | `[False]` | LIVE both inputs | no -- damaging |
+| `13dd4d9` | `[False]` | LIVE both inputs | no -- damaging |
+| `2df00cd` (this round) | `[True]` | LIVE both inputs | yes |
+
+Filed as #395. Full detail and the process note (two of my own oracles were
+wrong before the polarity self-test caught them) in
+`ledger/LEAD_20260928_367_FOR_ELSE_FINDING.md`.
+
+### Repair
+
+`_runs_before_end_of` already walked `orelse` but rejected anything not reached
+through a `with` body. It now recognises a loop `else` whose loop cannot break:
+
+- `_loop_else_always_runs(loop)` -- is the `else` guaranteed to run?
+- `_breaks_own_loop(node)` -- is there a `break` that exits *this* loop? It does
+  not descend into a nested loop, whose `break` targets that inner loop.
+
+The row is corrected to the shape it was always meant to be, and the genuinely
+undecidable shape it was describing -- the same loop with a `break` -- is now
+pinned separately as `[False]`, so the decline is earned rather than assumed.
+
+### Round 2 rows
+
+| row | expected |
+|---|---|
+| a for/else pair whose else runs on every path settles the name | `[True]` |
+| a for/else pair the loop can break out of is declined | `[False]` |
+| a break in a nested loop does not suppress the outer loop's else | `[True]` |
+
+### Round 2 commands and results
+
+    $ python -m pytest tests/test_timed_menu_milestone_sentinels.py \
+                        tests/test_timed_menu_milestones.py -q -p no:randomly \
+                        --junitxml=/tmp/fe_full2.xml
+    393 tests, 0 errors, 0 failures, 0 skipped        (exit 0)
+
+    $ python -m ruff check <both files>            All checks passed!
+    $ python -m ruff format --check <both files>   2 files already formatted
+    $ git diff --check                             clean
+
+### Round 2 mutation matrix -- 10/10 killed
+
+The seven original mutations (A-G) still hold. Three new ones cover the #395
+rule:
+
+| id | mutation | result |
+|---|---|---|
+| H | loop-`else` settling disabled | **killed** |
+| I | `_loop_else_always_runs` always `True` (a `break` ignored) | **killed** |
+| J | nested-loop guard removed (an inner `break` counts against the outer loop) | **killed after the third row was added** |
+
+J survived the first attempt, which is why the nested-loop row exists. Recorded
+because a surviving mutant is a coverage gap, not a pass.
+
 ## Independent review
 
 **Outstanding.** The head must be independently reviewed before merge. The
