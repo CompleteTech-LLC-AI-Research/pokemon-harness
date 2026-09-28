@@ -69,6 +69,12 @@ AMBIGUOUS_SUPPRESSOR = object()
 #: its own marker instead of being classified from the suppressor's arguments.
 LOUD_DUNDER = object()
 
+#: How many links of alias chain :func:`_deref_alias` will follow before it
+#: gives up and reports the value unreadable. A chain that resolves to a
+#: suppressor is short in practice, so the bound is generous; it exists so a
+#: cycle (``a = b; b = a``) terminates instead of recursing.
+_ALIAS_CHAIN_LIMIT = 32
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -843,7 +849,7 @@ def _assigned_suppressors(function, bound):
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
-    bindings = _store_bindings(function, bound)
+    bindings, raw_values = _store_bindings(function, bound)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in bindings.values()
@@ -858,11 +864,24 @@ def _assigned_suppressors(function, bound):
             value = _resolve_bindings(seen, bound, orders)
             if value is not None:
                 assigned.setdefault(index, {})[name] = value
-    return assigned
+    # The raw table has to be built for the whole function, not assembled as
+    # the recording walk proceeds. #333: an assignment expression in a `with`
+    # header can alias a name whose own store `ast.walk` has not reached yet,
+    # because `ast.walk` is breadth-first and visits the header before stores
+    # that precede it in source. `_store_bindings` applies the dereference to
+    # every recorded store and hands back the table it used, so the map and
+    # the table can never disagree about what a name carries.
+    return assigned, raw_values
 
 
 def _store_bindings(function, bound):
     """Map every name ``function`` binds to its ``(stmt, value, cond)`` stores.
+
+    Returns ``(bindings, raw_values)``. ``raw_values`` is the undereferenced
+    right-hand side of every value-bearing store, keyed the same way; the
+    recorded ``value`` has already had any alias followed through it. The
+    caller that resolves a *header* needs the raw side to follow a chain of
+    its own, which is why both are handed back rather than only the map.
 
     The raw per-name store lists, before any resolution to a suppressor. Rules
     that need to know *what value* a name received -- rather than whether that
@@ -870,8 +889,28 @@ def _store_bindings(function, bound):
     :func:`_assigned_suppressors` resolves a non-suppressor to ``None`` and the
     two meanings of that ``None`` are exactly what :func:`_entry_is_dead`
     needs to tell apart.
+
+    The recorded ``value`` is the store's right-hand side with any alias
+    already followed, so a name bound to a suppressor -- directly or through a
+    chain -- is recorded as the suppressor it carries. See :func:`_deref_alias`
+    for why the chain is resolved against the whole function at once.
     """
     bindings = {}
+    # #333: the right-hand side of every store, keyed by the name it binds,
+    # gathered BEFORE the recording walk so an assignment expression can be
+    # resolved against a name whose own store has not been visited yet.
+    # `ast.walk` is breadth-first, so a `with` header is visited before stores
+    # that precede it in source; resolving against the table as it fills would
+    # leave a two-hop chain (`first` -> `second` -> `(cs := second)`) stuck at
+    # an unrecorded name and report a swallowed assert as live.
+    #
+    # The table covers ALL stores, not just walruses, and the dereference below
+    # is applied to every one of them. The walrus path needs the table resolved
+    # at a `with` HEADER; the ordinary `with alias:` path resolves at the STORE
+    # SITE, where the table only has to be filled up to that point. Both need
+    # the same whole-function view to follow a name to its last binding, so
+    # they share the table rather than keeping two in step by hand.
+    raw_values = _raw_store_values(function)
     for statement in ast.walk(function):
         targets = []
         value = None
@@ -937,7 +976,9 @@ def _store_bindings(function, bound):
         else:
             conditional = statement not in function.body
         for name in _store_target_names(targets):
-            bindings.setdefault(name, []).append((statement, value, conditional))
+            bindings.setdefault(name, []).append(
+                (statement, _deref_alias(value, raw_values), conditional)
+            )
     # A `match` capture is the one store form that is not reachable from a
     # statement's target list, so it cannot ride along in the loop above.
     #
@@ -977,7 +1018,7 @@ def _store_bindings(function, bound):
     # Resolving once for the function would answer that `with` with the *last*
     # store and certify a disarmed assert as load-bearing. So each index
     # resolves from the bindings that precede it alone.
-    return bindings
+    return bindings, raw_values
 
 
 def _resolve_bindings(entries, bound, orders):
@@ -1088,6 +1129,104 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
+def _deref_alias(value, raw_values):
+    """The value an assignment expression's right-hand side stands for.
+
+    A binding can take its value from another name rather than from a call:
+
+        base = contextlib.suppress(AssertionError)
+        y = (cs := base)         # `cs` is the same suppressor as `base`
+        with cs:
+            assert 1 == 2        # swallowed, because `cs` *is* `base`
+
+    Recording the bare ``base`` node leaves the binding unreadable, because
+    :func:`_is_readable_suppressor` accepts only an ``ast.Call``. The header
+    then reported a swallowed assert as *enforced* -- the damaging direction,
+    a disarmed contract certified as load-bearing (#333).
+
+    Resolution is bounded so the walk is total. An alias with no recorded
+    binding resolves to itself and stays unreadable; a cycle (``a = b; b = a``)
+    is cut by the bound instead of recursing; and a name that resolves to a
+    non-suppressor keeps that value, so the store still supersedes whatever it
+    replaced. Only a chain that ends at a readable suppressor is reported as
+    one.
+
+    A name can be bound more than once, and the *last* binding is the one a
+    later read sees:
+
+        a = helper.make()
+        a = contextlib.suppress(AssertionError)
+        with (cs := a):          # `a` is the suppressor, not the first store
+
+    Taking the first binding would resolve that to the ordinary call, leave the
+    header unreadable, and report a swallowed assert as live. A name bound
+    twice is a plain supersession this module already models, so the chain has
+    to follow it the same way.
+
+    The table is whole-function rather than position-filtered, which is what
+    lets a two-hop chain resolve at the binding that performs it. The shapes
+    that over-approximates fail loudly rather than silently: binding an alias
+    *after* the header that reads it raises ``NameError`` on entry, and a
+    binding overwritten with a non-context manager raises ``TypeError``.
+    Neither is a swallowed assert, so neither is the damage this direction
+    causes.
+    """
+    seen = set()
+    current = value
+    for _ in range(_ALIAS_CHAIN_LIMIT):
+        if not isinstance(current, ast.Name) or current.id in seen:
+            return current
+        seen.add(current.id)
+        entries = raw_values.get(current.id)
+        if not entries:
+            return current
+        current = entries[-1]
+    return current
+
+
+def _raw_store_values(function):
+    """Every store's right-hand side, keyed by the name it binds.
+
+    The point is to have the whole table available *before* any binding is
+    resolved, so an assignment expression can follow a name whose own store
+    ``ast.walk`` has not reached yet. ``ast.walk`` is breadth-first, so a
+    ``with`` header is visited before stores that precede it in source:
+
+        first = contextlib.suppress(AssertionError)
+        second = first
+        with (cs := second):        # `second` is not recorded at this point
+
+    Resolving against the table as it fills would leave that stuck at an
+    unrecorded name, which is unreadable, and the assert it guards would be
+    reported live while the interpreter swallows it.
+
+    Only the forms that carry a *value* are listed. A ``for`` target, a
+    ``with ... as``, an ``except ... as``, a ``del`` and a ``match`` capture
+    bind a name without one, and :func:`_deref_alias` stops on a missing entry
+    exactly as it does for an unbound name -- which is right, because a later
+    store of that name is what retires the carried value anyway.
+    """
+    raw = {}
+    for statement in ast.walk(function):
+        if isinstance(statement, ast.Assign):
+            targets, value = statement.targets, statement.value
+        # `AnnAssign` without a value (`cs: contextlib.suppress`) binds
+        # nothing, so it is excluded here exactly as it is in the recording
+        # walk. The explicit `is not None` keeps `and`/`or` precedence obvious
+        # rather than relying on how the two combine.
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and statement.value is not None
+            or (isinstance(statement, ast.NamedExpr))
+        ):
+            targets, value = [statement.target], statement.value
+        else:
+            continue
+        for name in _store_target_names(targets):
+            raw.setdefault(name, []).append(value)
+    return raw
+
+
 def _aliased_suppressions(node, function, bound):
     """Suppressors reached through a bare ``Name`` in a ``with`` header.
 
@@ -1134,7 +1273,7 @@ def _aliased_suppressions(node, function, bound):
     report both of those live context managers as defeats. The mutation matrix
     in the sentinel suite pins that difference.
     """
-    by_index = _assigned_suppressors(function, bound)
+    by_index, raw_values = _assigned_suppressors(function, bound)
     # A name is bound only by the assignments that run *before* the `with`.
     # Each `with` header is therefore read against the bindings in force at
     # ITS OWN position, not against the bindings that were live when the
@@ -1192,12 +1331,28 @@ def _aliased_suppressions(node, function, bound):
                 # node type is checked before the suppressor predicate, which
                 # reads `call.func` and would otherwise raise.
                 walrus = expression if isinstance(expression, ast.NamedExpr) else None
-                if (
-                    walrus is not None
-                    and isinstance(walrus.value, ast.Call)
-                    and _is_suppression_call(walrus.value, bound)
-                ):
-                    entered.append(walrus.value)
+                if walrus is not None:
+                    # #333: the right-hand side may be a NAME bound to a
+                    # suppressor rather than a call:
+                    #
+                    #     base = contextlib.suppress(AssertionError)
+                    #     with (cs := base):
+                    #         assert 1 == 2      # swallowed by `base`
+                    #
+                    # Reading the bare `base` node finds no `ast.Call` and the
+                    # header is reported live. Resolving the name the same way
+                    # the re-entering path does means the two halves cannot
+                    # disagree about what `cs` carries.
+                    #
+                    # `live` is deliberately not used here: it holds only names
+                    # that already resolved to a suppressor, so an alias whose
+                    # own name is not itself a resolved suppressor is invisible
+                    # there. The raw table is the complete set of right-hand
+                    # sides, which is what makes a two-hop chain resolvable at
+                    # the header performing the binding.
+                    resolved = _deref_alias(walrus.value, raw_values)
+                    if _is_readable_suppressor(resolved, bound):
+                        entered.append(resolved)
                 if isinstance(expression, ast.Name) and expression.id in live:
                     entered.append(live[expression.id])
                 if not isinstance(expression, ast.Call) or not isinstance(
@@ -1870,7 +2025,7 @@ def _entered_name_is_dead(header, function, bound):
     # which is exactly the information this rule needs discarded: the value
     # `None` here means "not a known suppressor", not "the value is None". So
     # the raw per-name store lists and their orderings are rebuilt instead.
-    bindings = _store_bindings(function, bound)
+    bindings, _raw_values = _store_bindings(function, bound)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in bindings.values()
