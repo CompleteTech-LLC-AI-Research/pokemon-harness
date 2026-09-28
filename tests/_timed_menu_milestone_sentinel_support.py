@@ -2658,24 +2658,60 @@ def _stores_of(name, by_index, index, function):
     # contract as unreachable -- the damaging direction. `None` makes
     # `_entry_is_dead` decline, which is the safe direction.
     #
-    # `except ... as cs:` is excluded for the same reason `_stores_of`'s
-    # `decidable` list excludes it from `conditional`: the handler *unbinds*
-    # rather than supersedes, so the carrier is what remains in force.
-    carrier_orders = [
-        orders[id(entry[0])] for entry in entries if not entry[2] and isinstance(entry[1], str)
-    ]
-    if carrier_orders:
-        last_carrier = max(carrier_orders)
-        if any(
-            entry[2]
-            and not isinstance(entry[1], str)
-            and not isinstance(entry[0], ast.ExceptHandler)
-            and orders[id(entry[0])] > last_carrier
-            for entry in entries
-        ):
-            return None
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
     if latest is None:
+        return None
+    # A conditional store that may supersede a **carrier** leaves the name's
+    # value undecidable, so the rule must decline rather than read the carrier
+    # as final:
+    #
+    #     def outer(flag):
+    #         import os as cs
+    #         if flag:
+    #             cs = nullcontext()
+    #         with cs:
+    #             assert x != 1
+    #
+    # When the branch runs the name holds a real context manager and the
+    # assert is live; when it does not, the module is in force and entry
+    # raises. Answering "dead entry" from the carrier reports a live contract
+    # as unreachable, which is the damaging direction.
+    #
+    # The guard is anchored to the *settled* store and fires only when that
+    # store is itself a carrier. Both restrictions are load-bearing:
+    #
+    # * Anchoring to the last **carrier** rather than to `latest` is too
+    #   broad. An unconditional store after the carrier has already settled
+    #   the name, and a later conditional store cannot unsettle it. Given
+    #
+    #       def outer():
+    #           import os as cs
+    #           cs = None
+    #           if False:
+    #               cs = nullcontext()
+    #
+    #   the settled value is `None`, `with cs:` raises `TypeError`, and the
+    #   assert is unreachable on every path. Measured against master, which
+    #   gets all four of these right.
+    #
+    # * Firing whenever *any* conditional store follows `latest` is also too
+    #   broad, and regresses the same four cases for the same reason: master
+    #   does not consult conditional stores here at all, and a settled
+    #   non-carrier value is exactly as decided as a settled carrier.
+    #
+    # `except ... as cs:` is excluded because the handler *deletes* the name
+    # on exit rather than superseding it. Measured on CPython 3.12.14, a
+    # function-local carrier followed by `except TypeError as cs:` raises
+    # `UnboundLocalError` on entry rather than leaving the carrier in force;
+    # the handler is left decidable by the list above, which is what produces
+    # the correct dead verdict there.
+    settled_is_carrier = any(
+        isinstance(entry[1], str) and orders[id(entry[0])] == latest for entry in decidable
+    )
+    if settled_is_carrier and any(
+        entry[2] and not isinstance(entry[0], ast.ExceptHandler) and orders[id(entry[0])] > latest
+        for entry in entries
+    ):
         return None
     return [entry for entry in decidable if orders[id(entry[0])] == latest]
 

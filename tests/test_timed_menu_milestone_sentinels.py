@@ -2513,6 +2513,77 @@ STALE_LOCAL_CARRIER_SHAPES = (
 )
 
 
+#: The mirror of :data:`STALE_LOCAL_CARRIER_SHAPES`: a carrier that a later
+#: **unconditional** store has already superseded must stay decidable. The
+#: branch in these rows is `if False`, so it provably never runs and the
+#: settled value stands on every path. That is what makes them the right
+#: controls: they are decidable, and declining them is wrong.
+SETTLED_AFTER_CARRIER_SHAPES = (
+    (
+        "a None store settles the name after a carrier",
+        "    import os as cs",
+        "    cs = None",
+    ),
+    (
+        "a literal settles the name after a carrier",
+        "    import os as cs",
+        "    cs = 42",
+    ),
+    (
+        "a del unbinds the name after a carrier",
+        "    import os as cs",
+        "    del cs",
+    ),
+    (
+        "a with-as settles the name after a carrier",
+        "    import os as cs",
+        "    with nullcontext() as cs:\n        pass",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "carrier", "settled"),
+    SETTLED_AFTER_CARRIER_SHAPES,
+    ids=[shape[0] for shape in SETTLED_AFTER_CARRIER_SHAPES],
+)
+def test_a_carrier_superseded_by_an_unconditional_store_stays_dead(label, carrier, settled):
+    """A carrier that an unconditional store replaced is not still in force.
+
+    The control for :data:`STALE_LOCAL_CARRIER_SHAPES`. Here the carrier is
+    followed by a store that *does* run, so the name's value is settled before
+    the header. A later ``if False:`` branch cannot unsettle it, so the rule
+    must read the settled value rather than decline.
+
+    Every row is executed: the settled value is not a context manager, so
+    ``with cs:`` raises and the assert is unreachable, which is the ``False``
+    verdict these rows pin.
+
+    This is the mirror of the guard in :func:`_stores_of`. The first cut of
+    that guard was anchored to the last *carrier* rather than to the last
+    *unconditional store*, so it declined these four and reported a settled
+    dead entry as enforced. Master answers all four correctly.
+    """
+    source = (
+        "from contextlib import nullcontext\n"
+        "def outer(x, flag, helper):\n" + carrier + "\n" + settled + "\n"
+        "    if False:\n        cs = nullcontext()\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, False)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}: expected verdicts [False], got {results}. An unconditional "
+        f"store settles the name, so the carrier is gone and the entry is "
+        f"genuinely dead. Declining here would report a dead contract as "
+        f"load-bearing."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "carrier", "conditional"),
     STALE_LOCAL_CARRIER_SHAPES,
