@@ -10,7 +10,11 @@ hijack incident. Verify the head yourself before doing anything.
 
 - PR: #393 — https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/393
 - Branch: `fix/367-tied-store-ambiguity`
-- **Head SHA under review: `13dd4d975c9523e5bc50ab6da8dcc8ee6e29180a`**
+- **Head SHA under review: `3d38964549de69824ea6e79146706539b754d9fd`**
+- The code change is that head's parent,
+  `13dd4d975c9523e5bc50ab6da8dcc8ee6e29180a`, whose own parent is the base.
+  `3d38964` adds only this brief, so reviewing `13dd4d9`'s diff against the
+  base reviews the same code.
 - Base SHA (`origin/master`): `ed9d9b0daadefca4ce3082d49068890d4949ddc3`
 - Issue: #367 — read it with `gh issue view 367` **including comments**. The
   issue author RETRACTED the "#360 regression / damaging" attribution; the
