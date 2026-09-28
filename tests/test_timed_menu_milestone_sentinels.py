@@ -3138,17 +3138,32 @@ def test_a_carrier_inside_the_reading_header_leaves_the_name_unenterable(
 #: defect ship, and the whole point of a tie rule is that *each* store in the
 #: tie is a candidate the resolver must decline.
 TIED_STORE_ROWS = (
-    # The sharp case, and the one that motivated the issue. `items == []` runs
-    # the `else`, binds a `nullcontext`, and the assert FIRES. `items == [1]`
-    # runs the body, binds a `suppress`, and the assert is swallowed. The
-    # interpreter disagrees with itself across the two inputs, so no single
-    # verdict is right and the name has to be declined -- which reports a
-    # defeat, the safe side (#308 criterion 1). Resolving to the walk-first
-    # `suppress(...)` instead answers `False` for the wrong reason, and the
-    # moment the walk-first entry is a `nullcontext` it flips a live assert
-    # to `False` and certifies a real contract as disarmed.
+    # #395. This row's comment used to claim that `items == []` runs the `else`
+    # and binds a `nullcontext` (assert FIRES) while `items == [1]` runs the
+    # body and binds a `suppress` (assert swallowed), so that "the interpreter
+    # disagrees with itself" and the name had to be declined.
+    #
+    # That was false. A `for`'s `else` runs when the loop completes *without
+    # `break`* -- for any iteration count, including zero. It is not the "the
+    # loop was empty" branch:
+    #
+    #     items == []   ->  else runs
+    #     items == [1]  ->  body runs, THEN the else runs
+    #
+    # So `first` is the `nullcontext` on every input, the `with` enters a real
+    # context manager, and `assert x != 1` FIRES whenever `x == 1`. The
+    # correct verdict is `True`, and both `ed9d9b0` and this branch answered
+    # `False` -- a live contract certified as disarmed, the damaging direction
+    # per #308 criterion 1.
+    #
+    # The row is now the shape it was always meant to be: the two stores tie on
+    # `_binding_order`, and the tie is NOT ambiguous, because a loop `else` is
+    # a continuation rather than a peer branch. The later write settles the
+    # name. `_loop_else_always_runs` is what decides it, and the shape that
+    # genuinely needs declining -- the same loop with a `break`, where the two
+    # arms really are exclusive -- is the row below.
     (
-        "a for/else pair that binds the same name twice",
+        "a for/else pair whose else runs on every path settles the name",
         (
             "    for item in items:\n"
             "        first = contextlib.suppress(AssertionError)\n"
@@ -3157,7 +3172,52 @@ TIED_STORE_ROWS = (
             "    with (cs := first):\n"
             "        assert x != 1"
         ),
+        [True],
+    ),
+    # The same loop, but the body can `break` out of it. Then the `else` runs
+    # only when the iterable is empty, the two arms really are exclusive, and
+    # which one ran is an input:
+    #
+    #     items == []   ->  else runs, binds a nullcontext, assert FIRES
+    #     items == [1]  ->  body runs, breaks, binds a suppress, swallowed
+    #
+    # The interpreter disagrees with itself here, so no single verdict is
+    # right and the name must be declined -- a defeat, the safe side. This is
+    # the row the first cut of #367 believed it was pinning; it is the one
+    # that actually earns the decline.
+    (
+        "a for/else pair the loop can break out of is declined",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        break\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
         [False],
+    ),
+    # A `break` inside a NESTED loop belongs to that inner loop, so it cannot
+    # suppress the outer loop's `else` and the outer store still settles the
+    # name. The rule walks the outer body without descending into an inner
+    # loop, and this row is what keeps that walk honest: a version that
+    # counted every `break` in the subtree would decline here and report this
+    # live assert defeated.
+    (
+        "a break in a nested loop does not suppress the outer loop's else",
+        (
+            "    for item in items:\n"
+            "        for inner in range(2):\n"
+            "            if inner:\n"
+            "                break\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [True],
     ),
     # Two stores in one top-level statement where NEITHER is unconditional.
     # `max` would answer the `suppress` simply because it is walked first, but

@@ -3215,9 +3215,46 @@ def _runs_before_end_of(top, statement):
                     if child is statement:
                         # Reached through `orelse`/`finalbody`/`handlers` ->
                         # not a guaranteed with-body.
+                        if field == "orelse" and isinstance(
+                            node, (ast.For, ast.AsyncFor, ast.While)
+                        ):
+                            return _loop_else_always_runs(node)
                         return field == "body" and isinstance(node, (ast.With, ast.AsyncWith))
                     nxt.append(child)
         current = nxt
+    return False
+
+
+def _loop_else_always_runs(loop):
+    """Can control leave ``loop``'s body without running its ``else``?
+
+    #395. A ``for``/``while`` ``else`` runs when the loop finishes without a
+    ``break``, so the store written there settles the name *iff* no path can
+    break out. ``return``/``raise``/``continue`` are not disqualifying: they
+    leave the whole enclosing statement rather than falling through to the
+    ``else``, and a store that never ran cannot have settled a name that a
+    later statement reads.
+
+    Only a ``break`` targeting this loop suppresses the ``else``, and a
+    ``break`` written inside a *nested* loop belongs to that inner loop, so the
+    walk does not descend into one.
+    """
+    return not any(_breaks_own_loop(child) for child in loop.body)
+
+
+def _breaks_own_loop(node):
+    """Is there a ``break`` in ``node``'s subtree that exits the enclosing loop?"""
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        # A nested loop has its own `else` and its own `break` target, so
+        # nothing inside it can break the loop we are asking about. This test
+        # comes before the `ast.Break` check because a nested loop node is not
+        # a break, but its *subtree* is not ours to walk either.
+        return False
+    if isinstance(node, ast.Break):
+        return True
+    for child in ast.iter_child_nodes(node):
+        if _breaks_own_loop(child):
+            return True
     return False
 
 
