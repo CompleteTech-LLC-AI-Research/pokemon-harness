@@ -2473,6 +2473,56 @@ def test_a_module_scope_carrier_defeats_the_assert_below_it(label, prelude, live
     )
 
 
+def test_a_block_nested_module_carrier_is_still_declined():
+    """Pin the *known* limit of the module-scope rule, so it cannot widen silently.
+
+    A carrier written directly in the module body is an unconditional store:
+    it has run by the time any function is entered, so the rule can judge the
+    header on it. A carrier nested in a module-level ``if`` has run only on
+    some paths, and nothing in the syntax says which -- so the rule declines
+    and the answer stays ``enforced``.
+
+    That is the **wrong** answer for this fixture: at runtime ``sys.platform``
+    is truthy, the carrier binds, and ``with cs:`` raises ``TypeError`` before
+    the assert. The row is here precisely because it is wrong, and it is kept
+    out of :data:`MODULE_CARRIER_SHAPES` because that table's ``live`` column is
+    held to CPython and this row must not claim otherwise.
+
+    What the row buys is that the narrowing is *pinned*. If a later change
+    starts reading conditional module bindings as settled, this fails and the
+    widening has to be argued for on its own mutation matrix rather than
+    arriving as a side effect. It is the same reason #359's criterion 3 wants
+    a control: a rule that is merely "conservative" is indistinguishable from
+    one that is broken until something says which it is.
+    """
+    source = (
+        "import sys\n"
+        "if sys.platform:\n"
+        "    import os as cs\n"
+        "def outer(x, flag, helper):\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    # The interpreter half, so the gap is documented as a real one.
+    _assert_entry_contract(
+        "a block-nested module carrier (runtime: unreachable)",
+        source,
+        False,
+        False,
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected the rule to DECLINE a conditional module binding, i.e. "
+        f"[True], got {results}. CPython disagrees on this row (the assert is "
+        f"unreachable), so a change that reads it as settled has to update "
+        f"this test and justify the widening -- not land silently."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "rebind", "is_async", "second_assert_live"),
     WALRUS_REBINDING_SHAPES,
