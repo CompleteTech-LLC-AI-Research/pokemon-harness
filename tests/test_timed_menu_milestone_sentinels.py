@@ -2258,15 +2258,18 @@ CARRIER_UNREACHABLE_ROWS = (
     # `enforced` here while the runtime swallows, which is why the scan cannot
     # be simplified away. Found in review round 4.
     #
-    # The other rows also catch the containment mutation, but for a different
-    # reason: their carriers sit in a *different* block from the header, so a
-    # walk over the header's own block already misses them and the mutation
-    # reports the same wrong answer for the wrong reason. Only this row
-    # separates the two implementations, because here the carrier really is
-    # inside the block the containment walk searches. The one row above that
-    # does not catch the mutation at all is "a capture in a block that cannot
-    # run" -- it early-returns as a known-gap pin and never reaches the
-    # assertion.
+    # Measured: this row and the two sibling rows above all fail under that
+    # mutation, all three with `got [True]`. In all three, `_runs_before` is
+    # called with the `If` as `block` and the carrier is a descendant of that
+    # `If`, so `ast.walk` finds it. The rows differ in *where* the carrier
+    # sits: the two above put it in the `else` branch, this one puts it in
+    # `body[1]`, a later sibling of the header sharing the header's own body.
+    # So this is not the only row that catches the mutation -- it is the row
+    # that pins the later-sibling case directly.
+    #
+    # The one row that does not catch the mutation at all is "a capture in a
+    # block that cannot run": it early-returns as a known-gap pin and never
+    # reaches the assertion.
     (
         "a carrier in a later sibling of the header's own block",
         "    if flag:\n        with cs:\n            assert x != 1\n        import os as cs",
