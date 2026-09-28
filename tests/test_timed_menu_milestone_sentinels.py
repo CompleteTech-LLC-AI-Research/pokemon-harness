@@ -2148,38 +2148,261 @@ MATCH_CAPTURE_SHAPES = (
 )
 
 
-@pytest.mark.parametrize(
-    ("label", "capture"),
-    MATCH_CAPTURE_SHAPES,
-    ids=[shape[0] for shape in MATCH_CAPTURE_SHAPES],
-)
-def test_a_walrus_alias_is_retired_by_a_match_capture(label, capture):
-    """A ``match`` capture must retire a carried suppressor like any store.
+#: #342. Whether a capture retires a carried suppressor is a property of the
+#: *clause*, not of the capture: a capture binds as a side effect of its clause
+#: being selected, and a refutable clause is not selected for every subject.
+#: ``case _ as cs:`` is irrefutable, so that one always binds and always
+#: retires; the five refutable forms only bind when they are selected.
+MATCH_CAPTURE_ALWAYS_BINDS_SHAPES = (MATCH_CAPTURE_SHAPES[4],)
 
-    The first assert is swallowed by the walrus-bound suppressor. The capture
-    then rebinds ``cs`` to the matched value, so the ``with cs:`` that follows
-    enters something that does not suppress and the second assert is live.
-    """
+#: The three conditions that make a capture *guaranteed*, each pinned apart so
+#: that dropping one of them is caught rather than shipped silently:
+#:
+#: * **irrefutable pattern** -- ``case _ as cs:`` has nothing to fail;
+#: * **last clause** -- an earlier capture can be pre-empted by a later clause
+#:   that is selected instead, so it is not guaranteed.
+#:
+#: A guard is *not* one of the conditions: the name is bound once the pattern
+#: matches and is not unbound when a guard turns out false, which was measured
+#: against CPython 3.12.14 rather than assumed. The guard row below pins that
+#: measurement, so a future change cannot quietly reintroduce a guard check on
+#: the strength of intuition.
+#:
+#: Each row turns one condition off while leaving the other in place, which is
+#: what makes it discriminate: dropping "last clause" turns the second row's
+#: verdict, and dropping "irrefutable" is caught by the refutable rows above.
+MATCH_CAPTURE_GUARANTEE_ROWS = (
+    (
+        "a false guard does not undo a binding the pattern already made",
+        # The pattern is irrefutable, so `cs` is bound to the subject before
+        # the guard is ever evaluated. The guard then fails, the clause body is
+        # skipped, and `cs` is *not* restored -- so the alias really is
+        # retired. This row is the measured answer to "does a guard block the
+        # binding", and it is the reason `_capture_always_binds` ignores guards.
+        "    match flag:\n        case _ as cs if x > 100:\n            pass\n",
+        "unreachable:TypeError",
+    ),
+    (
+        "a refutable pattern with a false guard is decided by the pattern alone",
+        # `flag=[1]` selects the clause and binds `cs = 1` before the guard is
+        # evaluated, so the later `with cs:` raises; `flag='x'` selects nothing
+        # and leaves the carried suppressor bound, so the assert is swallowed.
+        # A guard is therefore orthogonal: the pattern alone decides which of
+        # the two happened, and both outcomes are defeated either way.
+        "    match flag:\n        case [cs] if x > 100:\n            pass\n",
+        ("unreachable:TypeError", "swallowed", "swallowed"),
+    ),
+    (
+        "a capture in an earlier clause is pre-empted by a later wildcard",
+        # `flag=[1]` selects the *first* clause and binds `cs = 1`; the trailing
+        # `case _` never gets the chance to pre-empt it. `flag='x'` falls
+        # through to the wildcard, which captures nothing, so the carried
+        # suppressor survives. One source, two runtimes, one verdict: the
+        # analyzer must not read the *matching* path and call the assert live.
+        "    match flag:\n        case [cs]:\n            pass\n        case _:\n            pass\n",
+        ("unreachable:TypeError", "swallowed", "swallowed"),
+    ),
+    (
+        "an or-pattern of two sequence captures still fails on a non-sequence",
+        # Every alternative here is a sequence pattern, so neither can match a
+        # mapping or a string: the clause is refutable even though it *looks*
+        # exhaustive. `flag=[1]` selects it and binds a list.
+        "    match flag:\n        case [*cs] | [*cs]:\n            pass\n",
+        ("unreachable:TypeError", "swallowed", "swallowed"),
+    ),
+    (
+        "an or-pattern of value patterns is refutable",
+        "    match flag:\n        case 1 | 2 as cs:\n            pass\n",
+        "swallowed",
+    ),
+)
+
+#: A subject that selects each clause, per shape. Used to prove the "bound"
+#: half of the contract independently of the verdict being asserted.
+MATCH_CAPTURE_MATCHING_SUBJECT = {
+    "a sequence-pattern capture": [1],
+    "an as-pattern capture": [1],
+    "a mapping-pattern capture": {"key": 1},
+    "a starred capture": [1, 2],
+    "an irrefutable as-pattern capture": "anything",
+    "a mapping rest capture": {"key": 1},
+}
+
+
+def _capture_fixture(capture):
+    """The two-assert walrus/capture fixture the capture rows share."""
     source = (
-        "def outer(x, flag, helper):\n"
+        "def outer(x, flag):\n"
         "    import contextlib\n"
-        "    from contextlib import suppress, nullcontext\n"
-        "    import pytest\n"
         "    with (cs := contextlib.suppress(AssertionError)):\n"
         "        assert x != 1\n" + capture + "\n"
-        "    with cs:\n"
-        "        assert x != 1\n"
+        "    with cs:\n        assert x != 1\n"
     )
-    tree = ast.parse(source)
+    return source, ast.parse(source)
+
+
+def _verdicts(tree):
+    """The analyzer's verdict for each assert, in source order."""
     function = tree.body[0]
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
-    assert asserts, f"{label}: fixture declared no assert to check"
-    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert asserts, "fixture declared no assert to check"
+    return [_is_enforced(function, node, tree) for node in asserts]
+
+
+def _execute_outer(source, flag):
+    """Run the fixture and report what became of the second assert."""
+    namespace = {}
+    exec(compile(source, "<capture-fixture>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](2, flag)
+    except AssertionError:
+        return "live"
+    except TypeError as error:
+        # Entering a non-context-manager. `NameError` and `UnboundLocalError`
+        # are deliberately *not* caught: those are the loud forms #334 and the
+        # `except ... as` shape own, and folding them in here would let a
+        # fixture that raises for an unrelated reason still pass.
+        return f"unreachable:{type(error).__name__}"
+    return "swallowed"
+
+
+def _execute_guarantee(source, subject):
+    """Run a guarantee-row fixture, which takes the or-pattern's two names."""
+    namespace = {}
+    exec(compile(source, "<guarantee-fixture>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](2, subject, "left", "right")
+    except AssertionError:
+        return "live"
+    except TypeError as error:
+        return f"unreachable:{type(error).__name__}"
+    return "swallowed"
+
+
+@pytest.mark.parametrize(
+    ("label", "clause", "outcome"),
+    MATCH_CAPTURE_GUARANTEE_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_GUARANTEE_ROWS],
+)
+def test_a_capture_binds_guaranteedly_only_on_an_irrefutable_last_unguarded_clause(
+    label, clause, outcome
+):
+    """A capture retires the alias only on a clause that cannot be passed over.
+
+    Each row turns exactly one of the three conditions off while leaving the
+    other two in place, so a regression that drops any single condition flips
+    the verdict for that row. The expected outcome is measured by executing
+    the fixture rather than asserted from the source.
+    """
+    source = (
+        "def outer(x, flag, a, b):\n"
+        "    import contextlib\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + clause + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    subjects = ([1], "x", {"key": 1})
+    # A row either behaves the same for every subject, or spells out one
+    # outcome per subject. The distinction is recorded per row rather than
+    # guessed, so a refutable clause is not forced to a single verdict.
+    expected_runtimes = outcome if isinstance(outcome, tuple) else (outcome,) * len(subjects)
+    for subject, expected_runtime in zip(subjects, expected_runtimes):
+        assert _execute_guarantee(source, subject) == expected_runtime, (
+            f"{label}: subject {subject!r} did not produce {expected_runtime}."
+        )
+    # The analyzer is per-source, so it cannot report a verdict per subject.
+    # It reports the *safe* reading of a row whose subjects disagree: the
+    # assert is only "enforced" when the clause is guaranteed to bind on every
+    # path, which for these rows is exactly the ones where every subject
+    # reaches an unreachable header. A row with a mix reports defeated.
+    assert "live" not in expected_runtimes, f"{label}: row has a live subject"
+    always_binds = all(outcome == "unreachable:TypeError" for outcome in expected_runtimes)
+    results = _verdicts(tree)
+    expected = [False, always_binds]
+    assert results == expected, f"{label}: expected verdicts {expected}, got {results}."
+
+
+@pytest.mark.parametrize(
+    ("label", "capture"),
+    MATCH_CAPTURE_ALWAYS_BINDS_SHAPES,
+    ids=[shape[0] for shape in MATCH_CAPTURE_ALWAYS_BINDS_SHAPES],
+)
+def test_an_irrefutable_capture_always_retires_a_carried_suppressor(label, capture):
+    """A capture that cannot fail to bind must retire the alias on every path.
+
+    ``case _ as cs:`` matches whatever subject it is given, so ``cs`` really is
+    rebound before the later ``with cs:``. Executed against four different
+    subjects, the second assert is always unreachable because the captured
+    value is not a context manager -- and the analyzer agrees.
+    """
+    source, tree = _capture_fixture(capture)
+    for subject in ("anything", [1], {"key": 1}, None):
+        assert _execute_outer(source, subject) == "unreachable:TypeError", (
+            f"{label}: subject {subject!r} should bind `cs` to a "
+            f"non-context-manager, making the assert unreachable."
+        )
     expected = [False, True]
+    results = _verdicts(tree)
     assert results == expected, (
-        f"{label}: expected verdicts {expected}, got {results}. The capture "
-        f"rebinds `cs` to the matched value, so the second assert is live and "
-        f"must be reported enforced."
+        f"{label}: expected verdicts {expected}, got {results}. An irrefutable "
+        f"capture always binds, so the carried suppressor cannot survive it."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "capture"),
+    tuple(
+        shape for shape in MATCH_CAPTURE_SHAPES if shape not in MATCH_CAPTURE_ALWAYS_BINDS_SHAPES
+    ),
+    ids=[
+        shape[0] for shape in MATCH_CAPTURE_SHAPES if shape not in MATCH_CAPTURE_ALWAYS_BINDS_SHAPES
+    ],
+)
+def test_a_refutable_capture_does_not_retire_a_binding_it_never_made(label, capture):
+    """A clause that was not selected binds nothing, so it retires nothing.
+
+    This is #342. With ``flag='x'`` no clause matches, the capture never runs,
+    and the carried suppressor is still bound -- executed, the second assert is
+    **swallowed**. Calling it enforced certifies a defeated contract as
+    load-bearing, so the alias has to be kept in force instead.
+    """
+    source, tree = _capture_fixture(capture)
+    assert _execute_outer(source, "x") == "swallowed", (
+        f"{label}: with flag='x' no clause matches, so the assert is swallowed "
+        f"and the fixture no longer demonstrates the #342 defect."
+    )
+    expected = [False, False]
+    results = _verdicts(tree)
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A capture whose "
+        f"clause was not selected cannot retire the carried suppressor."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "capture"),
+    tuple(
+        shape for shape in MATCH_CAPTURE_SHAPES if shape not in MATCH_CAPTURE_ALWAYS_BINDS_SHAPES
+    ),
+    ids=[
+        shape[0] for shape in MATCH_CAPTURE_SHAPES if shape not in MATCH_CAPTURE_ALWAYS_BINDS_SHAPES
+    ],
+)
+def test_a_selected_capture_binds_a_value_that_cannot_be_entered(label, capture):
+    """When the clause *is* selected, the captured value is not a context manager.
+
+    This is #336's reachability question rather than #342's suppression one:
+    the capture does run, and it binds the matched subject. Entering it raises
+    ``TypeError``, so the assert below is genuinely unreachable. Recorded
+    separately so the two directions are not conflated, and so a future fix
+    cannot make the no-match case "safe" by also claiming this one.
+    """
+    subject = MATCH_CAPTURE_MATCHING_SUBJECT[label]
+    source, _tree = _capture_fixture(capture)
+    assert _execute_outer(source, subject) == "unreachable:TypeError", (
+        f"{label}: subject {subject!r} is expected to bind `cs` to a value that "
+        f"cannot be entered, making the assert unreachable."
     )
 
 
@@ -2204,7 +2427,13 @@ MATCH_CAPTURE_SCOPE_ROWS = (
     ),
     (
         "a capture before the header does retire it",
-        "    match flag:\n        case [cs]:\n            pass\n",
+        # An irrefutable capture is used here so the row still demonstrates a
+        # *retirement* under #342. A refutable capture before the header no
+        # longer retires anything, which is the defect the neighbouring
+        # `test_a_refutable_capture_does_not_retire_a_binding_it_never_made`
+        # covers; keeping the refutable spelling in this row would make it a
+        # second copy of that test rather than a check on ordering.
+        "    match flag:\n        case _ as cs:\n            pass\n",
         [False, True],
     ),
 )
@@ -2212,10 +2441,18 @@ MATCH_CAPTURE_SCOPE_ROWS = (
 
 #: A capture is not a *statement*, so nothing in the block that holds a header
 #: can be found by looking for a store statement -- but a header written inside
-#: the capturing ``case`` body has still had the capture run by the time it is
-#: reached.  These rows are what makes that block in ``_bindings_before``
-#: load-bearing rather than dead: without it every row below reports the
-#: second assert as swallowed.
+#: the capturing ``case`` body is reached only on the path where that clause was
+#: selected, so it has had the capture run by then. These rows are what makes
+#: that block in ``_bindings_before`` load-bearing rather than dead: without it
+#: the capture is invisible to a header in the same block.
+#:
+#: All three report the second assert as defeated rather than enforced. Under
+#: #342 a refutable capture retires the alias only on the path it is selected,
+#: and a header written inside the clause body is on exactly that path -- where
+#: the captured value is a plain subject, not a context manager, so entering it
+#: raises and the assert is unreachable. The path that does *not* select the
+#: clause never reaches the header at all, so there is no live reading of it
+#: that the header has to preserve.
 MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS = (
     (
         "a header in the capturing clause body reads the capture",
@@ -2225,7 +2462,7 @@ MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS = (
             "            with cs:\n"
             "                assert x != 1\n"
         ),
-        True,
+        False,
     ),
     (
         "a header in a second clause body reads that clause's capture",
@@ -2237,7 +2474,7 @@ MATCH_CAPTURE_OWNS_NESTED_HEADER_ROWS = (
             "            with cs:\n"
             "                assert x != 1\n"
         ),
-        True,
+        False,
     ),
     (
         "a header in a clause that captures nothing still reads the suppressor",
