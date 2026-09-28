@@ -3219,6 +3219,78 @@ TIED_STORE_ROWS = (
         ),
         [True],
     ),
+    # The row above is the easy half of the nested-loop rule, and on its own it
+    # is exactly what makes the hard half look safe. `_breaks_own_loop` stops
+    # at a nested loop because a `break` in its BODY exits the inner loop. A
+    # nested loop's `else`, though, is a plain block rather than a loop, so a
+    # `break` written there binds to the ENCLOSING loop:
+    #
+    #     items == []  ->  outer body never runs, outer else runs,
+    #                     `first` is a nullcontext, assert FIRES
+    #     items == [1] ->  inner loop completes, its else runs `break`,
+    #                     the outer else is SKIPPED, `first` is still the
+    #                     suppress, assert SWALLOWED
+    #
+    # So the outer `else` is NOT guaranteed, the tie between the two stores is
+    # genuinely input-dependent, and the name has to be declined. Reading a
+    # nested loop as a blanket "cannot break the loop we are asking about"
+    # called the outer `else` guaranteed, answered `True`, and certified the
+    # swallowed assert ENFORCED -- head-worse-than-base, and the damaging
+    # direction per #308 criterion 1.
+    (
+        "a break in a nested loop's else does suppress the outer loop's else",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        for inner in range(1):\n"
+            "            pass\n"
+            "        else:\n"
+            "            break\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The same defect reached through `while`, whose `else` is the same kind of
+    # plain block. Without this row the rule could be repaired for `for` only
+    # and the suite would still be green.
+    (
+        "a break in a nested while's else does suppress the outer loop's else",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        inner = 0\n"
+            "        while inner < 1:\n"
+            "            inner += 1\n"
+            "        else:\n"
+            "            break\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The control for the two rows above: a nested loop that does NOT break out
+    # leaves the outer `else` guaranteed, so the outer store still settles the
+    # name and the assert stays live. If the repair were "any nested loop makes
+    # the outer `else` undecidable", this row would report `False` and fail.
+    (
+        "CONTROL a nested loop that never breaks leaves the outer else settled",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        for inner in range(1):\n"
+            "            pass\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [True],
+    ),
     # Two stores in one top-level statement where NEITHER is unconditional.
     # `max` would answer the `suppress` simply because it is walked first, but
     # neither store provably ran, so the name is declined by the *competing*

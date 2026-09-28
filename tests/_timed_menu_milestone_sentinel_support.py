@@ -3257,9 +3257,11 @@ def _loop_else_always_runs(loop):
     ``else``, and a store that never ran cannot have settled a name that a
     later statement reads.
 
-    Only a ``break`` targeting this loop suppresses the ``else``, and a
-    ``break`` written inside a *nested* loop belongs to that inner loop, so the
-    walk does not descend into one.
+    Only a ``break`` targeting this loop suppresses the ``else``. A ``break``
+    in a *nested* loop's body belongs to that inner loop and does not count,
+    but a ``break`` in a nested loop's ``else`` is a plain block statement: it
+    binds to this loop and does suppress this ``else``. See
+    ``_breaks_own_loop``.
     """
     return not any(_breaks_own_loop(child) for child in loop.body)
 
@@ -3267,11 +3269,26 @@ def _loop_else_always_runs(loop):
 def _breaks_own_loop(node):
     """Is there a ``break`` in ``node``'s subtree that exits the enclosing loop?"""
     if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-        # A nested loop has its own `else` and its own `break` target, so
-        # nothing inside it can break the loop we are asking about. This test
-        # comes before the `ast.Break` check because a nested loop node is not
-        # a break, but its *subtree* is not ours to walk either.
-        return False
+        # A nested loop has its own `break` target, so a `break` in its *body*
+        # exits the nested loop, not the one we are asking about. Its `else` is
+        # a different story: a loop `else` is a plain block, not a loop, so a
+        # `break` written there binds to the *enclosing* loop and really does
+        # suppress the enclosing `else`:
+        #
+        #     for i in range(n):        # the loop we are asking about
+        #         first = contextlib.suppress(AssertionError)
+        #         for j in range(1):
+        #             pass
+        #         else:
+        #             break            # exits the OUTER loop
+        #     else:
+        #         first = contextlib.nullcontext()
+        #
+        # With `n == 1` that `break` skips the outer `else`, so `first` keeps
+        # the suppressor and the assert is swallowed. Returning a flat `False`
+        # here called the outer `else` guaranteed and reported the swallowed
+        # assert ENFORCED -- head-worse-than-base (#308 criterion 1).
+        return any(_breaks_own_loop(child) for child in node.orelse)
     if isinstance(node, ast.Break):
         return True
     for child in ast.iter_child_nodes(node):
