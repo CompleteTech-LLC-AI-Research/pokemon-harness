@@ -2192,7 +2192,7 @@ WALRUS_REBINDING_SHAPES = (
 )
 
 
-#: #359: a ``with``-header bound by a carrier that is not a target.
+#: #354: a ``with``-header bound by a carrier that is not a target.
 #:
 #: Three binding forms bind their name as a *string field* of a node rather
 #: than as a target: ``import os as cs`` (``Import.asname``), ``def cs()`` and
@@ -2238,11 +2238,11 @@ CARRIER_ONLY_SHAPES = (
 )
 
 
-#: #359: the same carriers bound at **module** scope.
+#: #354: the same carriers bound at **module** scope.
 #:
 #: A module-scope carrier binds the name for the whole file, so a ``with``
 #: header inside a function reads it as a *free* name. The function-scoped
-#: walk behind :func:`_carrier_runtime_kinds` cannot see it, so before #359
+#: walk behind :func:`_carrier_runtime_kinds` cannot see it, so before #354
 #: the store table was silent and the header read as ``enforced`` -- on an
 #: assert the interpreter never evaluates. This is the residue that was left
 #: behind when #354's factual claim was refuted and closed.
@@ -2273,7 +2273,7 @@ MODULE_CARRIER_SHAPES = (
         "import os as cs\ndef cs():\n    pass",
         False,
     ),
-    # --- #359 supersession family -------------------------------------
+    # --- #354 supersession family -------------------------------------
     # A name's value is settled by the last *binding*, not the last carrier.
     # Each row below binds a module-scope carrier and then rebinds the name
     # to a real `nullcontext()` by a *different* module-level store form.

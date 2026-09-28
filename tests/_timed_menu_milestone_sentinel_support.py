@@ -811,7 +811,7 @@ def _carrier_runtime_kinds(function):
     already raising ``TypeError: 'module'/'type'/'function' object does not
     support the context manager protocol`` on entry. The assert is never
     evaluated, so calling it load-bearing is the **damaging** direction -- a
-    dead contract certified as live. #359.
+    dead contract certified as live. #354.
 
     ``from M import N as cs`` is deliberately **absent**, and that is the
     sharp edge of this function rather than an oversight. ``import os as cs``
@@ -1262,7 +1262,7 @@ def _store_bindings(function, bound):
     for name, statement in _match_capture_names(function).items():
         conditional = not _store_retires(statement, name)
         bindings.setdefault(name, []).append((statement, None, conditional))
-    # #359. The four string-field carriers (`import os as cs`, `def cs`,
+    # #354. The four string-field carriers (`import os as cs`, `def cs`,
     # `class cs`, ...) bind a name the loop above never sees, because their
     # name is a string field of a node rather than a target. They are recorded
     # here with the runtime kind their value is pinned to, so that
@@ -2295,7 +2295,7 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
         "tuple",
         "set",
         "dict",
-        # #359. A name bound by a string field of a node that is not a target
+        # #354. A name bound by a string field of a node that is not a target
         # at all holds an object that cannot be entered: a module, a class or
         # a function. Entering one raises `TypeError` *before* the assert under
         # the `with` is evaluated, so the assert is defeated -- and the
@@ -2342,7 +2342,7 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     name = expression.id
     stores = _stores_of(name, by_index, index, function)
     if stores is None and module is not None:
-        # #359. A carrier bound at module scope leaves no store in the
+        # #354. A carrier bound at module scope leaves no store in the
         # function's own table, so `_stores_of` declines and the header reads
         # as enforced. The module body is consulted next, because a
         # module-level binding is a real store that runs at import time,
@@ -2396,7 +2396,7 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             kinds.add("NoneType")
             continue
         if isinstance(value, str):
-            # #359. A carrier recorded by `_carrier_runtime_kinds`
+            # #354. A carrier recorded by `_carrier_runtime_kinds`
             # (function scope) or `_store_bindings` over the module body
             # (module scope): the name
             # holds a module, a class or a function, each pinned by the syntax
@@ -2546,19 +2546,23 @@ def _module_stores(name, module):
     }
     name_entries = bindings.get(name)
     if name_entries:
-        # #359. `_stores_of` keeps only unconditional stores, so a carrier
+        # #354. `_stores_of` keeps only unconditional stores, so a carrier
         # that is unconditional survives a *conditional* non-carrier store
         # that follows it. That store may have run and replaced the carrier
         # with an enterable value, in which case the carrier is stale and
         # answering from it would drop a live assert. When that happens the
         # value is genuinely undecidable, so decline rather than guess.
         #
-        # `except ... as cs:` is excluded because it *unbinds* rather than
-        # supersedes: CPython deletes the name when the handler exits, so the
-        # earlier carrier is what remains in force. `_stores_of` makes the same
-        # exception for the same reason, and without it here a try/except that
-        # merely mentions the name would flip a correct `defeated` to
-        # `enforced`.
+        # `except ... as cs:` is excluded because it *deletes* the name rather
+        # than binding a new value: CPython unbinds the target when the
+        # handler exits. Measured on CPython 3.12.14, a function-local carrier
+        # followed by `except TypeError as cs:` therefore raises
+        # `UnboundLocalError` on the later `with cs:` -- the carrier is NOT
+        # what remains in force. The handler is nonetheless left decidable by
+        # `decidable` above, which is what yields the correct dead verdict for
+        # that shape; excluding it from *this* guard is what keeps a
+        # try/except that merely mentions the name from flipping a correct
+        # `defeated` to `enforced`.
         carrier_orders = [
             orders[id(statement)]
             for statement, value, conditional in name_entries
