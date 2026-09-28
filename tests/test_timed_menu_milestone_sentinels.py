@@ -3127,6 +3127,167 @@ def test_a_carrier_inside_the_reading_header_leaves_the_name_unenterable(
     )
 
 
+#: #367: two stores that share a top-level statement are *tied*, and the
+#: original resolver broke the tie by walk position -- a question the source
+#: does not answer. `max` returns the first maximal entry, so a `for`/`else`
+#: pair resolved to whichever branch the walk reached first, which is fixed
+#: regardless of which branch actually runs.
+#:
+#: The `expected` column is the exact per-assert verdict list, never
+#: ``all(...)``: collapsing it to the first verdict is what let the original
+#: defect ship, and the whole point of a tie rule is that *each* store in the
+#: tie is a candidate the resolver must decline.
+TIED_STORE_ROWS = (
+    # The sharp case, and the one that motivated the issue. `items == []` runs
+    # the `else`, binds a `nullcontext`, and the assert FIRES. `items == [1]`
+    # runs the body, binds a `suppress`, and the assert is swallowed. The
+    # interpreter disagrees with itself across the two inputs, so no single
+    # verdict is right and the name has to be declined -- which reports a
+    # defeat, the safe side (#308 criterion 1). Resolving to the walk-first
+    # `suppress(...)` instead answers `False` for the wrong reason, and the
+    # moment the walk-first entry is a `nullcontext` it flips a live assert
+    # to `False` and certifies a real contract as disarmed.
+    (
+        "a for/else pair that binds the same name twice",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # Two stores in one top-level statement where NEITHER is unconditional.
+    # `max` would answer the `suppress` simply because it is walked first, but
+    # neither store provably ran, so the name is declined by the *competing*
+    # rule -- the same safe side, reached before the tie is ever formed. This
+    # row is here to pin that the two paths agree, since #367's tie handling
+    # sits immediately after them and a change to either could drift.
+    (
+        "two conditional stores in one top-level statement",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        if flag:\n"
+            "            cs = contextlib.suppress(ValueError)\n"
+            "        else:\n"
+            "            cs = contextlib.suppress(TypeError)\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # #367's own control, and the row that re-opens #323 if the mixed-tie rule
+    # is written as "any tie is ambiguous". The walrus is unconditional and
+    # runs on every path; the `nullcontext` assignment is later in the same
+    # block. Once the body has run the name IS the `nullcontext`, so the
+    # following header is live and must stay live.
+    (
+        "CONTROL an unconditional walrus beside a later rebind in one block",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # The row that makes the *control* above discriminating rather than
+    # accidental. In the control the walk happens to reach the `nullcontext`
+    # store first, so a resolver that read the first maximal entry would reach
+    # the same answer and the row would pass for the wrong reason. Here the
+    # walk reaches the carried `suppress` walrus first, so picking the first
+    # maximal entry resurrects the stale suppressor and reports the live
+    # second assert defeated -- the damaging direction. Only the mixed-tie
+    # rule, which returns the *conditional* member, answers `True`.
+    #
+    # Both stores sit in the SAME top-level statement, which is what makes
+    # them a tie: the walrus is the `with` header's own named expression
+    # (unconditional -- the header is evaluated on every path that reaches it)
+    # and the `nullcontext` assignment is in that header's own body.
+    (
+        "a carried suppressor walked before its in-block rebind",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    with (cs := base):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # The mixed tie where the later write cannot be entered at all. `cs` is a
+    # module by the time the second header reads it, so the assert under that
+    # header is unreachable -- and the FIRST assert, under the walrus header,
+    # really is swallowed. Both are `False`, from two different rules: the
+    # first from the alias walk, the second from the dead-entry rule that
+    # #367 makes reachable by recognising the in-header store as settled.
+    (
+        "an unconditional walrus beside a later carrier in one block",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        import os as cs\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    TIED_STORE_ROWS,
+    ids=[row[0] for row in TIED_STORE_ROWS],
+)
+def test_two_stores_sharing_one_statement_resolve_without_walk_order(label, body, expected):
+    """A binding tie is declined, never broken by where the walk reached.
+
+    #367. `_binding_order` keys a store by the top-level statement containing
+    it, so two stores inside one statement compare equal *by construction*.
+    Reading that equality as "the first one wins" answers a question the
+    source does not pose: which of two stores in the same block ran last is
+    decided by control flow, not by the order `ast.walk` happened to visit
+    them.
+
+    The rule here is therefore split, and the split is the whole repair:
+
+    * every tied member conditional -- none of them provably ran, so the name
+      is declined and reported as a defeat (#308 criterion 1, the safe side);
+    * a mixed tie -- an unconditional store and a conditional one share the
+      block, the unconditional one ran on every path, and the conditional one
+      is the later *write*, so the value read afterwards is the conditional
+      one's. That is #323's supersession, not an ambiguity, and treating it as
+      one would drop the `CONTROL` row's live assert.
+
+    A mixed tie can still retire the name entirely, when the later write is
+    something that cannot be entered. The last row is that case: an
+    `import ... as cs` in the same block makes the following header raise
+    `TypeError`, so its assert is unreachable. The carrier is recorded as a
+    runtime kind and the dead-entry rule reports it, which is what keeps the
+    row from certifying a `TypeError`-raising header as load-bearing.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts but the row "
+        f"expects {len(expected)} verdicts"
+    )
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A tie must be "
+        f"declined, and a mixed tie must resolve to the later write."
+    )
+
+
 def _async_loop_target_is_undecidable(label, source):
     """Pin why a loop target is excluded from the dead-entry rule.
 

@@ -62,6 +62,16 @@ SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRES
 #: applied.
 AMBIGUOUS_SUPPRESSOR = object()
 
+#: Sentinel recording that a name *is* bound at this position and deliberately
+#: carries something that is not a suppressor.
+#:
+#: #367. `_assigned_suppressors` records a name only when it resolves to a
+#: suppressor, so "carries a `nullcontext`" and "is not bound here" both fall
+#: out as a missing key. Those are different answers: the second inherits the
+#: previous position's binding, which resurrects a superseded suppressor. The
+#: marker separates them.
+_NOT_A_SUPPRESSOR = object()
+
 #: Sentinel for a suppressor reached through ``name.__enter__()``. The dunder
 #: is ``pass`` on every suppressor, so the entry raises ``TypeError`` before the
 #: body runs whatever exception list it was built with. The argument is
@@ -1110,9 +1120,86 @@ def _assigned_suppressors(function, bound):
             seen = [entry for entry in entries if orders[id(entry[0])] <= index]
             if not seen:
                 continue
-            value = _resolve_bindings(seen, bound, orders)
+            value = _resolve_bindings(seen, bound, orders, index, function)
             if value is not None:
                 assigned.setdefault(index, {})[name] = value
+            elif index and name in assigned.get(index - 1, {}):
+                # #367. The name is still bound here, and what it carries is
+                # deliberately *not* a suppressor. Recording that explicitly
+                # is what stops `_aliased_suppressions`' `bound_so_far` from
+                # carrying the previous index's suppressor forward:
+                #
+                #     with (cs := contextlib.suppress(AssertionError)):
+                #         cs = contextlib.nullcontext()
+                #         assert x != 1
+                #     with cs:                  # `cs` is the nullcontext
+                #         assert x != 2
+                #
+                # At the index of the *first* `with` the name really does carry
+                # the suppressor, so that index records it. The next index
+                # resolves the tie to the `nullcontext`, which is not a
+                # suppressor, and without this line the walk would find no
+                # entry for it and read the stale suppressor from the previous
+                # index -- reporting a live assert defeated. The marker is
+                # `_NOT_A_SUPPRESSOR` rather than a dropped key precisely
+                # because "not a suppressor" and "not bound" are different
+                # answers here.
+                assigned.setdefault(index, {})[name] = _NOT_A_SUPPRESSOR
+    # #367. A store in a statement's *body* runs before the next statement, so
+    # a header in that next statement must not read the value this statement's
+    # own header entered:
+    #
+    #     with (cs := contextlib.suppress(AssertionError)):
+    #         cs = contextlib.nullcontext()
+    #         assert x != 1
+    #     with cs:                  # `cs` is the nullcontext
+    #         assert x != 2
+    #
+    # At the index of the first `with`, `_resolve_bindings` answers with the
+    # `suppress` -- correct, because that header is evaluated before the body
+    # store happens. But the body store *has* run by the time the next
+    # statement is reached, so the value that statement's headers read is the
+    # `nullcontext`. Without this pass the next index records
+    # `_NOT_A_SUPPRESSOR` for `cs`, and `_aliased_suppressions`, which advances
+    # its carried set from `assigned[index]` at the end of each statement,
+    # hands the *first* `with`'s suppressor forward instead.
+    #
+    # The pass is deliberately narrow: only a name whose latest store *at or
+    # before* `index` is settled past `index` -- a store in a `with` body that
+    # has already run by the next statement -- is downgraded. Everything else
+    # keeps the value this statement's own header entered, which is what a
+    # header written *before* the body store must see.
+    for index in range(len(function.body) - 1):
+        following = index + 1
+        for name, entries in bindings.items():
+            value = assigned.get(index, {}).get(name)
+            if value is None or value is _NOT_A_SUPPRESSOR:
+                continue
+            seen = [entry for entry in entries if orders[id(entry[0])] <= index]
+            if not seen:
+                continue
+            latest = max(orders[id(entry[0])] for entry in seen)
+            if not any(
+                _store_is_settled_before(entry, orders, following, function)
+                for entry in seen
+                if orders[id(entry[0])] == latest
+            ):
+                continue
+            resolved = _resolve_bindings(
+                [entry for entry in entries if orders[id(entry[0])] <= following],
+                bound,
+                orders,
+                following,
+                function,
+            )
+            if resolved is None:
+                # Recorded against THIS index, not the next one.
+                # `_aliased_suppressions` advances its carried set from
+                # `assigned[index]` at the end of each statement, so this is
+                # the entry the *next* statement's headers read. Recording it
+                # against `following` would land one statement too late and
+                # leave the stale suppressor in force for exactly one header.
+                assigned.setdefault(index, {})[name] = _NOT_A_SUPPRESSOR
     # The raw table has to be built for the whole function, not assembled as
     # the recording walk proceeds. #333: an assignment expression in a `with`
     # header can alias a name whose own store `ast.walk` has not reached yet,
@@ -1244,6 +1331,7 @@ def _store_bindings(function, bound):
                         orders,
                         _binding_order(function, statement),
                         name,
+                        function,
                     ),
                     conditional,
                 )
@@ -1305,11 +1393,14 @@ def _store_bindings(function, bound):
     return bindings, raw_values
 
 
-def _resolve_bindings(entries, bound, orders):
+def _resolve_bindings(entries, bound, orders, index=None, function=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
     ``entries`` are ``(statement, value, conditional)`` triples, already
     filtered to the stores that run at or before the ``with`` in question.
+    ``index`` is the position of that ``with`` among the function's top-level
+    statements and ``function`` the scope it sits in; together they are what
+    tell a *settled* store from one still waiting on a branch.
     """
     # An unconditional store runs on *every* path, so the last one of those is
     # the value in force unless some conditional store comes after it. Only the
@@ -1358,8 +1449,251 @@ def _resolve_bindings(entries, bound, orders):
         return AMBIGUOUS_SUPPRESSOR
     # Otherwise nothing competes with anything: the stores that can be last are
     # a single one, so the highest-ordered entry is what the `with` enters.
-    last = max(entries, key=lambda entry: orders[id(entry[0])])[1]
+    # `max` runs over every entry, not just the unconditional ones: a
+    # conditional store ordered *after* the latest unconditional store is
+    # exactly the supersession #323 models, and dropping it would resurrect the
+    # stale suppressor.
+    #
+    # #367: `max` returns the FIRST maximal entry, and two stores inside one
+    # top-level statement share an order by construction. So where the maximum
+    # is attained more than once, `max` resolves the tie by walk position --
+    # a question the source does not answer. The sharp case is a `for`/`else`,
+    # where exactly one branch runs and which one is an input:
+    #
+    #     for i in items:
+    #         first = contextlib.suppress(AssertionError)
+    #     else:
+    #         first = contextlib.nullcontext()
+    #     with (cs := first):
+    #         assert x != 1
+    #
+    # `max` returned the *first* maximal entry, so a `for`/`else` pair resolved
+    # to whichever branch the walk reached first -- fixed regardless of which
+    # branch runs. The `for`/`else` above is the sharp case: on `items == []`
+    # the `else` runs and the name is a `nullcontext`, so the assert is LIVE,
+    # while on `items == [1]` the body runs and the name is a `suppress`, so
+    # the assert is swallowed. The interpreter disagrees with itself across
+    # the two inputs, so no single verdict is right, and walk order is not the
+    # thing that decides it.
+    #
+    # A tie of that kind -- every member conditional -- is already declined by
+    # the `competing` branch above, and cannot reach here: with no
+    # unconditional entry at the maximum order, two or more conditional
+    # entries at that order are exactly two or more *competing* stores, so
+    # that branch returns first. An earlier cut of this repair therefore
+    # carried a second, all-conditional tie test here; it was unreachable in
+    # every enumerated shape (630 order/conditional combinations, zero
+    # reachable) and has been removed rather than left as a branch no mutation
+    # can kill.
+    latest = max(orders[id(entry[0])] for entry in entries)
+    tied = [entry for entry in entries if orders[id(entry[0])] == latest]
+    if len(tied) > 1:
+        # Mixed tie: an unconditional store and a conditional one share the
+        # order. `_binding_order` cannot separate them -- it keys a store by the
+        # top-level statement containing it, so two stores in one block compare
+        # equal by construction -- but source position can, and a genuine
+        # supersession *is* written later:
+        #
+        # Treating this as ambiguous instead would re-open #323:
+        #
+        #     with (cs := suppress(AssertionError)):
+        #         cs = nullcontext()      # same top-level statement, so the
+        #         assert x != 1           # same order as the walrus above
+        #     with cs:                    # `cs` is the nullcontext
+        #         assert x != 2
+        #
+        # The unconditional walrus runs on every path; the assignment runs only
+        # when the body is entered, and once it has, the name is the
+        # `nullcontext`. Reporting the tie as ambiguous would call that live
+        # assert defeated.
+        # #367: "written later" is necessary but not sufficient. A store inside
+        # a *branch* of the block may never run, so it cannot be called the
+        # value in force:
+        #
+        #     with (cs := contextlib.suppress(AssertionError)):
+        #         assert x != 1
+        #         if flag:
+        #             cs = contextlib.nullcontext()
+        #     with cs:
+        #         assert x != 2
+        #
+        # Measured on CPython 3.12.14, `cs` is a `suppress` for both values of
+        # `flag`: the `with` statement's own item expression is what enters,
+        # and the body's rebinding of the name does not change the manager the
+        # `with` already holds. The second assert is swallowed either way, so
+        # it must be reported defeated. Treating the branch as the later write
+        # reads the `nullcontext`, retires the suppressor, and reports that
+        # swallowed assert live -- the damaging direction.
+        #
+        # So the last write counts only when it is one that has *run*: either
+        # it is unconditional, or it is the settled in-body store that
+        # `_store_is_settled_before` recognises. Anything else leaves the tie
+        # undecided, which is declined.
+        latest_write = _latest_write_in_block(tied, orders, index, function)
+        if latest_write is None:
+            return AMBIGUOUS_SUPPRESSOR
+        return _readable_store_value(latest_write[1], bound)
+    last = tied[0][1]
     return last if _is_readable_suppressor(last, bound) else None
+
+
+def _latest_write_in_block(tied, orders=None, index=None, function=None):
+    """The store written last among entries that share one top-level statement.
+
+    #367. `_binding_order` keys a store by the top-level statement containing
+    it, so two stores written in the same block compare equal *by construction*
+    and the tie has to be broken some other way. Source position is the one
+    that answers the question the tie poses: of the stores in this block, which
+    ran last? A later write to a name overwrites an earlier one, so the value
+    in force afterwards is the last write's -- not the first, and not the one
+    that happens to be walked first.
+
+    That is the whole correction. `ast.walk` is breadth-first, so it reaches a
+    `with` header's named expression *after* the statements in that header's
+    own body, and it reaches a body's `if` branch before the statements that
+    precede it. Reading the first maximal entry therefore picked whichever
+    store the traversal happened to visit first, which is a property of the
+    walk and not of the program:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            cs = contextlib.nullcontext()
+            assert x != 1
+        with cs:
+            assert x != 2
+
+    `cs = nullcontext()` is written *after* the walrus, so `cs` is the
+    `nullcontext` and the second assert is live. Resolving the tie by walk
+    position reads the walrus instead, resurrects the stale suppressor, and
+    reports that live assert defeated.
+
+    A write only counts as *last* if it has run. An unconditional store has.
+    A conditional one has only if it is the settled in-body store
+    :func:`_store_is_settled_before` recognises -- written in a `with` body
+    that has already completed by the time the queried header is read. A
+    conditional store inside an `if`, a loop or a `try` may never run, so it
+    cannot be called the value in force and the tie stays undecided.
+
+    Returning ``None`` -- no single last write, or the last write is one that
+    may not have run -- declines the name rather than guessing. The caller
+    reports that as a defeat, the safe side (#308 criterion 1).
+    """
+
+    def position(node):
+        return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+    def is_conditional(entry):
+        # The binding table records `(statement, value, conditional)` triples;
+        # `_assigned_suppressors`' raw table records `(statement, value)` pairs
+        # and carries no flag. A pair is treated as *conditional* here, which
+        # is the conservative reading in the one direction that matters: it
+        # cannot be called a store that provably ran, so it can neither win a
+        # tie outright nor license the fallback to an earlier write. A raw tie
+        # is therefore declined, which is the right answer -- the raw table is
+        # consulted for *which* right-hand side a read sees, and two stores in
+        # one block give it nothing to choose between.
+        return True if len(entry) <= 2 else entry[2]
+
+    latest = max(position(entry[0]) for entry in tied)
+    winners = [entry for entry in tied if position(entry[0]) == latest]
+    if len(winners) != 1:
+        return None
+    winner = winners[0]
+    if not is_conditional(winner):
+        return winner
+    if (
+        orders is not None
+        and index is not None
+        and function is not None
+        and _store_is_settled_before(winner, orders, index, function)
+    ):
+        return winner
+    # The last write has not run at this position -- the header being resolved
+    # is the very statement whose body contains it:
+    #
+    #     with (cs := contextlib.suppress(AssertionError)):
+    #         cs = contextlib.nullcontext()   # has not run yet
+    #         assert x != 1
+    #
+    # The value at THIS header is still the walrus. So the tie falls back to
+    # the last write that *has* run, which is what the read actually sees.
+    #
+    # The fallback is only sound when an unconditional store is in the tie --
+    # something that provably ran on every path. With no such store, every
+    # member may not have run and the name genuinely is one of several values:
+    #
+    #     for item in items:
+    #         first = contextlib.suppress(AssertionError)
+    #     else:
+    #         first = contextlib.nullcontext()
+    #     with (cs := first):
+    #         assert x != 1
+    #
+    # Exactly one of the two bodies runs, and which one is an input. Measured on
+    # CPython 3.12.14 the assert is swallowed when the `for` body ran and fires
+    # when the `else` did, so the interpreter disagrees with itself and no
+    # single verdict is right. The name is declined, which reports a defeat --
+    # the safe side (#308 criterion 1). Falling through to whichever store is
+    # written later would pick the `nullcontext` by source position and report
+    # that live assert enforced, which is the damaging direction.
+    if not any(not is_conditional(entry) for entry in tied):
+        return None
+    ran = [
+        entry
+        for entry in tied
+        if not is_conditional(entry)
+        or (
+            orders is not None
+            and index is not None
+            and function is not None
+            and _store_is_settled_before(entry, orders, index, function)
+        )
+    ]
+    if not ran:
+        return None
+    ran_latest = max(position(entry[0]) for entry in ran)
+    survivors = [entry for entry in ran if position(entry[0]) == ran_latest]
+    return survivors[0] if len(survivors) == 1 else None
+
+
+def _readable_store_value(value, bound):
+    """The store's value, if it is a *suppressor candidate* this function owns.
+
+    This resolver answers "is the name in force a readable suppressor?", so it
+    must only ever hand back a value the suppressor machinery can read. That is
+    not every store value, and #367's tie branch is where the difference bites:
+
+    #359 records a carrier (`import ... as cs`, `def cs`, `class cs`) as a
+    plain ``str`` runtime kind -- "module"/"function"/"type" -- deliberately, so
+    the value stays attached to the real statement and containment and
+    ordering stay answerable. A carrier is *not* a suppressor and not a
+    readable right-hand side either, and `_entry_is_dead` is the rule that
+    answers it, by reading the ``str``. Returning one from here would put a
+    bare ``"module"`` in front of the alias machinery as though it were a call.
+
+    The failure that produced is measured. A carrier inside the header's own
+    scope has already run by the time the name is entered:
+
+        with (cs := suppress(AssertionError)):
+            import os as cs
+        with cs:
+            assert x != 1        # TypeError: 'module' object ...
+
+    Both stores sit in one top-level statement, so they share a binding order
+    and this tie branch answers with the conditional one. Returning the raw
+    ``"module"`` skipped the entry for *any* readable suppressor -- the tie had
+    already retired the `suppress` -- and reported the assert `enforced`,
+    certifying an unreachable contract as load-bearing. Base answers `False`
+    here, so the tie branch is what introduced it.
+
+    So: anything that is not a value the suppressor rules can read answers
+    ``None``, which is this function's existing "not a suppressor" answer, and
+    leaves the carrier to ``_entry_is_dead``. An unreadable right-hand side and
+    a carrier are different things that happen to share an answer here, which
+    is the safe one -- neither can be claimed harmless.
+    """
+    if isinstance(value, str):
+        return None
+    return value if _is_readable_suppressor(value, bound) else None
 
 
 def _binding_order(function, statement):
@@ -1433,7 +1767,7 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
-def _deref_alias(value, raw_values, orders=None, index=None, target=None):
+def _deref_alias(value, raw_values, orders=None, index=None, target=None, function=None):
     """The value an assignment expression's right-hand side stands for.
 
     A binding can take its value from another name rather than from a call:
@@ -1518,6 +1852,7 @@ def _deref_alias(value, raw_values, orders=None, index=None, target=None):
             orders,
             index,
             origin if current.id == target or revisiting else None,
+            function,
         )
         if origin is None:
             origin = next((e for e in entries if e[1] is chosen), None)
@@ -1527,7 +1862,7 @@ def _deref_alias(value, raw_values, orders=None, index=None, target=None):
     return current
 
 
-def _last_store_before(entries, orders, index, exclude=None):
+def _last_store_before(entries, orders, index, exclude=None, function=None):
     """The right-hand side a read at ``index`` would actually see.
 
     ``raw_values`` is deliberately whole-function, so ``entries[-1]`` is the
@@ -1583,11 +1918,50 @@ def _last_store_before(entries, orders, index, exclude=None):
     Resolving to the nested ``suppress(...)`` instead makes the chain look
     swallowable, and the header reports a live contract as defeated.
 
-    When two stores share an order they are inside one top-level statement, so
-    neither provably precedes the other and the value is genuinely ambiguous.
-    ``max`` returns the first such entry, which keeps ``second = first``
-    resolvable when both sit in one statement; the existing
-    :func:`_binding_order` docstring records that ambiguity.
+    #367: when two stores share an order they are inside one top-level
+    statement, so neither provably precedes the other and the value is
+    genuinely ambiguous. Picking the first -- which is what ``max`` does --
+    resolves that ambiguity by walk position, which the source does not
+    justify. A ``for``/``else`` pair is the sharpest case, because exactly one
+    branch runs and the walk order is fixed regardless of which:
+
+        for i in items:
+            first = contextlib.suppress(AssertionError)
+        else:
+            first = contextlib.nullcontext()
+        with (cs := first):
+            assert x != 1
+
+    With ``items == []`` the ``else`` runs and the assert is LIVE. With
+    ``items == [1]`` the body runs, the assert is swallowed. The interpreter
+    disagrees with itself across the two, so no single verdict is right, and
+    returning the walk-first entry -- the ``suppress(...)`` -- reports the
+    ``items == []`` case as defeated. That is the damaging direction: a live
+    contract certified as disarmed.
+
+    A tie is not always ambiguous, though. A later write to a name overwrites
+    an earlier one, so where a single store in the block is the last write
+    that *ran*, that store is what a read at ``index`` sees:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            cs = contextlib.nullcontext()      # written after the walrus
+            assert x != 1
+        with cs:                              # `cs` is the nullcontext
+            assert x != 2
+
+    Resolving that tie to the ``suppress(...)`` instead resurrects a stale
+    suppressor and reports a live assert defeated. Only a store that *ran*
+    qualifies -- an unconditional one, or the settled in-body store
+    :func:`_store_is_settled_before` recognises. A conditional store inside an
+    ``if`` may never run, so the tie stays undecided there.
+
+    An undecided tie is declined with :data:`AMBIGUOUS_SUPPRESSOR` -- the same
+    marker :func:`_resolve_bindings` returns for a name several conditional
+    stores can reach, and the one the suppression rules already read as "may be
+    any suppressor, so report a defeat" (#308 criterion 1). Returning a plain
+    ``None`` would be wrong: ``None`` means "this store's right-hand side is
+    not readable", and callers treat it as *not a suppressor*, which reports
+    the assert live. A tie is not an unreadable right-hand side.
 
     Without ``orders``/``index`` -- the call sites that genuinely have no
     position to reason from -- this falls back to the whole-function last
@@ -1604,7 +1978,18 @@ def _last_store_before(entries, orders, index, exclude=None):
     ]
     if not visible:
         return entries[-1][1]
-    return max(visible, key=lambda entry: orders[id(entry[0])])[1]
+    latest = max(orders[id(entry[0])] for entry in visible)
+    tied = [entry for entry in visible if orders[id(entry[0])] == latest]
+    if len(tied) > 1:
+        # #367. The same tie :func:`_resolve_bindings` handles, and the same
+        # answer: a later write to a name overwrites an earlier one, so the
+        # value a read at ``index`` sees is the last write that *ran*. The
+        # two functions cannot disagree about it, so both call
+        # :func:`_latest_write_in_block`; where that cannot name a single
+        # store, the name is declined rather than picked by walk position.
+        winner = _latest_write_in_block(tied, orders, index, function)
+        return AMBIGUOUS_SUPPRESSOR if winner is None else winner[1]
+    return tied[0][1]
 
 
 def _raw_store_values(function):
@@ -1793,10 +2178,29 @@ def _aliased_suppressions(node, function, bound):
                         orders,
                         _binding_order(function, walrus),
                         walrus.target.id if isinstance(walrus.target, ast.Name) else None,
+                        function,
                     )
+                    # #367: the alias walk can land on `AMBIGUOUS_SUPPRESSOR`
+                    # when the name it followed is bound twice in one top-level
+                    # statement, so the source does not say which store the
+                    # read sees. `_is_readable_suppressor` accepts only an
+                    # `ast.Call`, so the marker is tested before it -- otherwise
+                    # it reads as "not a suppressor", the header looks live, and
+                    # a `for`/`else` tie certifies a live assert as defeated.
+                    if resolved is AMBIGUOUS_SUPPRESSOR:
+                        entered.append(AMBIGUOUS_SUPPRESSOR)
                     if _is_readable_suppressor(resolved, bound):
                         entered.append(resolved)
-                if isinstance(expression, ast.Name) and expression.id in live:
+                # #367: `_NOT_A_SUPPRESSOR` is a *record*, not a value. It says
+                # the name is bound here and carries nothing this module can
+                # call a suppressor, which is what keeps the previous
+                # position's suppressor from being read forward. Appending it
+                # would hand `_suppression_names` an object with no `args`.
+                if (
+                    isinstance(expression, ast.Name)
+                    and expression.id in live
+                    and live[expression.id] is not _NOT_A_SUPPRESSOR
+                ):
                     entered.append(live[expression.id])
                 if not isinstance(expression, ast.Call) or not isinstance(
                     expression.func, ast.Attribute
@@ -1807,12 +2211,72 @@ def _aliased_suppressions(node, function, bound):
                 value = expression.func.value
                 if isinstance(value, ast.Name) and value.id in live:
                     entered.append(LOUD_DUNDER)
-        # Bindings take effect only *after* the statement that makes them, and
-        # each index is the COMPLETE set in force there rather than a delta.
-        # Merging would leave a superseded alias live: a suppressor bound in an
-        # `if` at index 0 followed by `cs = helper.make()` at index 1 would
-        # still resolve `cs` to the suppressor at index 2, reporting a live
-        # assert as swallowed.
+        # `assigned[index]` is already the COMPLETE set in force *at* that
+        # index: `_assigned_suppressors` filters stores to `order <= index`, so
+        # it includes everything written by every earlier statement, and it
+        # records a store that deliberately resolves to a non-suppressor
+        # (#367's `_NOT_A_SUPPRESSOR`). Advancing to that set here rather than
+        # to the previous index's is what stops a superseded suppressor from
+        # being read forward:
+        #
+        #     with (cs := contextlib.suppress(AssertionError)):
+        #         cs = contextlib.nullcontext()
+        #         assert x != 1
+        #     with cs:                  # `cs` is the nullcontext
+        #         assert x != 2
+        #
+        # At the index of the second `with`, `assigned` records `cs` as bound
+        # and not a suppressor. The earlier index recorded the `suppress`, so
+        # reading the previous index's set forward would resurrect it and
+        # report a live assert defeated. The set is copied rather than
+        # aliased because it is replaced, never mutated.
+        #
+        # The index advanced to is the *next* statement's, not this one's. A
+        # header written inside this statement has not been read yet when the
+        # loop reaches the end of the iteration, and a header in a later
+        # statement reads the set in force once this one is done -- which is
+        # exactly `assigned[index + 1]`. Taking `assigned[index]` here instead
+        # would apply this statement's own stores to a header written *before*
+        # them:
+        #
+        #     if p:
+        #         with cs:                 # NameError: `cs` is not bound yet
+        #             assert x != 1
+        #         cs = contextlib.suppress(AssertionError)
+        #         with cs:
+        #             assert x != 1
+        #
+        # Both headers belong to the same top-level statement, so they are both
+        # read while `by_index` still holds only that statement's own entry.
+        # `_bindings_before` is what separates the two, and it needs
+        # `bound_so_far` to be the set carried in from *earlier* statements.
+        # That is why the update happens at all, and why advancing to
+        # `index + 1` rather than `index` is the only reading under which
+        # `bound_so_far` still means "before this statement" when the next
+        # iteration's headers are read.
+        # #367. The set a *later* statement's headers read is the one resolved
+        # at that later index, not this one's. Advancing to the next index that
+        # has an entry is what lets a store that retires a suppressor in this
+        # statement's body be seen by the next statement:
+        #
+        #     with (cs := contextlib.suppress(AssertionError)):
+        #         cs = contextlib.nullcontext()
+        #         assert x != 1
+        #     with cs:                  # `cs` is the nullcontext
+        #         assert x != 2
+        #
+        # At the index of the first `with` the name really does carry the
+        # suppressor, so that index records it. The next index resolves the
+        # tie to the `nullcontext` and records `_NOT_A_SUPPRESSOR` for `cs`.
+        # Advancing to the next *recorded* index hands that marker over, so
+        # the second header does not read the stale suppressor and report a
+        # live assert defeated.
+        #
+        # Taking the very next index unconditionally would be wrong in the
+        # other direction: `assigned[i]` includes statement `i`'s own body
+        # stores, and a header written *before* those must not see them.
+        # `_bindings_before` is what separates headers inside one statement;
+        # this hand-off is only for the statement-to-statement case.
         bound_so_far = dict(by_index.get(index, {}))
     return entered
 
@@ -2381,7 +2845,17 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # suppressor and leaves the assert live). That direction is the
             # safe one, so the rule declines to touch captures.
             if isinstance(statement, ast.Match):
-                return False
+                # #367. ... unless the subject itself pins the captured
+                # value, which `match [1]: case [cs]:` does. The exclusion
+                # above is about an *arbitrary* matched value; a literal
+                # subject is not arbitrary, and reading it is what keeps the
+                # in-header capture row from reporting a `TypeError`-raising
+                # header as enforced.
+                pinned = _match_capture_pins_value(statement, name)
+                if pinned is None:
+                    return False
+                kinds.add(pinned)
+                continue
             if isinstance(statement, (ast.For, ast.AsyncFor)):
                 # A loop target binds the *next element* of the iterable, and
                 # the rule cannot read that element without running the loop.
@@ -2630,12 +3104,186 @@ def _stores_of(name, by_index, index, function):
     # the name when the handler exited, and if it did not run, the previous
     # binding is still in force and is settled by an unconditional store.
     decidable = [
-        entry for entry in entries if not entry[2] or isinstance(entry[0], ast.ExceptHandler)
+        entry
+        for entry in entries
+        if not entry[2]
+        or isinstance(entry[0], ast.ExceptHandler)
+        or _store_is_settled_before(entry, orders, index, function)
     ]
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
     if latest is None:
         return None
-    return [entry for entry in decidable if orders[id(entry[0])] == latest]
+    tied = [entry for entry in decidable if orders[id(entry[0])] == latest]
+    if len(tied) == 1:
+        return tied
+    # Two stores share the top-level statement, so `orders` cannot separate
+    # them. Among the tied, the one this rule newly deemed *settled* is the
+    # later write in the block: it is written into a `with` body, and by the
+    # time a *subsequent* top-level statement is reached it has run, so it is
+    # the value in force. Returning it alone keeps the dead-entry rule from
+    # reading the earlier carried suppressor as if it were still in play.
+    settled = [entry for entry in tied if _store_is_settled_before(entry, orders, index, function)]
+    return settled or tied
+
+
+def _store_is_settled_before(entry, orders, index, function):
+    """Has this conditional store run by the time top-level statement ``index``?
+
+    #367. A store recorded as ``conditional`` is one nested *somewhere* inside
+    a top-level statement, but "nested" and "may not have run" are not the same
+    question. The two shapes this rule separates are the ones the anchor test
+    pins side by side:
+
+        with (cs := contextlib.suppress(AssertionError)):
+            import os as cs          # <-- nested, yet certainly run
+        with cs:                      # a LATER top-level statement
+            assert x != 1
+
+    The ``import`` sits in the *body* of a ``with``. A ``with`` body is not a
+    branch: it either runs to completion -- and then the store has happened --
+    or it propagates an exception, in which case the later top-level ``with``
+    is never reached at all. So by the time statement ``index`` is executing,
+    a store in an *earlier* top-level statement's body has run. `conditional`
+    is still the right flag for the *binding resolver*, which has to reason
+    about a ``with`` header that is entered *before* the body store happens
+    (that is the #323 supersession the flag encodes). It is the wrong flag for
+    the dead-entry rule, which is only ever asked about a header that comes
+    strictly after the statement containing the store.
+
+    That strictness is what keeps this from over-claiming. The store's order
+    must be *less than* the queried index: an order equal to ``index`` means
+    the store is nested in the very statement whose header is being read, and
+    that header is evaluated *before* the body runs:
+
+        with cs = nullcontext():
+            ...
+
+    is not a shape, but ``with (cs := nullcontext()):`` is -- and there the
+    store has not happened when ``cs`` is read. The `strictly earlier` test
+    declines it, which is the safe direction.
+
+    Branching containers are excluded outright, because a store inside one of
+    their *bodies* really can be skipped:
+
+        with helper.manage():
+            if flag:
+                cs = nullcontext()
+        with cs:                      # `cs` may not be bound at all
+            assert x != 1
+
+    The walk therefore requires the store to be nested under a ``with``/
+    ``async with`` *body* and not under any ``if``/loop/``try``/``with`` *body*
+    that could skip it. ``try`` is included because its ``body`` runs once but
+    an exception can still divert control; keeping it out means a store
+    directly in a ``try`` body is left to the ordinary ``conditional`` answer,
+    which is the conservative one.
+    """
+    statement = entry[0]
+    if orders[id(statement)] >= index:
+        # Same top-level statement as the queried header, or later: the header
+        # is read before that body runs, so nothing is settled.
+        return False
+    order = orders[id(statement)]
+    if 0 <= order < len(function.body):
+        return _runs_before_end_of(function.body[order], statement)
+    return False
+
+
+def _runs_before_end_of(top, statement):
+    """Does ``statement`` run on every path that completes ``top``?
+
+    ``top`` is the top-level statement the store is nested in, and ``statement``
+    is the store. A store written directly in ``top``'s body runs whenever
+    ``top`` completes. A store nested inside a *branch* of ``top`` may be
+    skipped, so it does not. The only container whose body is guaranteed to run
+    is a ``with``/``async with``: its body is not conditional, so anything
+    written directly in it has run by the time ``top`` returns.
+    """
+    if statement is top:
+        return False
+    # Find the chain of bodies from `top` down to `statement`; every hop must
+    # be a with-body, never a branch body.
+    current = [top]
+    while current:
+        nxt = []
+        for node in current:
+            for field in ("body", "orelse", "finalbody", "handlers", "items"):
+                children = getattr(node, field, None) or []
+                if isinstance(children, ast.AST):
+                    children = [children]
+                for child in children:
+                    if child is statement:
+                        # Reached through `orelse`/`finalbody`/`handlers` ->
+                        # not a guaranteed with-body.
+                        return field == "body" and isinstance(node, (ast.With, ast.AsyncWith))
+                    nxt.append(child)
+        current = nxt
+    return False
+
+
+def _match_capture_pins_value(statement, name):
+    """The literal a ``match`` capture binds, when the subject fixes it.
+
+    #367. `_entry_is_dead` declines every `ast.Match` store, because a capture
+    binds whatever was *matched* and that is very often a real context manager.
+    The exclusion is right in general and wrong for the one shape the anchor
+    test pins: when the ``match`` subject is a literal and the capture takes
+    one of its elements, the value is fixed by the source, exactly as `import
+    os as cs` is fixed by its syntax.
+
+        match [1]:
+            case [cs]:        # `cs` is `1`, an int
+                pass
+
+    Only a sequence or mapping subject is considered, only a capture that
+    binds a *whole element* of it (a ``MatchAs`` with no sub-pattern, or a
+    ``MatchStar``), and only when the element the capture receives is itself a
+    literal this module can type. Anything else -- a class pattern, a nested
+    sequence, a starred tail, a computed subject -- returns ``None`` and the
+    capture keeps its exclusion, so a real context manager bound by a capture
+    is never called dead.
+    """
+    subject = statement.subject
+    if isinstance(subject, (ast.List, ast.Tuple)):
+        elements = list(subject.elts)
+    elif isinstance(subject, ast.Dict):
+        return None
+    else:
+        return None
+    for case in statement.cases:
+        pattern = case.pattern
+        # A single whole-subject sequence pattern maps element-wise onto the
+        # subject, so the capture's index in the pattern fixes its element.
+        if not isinstance(pattern, (ast.MatchSequence, ast.MatchStar)):
+            continue
+        for index, element in enumerate(elements):
+            kind = _capture_element_kind(pattern, index, name)
+            if kind is not None:
+                return _literal_runtime_type(element)
+    return None
+
+
+def _capture_element_kind(pattern, index, name):
+    """Does the sequence ``pattern`` bind ``name`` to its ``index``-th element?"""
+    if isinstance(pattern, ast.MatchSequence):
+        patterns = list(pattern.patterns)
+        if index >= len(patterns):
+            return None
+        return name if _pattern_binds_element(patterns[index], name) else None
+    if isinstance(pattern, ast.MatchStar):
+        # A bare `[*cs]` collects the *remaining* elements as a list, which is
+        # a real list, not an element of the subject.
+        return "star" if isinstance(pattern.name, str) and pattern.name == name else None
+    return None
+
+
+def _pattern_binds_element(pattern, name):
+    """Does ``pattern`` bind ``name`` to the whole element it matches?"""
+    if isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
+        return pattern.name == name
+    if isinstance(pattern, ast.MatchStar):
+        return pattern.name == name
+    return False
 
 
 def _entered_name_is_dead(header, function, bound, module=None):
@@ -2719,6 +3367,29 @@ def _is_suppressing_with(node, bound, function=None):
             # `cs.__enter__()` raises before the body whatever `cs` holds, so
             # the argument is not what decides this and must not be read.
             return True
+        # #367: no `_is_suppression_call` gate is needed here, and adding one
+        # would be a re-test of a property the producer already guarantees.
+        # Every value `_aliased_suppressions` appends is either one of the two
+        # markers handled above or a value that already passed
+        # `_is_readable_suppressor` at its source:
+        #
+        # * the walrus branch appends `resolved` only under
+        #   `if _is_readable_suppressor(resolved, bound)`, and that predicate
+        #   accepts only an `ast.Call` that `_is_suppression_call` accepts;
+        # * `live[expression.id]` comes from `_assigned_suppressors`, which
+        #   records a name only when `_resolve_bindings` returned a non-`None`
+        #   value -- and every non-`None` branch of `_resolve_bindings` returns
+        #   either `AMBIGUOUS_SUPPRESSOR` or `_is_readable_suppressor`'s result.
+        #
+        # An earlier cut of this repair gated the loop on `_is_suppression_call`
+        # to stop a bare `nullcontext()` from reading as `["BaseException"]`
+        # and eating the verdict. That was treating the symptom at the
+        # consumer: the real source of the bad value was `_resolve_bindings`
+        # returning an unreadable right-hand side, which `_readable_store_value`
+        # now declines at the producer. A mutation removing such a gate is
+        # therefore not a surviving defect, and shipping an unpinned
+        # re-test would be exactly the kind of change this lane rejects.
+        # #390 tracks the related own-body `lambda` case.
         if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
             return True
     return False
