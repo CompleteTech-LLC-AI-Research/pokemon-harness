@@ -1960,6 +1960,43 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [True, True],
     ),
+    # A self-alias is a real store, and the right-hand side read happens
+    # *before* the rebind takes effect:
+    #
+    #     cs = contextlib.suppress(AssertionError)
+    #     with (cs := cs):
+    #         assert x != 1
+    #
+    # Entering succeeds on the suppressor instance, the walrus rebinds `cs` to
+    # that same instance, and its `__exit__` swallows the assert. Resolving the
+    # self-store as the value made the alias loop hand back a bare `Name` that
+    # `_is_readable_suppressor` rejects, so the header was not recognised as
+    # suppressing and a swallowed assert was reported as *enforced* (#348).
+    (
+        "a walrus that aliases itself to the carried suppressor stays defeated",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with (cs := cs):\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The control for that row. A self-alias whose name was *never* a
+    # suppressor must stay live, so the row above cannot be satisfied by a
+    # rule that declines every self-alias:
+    (
+        "a walrus that aliases a non-suppressor to itself stays live",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with (cs := cs):\n"
+            "        assert x != 2"
+        ),
+        [True, True],
+    ),
 )
 
 

@@ -1129,6 +1129,18 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
+def _is_self_reference(entry, name_node):
+    """Is ``entry`` just ``name_node`` standing for itself?
+
+    ``cs = cs`` records the *read* of ``cs`` as that store's right-hand side.
+    The read observes the previous binding and contributes no new value, so
+    resolution must step past it rather than adopt it (#348).
+    """
+    return (
+        isinstance(entry, ast.Name) and isinstance(name_node, ast.Name) and entry.id == name_node.id
+    )
+
+
 def _deref_alias(value, raw_values):
     """The value an assignment expression's right-hand side stands for.
 
@@ -1191,7 +1203,29 @@ def _deref_alias(value, raw_values):
         entries = raw_values.get(current.id)
         if not entries:
             return current
-        current = entries[-1]
+        # A name can appear in its own store table, because a self-alias is
+        # a real store:
+        #
+        #     cs = contextlib.suppress(AssertionError)
+        #     with (cs := cs):     # the right-hand side reads `cs`
+        #         assert 1 == 2
+        #
+        # The read happens *before* the assignment rebinds anything, so it
+        # still sees the suppressor from the earlier store. Taking the last
+        # entry instead hands back that self-reference, the loop closes on
+        # ``current.id in seen``, and the result is a bare ``Name`` that
+        # :func:`_is_readable_suppressor` rejects -- so the header is not
+        # recognised as suppressing and a swallowed assert is reported as
+        # *enforced* (#348).
+        #
+        # The self-store therefore carries no new value, and resolution steps
+        # past it to the most recent *other* binding. When there is no such
+        # binding the name is genuinely unresolved and the table is exhausted
+        # exactly as before.
+        others = [entry for entry in entries if not _is_self_reference(entry, current)]
+        if not others:
+            return current
+        current = others[-1]
     return current
 
 
