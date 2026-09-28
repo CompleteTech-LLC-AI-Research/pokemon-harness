@@ -1164,12 +1164,23 @@ def _deref_alias(value, raw_values):
     to follow it the same way.
 
     The table is whole-function rather than position-filtered, which is what
-    lets a two-hop chain resolve at the binding that performs it. The shapes
-    that over-approximates fail loudly rather than silently: binding an alias
-    *after* the header that reads it raises ``NameError`` on entry, and a
-    binding overwritten with a non-context manager raises ``TypeError``.
+    lets a two-hop chain resolve at the binding that performs it. Most of the
+    shapes that over-approximates fail loudly rather than silently: binding an
+    alias *after* the header that reads it raises ``NameError`` on entry, and
+    a binding overwritten with a non-context manager raises ``TypeError``.
     Neither is a swallowed assert, so neither is the damage this direction
     causes.
+
+    "Most" is doing real work, and the exception is ``del``. A ``del`` is a
+    value-less store, so :func:`_raw_store_values` records nothing for it and
+    this walk never sees it -- but the name's *earlier* store is still in the
+    table, so a name that was a suppressor before its ``del`` is still
+    resolved to that suppressor. #336's :func:`_entered_name_is_dead` reads
+    the ``del`` and reports the same entry unreachable, so both rules fire and
+    the surviving verdict depends on whether a later store exists. The
+    answers are correct either way, but the route differs, and nothing here
+    says which rule decided. Filed as #344; it predates this change and is not
+    fixed by it.
     """
     seen = set()
     current = value
