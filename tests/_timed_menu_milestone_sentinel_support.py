@@ -2341,6 +2341,18 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         return False
     name = expression.id
     stores = _stores_of(name, by_index, index, function)
+    # #388. `_stores_of` keeps only unconditional stores, so an *unconditional*
+    # carrier survives a *conditional* non-carrier store that follows it. That
+    # later store may have run and replaced the carrier with an enterable
+    # value, in which case the carrier is stale and reading it would answer
+    # `defeated` on an assert the interpreter really does evaluate. The
+    # `_module_stores` half of this already declines; without the same decline
+    # here the function scope is the only one that answers from a carrier a
+    # conditional store may have superseded, which is the damaging direction.
+    if stores is not None and _carrier_may_have_been_superseded(
+        by_index["bindings"].get(name, ()), by_index["orders"], index
+    ):
+        return False
     if stores is None and module is not None:
         # #359. A carrier bound at module scope leaves no store in the
         # function's own table, so `_stores_of` declines and the header reads
@@ -2475,24 +2487,20 @@ def _module_stores(name, module):
     rather than declined.
 
     That conservatism is not new to the module path. The function-scope walk
-    already answers the identical shape the same way, because
-    :func:`_stores_of` is what drops conditional stores on *both* sides.
-    Given
+    answers the identical shape the same way, because :func:`_stores_of` is
+    what drops conditional stores on *both* sides, and both paths now run the
+    same ordered decline through
+    :func:`_carrier_may_have_been_superseded`. Lifting the shared
+    conservatism -- reading a conditional binding as settled -- would mean
+    changing :func:`_stores_of` for every rule at once, and is deliberately
+    not folded in here.
 
-        def outer(...):
-            import os as cs
-            if flag:
-                cs = contextlib.nullcontext()
-            else:
-                cs = contextlib.nullcontext()
-            with cs: ...
-
-    the function path keeps the unconditional carrier and answers ``defeated``
-    on master, before this rule existed. The module path now agrees with it
-    rather than inventing a stricter policy for one scope only. Lifting the
-    shared conservatism -- reading a conditional binding as settled -- would
-    mean changing :func:`_stores_of` for every rule at once, and is
-    deliberately not folded in here.
+    #388 is what made that agreement real rather than aspirational. This
+    decline was written for the module path only, and the function path had no
+    equivalent, so a function-scope carrier that a later conditional store
+    may have superseded went stale and answered ``defeated`` on a live assert.
+    The two scopes now call one helper, so a future change to the ordering
+    test cannot reach one without reaching the other.
 
     A *conditional non-carrier* store is the one case where dropping it is
     not safe here, and it is handled separately. A store nested in a block may
@@ -2541,35 +2549,8 @@ def _module_stores(name, module):
         for statement, _, _ in entries
     }
     name_entries = bindings.get(name)
-    if name_entries:
-        # #359. `_stores_of` keeps only unconditional stores, so a carrier
-        # that is unconditional survives a *conditional* non-carrier store
-        # that follows it. That store may have run and replaced the carrier
-        # with an enterable value, in which case the carrier is stale and
-        # answering from it would drop a live assert. When that happens the
-        # value is genuinely undecidable, so decline rather than guess.
-        #
-        # `except ... as cs:` is excluded because it *unbinds* rather than
-        # supersedes: CPython deletes the name when the handler exits, so the
-        # earlier carrier is what remains in force. `_stores_of` makes the same
-        # exception for the same reason, and without it here a try/except that
-        # merely mentions the name would flip a correct `defeated` to
-        # `enforced`.
-        carrier_orders = [
-            orders[id(statement)]
-            for statement, value, conditional in name_entries
-            if not conditional and isinstance(value, str)
-        ]
-        if carrier_orders:
-            last_carrier = max(carrier_orders)
-            if any(
-                conditional
-                and not isinstance(value, str)
-                and not isinstance(statement, ast.ExceptHandler)
-                and orders[id(statement)] > last_carrier
-                for statement, value, conditional in name_entries
-            ):
-                return None
+    if name_entries and _carrier_may_have_been_superseded(name_entries, orders):
+        return None
     by_index = {"bindings": bindings, "orders": orders}
     index = max(orders.values(), default=-1) + 1
     return _stores_of(name, by_index, index, module)
@@ -2604,6 +2585,86 @@ def _binds_element_of(statement, name):
     return any(
         isinstance(target, (ast.Tuple, ast.List)) and name in _store_target_names([target])
         for target in statement.targets
+    )
+
+
+def _carrier_may_have_been_superseded(entries, orders, index=None):
+    """May a store a conditional binding performed have replaced the carrier?
+
+    #388. :func:`_stores_of` keeps only *unconditional* stores, because a
+    store nested in a block may not have run. That is the right default, but
+    it has one damaging consequence for a name that also carries a carrier:
+    an unconditional carrier survives a *conditional* non-carrier store that
+    follows it, so the stale carrier wins and the rule answers ``defeated``
+    from a value the name may no longer hold.
+
+    Given
+
+        def outer(x, flag, helper):
+            import os as cs                 # carrier: pins cs to module os
+            if flag:
+                cs = contextlib.nullcontext()   # may supersede the carrier
+            with cs:
+                assert x != 1               # FIRES: cs is a nullcontext
+
+    ``with cs:`` succeeds and the assert runs, so calling it defeated drops a
+    live pinned contract. When that happens the value is genuinely
+    undecidable -- the carrier runs first, the later store *may* replace it --
+    so the answer is to decline rather than guess.
+
+    The ordering test is what keeps this narrow. A conditional store *before*
+    the last carrier really is superseded by it and needs no special case, and
+    a carrier followed only by further carriers is decided by the last one.
+
+    `except ... as cs:` is excluded because it *unbinds* rather than
+    supersedes: CPython deletes the name when the handler exits, so the
+    earlier carrier is what remains in force. :func:`_stores_of` makes the same
+    exception for the same reason, and without it here a try/except that
+    merely mentions the name would flip a correct ``defeated`` to
+    ``enforced``.
+
+    ``del cs`` is excluded for the same reason, and the exclusion is what keeps
+    this rule from inventing a dead assert. A delete *unbinds* the name; it
+    never installs an enterable value in its place:
+
+        def outer(flag):
+            import os as cs
+            if flag:
+                del cs
+            with cs:            # never runs the body, on either path
+                assert False
+
+    With ``flag=False`` the carrier is still in force and the header raises
+    ``TypeError``; with ``flag=True`` CPython has deleted the name and the
+    header raises ``UnboundLocalError``. The assert is unreachable either way.
+    Counting the delete as a superseding store declines the header, and a
+    decline reports ``enforced`` -- so the delete would turn a *dead* assert
+    into a purportedly load-bearing one, the opposite error from the one this
+    rule exists to prevent. Reviewed as a blocking finding on #388.
+
+    ``index`` restricts the question to the stores that precede the queried
+    ``with`` header, so a later store cannot be read backwards into an earlier
+    one. It is ``None`` for the module path, where the header is evaluated
+    only after every module-level statement has run.
+    """
+    carriers = [
+        orders[id(statement)]
+        for statement, value, conditional in entries
+        if not conditional
+        and isinstance(value, str)
+        and (index is None or orders[id(statement)] <= index)
+    ]
+    if not carriers:
+        return False
+    last_carrier = max(carriers)
+    return any(
+        conditional
+        and not isinstance(value, str)
+        and not isinstance(statement, ast.ExceptHandler)
+        and not isinstance(statement, ast.Delete)
+        and orders[id(statement)] > last_carrier
+        and (index is None or orders[id(statement)] <= index)
+        for statement, value, conditional in entries
     )
 
 
