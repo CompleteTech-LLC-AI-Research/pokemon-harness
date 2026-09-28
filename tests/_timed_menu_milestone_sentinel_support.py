@@ -2431,7 +2431,7 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
 def _module_stores(name, module):
     """The module-level stores binding ``name``, resolved the ordinary way.
 
-    #359. The first cut of this rule read the module body looking for
+    #354. The first cut of this rule read the module body looking for
     *carriers* only, and answered from whichever carrier it found last. That
     is the wrong invariant. A name's value is settled by the last **binding**
     of that name, not the last carrier: given
@@ -2444,9 +2444,13 @@ def _module_stores(name, module):
     manager, so ``with cs:`` succeeds and the assert under it is live. Reading
     only carriers left the ``import os as cs`` entry standing, reported the
     name as a module, and answered ``defeated`` -- dropping a real pinned
-    contract. That is the damaging direction, and it is the same one #359 was
-    filed to correct, so a first cut that fixes the carrier rows while
+    contract. That is the damaging direction, and it is the same one this rule
+    exists to avoid, so a first cut that fixes the carrier rows while
     regressing these is not a partial success.
+
+    (Provenance: the module-scope carrier shape is tracked in #354/#373. It is
+    NOT #359, which was a *coverage* gap -- master already answered every one
+    of those rows correctly -- and was closed by the gate in #386.)
 
     The fix is to resolve the module body through the machinery already used
     for a function scope -- :func:`_store_bindings`, :func:`_binding_order`
