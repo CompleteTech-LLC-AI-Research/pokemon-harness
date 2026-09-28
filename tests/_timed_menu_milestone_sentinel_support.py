@@ -1671,9 +1671,22 @@ def _element_for_target(target, elements, name):
     nested tuple/list target recurses against the correspondingly nested
     element, so ``(a, (b, c)) = (1, (2, 3))`` resolves ``b`` to ``2``.
 
-    A ``Starred`` target breaks that correspondence -- it collects the
-    remainder rather than one element -- so it and every position after it
-    are reported unreadable instead of being paired with the wrong element.
+    A ``Starred`` target collects a *run* of elements rather than one, so the
+    positions after it are not the same indices as the targets. Python binds
+    them from the end: in ``a, *rest, cs = (1, 2, 3, 4)`` the star takes
+    ``2, 3`` and ``cs`` gets ``4``, the last element. Returning
+    :data:`UNREADABLE_VALUE` at the star instead would leave every target
+    after it unresolved, so
+
+        a, *rest, cs = (1, 2, 3, contextlib.suppress(AssertionError))
+        with cs:
+            assert x != 1          # swallowed
+
+    was reported ``enforced``. That is the damaging direction, and it is
+    reachable with nothing exotic. The star's own value stays unreadable --
+    it is a list, and a name bound to a list cannot be entered -- so the star
+    itself still declines.
+
     A target/value length mismatch is likewise unreadable rather than an
     index error, so a shape this function cannot model degrades to declining.
 
@@ -1688,17 +1701,32 @@ def _element_for_target(target, elements, name):
     unreachable and the swallowed assert was reported live. Descending in step
     with the value is what keeps the correspondence Python actually performs.
     """
+    star = next(
+        (i for i, leaf in enumerate(target.elts) if isinstance(leaf, ast.Starred)),
+        None,
+    )
     for index, leaf in enumerate(target.elts):
-        if isinstance(leaf, ast.Starred):
-            return UNREADABLE_VALUE
         if index >= len(elements):
             return UNREADABLE_VALUE
+        if star is not None and index > star:
+            # Targets after a star are bound from the END of the value, so the
+            # correspondence is measured from the other end: the last target
+            # takes the last element, the one before it the second-last, and so
+            # on. In `a, *rest, cs = (1, 2, 3, s)` that is `3 -> s`, which is
+            # the whole point -- `cs` really does receive the suppressor.
+            element_index = len(elements) - 1 - ((len(target.elts) - 1) - index)
+        else:
+            element_index = index
         if isinstance(leaf, ast.Name):
             if leaf.id == name:
-                return elements[index]
+                return elements[element_index]
+            continue
+        if isinstance(leaf, ast.Starred):
+            if isinstance(leaf.value, ast.Name) and leaf.value.id == name:
+                return UNREADABLE_VALUE
             continue
         if isinstance(leaf, (ast.Tuple, ast.List)):
-            nested = elements[index]
+            nested = elements[element_index]
             if not isinstance(nested, (ast.Tuple, ast.List)):
                 return UNREADABLE_VALUE
             bound = _element_for_target(leaf, nested.elts, name)
