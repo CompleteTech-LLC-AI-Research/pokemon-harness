@@ -1332,6 +1332,36 @@ def _resolve_bindings(entries, bound, orders):
     competing = [
         entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
     ]
+    # A `for cs in ...:` target and an assignment to `cs` in that loop's own
+    # body are not two competing bindings. The body runs *after* the target on
+    # every pass, so whichever it stores is the value left behind and the
+    # target's element is gone. Counting both made
+    #
+    #     import os as cs
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = nullcontext()
+    #
+    # ambiguous and reported a live header dead: the name really is a context
+    # manager whenever the loop runs. The target is dropped from the competing
+    # set when its own body rebinds the name, leaving the body's store as the
+    # single conditional binding -- which supersedes the carried carrier.
+    body_rebound_targets = {
+        id(entry[0].target)
+        for entry in competing
+        if isinstance(entry[0], (ast.For, ast.AsyncFor))
+        and isinstance(entry[0].target, ast.Name)
+        and _loop_body_rebinds_the_name(entry[0], entry[0].target.id)
+    }
+    if body_rebound_targets:
+        competing = [
+            entry
+            for entry in competing
+            if not (
+                isinstance(entry[0], (ast.For, ast.AsyncFor))
+                and id(entry[0].target) in body_rebound_targets
+            )
+        ]
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
@@ -2352,23 +2382,39 @@ _BUILTIN_CONSTRUCTOR_TYPES = {
 #: following a carrier is the carrier itself.
 _RAISING_CONSTRUCTOR = object()
 
-#: Constructors called with no arguments that yield **nothing** when iterated:
-#: `for cs in set():` runs zero times, so the loop never binds the name.
-_EMPTY_CONSTRUCTOR_TYPES = frozenset({"set", "frozenset", "dict", "list", "tuple"})
+#: Constructors called with no arguments that are **falsy**: `if set():` never
+#: enters its body, and `for cs in set():` runs zero times so the loop never
+#: binds the name. Both spellings of "empty builtin container" are decided from
+#: this one set, so the condition form and the loop form cannot disagree.
+_EMPTY_CONSTRUCTOR_TYPES = frozenset({"set", "frozenset", "dict", "list", "tuple", "bytearray"})
 
 
-def _builtin_constructor_kind(value):
+def _builtin_constructor_kind(value, function=None):
     """The type name a zero-argument builtin constructor call produces.
 
     ``int()`` is decided by the callee's name, so this is the *call* form of
     :func:`_literal_runtime_type`: a bare ``ast.Name`` callee drawn from
     :data:`_BUILTIN_CONSTRUCTOR_TYPES`, or the same spelled as ``builtins.int``.
 
+    ``function``, when given, is the scope the call appears in. A name the
+    function itself rebinds -- ``def int(): ...``, ``int = ...``, ``import int``
+    -- is a *different* binding, and calling it may return anything at all,
+    including a real context manager. Reading it as the builtin produces a
+    false-dead: the header is reported dead while CPython enters it. A shadowed
+    name therefore answers ``None`` here and falls through to the caller's
+    ordinary "a call is a call" rule, which is the safe direction.
+
     Returns ``None`` for every other call, so the caller's existing "a call is
     a call" rule stays in force. That rule is the safe direction: a
     ``nullcontext()`` really does return a context manager, and declining to
     read it keeps a live header live.
     """
+    if (
+        isinstance(value, ast.Call)
+        and function is not None
+        and _name_is_shadowed_in(value.func, function)
+    ):
+        return None
     if not isinstance(value, ast.Call):
         # A constructor called with arguments may return a subclass or a
         # different object entirely (``bool(1)`` is still bool, but
@@ -2392,6 +2438,82 @@ def _builtin_constructor_kind(value):
     if kind is None or not _builtin_constructor_arguments_are_ignorable(func, value):
         return None
     return kind
+
+
+def _name_is_shadowed_in(func, function):
+    """Is the callee a name this function rebinds away from the builtin?
+
+    Only a *binding in the function's own scope* counts, and only for a bare
+    ``ast.Name`` callee: ``cs = range(3)`` is only the builtin when nothing
+    in scope rebinds ``range``. A ``def``/``class``/``import``/assignment to
+    that name anywhere in the function body makes the call a different one.
+
+    Nested scopes bind their own names, so a ``def range(...)`` inside another
+    ``def`` inside this function does not shadow the builtin's meaning *here*;
+    those are skipped, matching :func:`_own_imports`' scope discipline.
+    """
+    if not isinstance(func, ast.Name):
+        return False
+    name = func.id
+    for node in _own_scope_bindings(function):
+        if node is name:
+            continue
+        for bound in _names_bound_by_statement(node, name):
+            if bound:
+                return True
+    return False
+
+
+def _own_scope_bindings(function):
+    """Statements in ``function``'s own scope, excluding nested scopes."""
+    found = []
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # A `def`/`class` statement *is* a binding in the enclosing scope --
+            # that is exactly the shadowing being looked for -- so it is
+            # recorded. Its *body* is a separate scope and is not descended
+            # into. A bare `Lambda` has no name, so there is nothing to record
+            # and its body is skipped with the rest.
+            found.append(node)
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        found.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _names_bound_by_statement(statement, name):
+    """Does this statement bind ``name`` in the enclosing function's scope?"""
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [statement.name == name]
+    if isinstance(statement, ast.ClassDef):
+        return [statement.name == name]
+    if isinstance(statement, ast.Assign):
+        return [any(isinstance(t, ast.Name) and t.id == name for t in statement.targets)]
+    if isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+        target = statement.target
+        return [isinstance(target, ast.Name) and target.id == name]
+    if isinstance(statement, ast.Import):
+        return [any((a.asname or a.name) == name for a in statement.names)]
+    if isinstance(statement, ast.ImportFrom):
+        return [any((a.asname or a.name) == name for a in statement.names)]
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [name in _store_target_names([statement.target])]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return [
+            any(
+                a.optional_vars is not None and name in _store_target_names([a.optional_vars])
+                for a in statement.items
+            )
+        ]
+    if isinstance(statement, ast.ExceptHandler):
+        return [statement.name == name]
+    if isinstance(statement, (ast.Global, ast.Nonlocal)):
+        return [name in (statement.names or [])]
+    return [False]
 
 
 def _builtin_constructor_arguments_are_ignorable(func, call):
@@ -2531,8 +2653,23 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             continue
         if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
             # A call is a call: `nullcontext()` returns a real context manager
-            # and must not be read as a non-manager here.
-            return False
+            # and must not be read as a non-manager here. The *builtin
+            # constructors* are the exception, because their result type is
+            # fixed by the callee's name: `cs = int()` leaves an `int`, and
+            # `with cs:` raises before the assert. Reading every call as
+            # unreadable left an unconditional `cs = int()` reported live
+            # where CPython raises -- a false-live.
+            constructor = _builtin_constructor_kind(value, function)
+            if constructor is None or constructor is _RAISING_CONSTRUCTOR:
+                # A raising constructor never stores, so it does not settle the
+                # name; an ordinary call is genuinely unreadable. Both leave
+                # whatever the earlier stores decided, so the set is not
+                # narrowed here.
+                if constructor is _RAISING_CONSTRUCTOR:
+                    continue
+                return False
+            kinds.add(constructor)
+            continue
         if _binds_element_of(statement, name):
             # `cs, other = (contextlib.nullcontext(), 2)` binds `cs` to the
             # tuple's *first element*, not to the tuple. Reading the right-hand
@@ -2910,6 +3047,13 @@ def _condition_is_never_true(node):
         # the body can still run. Reading both the same way made
         # `if flag or False: cs = nullcontext()` report a live header dead.
         return any(_condition_is_never_true(value) for value in node.values)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        # `a or b` is true when *any* operand is true, so it is never-true
+        # only when **every** operand is false. `flag or False` has a live
+        # operand and stays reachable; `(False or ())` has none and never
+        # runs its body. Reading an `or` like an `and` missed the second case
+        # and reported a genuinely dead header live.
+        return all(_condition_is_never_true(value) for value in node.values)
     return False
 
 
@@ -2943,7 +3087,55 @@ def _loop_last_element_kind(iterable):
     return _literal_runtime_type(iterable.elts[-1])
 
 
-def _store_may_bind_enterable(entry, name):
+def _loop_body_rebinds_the_name(statement, name):
+    """Does the loop body assign ``name``, so the yield is not what survives?
+
+    A ``for`` target is re-bound on every pass, and the *body* runs after the
+    assignment. If the body assigns the name again, the value left in force
+    once the loop finishes is whatever the last pass's body stored, and the
+    iterable's final element says nothing about it.
+
+    Only the loop's own body counts, and nested scopes are skipped for the
+    same reason :func:`_own_scope_bindings` skips them: a name bound inside a
+    nested ``def`` is not the enclosing function's variable.
+    """
+    for node in statement.body:
+        if _names_bound_in_scope(node, name):
+            return True
+        if _nested_rebinds(node, name):
+            return True
+    return False
+
+
+def _names_bound_in_scope(node, name):
+    """Every statement under ``node`` that binds ``name``, nested scopes aside."""
+    found = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if any(_names_bound_by_statement(current, name)):
+            found.append(current)
+        stack.extend(ast.iter_child_nodes(current))
+    return found
+
+
+def _nested_rebinds(node, name):
+    """Does ``node`` contain a binding of ``name`` in a nested block of its own?"""
+    for statement in getattr(node, "body", []) or []:
+        if _names_bound_in_scope(statement, name):
+            return True
+    for handler in getattr(node, "handlers", []) or []:
+        if _names_bound_in_scope(handler, name):
+            return True
+    for case in getattr(node, "cases", []) or []:
+        if _names_bound_in_scope(case, name):
+            return True
+    return False
+
+
+def _store_may_bind_enterable(entry, name, function=None):
     """Could this store leave ``name`` holding something a ``with`` accepts?
 
     The narrow companion to the stale-carrier guard in :func:`_stores_of`.
@@ -2989,7 +3181,7 @@ def _store_may_bind_enterable(entry, name):
     if isinstance(value, str):
         # A carrier: a module, a function or a class, none enterable.
         return False
-    constructor = _builtin_constructor_kind(value)
+    constructor = _builtin_constructor_kind(value, function)
     if constructor is not None:
         # `cs = int()` is decided by the callee, not by the call. Reading every
         # call as possibly-enterable is right for `nullcontext()` and wrong for
@@ -3031,13 +3223,24 @@ def _store_may_bind_enterable(entry, name):
             # An empty *builtin* container yields nothing, so the name is never
             # bound at all and the header raises `UnboundLocalError`; the
             # carrier never gets the chance to be superseded either way.
-            empty_builtin = _builtin_constructor_kind(statement.iter) in _EMPTY_CONSTRUCTOR_TYPES
+            empty_builtin = (
+                _builtin_constructor_kind(statement.iter, function) in _EMPTY_CONSTRUCTOR_TYPES
+            )
             if _is_bare_name(statement.target, name) and empty_builtin:
                 # `for cs in set():` and `for cs in ():` iterate zero times, so
                 # the loop never binds the name. The carrier is untouched and
                 # the header still raises on entry.
                 return False
             if _is_bare_name(statement.target, name):
+                if _loop_body_rebinds_the_name(statement, name):
+                    # The body assigns the name, so whatever it leaves on the
+                    # last pass is in force afterwards -- not the final yield.
+                    # `for cs in (None,): cs = nullcontext()` binds a real
+                    # context manager, so reading the iterable's last element
+                    # would report a live header dead. The body's store may be
+                    # any value, so the loop is declined as unreadable, which
+                    # keeps the header live.
+                    return True
                 element = _loop_last_element_kind(statement.iter)
                 if element is not None:
                     return element not in NON_CONTEXT_MANAGER_TYPES
@@ -3170,15 +3373,35 @@ def _stores_of(name, by_index, index, function):
     #   on exit rather than superseding it, and the list above already keeps
     #   that shape decidable. Excluding it here stops a try/except that merely
     #   mentions the name from flipping a correct `defeated` to `enforced`.
-    settled_is_carrier = any(
-        isinstance(entry[1], str) and orders[id(entry[0])] == latest for entry in decidable
+    # The guard fires when the *settled* store is a value the header could not
+    # otherwise have entered -- a carrier, a pinned unenterable literal, `None`,
+    # and so on -- and a *later conditional* store might make the header
+    # enterable by superseding it with a real context manager. It must not be
+    # restricted to carriers: with
+    #
+    #     def outer(flag, x):
+    #         import os as cs
+    #         cs = None
+    #         if flag:
+    #             cs = nullcontext()
+    #
+    # the settled value is `None` (not a carrier) yet a later conditional store
+    # *does* make the header live for `flag=True`. Restricting the guard to
+    # carriers read the stale `None` and reported that live header dead. The
+    # "later store must itself be enterable" restriction below still keeps the
+    # `cs = None; if False: cs = nullcontext()` family correctly dead, because
+    # a conditional store that is itself pinned unenterable cannot rescue the
+    # header on the path where it runs.
+    settled_unenterable = any(
+        orders[id(entry[0])] == latest and not _store_may_bind_enterable(entry, name, function)
+        for entry in decidable
     )
-    if settled_is_carrier and any(
+    if settled_unenterable and any(
         entry[2]
         and not isinstance(entry[0], ast.ExceptHandler)
         and orders[id(entry[0])] > latest
         and not _statement_never_runs(entry[0], function)
-        and _store_may_bind_enterable(entry, name)
+        and _store_may_bind_enterable(entry, name, function)
         for entry in entries
     ):
         return None
@@ -3301,7 +3524,21 @@ def _falsy_literal(node):
     # truth value at runtime; the empty form is decidable from the syntax, so
     # it belongs to the same rule rather than to the loop-emptiness check,
     # which is about a *container of values* rather than a condition.
-    return isinstance(node, (ast.Tuple, ast.List, ast.Set, ast.Dict)) and not node.elts
+    #
+    # `ast.Dict` has to be asked about its own emptiness, not `.elts`: a dict
+    # node carries `keys`/`values`, so reading `.elts` on it raised
+    # `AttributeError` inside the decision function and crashed the analyzer on
+    # `if {}: cs = nullcontext()`. A decision function must answer for every
+    # node the caller can hand it, not raise.
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    # A zero-argument call that builds an *empty* container is falsy for the
+    # same runtime reason `()` is: `if set():` never enters its body, exactly
+    # like `if ():`. Only the no-argument form is decided, because `set([1])`
+    # is non-empty and reading it as empty would report a live header dead.
+    return _builtin_constructor_kind(node) in _EMPTY_CONSTRUCTOR_TYPES
 
 
 def _is_empty_literal_iterable(node):

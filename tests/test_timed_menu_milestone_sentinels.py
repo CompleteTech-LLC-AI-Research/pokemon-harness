@@ -4120,6 +4120,26 @@ STALE_LOCAL_CARRIER_SHAPES = (
         "    import os as cs",
         "    if flag:\n        for cs in (None, nullcontext()):\n            pass",
     ),
+    # The rows below are the fourth review round. An independent reviewer
+    # executed 73 fixtures under real CPython and found these three reported
+    # DEAD while CPython reaches the assert. A false-dead is the damaging
+    # direction: it certifies a real contract as swallowed, so each row below
+    # is a LIVE header that an earlier revision got backwards.
+    (
+        "a shadowed builtin constructor returning a manager",
+        "    import os as cs\n    def int():\n        return nullcontext()",
+        "    if flag:\n        cs = int()",
+    ),
+    (
+        "a loop body rebinding the target to a manager",
+        "    import os as cs",
+        "    if flag:\n        for cs in (None,):\n            cs = nullcontext()",
+    ),
+    (
+        "a conditional manager after an unconditional none store",
+        "    import os as cs\n    cs = None",
+        "    if flag:\n        cs = nullcontext()",
+    ),
 )
 
 
@@ -4320,6 +4340,35 @@ DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
         "a nested pattern holding a starred element",
         "    import os as cs",
         "    if flag:\n        cs, (other, rest3) = (None, (1, 2))",
+    ),
+    # The remaining fourth-round rows were reported LIVE while CPython raises
+    # before the assert. These are the false-live direction: they do not hide a
+    # contract, but they claim an entry works when it cannot, which is the
+    # mirror error and still blocks a merge.
+    (
+        "a store in a branch guarded by an or of false operands",
+        "    import os as cs",
+        "    if flag and (False or ()):\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a branch guarded by an empty builtin call",
+        "    import os as cs",
+        "    if set():\n        cs = nullcontext()",
+    ),
+    (
+        "a loop over an empty bytearray",
+        "    import os as cs",
+        "    if flag:\n        for cs in bytearray():\n            pass",
+    ),
+    (
+        "an unconditional constructor store",
+        "    import os as cs\n    cs = int()",
+        "",
+    ),
+    (
+        "a store in a branch guarded by an empty dict",
+        "    import os as cs",
+        "    if {}:\n        cs = nullcontext()",
     ),
 )
 
