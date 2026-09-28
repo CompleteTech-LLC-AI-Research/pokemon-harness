@@ -20,6 +20,7 @@ backstop that keeps them from being quietly removed.
 """
 
 import ast
+import asyncio
 import inspect
 
 import pytest
@@ -1754,90 +1755,299 @@ WALRUS_REBINDING_SHAPES = (
     (
         "a plain store retires the walrus",
         "    cs = contextlib.nullcontext()",
+        False,
+        True,
     ),
     (
         "a tuple-unpack store retires the walrus",
         "    cs, other = (contextlib.nullcontext(), 2)",
+        False,
+        True,
     ),
     (
         "a starred-unpack store retires the walrus",
         "    cs, *rest = (contextlib.nullcontext(), 2, 3)",
+        False,
+        True,
     ),
     (
         "a list-target store retires the walrus",
         "    [cs] = [contextlib.nullcontext()]",
+        False,
+        True,
     ),
     (
         "an annotated store retires the walrus",
         "    cs: object = contextlib.nullcontext()",
+        False,
+        True,
     ),
     (
         "a loop target retires the walrus",
         "    for cs in (contextlib.nullcontext(),):\n        pass",
+        False,
+        True,
     ),
     (
         "a with-as target retires the walrus",
         "    with nullcontext() as cs:\n        pass",
+        False,
+        False,
     ),
     (
         "an async with-as target retires the walrus",
         "    async with nullcontext() as cs:\n        pass",
+        True,
+        False,
     ),
     (
-        "an async loop target retires the walrus",
-        "    async for cs in gen():\n        pass",
+        "an async loop target over a context manager is undecided by the rule",
+        "    async for cs in agen():\n        pass",
+        True,
+        True,
     ),
     (
         "an except-as target retires the walrus",
         "    try:\n        raise ValueError()\n    except ValueError as cs:\n        pass",
+        False,
+        False,
     ),
     (
         "a del retires the walrus",
         "    del cs",
+        False,
+        False,
     ),
 )
 
 
 @pytest.mark.parametrize(
-    ("label", "rebind"),
+    ("label", "rebind", "is_async", "second_assert_live"),
     WALRUS_REBINDING_SHAPES,
     ids=[shape[0] for shape in WALRUS_REBINDING_SHAPES],
 )
-def test_a_walrus_alias_is_retired_by_every_binding_form(label, rebind):
+def test_a_walrus_alias_is_retired_by_every_binding_form(
+    label, rebind, is_async, second_assert_live
+):
     """A carried suppressor must not outlive the name being rebound.
 
-    Each row binds a suppressor through a walrus, then rebinds that name to a
-    ``nullcontext`` in a different syntactic form, then enters it. The first
-    assert is swallowed by the walrus-bound suppressor; the second is entered
-    through the ``nullcontext`` and is **live**.
+    Each row binds a suppressor through a walrus, then rebinds that name in a
+    different syntactic form, then enters it. The first assert is swallowed by
+    the walrus-bound suppressor on **every** row -- that is the retirement
+    claim, and it is ``False`` throughout.
 
-    The ``del`` row is the exception to that description. ``del cs`` leaves the
-    name unbound, so the later ``with cs:`` raises ``NameError`` in real
-    Python and the second assert never executes -- there is no runtime verdict
-    to agree with. The row still earns its place: the carried suppressor must
-    be retired either way, and an unbound name is reported *enforced*, which is
-    the same contract a name that was never bound at all gets.
+    The second assert divides, and the division is the point. It used to be
+    pinned to a single ``[False, True]`` for all eleven rows, which was wrong
+    twice over: the two async rows are not even executable (they sit inside a
+    plain ``def`` and call an undefined ``gen()``), and no row was ever run --
+    there is no ``exec``, ``compile`` or ``eval`` in the body, only
+    ``ast.parse`` and a call to the checker. A table that only reads the
+    checker cannot notice when its claim and the checker's answer are wrong
+    together.
+
+    Executed on CPython, the rows split cleanly in two:
+
+    * ``second_assert_live`` -- the rebind leaves ``cs`` bound to something
+      enterable, so ``with cs:`` succeeds and the assert is a real contract.
+      That covers every row whose right-hand side is a *call*:
+      ``cs = contextlib.nullcontext()``, ``cs, other = (nullcontext(), 2)``,
+      ``[cs] = [nullcontext()]``, the annotated store, and
+      ``for cs in (nullcontext(),):``. Destructuring is not special here --
+      the name still receives a real context manager, just one element out of
+      a container. The async loop row is here for a second reason, and it is
+      the one row whose entry is genuinely undecidable: the rule cannot read
+      the element type out of an arbitrary async iterable, so it declines
+      rather than guessing, and this row pins that choice. See
+      :func:`_async_loop_target_is_undecidable` for the evidence.
+    * ``not second_assert_live`` -- the rebind leaves ``cs`` holding something
+      that cannot be entered, so the header raises before the body runs and
+      the assert is unreachable. ``with nullcontext() as cs:`` binds
+      ``__enter__``'s return value, which is ``None``; ``except E as cs:``
+      and ``del cs`` unbind the name; ``async for cs in gen()`` binds the loop
+      variable, an ``int``.
+
+    The first half of each row is the retirement contract and the second is
+    the entry contract, and they are independent: both are asserted, and the
+    entry half is checked against the interpreter rather than against the
+    analyzer it is supposed to police.
     """
     source = (
-        "def outer(x, flag, helper):\n"
+        f"{'async def' if is_async else 'def'} outer(x, flag, helper):\n"
         "    import contextlib\n"
         "    from contextlib import suppress, nullcontext\n"
-        "    import pytest\n"
+        "    async def gen():\n"
+        "        yield 1\n"
+        "    async def agen():\n"
+        "        yield nullcontext()\n"
         "    with (cs := contextlib.suppress(AssertionError)):\n"
         "        assert x != 1\n" + rebind + "\n"
         "    with cs:\n"
         "        assert x != 1\n"
     )
+    if is_async and "async for" in rebind:
+        _async_loop_target_is_undecidable(label, source)
+    else:
+        _assert_entry_contract(label, source, is_async, second_assert_live)
     tree = ast.parse(source)
     function = tree.body[0]
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     assert asserts, f"{label}: fixture declared no assert to check"
     results = [_is_enforced(function, node, tree) for node in asserts]
-    expected = [False, True]
+    expected = [False, second_assert_live]
     assert results == expected, (
-        f"{label}: expected verdicts {expected}, got {results}. The second "
-        f"assert is under a `with cs:` entered after `cs` was rebound to a "
-        f"nullcontext, so it is live and must be reported enforced."
+        f"{label}: expected verdicts {expected}, got {results}. Both are "
+        f"fixed by what the rebind leaves bound to the name."
+    )
+
+
+def _assert_entry_contract(label, source, is_async, second_assert_live):
+    """Run the fixture and hold CPython to the row's declared entry contract.
+
+    This is the check the table did not have. Every row ends with a
+    ``with cs:``, and what CPython does on entry -- succeed and run the body,
+    or raise before the body -- is the ground truth the analyzer's verdict is
+    checked against. Pinning it here means a future row cannot claim "live"
+    without the interpreter agreeing, and cannot claim "dead" either.
+
+    Called with ``x=1``, so ``assert x != 1`` is **false** and the assert
+    fires if and only if it is reachable. That distinguishes the two outcomes
+    cleanly: a live row must raise ``AssertionError``, and an unreachable row
+    must raise something *else* (``TypeError`` for a non-manager, or
+    ``UnboundLocalError`` for an unbound name). Running with a value that
+    makes the assert trivially true would let a swallowed row and an
+    unreachable row look identical, which is the confusion this replaces.
+    """
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outer = namespace["outer"]
+    try:
+        if is_async:
+            asyncio.run(outer(1, True, None))
+        else:
+            outer(1, True, None)
+    except AssertionError:
+        if second_assert_live:
+            return
+        raise AssertionError(
+            f"{label}: the second assert fired, so the name was enterable. "
+            f"The row claims it is unreachable."
+        ) from None
+    except (TypeError, UnboundLocalError, NameError):
+        if second_assert_live:
+            raise AssertionError(
+                f"{label}: entering `with cs:` raised instead of running the "
+                f"body, so the second assert is unreachable. The row claims "
+                f"it is live."
+            ) from None
+        return
+    raise AssertionError(
+        f"{label}: the fixture returned normally, so the second assert was "
+        f"swallowed rather than reachable. Row is stale."
+    )
+
+
+def _async_loop_target_is_undecidable(label, source):
+    """Pin why a loop target is excluded from the dead-entry rule.
+
+    ``async for cs in <iterable>:`` binds the loop variable, so whether the
+    later ``with cs:`` can be entered is decided entirely by the *element
+    type* of the iterable -- something the analyzer cannot read without
+    running the loop. Both outcomes are reachable from the same syntax:
+
+    * an iterable of ``nullcontext()`` leaves an enterable value, so the
+      assert is **live** and reporting it as dead would drop a real contract;
+    * an iterable of ``int`` leaves an ``int``, so entering raises
+      ``TypeError`` and the assert is unreachable.
+
+    The row above uses the enterable iterable, and the table declares that
+    verdict ``True``. This helper proves the exclusion is necessary rather
+    than merely convenient: the same rebind spelling, differing only in what
+    the loop yields, is live in one case and unreachable in the other. A rule
+    that answered either way for both would be wrong on one of them.
+    """
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False, True], (
+        f"{label}: expected verdicts [False, True], got {results}. The rule "
+        f"must decline a loop target rather than read a type it cannot know."
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        asyncio.run(namespace["outer"](1, True, None))
+    except AssertionError:
+        pass  # the declared live row: the body ran and the assert fired
+    else:
+        raise AssertionError(f"{label}: the enterable-iterable row did not run its assert.")
+    # The same spelling over a non-manager iterable is the other half of the
+    # proof: it must be unreachable, or the rule would have had a decidable
+    # answer available and declined for no reason.
+    hostile = source.replace("yield nullcontext()", "yield 1").replace(
+        "async for cs in agen():", "async for cs in gen():"
+    )
+    assert hostile != source, f"{label}: could not build the hostile variant"
+    namespace = {}
+    exec(compile(hostile, f"<{label}-hostile>", "exec"), namespace)  # noqa: S102
+    try:
+        asyncio.run(namespace["outer"](1, True, None))
+    except AssertionError:
+        raise AssertionError(
+            f"{label}: the hostile variant reached its assert, so a loop "
+            f"target is not actually undecidable and the rule should model it."
+        ) from None
+    except (TypeError, UnboundLocalError, NameError):
+        return
+    raise AssertionError(f"{label}: the hostile variant returned normally; the fixture is stale.")
+
+
+def test_an_except_as_handler_is_decidable_even_after_a_conditional_store():
+    """The ``ExceptHandler`` clause in ``_stores_of`` is load-bearing alone.
+
+    The ``except-as`` row in ``WALRUS_REBINDING_SHAPES`` does not actually
+    exercise the clause that lets a handler count as a decidable store. In
+    that row the preceding store is the *unconditional* walrus, so removing
+
+        or isinstance(entry[0], ast.ExceptHandler)
+
+    from ``_stores_of`` falls back to that walrus, whose value is an
+    ``ast.Call``, and ``_entry_is_dead`` declines at the "a call is a call"
+    guard -- reaching the same answer by a different route. The clause can
+    therefore be deleted with the whole table still green.
+
+    It stops being redundant as soon as the prior store is *conditional*.
+    Then the handler is the only store whose value is decidable, and without
+    the clause ``_stores_of`` returns ``None`` and the rule declines to say
+    anything. This row is what makes the clause's removal detectable.
+
+    Whether the handler runs or not, ``cs`` cannot hold a usable context
+    manager afterwards: if it ran, CPython deleted the name when the handler
+    exited; if it did not, no suppressor was ever bound, so entry raises
+    ``UnboundLocalError`` before the assert. Both paths are unreachable, so
+    the honest verdict is ``False`` either way.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    if flag:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    try:\n"
+        "        raise ValueError()\n"
+        "    except ValueError as cs:\n"
+        "        pass\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract("an except-as after a conditional store", source, False, False)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"expected [False], got {results}. The handler is the only decidable "
+        f"store here, so this row is what pins the clause."
     )
 
 
