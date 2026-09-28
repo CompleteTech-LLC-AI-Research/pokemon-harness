@@ -4144,6 +4144,36 @@ DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
         "    import os as cs",
         "    if flag:\n        cs = 'x'",
     ),
+    (
+        "a starred target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        *cs, = (helper,)",
+    ),
+    (
+        "a starred target after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        *cs, = (helper,)",
+    ),
+    (
+        "a starred target after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        *cs, = (helper,)",
+    ),
+    (
+        "a chained bare target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = (other, x) = (helper, 1)",
+    ),
+    (
+        "a chained bare target after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = (other, x) = (helper, 1)",
+    ),
+    (
+        "a chained bare target after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = (other, x) = (helper, 1)",
+    ),
 )
 
 
@@ -4203,6 +4233,20 @@ def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
     enforced, which is the damaging direction, so the rule must answer from the
     carrier as usual.
 
+    The last six rows are the ones an independent review caught on the first
+    cut of the repair. Deciding "this assignment destructures, so the value is
+    unreadable" from the *statement* is wrong in both directions at once:
+
+    * ``*cs, = (helper,)`` builds a **list** for ``cs`` whatever the elements
+      are, so the name is pinned non-enterable and the assert is dead;
+    * ``cs = (other, x) = (helper, 1)`` gives the bare ``cs`` the **whole**
+      right-hand side -- a tuple -- while ``other`` and ``x`` get elements of
+      it. Deciding the statement once calls ``cs`` unreadable and declines.
+
+    Both were reported live on the first cut, against a master that answers
+    them correctly. Whether a store pins *this* name is a question about that
+    name's own target, which is what `_store_may_bind_enterable` is now asked.
+
     Both rows are executed under CPython here too -- ``_assert_entry_contract``
     is called with ``second_assert_live=False``, which requires the fixture to
     raise something *other* than ``AssertionError``. That is what distinguishes
@@ -4229,8 +4273,15 @@ def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
     source = (
         "import contextlib\n"
         "from contextlib import nullcontext\n"
-        "def outer(x, flag, helper):\n" + carrier + "\n" + conditional + "\n"
-        "    with cs:\n        assert x != 1\n"
+        # `other` is bound by the chained-target rows, so it is a parameter
+        # here rather than an unbound global: CPython has to be able to run
+        # the fixture for the entry contract to mean anything.
+        "def outer(x, flag, helper, other=None):\n"
+        + carrier
+        + "\n"
+        + conditional
+        + "\n"
+        + "    with cs:\n        assert x != 1\n"
     )
     _assert_entry_contract(label, source, False, False)
     tree = ast.parse(source)

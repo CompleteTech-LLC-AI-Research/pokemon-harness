@@ -2607,7 +2607,53 @@ def _binds_element_of(statement, name):
     )
 
 
-def _store_may_bind_enterable(entry):
+def _target_is_bare_name(statement, name):
+    """Does ``name`` receive this assignment's whole right-hand side?
+
+    The complement of :func:`_binds_element_of`, asked per target rather than
+    per statement. A chained assignment can mix the two spellings in one
+    statement:
+
+        cs = (other, x) = (helper, 1)
+
+    Here ``cs`` is a bare target and receives the whole tuple, while ``other``
+    and ``x`` receive elements of it. Deciding the statement once -- "this is a
+    destructuring assignment" -- is wrong for ``cs`` in both halves of that
+    example, and reading the right-hand side's type for ``cs`` is right.
+
+    Only ``ast.Assign`` carries several targets, so any other store form binds
+    its name the ordinary way and answers ``True``.
+    """
+    if not isinstance(statement, ast.Assign):
+        return True
+    return any(isinstance(target, ast.Name) and target.id == name for target in statement.targets)
+
+
+def _binds_a_starred_name(statement, name):
+    """Is ``name`` a starred target, so unpacking pins it to a list?
+
+    ``*cs, = (helper,)`` and ``first, *cs = pair`` both build a list for ``cs``
+    whatever the elements are, so the name cannot hold a context manager
+    afterwards. :func:`_literal_runtime_type` reads the ``ast.Starred`` that
+    records this as ``"list"`` for the ordinary entry rule; this is the same
+    question asked about the target rather than the value, because
+    :func:`_store_may_bind_enterable` has to know it *before* it decides
+    whether the element type is readable at all.
+    """
+    if not isinstance(statement, ast.Assign):
+        return False
+
+    def starred(node):
+        if isinstance(node, ast.Starred):
+            return name in _store_target_names([node.value])
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return any(starred(element) for element in node.elts)
+        return False
+
+    return any(starred(target) for target in statement.targets)
+
+
+def _store_may_bind_enterable(entry, name):
     """Could this store leave ``name`` holding something a ``with`` accepts?
 
     The narrow companion to the stale-carrier guard in :func:`_stores_of`.
@@ -2616,6 +2662,11 @@ def _store_may_bind_enterable(entry):
     put something *enterable* there. A store pinned to a type that cannot be
     entered settles the name just as surely as leaving it alone, because every
     path through the header then raises before the assert is evaluated.
+
+    ``name`` is the name the header under test reads, because whether a store
+    pins that name is a question about *that name's own target*. A statement
+    can bind several names at once and, in a chained assignment, can mix a bare
+    target with a destructured one; the answer differs per target.
 
     The same reading the literal-type rule already uses is applied, so the two
     cannot disagree about a value:
@@ -2626,6 +2677,9 @@ def _store_may_bind_enterable(entry):
       none of which leaves a usable manager bound;
     * a literal is read through :func:`_literal_runtime_type`; a literal whose
       type is in :data:`NON_CONTEXT_MANAGER_TYPES` cannot be entered;
+    * a target that is not a bare ``Name`` -- a tuple or list target, or a
+      starred one -- binds an *element* of the right-hand side, and the
+      element's type is not readable from the container's syntax;
     * a call, an attribute, a subscript, a loop target or a `match` capture is
       **not** read. The value is whatever the call returns or the loop yields,
       which the syntax does not fix -- `nullcontext()` is a real context
@@ -2653,14 +2707,35 @@ def _store_may_bind_enterable(entry):
         # A call is a call. `nullcontext()` returns a real context manager and
         # must not be read as unenterable here.
         return True
-    if isinstance(statement, ast.Assign) and any(
-        isinstance(target, (ast.Tuple, ast.List)) for target in statement.targets
+    if (
+        isinstance(statement, ast.Assign)
+        and not _target_is_bare_name(statement, name)
+        and not _binds_a_starred_name(statement, name)
     ):
         # A destructuring target: `cs, other = (...)` binds `cs` to one
-        # *element*, and the element's type is not readable from the
-        # container's syntax. The literal type below would call the name a
-        # tuple and drop a live assert, so this is reported as possibly
-        # enterable and the caller declines.
+        # *element* of the right-hand side, and the element's type is not
+        # readable from the container's syntax. Reading the whole right-hand
+        # side's type would call the name a tuple and drop a live assert, so
+        # this is reported as possibly enterable and the caller declines.
+        #
+        # This is about *this name's* own target, not about the statement.
+        # A chained assignment mixes the two, and the two spellings are not
+        # equivalent:
+        #
+        #     *cs, = (helper,)              # `cs` is a list
+        #     cs = (other, x) = (helper, 1)  # `cs` is the whole RHS tuple
+        #
+        # Both are pinned non-enterable, so declining them would replace a
+        # correct dead verdict with a false-live one. Reading the statement as
+        # "destructuring happened" and returning early for both got that
+        # wrong in six fixtures. The direct `cs` target in a chain is a bare
+        # name and falls through to the literal reading below, which is right
+        # for it.
+        #
+        # A *starred* target is the exception: `*cs, = (helper,)` builds a
+        # list whatever the elements are, so the name is pinned non-enterable
+        # and falls through to the literal reading, which is what
+        # `_entry_is_dead` already does for the same shape.
         return True
     kind = _literal_runtime_type(value)
     if kind is None:
@@ -2767,7 +2842,7 @@ def _stores_of(name, by_index, index, function):
         entry[2]
         and not isinstance(entry[0], ast.ExceptHandler)
         and orders[id(entry[0])] > latest
-        and _store_may_bind_enterable(entry)
+        and _store_may_bind_enterable(entry, name)
         for entry in entries
     ):
         return None
