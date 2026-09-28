@@ -2607,7 +2607,7 @@ def test_a_block_nested_module_carrier_is_still_declined():
         (
             "CONTROL a conditional store before the carrier is superseded by it",
             "import os as cs\nimport contextlib\n",
-            "",
+            "    if flag:\n        cs = contextlib.nullcontext()\n    import os as cs\n",
             False,
         ),
     ],
@@ -2658,27 +2658,19 @@ def test_a_conditional_function_store_after_a_carrier_is_declined(label, prelude
     control a fix that declined every shape containing a conditional store
     would pass.
 
-    The second control places the conditional store in an inner function that
-    is called before the carrier, mirroring the module-scope control.
+    Both controls sit at function scope inside ``outer``, the same scope as the
+    rows above, because that is the scope the guard reasons about. The second
+    one puts the conditional store at index 1 and the carrier at index 2, the
+    mirror image of the first row, and stays ``defeated`` because the later
+    carrier is what is in force at the ``with``.
     """
-    if "before the carrier" in label:
-        source = (
-            "import contextlib\n"
-            "def _rebind(flag):\n"
-            "    if flag:\n"
-            "        cs = contextlib.nullcontext()\n"
-            "_rebind(True)\n"
-            + prelude
-            + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
-        )
-    else:
-        source = (
-            prelude
-            + "def outer(x, flag, helper):\n"
-            + "    import os as cs\n"
-            + body
-            + "    with cs:\n        assert x != 1\n"
-        )
+    source = (
+        prelude
+        + "def outer(x, flag, helper):\n"
+        + "    import os as cs\n"
+        + body
+        + "    with cs:\n        assert x != 1\n"
+    )
     _assert_entry_contract(label, source, False, live)
     tree = ast.parse(source)
     function = next(
