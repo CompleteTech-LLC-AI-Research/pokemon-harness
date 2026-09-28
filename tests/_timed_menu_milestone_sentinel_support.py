@@ -2341,6 +2341,13 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         return False
     name = expression.id
     stores = _stores_of(name, by_index, index, function)
+    if stores is not None and _superseded_by_conditional_store(name, by_index, index, function):
+        # #388. `_stores_of` keeps only *unconditional* stores, so an
+        # unconditional carrier survives a *conditional* store that follows
+        # it. That store may have run and replaced the carrier with an
+        # enterable value, in which case the carrier is stale and answering
+        # from it would drop a live assert. Decline instead.
+        return False
     if stores is None and module is not None:
         # #359. A carrier bound at module scope leaves no store in the
         # function's own table, so `_stores_of` declines and the header reads
@@ -2604,6 +2611,56 @@ def _binds_element_of(statement, name):
     return any(
         isinstance(target, (ast.Tuple, ast.List)) and name in _store_target_names([target])
         for target in statement.targets
+    )
+
+
+def _superseded_by_conditional_store(name, by_index, index, function):
+    """May a *conditional* store of ``name`` have superseded a carrier?
+
+    #388. The module-scope path has had this guard since ``79471b3``; the
+    function-scope path did not, which made it the only scope where an
+    unconditional carrier could outlive a later conditional store and report a
+    live assert as defeated:
+
+        def outer(x, flag, helper):
+            import os as cs                 # carrier: pins cs to the module os
+            if flag:
+                cs = contextlib.nullcontext()   # may supersede the carrier
+            with cs:
+                assert x != 1               # FIRES when the branch runs
+
+    :func:`_stores_of` keeps only unconditional stores, so the carrier wins and
+    the header reads as dead. This asks the narrower question directly: is the
+    value :func:`_stores_of` about to answer from a carrier that a *later*
+    conditional non-carrier binding may have replaced?
+
+    Returns ``True`` only in that case, so the caller can decline. The ordering
+    test is what keeps it narrow -- a conditional store *before* the last
+    carrier is genuinely superseded by it and needs no special case.
+
+    ``except ... as cs:`` is excluded because it *unbinds* rather than
+    supersedes: CPython deletes the name when the handler exits, so the earlier
+    carrier is what remains in force. This is the same exclusion
+    :func:`_stores_of` makes, for the same reason.
+    """
+    orders = by_index["orders"]
+    entries = [
+        entry for entry in by_index["bindings"].get(name, ()) if orders[id(entry[0])] <= index
+    ]
+    carrier_orders = [
+        orders[id(statement)]
+        for statement, value, conditional in entries
+        if not conditional and isinstance(value, str)
+    ]
+    if not carrier_orders:
+        return False
+    last_carrier = max(carrier_orders)
+    return any(
+        conditional
+        and not isinstance(value, str)
+        and not isinstance(statement, ast.ExceptHandler)
+        and orders[id(statement)] > last_carrier
+        for statement, value, conditional in entries
     )
 
 

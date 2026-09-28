@@ -2572,6 +2572,131 @@ def test_a_block_nested_module_carrier_is_still_declined():
 
 
 @pytest.mark.parametrize(
+    ("label", "prelude", "body", "live"),
+    [
+        (
+            "a function-scope carrier superseded by a conditional store",
+            "import os as cs\nimport contextlib\n",
+            "    if flag:\n        cs = contextlib.nullcontext()\n",
+            True,
+        ),
+        (
+            "a function-scope carrier superseded by a conditional tuple-unpack",
+            "import os as cs\nimport contextlib\n",
+            "    if flag:\n        cs, o = (contextlib.nullcontext(), 2)\n",
+            True,
+        ),
+        (
+            "a function-scope carrier superseded by a conditional walrus",
+            "import os as cs\nimport contextlib\n",
+            "    if flag:\n        (cs := contextlib.nullcontext())\n",
+            True,
+        ),
+        (
+            "a function-scope carrier superseded by a conditional for-target",
+            "import os as cs\nimport contextlib\n",
+            "    if flag:\n        for cs in (contextlib.nullcontext(),):\n            pass\n",
+            True,
+        ),
+        (
+            "CONTROL a function-scope carrier alone is still defeated",
+            "import os as cs\nimport contextlib\n",
+            "",
+            False,
+        ),
+        (
+            "CONTROL a conditional store before the carrier is superseded by it",
+            "import os as cs\nimport contextlib\n",
+            "",
+            False,
+        ),
+    ],
+    ids=[
+        "a function-scope carrier superseded by a conditional store",
+        "a function-scope carrier superseded by a conditional tuple-unpack",
+        "a function-scope carrier superseded by a conditional walrus",
+        "a function-scope carrier superseded by a conditional for-target",
+        "CONTROL a function-scope carrier alone is still defeated",
+        "CONTROL a conditional store before the carrier is superseded by it",
+    ],
+)
+def test_a_conditional_function_store_after_a_carrier_is_declined(label, prelude, body, live):
+    """A *function*-scope carrier followed by a conditional store is declined.
+
+    #388. This is the function-scope twin of the module-scope rule that
+    ``79471b3`` added, and the branch was missing it. ``_stores_of`` keeps only
+    unconditional stores, so an unconditional carrier survived a conditional
+    store that followed it:
+
+        def outer(x, flag, helper):
+            import os as cs                 # carrier: pins cs to the module os
+            if flag:
+                cs = contextlib.nullcontext()   # may supersede the carrier
+            with cs:
+                assert x != 1               # FIRES when the branch runs
+
+    ``flag`` is ``True`` when the row is executed, so the store runs, ``with
+    cs:`` succeeds and the assert is live. Reading the stale carrier reported
+    it as defeated -- a live pinned contract dropped, which is the damaging
+    direction. Every pre-#375 tree answers these rows correctly; ``4e1bb4e``,
+    the branch's first commit, is where they regressed.
+
+    Scope, measured rather than assumed. Of the conditional-store shapes tried,
+    the carrier rule accounts for exactly **nine** regressions against the
+    pre-#375 base: one-arm ``if``, walrus, tuple-unpack, annotated assign,
+    ``for``-target, nested ``if``, ``while``, store-inside-``with``, and
+    ``try``/``else``. Three further shapes -- both-arms ``if``/``else``,
+    conditional ``del``-then-store, and ``if``/``elif``/``else`` -- are answered
+    ``defeated`` on the pre-#375 base *as well*, by a different rule that
+    resolves the alias to a suppressor. They are out of scope here and are not
+    pinned as fixed, because a fix for this issue does not reach them.
+
+    Two controls, because the guard is an *ordering* test and not a blanket
+    decline. A carrier on its own is genuinely unenterable and must stay
+    ``defeated``; and a conditional store that runs *before* the carrier is
+    superseded by it, so that shape is also ``defeated``. Without the second
+    control a fix that declined every shape containing a conditional store
+    would pass.
+
+    The second control places the conditional store in an inner function that
+    is called before the carrier, mirroring the module-scope control.
+    """
+    if "before the carrier" in label:
+        source = (
+            "import contextlib\n"
+            "def _rebind(flag):\n"
+            "    if flag:\n"
+            "        cs = contextlib.nullcontext()\n"
+            "_rebind(True)\n"
+            + prelude
+            + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+        )
+    else:
+        source = (
+            prelude
+            + "def outer(x, flag, helper):\n"
+            + "    import os as cs\n"
+            + body
+            + "    with cs:\n        assert x != 1\n"
+        )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A conditional "
+        f"store after the last carrier can have replaced it with an enterable "
+        f"value, so the header must be declined rather than judged on a store "
+        f"that may be stale."
+    )
+
+
+@pytest.mark.parametrize(
     ("label", "rebind", "live"),
     [
         (
