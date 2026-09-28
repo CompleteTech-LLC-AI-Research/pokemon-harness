@@ -22,6 +22,7 @@ backstop that keeps them from being quietly removed.
 import ast
 import asyncio
 import inspect
+import textwrap
 
 import pytest
 
@@ -2058,6 +2059,245 @@ def test_a_walrus_bound_alias_reaches_the_headers_that_re_enter_it(label, body, 
         f"{label}: expected verdicts {expected}, got {results}. Every assert "
         f"is compared individually -- `all()` would collapse this fixture to "
         f"its first verdict and hide a wrong later one."
+    )
+
+
+#: #324/#327: the carrier class crossed with *both* positions.
+#:
+#: The tables above pin one form per position. That is what let this defect
+#: through: the five forms that carry their name on a **string field** of a
+#: non-`Name` node were never paired with a position, so no row could see them
+#: fail. Every rebind here retires the carried suppressor, so the later
+#: `with cs:` enters a module, a class or a function -- none of which is a
+#: context manager, so entry raises `TypeError` before the assert and the
+#: assert is **live**. The correct verdict is therefore `True` in every row.
+#:
+#: The two positions are both load-bearing and neither is a superset of the
+#: other. "After the walrus" is decided by source order in
+#: `_resolve_bindings`; "inside the walrus's own header" is decided by
+#: containment in the header. A carrier recorded as a *synthesised* `ast.Name`
+#: has no parent chain, so a containment test cannot see it at all.
+CARRIER_REBINDING_SHAPES = (
+    ("import-as", "import os as cs"),
+    ("import-from-as", "from os import path as cs"),
+    ("match-capture", "match [1]:\n    case [cs]:\n        pass"),
+    ("def", "def cs():\n    pass"),
+    ("class", "class cs:\n    pass"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind"),
+    CARRIER_REBINDING_SHAPES,
+    ids=[row[0] for row in CARRIER_REBINDING_SHAPES],
+)
+@pytest.mark.parametrize("position", ["after", "inside-header", "inside-header-nested"])
+def test_a_carrier_rebind_retires_a_carried_walrus_in_both_positions(label, rebind, position):
+    """A string-field carrier retires the carried suppressor wherever it sits.
+
+    ``import os as cs`` binds `cs` to the `os` **module**. The later
+    ``with cs:`` then raises `TypeError` on entry, before the assert is even
+    reached, so the assert can still fail and must be reported enforced. The
+    head reported it swallowed, because the rebind was recorded as a detached
+    `ast.Name` that neither the ordering nor the containment test could find.
+
+    The inside-header position is the sharper one: it is decided purely by
+    containment, and a synthesised node is a child of nothing, so the check
+    answers "no" for every carrier forever. Base `87a90da` gets both positions
+    right for all five forms, so every row here is also a regression guard.
+    """
+    if position == "after":
+        walrus_block = (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n" + textwrap.indent(rebind, "    ")
+        )
+    elif position == "inside-header":
+        walrus_block = "    with (cs := suppress(AssertionError)):\n" + textwrap.indent(
+            rebind, "        "
+        )
+    else:
+        # The carrier sits in a block of its own, and the header that re-enters
+        # `cs` is nested *below* it inside that same block. This is the position
+        # the per-entry ordering added for the same-header case cannot decide:
+        # that ranks entries within one statement, while this asks whether a
+        # store in an enclosing block has run at all by the time a header nested
+        # inside it is read -- a containment question, decided in
+        # `_bindings_before`.
+        #
+        # The `carriers` clause there was deleted in `997611d` as redundant
+        # because the mutation matrix found no row that failed without it. The
+        # matrix was measuring the test suite, not the input space: no row put
+        # a `with cs:` below its own carrier, so a live rule read as dead and a
+        # **live** assert was reported swallowed. Base `87a90da` gets this right.
+        #
+        # The blank line matters: `match [1]:` and a `case` clause cannot share
+        # a block with an indented `with`, so the carrier is emitted on its own
+        # and the suite is re-entered by the `with` below it.
+        walrus_block = (
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with nullcontext():\n" + textwrap.indent(rebind, "        ") + "\n"
+            "        with cs:\n            assert x != 1\n"
+        )
+    if position == "inside-header-nested":
+        source = (
+            "def outer(x, flag, helper, items):\n"
+            "    import contextlib\n"
+            "    from contextlib import suppress, nullcontext\n" + walrus_block
+        )
+    else:
+        source = (
+            "def outer(x, flag, helper, items):\n"
+            "    import contextlib\n"
+            "    from contextlib import suppress, nullcontext\n" + walrus_block + "\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}/{position}: entering a module, class or function raises "
+        f"TypeError before the assert, so it is live and must be enforced; "
+        f"got {results}"
+    )
+
+
+#: #324/#327: a carrier must not reach *past* the scope that binds it.
+CARRIER_NESTED_ROWS = (
+    ("def", "def inner():\n    def cs():\n        pass"),
+    ("class", "def inner():\n    class cs:\n        pass"),
+)
+
+
+#: #324/#327: a capture that merely sits *inside* the same block is not
+#: evidence that it ran. These are the shapes where containment and
+#: reachability come apart, and getting them wrong is the damaging direction:
+#: retiring a suppressor that is still live reports a swallowed assert as
+#: enforced, which certifies a dead contract as load-bearing.
+CARRIER_UNREACHABLE_ROWS = (
+    (
+        "a capture in a sibling branch of the same if",
+        (
+            "    if flag:\n        with cs:\n            assert x != 1\n"
+            "    else:\n        match [1]:\n            case [cs]:\n                pass"
+        ),
+    ),
+    (
+        "a capture in a block that cannot run",
+        (
+            "    if False:\n        match [1]:\n            case [cs]:\n                pass\n"
+            "    with cs:\n        assert x != 1"
+        ),
+    ),
+    (
+        "a capture in a sibling block of the same if",
+        (
+            "    if flag:\n        with cs:\n            assert x != 1\n"
+            "    else:\n        import os as cs"
+        ),
+    ),
+    # A carrier in a *later sibling of the header's own block*, with the
+    # header nested inside that block. Every row above puts the carrier in a
+    # different block from the header; this one puts them in the same one, so
+    # a containment walk over the block finds the carrier and retires the
+    # suppressor -- but the carrier is written *after* the header and has not
+    # run yet. The assert is still swallowed.
+    #
+    # This is the row that makes `_runs_before`'s earlier-sibling scan
+    # load-bearing. Replacing it with whole-block containment returns
+    # `enforced` here while the runtime swallows, which is why the scan cannot
+    # be simplified away. Found in review round 4.
+    #
+    # Measured: this row and the two sibling rows above all fail under that
+    # mutation, all three with `got [True]`. In all three, `_runs_before` is
+    # called with the `If` as `block` and the carrier is a descendant of that
+    # `If`, so `ast.walk` finds it. The rows differ in *where* the carrier
+    # sits: the two above put it in the `else` branch, this one puts it in
+    # `body[1]`, a later sibling of the header sharing the header's own body.
+    # So this is not the only row that catches the mutation -- it is the row
+    # that pins the later-sibling case directly.
+    #
+    # The one row that does not catch the mutation at all is "a capture in a
+    # block that cannot run": it early-returns as a known-gap pin and never
+    # reaches the assertion.
+    (
+        "a carrier in a later sibling of the header's own block",
+        "    if flag:\n        with cs:\n            assert x != 1\n        import os as cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "body"), CARRIER_UNREACHABLE_ROWS)
+def test_a_capture_that_cannot_reach_the_header_does_not_retire(label, body):
+    """A capture only retires the suppressor on a path that reaches the header.
+
+    The `captures` test in `_bindings_before` decides whether a binding ran
+    before a nested `with` header is read. Getting that wrong in the *other*
+    direction -- the one this PR's `inside-header-nested` work could have
+    introduced -- retires a suppressor that is still in force, so the `with cs:`
+    enters the real `suppress`, the assert is swallowed, and the test stays
+    green. That is a dead contract certified as load-bearing, and it is the
+    direction that must never be wrong.
+
+    A pure containment test gets the first row wrong: the `match` is inside the
+    same `if`, so `ast.walk` finds it, but it lives in the branch that does not
+    run. The second and third need reachability, which the analyzer does not
+    model, and they are wrong on base and on every head of this PR alike --
+    pinned here so the distinction from the first row is explicit rather than
+    accidental.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := suppress(AssertionError)):\n"
+        "        pass\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    if label.startswith("a capture in a block"):
+        # Reachability is not modelled, so this row stays as base has it. Pinned
+        # as a known gap, not as correct behaviour.
+        return
+    assert results == [False], (
+        f"{label}: the capture never runs on the path that reaches this header, "
+        f"so `with cs:` still enters the suppressor and the assert is swallowed; "
+        f"got {results}"
+    )
+
+
+@pytest.mark.parametrize(("label", "nested"), CARRIER_NESTED_ROWS)
+def test_a_nested_carrier_does_not_retire_an_outer_binding(label, nested):
+    """A carrier in a nested scope binds that scope's name, not the outer one.
+
+    This is the other direction of the same rule, and the reason
+    `_carrier_bound_names` walks `_scope_body_nodes` rather than `ast.walk`:
+    retiring the outer suppressor on a nested `def cs` would report a
+    **swallowed** assert as live, which is damaging for the opposite reason --
+    it disarms a real defeat rather than hiding one.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := suppress(AssertionError)):\n"
+        "        pass\n" + textwrap.indent(nested, "    ") + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}: a nested carrier binds the nested scope's name, so the "
+        f"outer `with cs:` still enters the suppressor and swallows the assert; "
+        f"got {results}"
     )
 
 

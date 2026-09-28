@@ -768,6 +768,50 @@ def _match_capture_names(function):
     return owners
 
 
+def _carrier_bound_names(function):
+    """Every ``(name, carrier node)`` bound by a *string field* of a node.
+
+    Five binding forms carry the bound name as a plain ``str`` on a node that
+    is not a target at all, so a walk over ``statement.targets`` cannot see
+    them:
+
+        import os as cs                # Import.asname
+        from os import path as cs      # ImportFrom.asname
+        match ...: case [cs]           # MatchAs / MatchStar / MatchMapping.rest
+        def cs(): ...                  # FunctionDef.name
+        class cs: ...                  # ClassDef.name
+
+    Recording one of these by handing the walk a **detached** ``ast.Name`` is
+    sound for ordering and unsound for containment: a synthesised node is not a
+    child of anything, so ``ast.walk(header)`` never yields it and any test
+    asking "did this store happen inside this header" answers no forever. The
+    carried suppressor then survives a rebind that really did retire it, and a
+    **live** assert under the later ``with cs:`` is reported swallowed -- the
+    damaging direction, and a regression against the base this merges onto.
+
+    So the carrier node itself is returned, not the fake name. It sits in the
+    real tree, so containment is answerable by parent chain and ordering can
+    still be resolved to the statement that contains it.
+
+    Only carriers in `function`'s own scope count, for the reason
+    `_match_capture_names` gives: a `def cs` in a nested scope binds that
+    scope's name, and retiring the outer binding on it would report a
+    swallowed assert as live -- the opposite error.
+    """
+    owners = {}
+    for statement in _scope_body_nodes(function):
+        carriers = []
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            # One statement can bind several names, and only the `asname`
+            # spelling retires a *different* name than the one imported.
+            carriers.extend((alias.asname, alias) for alias in statement.names if alias.asname)
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            carriers.append((statement.name, statement))
+        for name, node in carriers:
+            owners.setdefault(name, node)
+    return owners
+
+
 def _assigned_suppressors(function, bound):
     """Map each statement index to the suppressor names bound *by* it.
 
@@ -850,18 +894,31 @@ def _assigned_suppressors(function, bound):
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
     bindings, raw_values = _store_bindings(function, bound)
-    orders = {
-        id(statement): _binding_order(function, statement)
-        for entries in bindings.values()
-        for statement, _, _ in entries
-    }
+    # A store in a `with` header's *body* runs after that header's own context
+    # expressions, so it outranks a walrus written in the same header. Both map
+    # to one top-level statement, so the tie is broken on position.
+    header_body_carriers = {id(carrier) for carrier in _carrier_bound_names(function).values()}
+    header_body_carriers |= {id(owner) for owner in _match_capture_names(function).values()}
+    # Keyed per *entry*: a walrus and a body-store carrier can share a single
+    # top-level statement, and a statement-keyed dict would let the later write
+    # overwrite the earlier one and lose the tie-break entirely.
+    entry_orders = {}
+    orders = {}
+    for entries in bindings.values():
+        for entry in entries:
+            statement = entry[0]
+            position = _binding_order(function, statement)
+            carrier = entry[3] if len(entry) > 3 else None
+            late = carrier is not None and id(carrier) in header_body_carriers
+            entry_orders[id(entry)] = (position, 1 if late else 0)
+            orders.setdefault(id(statement), entry_orders[id(entry)])
     assigned = {}
     for index in range(len(function.body)):
         for name, entries in bindings.items():
-            seen = [entry for entry in entries if orders[id(entry[0])] <= index]
+            seen = [entry for entry in entries if entry_orders[id(entry)] <= (index, 1)]
             if not seen:
                 continue
-            value = _resolve_bindings(seen, bound, orders)
+            value = _resolve_bindings(seen, bound, orders, entry_orders)
             if value is not None:
                 assigned.setdefault(index, {})[name] = value
     # The raw table has to be built for the whole function, not assembled as
@@ -875,7 +932,15 @@ def _assigned_suppressors(function, bound):
 
 
 def _store_bindings(function, bound):
-    """Map every name ``function`` binds to its ``(stmt, value, cond)`` stores.
+    """Map every name ``function`` binds to its store entries.
+
+    Each entry is a ``(statement, value, conditional, carrier)`` tuple, where
+    ``carrier`` is the node that produced the binding or ``None`` for an
+    ordinary store. Two store forms have no statement target list to walk --
+    a ``match`` capture and the four string-field carriers -- so they record
+    the node that binds the name as their carrier, and
+    :func:`_assigned_suppressors` uses it to order a body store after a walrus
+    written in the same ``with`` header.
 
     Returns ``(bindings, raw_values)``. ``raw_values`` is the undereferenced
     right-hand side of every value-bearing store, keyed the same way; the
@@ -997,6 +1062,7 @@ def _store_bindings(function, bound):
                         name,
                     ),
                     conditional,
+                    None,
                 )
             )
     # A `match` capture is the one store form that is not reachable from a
@@ -1011,7 +1077,13 @@ def _store_bindings(function, bound):
     # superseding it, so `_resolve_bindings` still resolved the name to the
     # carried suppressor and a live assert was reported as swallowed.
     for name, statement in _match_capture_names(function).items():
-        bindings.setdefault(name, []).append((statement, None, False))
+        bindings.setdefault(name, []).append((statement, None, False, statement))
+    # The four remaining string-field carriers, recorded with their **carrier
+    # node** rather than a synthesised name so containment can still find them.
+    for name, carrier in _carrier_bound_names(function).items():
+        bindings.setdefault(name, []).append(
+            (_owning_statement(function, carrier), None, False, carrier)
+        )
     # A name bound by exactly one readable suppressor is a known alias. A name
     # bound by several is ambiguous -- see the docstring (#308 criterion 1) --
     # and must NOT be resolved by source order. It is recorded as an
@@ -1041,7 +1113,7 @@ def _store_bindings(function, bound):
     return bindings, raw_values
 
 
-def _resolve_bindings(entries, bound, orders):
+def _resolve_bindings(entries, bound, orders, entry_orders=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
     ``entries`` are ``(statement, value, conditional)`` triples, already
@@ -1064,9 +1136,10 @@ def _resolve_bindings(entries, bound, orders):
     # unconditional one as competing is the other half: it genuinely can be the
     # last store to run.
     unconditional = [entry for entry in entries if not entry[2]]
-    latest = max((orders[id(entry[0])] for entry in unconditional), default=None)
+    key = entry_orders or {id(e): orders[id(e[0])] for e in entries}
+    latest = max((key[id(entry)] for entry in unconditional), default=None)
     competing = [
-        entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
+        entry for entry in entries if entry[2] and (latest is None or key[id(entry)] > latest)
     ]
     if len(competing) > 1:
         # More than one conditional binding can reach this `with` on different
@@ -1077,7 +1150,7 @@ def _resolve_bindings(entries, bound, orders):
         return AMBIGUOUS_SUPPRESSOR
     # Otherwise nothing competes with anything: the stores that can be last are
     # a single one, so the highest-ordered entry is what the `with` enters.
-    last = max(entries, key=lambda entry: orders[id(entry[0])])[1]
+    last = max(entries, key=lambda entry: key[id(entry)])[1]
     return last if _is_readable_suppressor(last, bound) else None
 
 
@@ -1099,6 +1172,20 @@ def _binding_order(function, statement):
         index
         for index, top in enumerate(function.body)
         if any(child is statement for child in ast.walk(top))
+    )
+
+
+def _owning_statement(function, node):
+    """The top-level statement of `function` that contains `node`.
+
+    `_binding_order` sorts every store by the top-level statement that holds
+    it, so a carrier reached through a string field has to be mapped back onto
+    the real statement it lives in -- `import os as cs` is stored as an
+    `ast.alias` hanging off an `ast.Import`, and neither is the statement the
+    ordering pass compares.
+    """
+    return next(
+        top for top in function.body if top is node or any(child is node for child in ast.walk(top))
     )
 
 
@@ -1512,6 +1599,39 @@ def _encloses(header, node):
     return any(child is node for child in ast.walk(header))
 
 
+def _runs_before(carrier, block, body, header_index):
+    """Has ``carrier`` run by the time the header at ``body[header_index]`` is read?
+
+    "Is the carrier inside this block?" is the wrong question, and answering it
+    with a containment walk is a damaging error. A carrier in a *sibling
+    branch* is inside the block and yet can never run on the path that reaches
+    the header:
+
+        if flag:
+            with cs:              # this runs, and cs is still the suppressor
+                assert x != 1
+        else:
+            import os as cs       # the only thing that would retire cs
+
+    Retiring on containment there reports a **swallowed** assert as enforced,
+    which certifies a dead contract as load-bearing -- the direction this module
+    must never get wrong.
+
+    So the carrier's owning statement has to be an *earlier sibling* in this
+    block's body: it is then on every path that reaches the header.
+
+    Returns False when the carrier is not in this block's body at all; the
+    separate `ast.walk(block)` containment test covers the shapes where the
+    carrier sits inside a nested block that wholly encloses the header.
+    """
+    for index, node in enumerate(body):
+        if index >= header_index:
+            break
+        if node is carrier or any(child is carrier for child in ast.walk(node)):
+            return True
+    return False
+
+
 def _bindings_before(header, statement, bound_so_far, own, function=None):
     """The bindings in force at a nested ``with`` inside ``statement``.
 
@@ -1536,22 +1656,64 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
         if not isinstance(body, list):
             continue
         seen_store = False
-        # Captures owned by this block have run by the time a header inside the
-        # same clause body is reached, even though no store *statement* does.
-        # The owner is the `ast.Match`; the block holding the header is the
-        # `match_case` nested under it, so the test runs the other way round --
-        # does the capturing `match` enclose this block?
+        # Captures that have run by the time a header nested in this block is
+        # reached, even though no store *statement* does. A capture binds as a
+        # side effect of its clause matching, so it is not in any block's body
+        # list and the `seen_store` test below can never see it.
+        #
+        # Two directions, because there are two shapes:
+        #
+        # * the capturing `match` **encloses** this block -- the header is
+        #   written inside the `case` body, so the clause must have matched for
+        #   execution to reach the header at all;
+        # * this block **encloses** the capturing `match` -- the header is a
+        #   later sibling in the same block, so the capture ran on the way to
+        #   it -- but only if it is an *earlier* sibling. Containment alone is
+        #   not enough, and that is the whole point of `_runs_before`.
+        #
+        # Only the first was modelled. The second is the shape that made a live
+        # assert report as swallowed, and base `87a90da` gets it right.
         captures_scope = function if function is not None else statement
+        header_index = body.index(header) if header in body else None
         captures = {
             name
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
+            or (header_index is not None and _runs_before(owner, block, body, header_index))
+        }
+        # The same question for the string-field carriers, and this is a
+        # containment test on the **carrier node**, which is the whole point of
+        # recording it: an `ast.alias` is a real child of its `ast.Import`, so it
+        # can be found inside a block, while the detached `ast.Name` this used
+        # to synthesise could never be found and the row stayed silently wrong.
+        #
+        # This clause is load-bearing and is NOT subsumed by the per-entry `late`
+        # ordering added for the same-header case. That ordering ranks entries
+        # *within one statement*; this decides whether a store in an enclosing
+        # block has run at all by the time a header *nested inside that block*
+        # is read. Deleting it as "redundant" left this shape reporting a live
+        # assert as swallowed:
+        #
+        #     with (cs := suppress(AssertionError)): ...
+        #     with nullcontext():
+        #         import os as cs   # carrier runs here
+        #         with cs:           # cs is the os MODULE -> TypeError -> LIVE
+        #             assert x != 1
+        #
+        # The full mutation matrix said otherwise only because no row exercised
+        # a `with` nested *below* its carrier; see the "inside-header-nested"
+        # position in the carrier test table.
+        carriers_scope = function if function is not None else statement
+        carriers = {
+            name
+            for name, carrier in _carrier_bound_names(carriers_scope).items()
+            if header_index is not None and _runs_before(carrier, block, body, header_index)
         }
         for node in body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
-                return dict(own) if seen_store or captures else bound_so_far
+                return dict(own) if seen_store or captures or carriers else bound_so_far
             if isinstance(node, ast.Assign) or (
                 isinstance(node, ast.AnnAssign) and node.value is not None
             ):
@@ -2011,7 +2173,7 @@ def _entry_is_dead(expression, by_index, index, function, bound):
     if stores is None:
         return False
     kinds = set()
-    for statement, value, _conditional in stores:
+    for statement, value, _conditional, carrier in stores:
         if value is None:
             # A store with no readable right-hand side. Which store it is
             # decides the answer, and each of these cannot leave a usable
@@ -2027,15 +2189,23 @@ def _entry_is_dead(expression, by_index, index, function, bound):
             # the rule cannot read that element without running the loop, so
             # it is declined below rather than assumed.
             #
-            # A `match` capture is excluded outright. It is recorded with no
-            # value because the capture is not reachable from a target list at
-            # all, but the name it binds is whatever was *matched* -- arbitrary,
-            # and very often a real context manager. Reading its missing value
-            # as `None` would claim the later `with cs:` always raises, when the
-            # shipped tests pin the opposite (a capture retires the carried
-            # suppressor and leaves the assert live). That direction is the
-            # safe one, so the rule declines to touch captures.
-            if isinstance(statement, ast.Match):
+            # A `match` capture and a string-field carrier are excluded
+            # outright, by the carrier test below.
+            if carrier is not None:
+                # A binding that carries its name on a *string field* -- a
+                # `match` capture, `import ... as cs`, `def cs`, `class cs` --
+                # is not reachable from a target list, so it is recorded with
+                # no readable value and with the binding node as its carrier.
+                # The value is whatever was matched, imported, defined or
+                # otherwise supplied, and nothing in the syntax says what:
+                # a capture is very often a real context manager, and
+                # `import os as cs` binds the `os` **module**, which is not a
+                # context manager at all. Reading the missing value as `None`
+                # would claim the later `with cs:` always raises, when in the
+                # module case the shipped tests pin the opposite (the carrier
+                # retires the carried suppressor and the assert stays live).
+                # Both directions are undecidable from the value, so the rule
+                # declines to touch carriers rather than guessing.
                 return False
             if isinstance(statement, (ast.For, ast.AsyncFor)):
                 # A loop target binds the *next element* of the iterable, and
@@ -2158,9 +2328,9 @@ def _entered_name_is_dead(header, function, bound):
     # the raw per-name store lists and their orderings are rebuilt instead.
     bindings, _raw_values = _store_bindings(function, bound)
     orders = {
-        id(statement): _binding_order(function, statement)
+        id(entry[0]): _binding_order(function, entry[0])
         for entries in bindings.values()
-        for statement, _, _ in entries
+        for entry in entries
     }
     by_index = {"bindings": bindings, "orders": orders}
     for index, statement in enumerate(function.body):
