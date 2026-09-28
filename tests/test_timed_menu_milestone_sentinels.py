@@ -4100,6 +4100,26 @@ STALE_LOCAL_CARRIER_SHAPES = (
         "    import os as cs",
         "    for _ in (1,):\n        cs = nullcontext()",
     ),
+    # Controls for the third review round, all of which must stay LIVE. Each
+    # is a shape the second round read as decidable-and-dead, and each is in
+    # fact decidable-and-live: a false operand in an `or` does not make the
+    # condition false, and a loop whose *last* element is a context manager
+    # leaves that element bound.
+    (
+        "a false operand in an or-ed condition",
+        "    import os as cs",
+        "    if flag or False:\n        cs = nullcontext()",
+    ),
+    (
+        "a false operand in an or-ed condition after a def carrier",
+        "    def cs():\n        pass",
+        "    if False or flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a loop whose last element is a context manager",
+        "    import os as cs",
+        "    if flag:\n        for cs in (None, nullcontext()):\n            pass",
+    ),
 )
 
 
@@ -4255,6 +4275,52 @@ DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
         "    class cs:\n        pass",
         "    if flag and False:\n        cs = nullcontext()",
     ),
+    # The rows below are the third review round. Each was a regression the
+    # second round introduced while fixing the first, and each is the kind of
+    # mistake that only a fresh fixture finds: a type missing from the
+    # non-enterable set, a boolean operator read the wrong way round, a loop
+    # spelling of a dead branch, and a loop whose *last* element -- not its
+    # first -- is the value left bound.
+    (
+        "a range constructor after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = range(3)",
+    ),
+    (
+        "an argument-less range constructor",
+        "    import os as cs",
+        "    if flag:\n        cs = range()",
+    ),
+    (
+        "a frozenset constructor after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = frozenset()",
+    ),
+    (
+        "a store in an and-ed empty-literal branch",
+        "    import os as cs",
+        "    if flag and ():\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a while-false branch",
+        "    import os as cs",
+        "    while False:\n        cs = nullcontext()",
+    ),
+    (
+        "a loop whose last element is not enterable",
+        "    import os as cs",
+        "    if flag:\n        for cs in (nullcontext(), None):\n            pass",
+    ),
+    (
+        "a loop over an empty builtin container",
+        "    import os as cs",
+        "    if flag:\n        for cs in set():\n            pass",
+    ),
+    (
+        "a nested pattern holding a starred element",
+        "    import os as cs",
+        "    if flag:\n        cs, (other, rest3) = (None, (1, 2))",
+    ),
 )
 
 
@@ -4360,7 +4426,7 @@ def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
         # to be able to run the fixture for the entry contract to mean
         # anything. `_assert_entry_contract` calls `outer(1, True, None)`, so
         # the extra names take their defaults.
-        "def outer(x, flag, helper, other=None, pair=(1, 2), first=None, rest=None, a=None, b=None, third=None):\n"
+        "def outer(x, flag, helper, other=None, pair=(1, 2), first=None, rest=None, a=None, b=None, third=None, rest3=None):\n"
         + carrier
         + "\n"
         + conditional

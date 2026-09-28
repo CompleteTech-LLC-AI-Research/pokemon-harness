@@ -2304,6 +2304,16 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
         "module",
         "type",
         "function",
+        # #388. The builtin constructors read by `_builtin_constructor_kind`
+        # have to be non-enterable *here* as well: a type name the set omits
+        # makes the constructor read as possibly-enterable, and the guard then
+        # declines a header CPython settles to a value it cannot enter. `range`
+        # and `frozenset` are the two a first pass missed, because they are
+        # builtins that are not spelled in everyday source as a `with` target
+        # and so were not already listed.
+        "frozenset",
+        "range",
+        "bytearray",
     }
 )
 
@@ -2335,6 +2345,16 @@ _BUILTIN_CONSTRUCTOR_TYPES = {
     "bytearray": "bytearray",
     "range": "range",
 }
+
+#: Marker for a constructor call that *raises* for the arguments given, so the
+#: store it appears in never happens. ``range()`` with no argument is a
+#: `TypeError`; the name keeps whatever was bound before, which for a header
+#: following a carrier is the carrier itself.
+_RAISING_CONSTRUCTOR = object()
+
+#: Constructors called with no arguments that yield **nothing** when iterated:
+#: `for cs in set():` runs zero times, so the loop never binds the name.
+_EMPTY_CONSTRUCTOR_TYPES = frozenset({"set", "frozenset", "dict", "list", "tuple"})
 
 
 def _builtin_constructor_kind(value):
@@ -2393,8 +2413,13 @@ def _builtin_constructor_arguments_are_ignorable(func, call):
     if name == "range":
         # `range(stop)`, `range(start, stop)` and `range(start, stop, step)`
         # are all ranges, but `range()` with no argument is a TypeError, so
-        # the call may not run at all -- which leaves the carrier in force.
-        return bool(call.args)
+        # the call raises and the store never happens, which leaves the carrier
+        # in force. That is a decided outcome, not an unreadable one, so the
+        # argument-bearing forms still answer `"range"` and the empty form is
+        # recognised by the *caller* as a store that cannot happen.
+        if not call.args:
+            return _RAISING_CONSTRUCTOR
+        return _BUILTIN_CONSTRUCTOR_TYPES["range"]
     # An unpacked argument list may carry anything, including a value that
     # makes the call fail, so it is treated as unreadable.
     return not (
@@ -2844,6 +2869,10 @@ def _statement_never_runs(statement, function):
     for enclosing in _enclosing_blocks(statement, function):
         if isinstance(enclosing, ast.If) and _condition_is_never_true(enclosing.test):
             return True
+        if isinstance(enclosing, ast.While) and _condition_is_never_true(enclosing.test):
+            # `while False:` is the loop spelling of `if False:` -- the body
+            # never runs, so it is never the last element either.
+            return True
         if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
             enclosing.iter
         ):
@@ -2874,7 +2903,12 @@ def _condition_is_never_true(node):
     """A condition that is false for every binding, so its body never runs."""
     if _falsy_literal(node):
         return True
-    if isinstance(node, ast.BoolOp):
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        # `a and b` is false when *any* operand is false, so one literal-false
+        # operand settles it. `a or b` is the opposite: `flag or False` is
+        # true whenever `flag` is, so a false operand there says nothing and
+        # the body can still run. Reading both the same way made
+        # `if flag or False: cs = nullcontext()` report a live header dead.
         return any(_condition_is_never_true(value) for value in node.values)
     return False
 
@@ -2884,17 +2918,29 @@ def _is_bare_name(target, name):
     return isinstance(target, ast.Name) and target.id == name
 
 
-def _loop_first_element_kind(iterable):
-    """The type of the first element a literal loop iterable yields, or ``None``.
+def _loop_last_element_kind(iterable):
+    """The type of the last element a literal loop iterable yields, or ``None``.
 
-    ``for cs in (None,):`` yields ``None`` first, so the name holds ``None``
-    and cannot be entered. An empty or non-literal iterable answers ``None``,
-    which leaves the caller's "possibly enterable" rule in force -- the safe
-    direction, since a later element may be a context manager.
+    ``for cs in (None,):`` yields ``None``, so the name holds ``None`` and
+    cannot be entered. The **last** element is the one in force once the loop
+    finishes, because the body may reassign the name on every pass: reading the
+    first element instead gets ``for cs in (nullcontext(), None):`` backwards,
+    and that error is in the damaging direction -- it reports a live assert
+    dead. So the last element decides, and ``for cs in (None, nullcontext()):``
+    correctly stays enterable.
+
+    An empty or non-literal iterable answers ``None``, which leaves the
+    caller's "possibly enterable" rule in force -- the safe direction.
     """
-    if not isinstance(iterable, (ast.Tuple, ast.List, ast.Set)) or not iterable.elts:
+    if not isinstance(iterable, (ast.Tuple, ast.List)) or not iterable.elts:
+        # A set literal is left out on purpose: `{nullcontext(), None}` has no
+        # readable order, so which element the loop leaves bound is not
+        # decidable from the syntax. Answering the first element would report
+        # `for cs in {nullcontext(), None}:` dead, which is the damaging
+        # direction. `for cs in set():` yields nothing and is already covered
+        # by `_is_empty_literal_iterable`'s sibling case here.
         return None
-    return _literal_runtime_type(iterable.elts[0])
+    return _literal_runtime_type(iterable.elts[-1])
 
 
 def _store_may_bind_enterable(entry, name):
@@ -2949,6 +2995,11 @@ def _store_may_bind_enterable(entry, name):
         # call as possibly-enterable is right for `nullcontext()` and wrong for
         # the builtin constructors, so a header the head reported live where
         # CPython raises `TypeError` on both paths is recovered here.
+        if constructor is _RAISING_CONSTRUCTOR:
+            # `range()` raises before binding, so this store never happens and
+            # the carrier stays in force. Reporting it possibly-enterable
+            # would decline a header CPython settles on the carrier.
+            return False
         return constructor not in NON_CONTEXT_MANAGER_TYPES
     if _binds_a_starred_name(statement, name):
         # A starred target pins the name to a **list** whatever the elements
@@ -2972,9 +3023,22 @@ def _store_may_bind_enterable(entry, name):
             # A loop over a *literal* container yields a literal element, so
             # `for cs in (None,):` binds `None` and `with cs:` raises before
             # the assert. Declining every loop target left this one reported
-            # live where CPython raises on both paths.
+            # live where CPython raises on both paths. The **last** element
+            # decides, not the first: the body may rebind the name on each
+            # pass, so the one in force afterwards is the final yield, and
+            # reading the first would report `for cs in (nullcontext(), None):`
+            # live.
+            # An empty *builtin* container yields nothing, so the name is never
+            # bound at all and the header raises `UnboundLocalError`; the
+            # carrier never gets the chance to be superseded either way.
+            empty_builtin = _builtin_constructor_kind(statement.iter) in _EMPTY_CONSTRUCTOR_TYPES
+            if _is_bare_name(statement.target, name) and empty_builtin:
+                # `for cs in set():` and `for cs in ():` iterate zero times, so
+                # the loop never binds the name. The carrier is untouched and
+                # the header still raises on entry.
+                return False
             if _is_bare_name(statement.target, name):
-                element = _loop_first_element_kind(statement.iter)
+                element = _loop_last_element_kind(statement.iter)
                 if element is not None:
                     return element not in NON_CONTEXT_MANAGER_TYPES
             return True
@@ -3230,7 +3294,14 @@ def _in_body(branch, target):
 
 def _falsy_literal(node):
     """A condition that is a literal false, so its body can never run."""
-    return isinstance(node, ast.Constant) and not node.value
+    if isinstance(node, ast.Constant) and not node.value:
+        return True
+    # An empty literal container is false for the same reason `False` is, and
+    # `if flag and ():` never enters its body. CPython evaluates the tuple's
+    # truth value at runtime; the empty form is decidable from the syntax, so
+    # it belongs to the same rule rather than to the loop-emptiness check,
+    # which is about a *container of values* rather than a condition.
+    return isinstance(node, (ast.Tuple, ast.List, ast.Set, ast.Dict)) and not node.elts
 
 
 def _is_empty_literal_iterable(node):
