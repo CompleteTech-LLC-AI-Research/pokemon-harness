@@ -1312,6 +1312,39 @@ def _encloses(header, node):
     return any(child is node for child in ast.walk(header))
 
 
+def _runs_before(carrier, block, body, header_index):
+    """Has ``carrier`` run by the time the header at ``body[header_index]`` is read?
+
+    "Is the carrier inside this block?" is the wrong question, and answering it
+    with a containment walk is a damaging error. A carrier in a *sibling
+    branch* is inside the block and yet can never run on the path that reaches
+    the header:
+
+        if flag:
+            with cs:              # this runs, and cs is still the suppressor
+                assert x != 1
+        else:
+            import os as cs       # the only thing that would retire cs
+
+    Retiring on containment there reports a **swallowed** assert as enforced,
+    which certifies a dead contract as load-bearing -- the direction this module
+    must never get wrong.
+
+    So the carrier's owning statement has to be an *earlier sibling* in this
+    block's body: it is then on every path that reaches the header.
+
+    Returns False when the carrier is not in this block's body at all; the
+    separate `ast.walk(block)` containment test covers the shapes where the
+    carrier sits inside a nested block that wholly encloses the header.
+    """
+    for index, node in enumerate(body):
+        if index >= header_index:
+            break
+        if node is carrier or any(child is carrier for child in ast.walk(node)):
+            return True
+    return False
+
+
 def _bindings_before(header, statement, bound_so_far, own, function=None):
     """The bindings in force at a nested ``with`` inside ``statement``.
 
@@ -1341,23 +1374,25 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
         # side effect of its clause matching, so it is not in any block's body
         # list and the `seen_store` test below can never see it.
         #
-        # Two containment directions, because there are two shapes:
+        # Two directions, because there are two shapes:
         #
         # * the capturing `match` **encloses** this block -- the header is
         #   written inside the `case` body, so the clause must have matched for
         #   execution to reach the header at all;
         # * this block **encloses** the capturing `match` -- the header is a
         #   later sibling in the same block, so the capture ran on the way to
-        #   it.
+        #   it -- but only if it is an *earlier* sibling. Containment alone is
+        #   not enough, and that is the whole point of `_runs_before`.
         #
         # Only the first was modelled. The second is the shape that made a live
         # assert report as swallowed, and base `87a90da` gets it right.
         captures_scope = function if function is not None else statement
+        header_index = body.index(header) if header in body else None
         captures = {
             name
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
-            or any(child is owner for child in ast.walk(block))
+            or (header_index is not None and _runs_before(owner, block, body, header_index))
         }
         # The same question for the string-field carriers, and this is a
         # containment test on the **carrier node**, which is the whole point of
@@ -1385,7 +1420,7 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
         carriers = {
             name
             for name, carrier in _carrier_bound_names(carriers_scope).items()
-            if any(child is carrier for child in ast.walk(block))
+            if header_index is not None and _runs_before(carrier, block, body, header_index)
         }
         for node in body:
             if node is header:
