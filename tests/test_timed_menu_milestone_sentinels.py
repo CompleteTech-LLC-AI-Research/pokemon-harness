@@ -2002,6 +2002,55 @@ def _async_loop_target_is_undecidable(label, source):
     raise AssertionError(f"{label}: the hostile variant returned normally; the fixture is stale.")
 
 
+def test_an_except_as_handler_is_decidable_even_after_a_conditional_store():
+    """The ``ExceptHandler`` clause in ``_stores_of`` is load-bearing alone.
+
+    The ``except-as`` row in ``WALRUS_REBINDING_SHAPES`` does not actually
+    exercise the clause that lets a handler count as a decidable store. In
+    that row the preceding store is the *unconditional* walrus, so removing
+
+        or isinstance(entry[0], ast.ExceptHandler)
+
+    from ``_stores_of`` falls back to that walrus, whose value is an
+    ``ast.Call``, and ``_entry_is_dead`` declines at the "a call is a call"
+    guard -- reaching the same answer by a different route. The clause can
+    therefore be deleted with the whole table still green.
+
+    It stops being redundant as soon as the prior store is *conditional*.
+    Then the handler is the only store whose value is decidable, and without
+    the clause ``_stores_of`` returns ``None`` and the rule declines to say
+    anything. This row is what makes the clause's removal detectable.
+
+    Whether the handler runs or not, ``cs`` cannot hold a usable context
+    manager afterwards: if it ran, CPython deleted the name when the handler
+    exited; if it did not, no suppressor was ever bound, so entry raises
+    ``UnboundLocalError`` before the assert. Both paths are unreachable, so
+    the honest verdict is ``False`` either way.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    if flag:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    try:\n"
+        "        raise ValueError()\n"
+        "    except ValueError as cs:\n"
+        "        pass\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract("an except-as after a conditional store", source, False, False)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"expected [False], got {results}. The handler is the only decidable "
+        f"store here, so this row is what pins the clause."
+    )
+
+
 #: #324: a walrus bound in a comprehension is a binding like any other.
 #:
 #: The comprehension's condition expression runs and leaves ``cs`` bound, so a
