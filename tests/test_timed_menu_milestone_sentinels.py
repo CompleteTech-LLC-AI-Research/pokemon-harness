@@ -1575,6 +1575,68 @@ WALRUS_REENTRY_SHAPES = (
         ),
         [True, True],
     ),
+    # #348: a store whose right-hand side is the name it binds. The alias walk
+    # stands on the very store it is resolving, so the suppressor it already
+    # holds is never seen and both headers reported a SWALLOWED assert as
+    # live. Both are the damaging direction, and neither was pinned before.
+    (
+        "a walrus aliasing the very name it binds re-enters",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    with (cs := cs):\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, False],
+    ),
+    # The same self-alias written as an ordinary store rather than a walrus.
+    # It resolves on a different path, so pinning only the walrus spelling
+    # would leave this one unpinned.
+    (
+        "a plain store aliasing the very name it binds re-enters",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = cs\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # A rebind of the aliased name *after* the header. The interpreter has not
+    # run it when the header reads the name, so the suppressor is still in
+    # force and the assert is swallowed -- but a whole-function "last binding"
+    # view resolves the header to the nullcontext instead, which reads as live.
+    # The re-entering `with first:` is the control: by then the rebind HAS
+    # run, so that assert really is live and must stay reported so.
+    (
+        "an alias read before its own later rebind re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    with (cs := first):\n"
+            "        assert x != 1\n"
+            "    first = nullcontext()\n"
+            "    with first:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # A two-hop chain whose last link is rebound after the header that reads
+    # it. Same failure as the row above, one link further from the store, so
+    # a rule that only special-cases the direct name would still look right.
+    (
+        "a two-hop alias read before its last link is rebound re-enters",
+        (
+            "    first = contextlib.suppress(AssertionError)\n"
+            "    second = first\n"
+            "    with (cs := second):\n"
+            "        assert x != 1\n"
+            "    first = nullcontext()\n"
+            "    with first:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
     # Two walruses of the same name in sequence: the later one supersedes the
     # earlier, so the third assert runs under a `nullcontext` and is live.
     (

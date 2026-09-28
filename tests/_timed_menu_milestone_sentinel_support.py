@@ -908,9 +908,19 @@ def _store_bindings(function, bound):
     # is applied to every one of them. The walrus path needs the table resolved
     # at a `with` HEADER; the ordinary `with alias:` path resolves at the STORE
     # SITE, where the table only has to be filled up to that point. Both need
-    # the same whole-function view to follow a name to its last binding, so
-    # they share the table rather than keeping two in step by hand.
+    # the same whole-function view to follow a name to its binding, so they
+    # share the table rather than keeping two in step by hand.
+    #
+    # "Whichever binding ran last" is not the same as "whichever binding is
+    # written last". A read only sees the stores that precede it, so both
+    # resolution sites pass the position they are resolving at and let
+    # :func:`_last_store_before` pick the entry that had actually run.
     raw_values = _raw_store_values(function)
+    orders = {
+        id(statement): _binding_order(function, statement)
+        for entries in raw_values.values()
+        for statement, _ in entries
+    }
     for statement in ast.walk(function):
         targets = []
         value = None
@@ -977,7 +987,17 @@ def _store_bindings(function, bound):
             conditional = statement not in function.body
         for name in _store_target_names(targets):
             bindings.setdefault(name, []).append(
-                (statement, _deref_alias(value, raw_values), conditional)
+                (
+                    statement,
+                    _deref_alias(
+                        value,
+                        raw_values,
+                        orders,
+                        _binding_order(function, statement),
+                        name,
+                    ),
+                    conditional,
+                )
             )
     # A `match` capture is the one store form that is not reachable from a
     # statement's target list, so it cannot ride along in the loop above.
@@ -1129,7 +1149,7 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
-def _deref_alias(value, raw_values):
+def _deref_alias(value, raw_values, orders=None, index=None, target=None):
     """The value an assignment expression's right-hand side stands for.
 
     A binding can take its value from another name rather than from a call:
@@ -1183,16 +1203,96 @@ def _deref_alias(value, raw_values):
     fixed by it.
     """
     seen = set()
+    # A store whose right-hand side names the name it binds is a *self-alias*:
+    #
+    #     cs = contextlib.suppress(AssertionError)
+    #     with (cs := cs):       # `cs` still holds the suppressor
+    #         assert x != 1     # swallowed
+    #
+    # Following the name from here lands on the very store being resolved, so
+    # the walk would hand back the same name and the header would read as
+    # unreadable. The binding in force *before* this statement is the answer,
+    # which is the same resolution with the store being resolved excluded.
+    # That exclusion is what `origin` carries below.
     current = value
+    origin = None
     for _ in range(_ALIAS_CHAIN_LIMIT):
-        if not isinstance(current, ast.Name) or current.id in seen:
+        if not isinstance(current, ast.Name):
             return current
-        seen.add(current.id)
         entries = raw_values.get(current.id)
         if not entries:
             return current
-        current = entries[-1]
+        # When the walk is standing on the very store it is resolving, that
+        # store is excluded so the chain falls through to the binding that
+        # preceded it. Otherwise the entry that supplied the current value is
+        # remembered, so a later return to this name excludes the right one.
+        revisiting = current.id in seen
+        if not revisiting:
+            seen.add(current.id)
+        chosen = _last_store_before(
+            entries,
+            orders,
+            index,
+            origin if current.id == target or revisiting else None,
+        )
+        if origin is None:
+            origin = next((e for e in entries if e[1] is chosen), None)
+        current = chosen
+        if revisiting:
+            return current
     return current
+
+
+def _last_store_before(entries, orders, index, exclude=None):
+    """The right-hand side a read at ``index`` would actually see.
+
+    ``raw_values`` is deliberately whole-function, so ``entries[-1]`` is the
+    *last* store of the name anywhere in the function. That is the wrong
+    answer for a read that happens before that store:
+
+        first = contextlib.suppress(AssertionError)
+        with (cs := first):        # here `first` IS the suppressor
+            assert x != 1          # swallowed
+        first = contextlib.nullcontext()
+
+    The interpreter swallows the assert, because at the moment the header
+    reads ``first`` the rebind has not run. Taking ``entries[-1]`` resolves
+    the header to the ``nullcontext()`` store instead, which is not a
+    suppressor, so the header looks unreadable and a swallowed assert is
+    reported live -- the damaging direction (#348).
+
+    The same mistake makes a self-alias resolve to itself:
+
+        cs = contextlib.suppress(AssertionError)
+        with (cs := cs):           # `cs` is the suppressor it already holds
+            assert x != 1
+
+    Here the read and the store share a name, so the only store that
+    *precedes* the header is the ``cs = contextlib.suppress(...)`` above it.
+    Reading ``entries[-1]`` instead finds the walrus's own store, and the
+    walk becomes self-referential.
+
+    Ordering is by :func:`_binding_order`, so a store nested inside another
+    top-level statement sorts at that statement's position -- the earliest
+    point at which it can have run. A read and the store being resolved that
+    share an order are inside one top-level statement, so neither precedes
+    the other; the earlier entry in source order wins there, which keeps
+    ``second = first`` resolvable when both sit in one statement.
+
+    Without ``orders``/``index`` -- the call sites that genuinely have no
+    position to reason from -- this falls back to the whole-function last
+    binding, which is the behaviour #333 originally shipped.
+    """
+    if orders is None or index is None:
+        return entries[-1][1]
+    visible = [
+        entry
+        for entry in entries
+        if orders.get(id(entry[0])) is not None
+        and orders[id(entry[0])] <= index
+        and entry is not exclude
+    ]
+    return (visible[-1] if visible else entries[-1])[1]
 
 
 def _raw_store_values(function):
@@ -1216,6 +1316,11 @@ def _raw_store_values(function):
     bind a name without one, and :func:`_deref_alias` stops on a missing entry
     exactly as it does for an unbound name -- which is right, because a later
     store of that name is what retires the carried value anyway.
+
+    Each entry is the ``(statement, right-hand side)`` pair rather than the
+    right-hand side alone. The statement is what :func:`_last_store_before`
+    orders by, so a read resolves against the stores that precede it and not
+    against stores the interpreter has not executed yet (#348).
     """
     raw = {}
     for statement in ast.walk(function):
@@ -1234,7 +1339,7 @@ def _raw_store_values(function):
         else:
             continue
         for name in _store_target_names(targets):
-            raw.setdefault(name, []).append(value)
+            raw.setdefault(name, []).append((statement, value))
     return raw
 
 
@@ -1285,6 +1390,15 @@ def _aliased_suppressions(node, function, bound):
     in the sentinel suite pins that difference.
     """
     by_index, raw_values = _assigned_suppressors(function, bound)
+    # The raw table is keyed by name, so the statement that owns each entry is
+    # what positions it. #348: the header must resolve against the stores that
+    # ran before it, not against whichever store of that name is written last
+    # somewhere else in the function.
+    orders = {
+        id(statement): _binding_order(function, statement)
+        for entries in raw_values.values()
+        for statement, _ in entries
+    }
     # A name is bound only by the assignments that run *before* the `with`.
     # Each `with` header is therefore read against the bindings in force at
     # ITS OWN position, not against the bindings that were live when the
@@ -1361,7 +1475,13 @@ def _aliased_suppressions(node, function, bound):
                     # there. The raw table is the complete set of right-hand
                     # sides, which is what makes a two-hop chain resolvable at
                     # the header performing the binding.
-                    resolved = _deref_alias(walrus.value, raw_values)
+                    resolved = _deref_alias(
+                        walrus.value,
+                        raw_values,
+                        orders,
+                        _binding_order(function, walrus),
+                        walrus.target.id if isinstance(walrus.target, ast.Name) else None,
+                    )
                     if _is_readable_suppressor(resolved, bound):
                         entered.append(resolved)
                 if isinstance(expression, ast.Name) and expression.id in live:
