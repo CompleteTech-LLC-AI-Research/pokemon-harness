@@ -3148,34 +3148,47 @@ def _binds_a_null_returning_context(expression, bound):
         # store would decline the header and report a dead assert as
         # load-bearing, so it keeps the exclusion.
         return True
-    return not _null_context_binds_an_enterable(expression)
+    return not _null_context_binds_an_enterable(expression, bound)
 
 
-#: Bare names whose call is *knowably* an enterable value.
+#: A ``with`` binds ``EXPR.__enter__()``, so what decides whether the name
+#: still holds something enterable is the *type* of the value
+#: ``enter_result`` evaluates to -- not whether it is ``None``, and not how it
+#: is spelled. Measured on CPython 3.12.14 over the ``enter_result`` space:
 #:
-#: The question is not "is this value ``None``" but "can a header be entered
-#: with it". Measured on CPython 3.12.14 over the whole ``enter_result``
-#: space, those are different: ``nullcontext(enter_result=0)`` returns ``0``,
-#: and ``nullcontext(enter_result=(CM(),))`` returns a *tuple* holding a
-#: context manager. Neither is ``None`` and neither can be entered either, so
-#: a truthiness test would have called the second a live superseder.
+#:     nullcontext()                      -> None   (not enterable)
+#:     nullcontext(enter_result=0)       -> 0      (not enterable)
+#:     nullcontext(enter_result=())      -> ()     (not enterable)
+#:     nullcontext(enter_result=(CM(),)) -> tuple  (not enterable)
+#:     nullcontext(enter_result=[CM()])  -> list   (not enterable)
+#:     nullcontext(enter_result=CM())    -> CM     (ENTERABLE)
+#:     nullcontext(CM())                 -> CM     (ENTERABLE)
 #:
-#: An arbitrary call is the opposite error: ``nullcontext(enter_result=list())``
-#: binds a list, and treating every call as enterable declared that live.
-#: Only calls the source pins to a class are asked, and of those only the
-#: ones that are not a builtin container. A call to a *user* class is
-#: enterable by the protocol (``CM()`` above), and a class spelled by a bare
-#: name is the readable spelling -- an attribute, a subscript or a call to an
-#: opaque helper is not, and is declined.
+#: A literal *container* holding a manager is still not one, so the rule reads
+#: the value's type. It cannot read a runtime type off an expression, and the
+#: two ways of guessing each get one of these rows wrong:
+#:
+#: * "any ``ast.Call`` binds an enterable" is wrong for ``list()``, ``int()``,
+#:   ``dict()``, ``set()`` and every other builtin, which bind objects with no
+#:   ``__enter__``. :data:`_NON_ENTERABLE_BUILTIN_CALLS` is that list.
+#: * "only a bare ``ast.Call`` binds an enterable" is wrong for every other
+#:   *spelling* of the same value -- a walrus, an ``IfExp``, a ``BoolOp``, a
+#:   subscript, a local name, a computed ``*`` or ``**`` -- and excluding those
+#:   declares a live contract dead, which is the damaging direction.
+#:
+#: So the classifier is an **allowlist of known-non-enterable types** and
+#: everything else answers "may be enterable". See
+#: :func:`_value_may_be_enterable`.
 _ENTERABLE_CLASS_NAMES = (ast.Name,)
 
 #: Builtin containers and scalars whose instances have no ``__enter__``.
 #:
 #: ``frozenset``, ``set``, ``dict``, ``list``, ``tuple``, ``range``,
 #: ``enumerate``, ``zip``, ``map``, ``filter`` and the numeric/``bytes``
-#: builtins are all *calls* that bind something a ``with`` cannot enter, so
-#: the "a call is enterable" rule would have declared every one of them live.
-#: Measured on CPython 3.12.14 by entering each result.
+#: builtins are all *calls* that bind something a ``with`` cannot enter, so a
+#: rule reading "any call is enterable" would declare every one of them live.
+#: Measured on CPython 3.12.14 by entering each result. This is the call
+#: arm of the allowlist; the display arm is the container literals below.
 _NON_ENTERABLE_BUILTIN_CALLS = frozenset(
     {
         "bytes",
@@ -3195,123 +3208,305 @@ _NON_ENTERABLE_BUILTIN_CALLS = frozenset(
     }
 )
 
+#: Values whose *type the language pins* to something with no ``__enter__``.
+#:
+#: This is an allowlist, so membership is the only thing that may decline a
+#: store. Each entry is a type CPython decides, not a guess about the program:
+#:
+#: * a ``None`` constant is the value the no-argument form produces;
+#: * a numeric / ``bytes`` / ``str`` constant is a literal of that type;
+#: * a list, tuple, set or dict *display* builds a container, and a container
+#:   is not a context manager however it is filled -- ``[CM()]`` holds a
+#:   manager and is still a list.
+#:
+#: A call to a builtin in :data:`_NON_ENTERABLE_BUILTIN_CALLS` is the same
+#: decision made through a call rather than a display, and is kept in
+#: :func:`_value_may_be_enterable` so the builtin list and the display rule
+#: read as one allowlist.
+_NON_ENTERABLE_LITERAL_TYPES = (type(None), int, float, complex, str, bytes, bool)
 
-def _null_context_binds_an_enterable(expression):
-    """Does this ``nullcontext`` call provably bind something enterable?
 
-    ``nullcontext`` passes its ``enter_result`` straight through, so the bound
-    value is whatever the argument evaluates to and nothing about the *spelling*
-    decides it. Only a value whose type the source pins settles the question,
-    and the pinned-enterable cases are narrow: an ``enter_result`` written as a
-    bare call, or a literal container whose single element is such a call
-    (``nullcontext(enter_result=[CM()])`` binds the *list*, which cannot be
-    entered, and ``nullcontext(enter_result=(CM(),))`` binds the *tuple*,
-    likewise).
+def _null_context_binds_an_enterable(expression, bound):
+    """Does this ``nullcontext`` call bind something a ``with`` could enter?
 
-    Everything else is reported as *not* provably enterable, which is the
-    conservative direction for the rule this feeds: the store is not counted
-    as a superseder, so the header keeps reading from the carrier. A value
-    that turns out to be enterable costs a declined header, and a value that
-    turns out not to be costs a carrier read -- and the second of those is the
-    damaging one, so it is the one this avoids.
+    ``nullcontext.__enter__`` is ``return self.enter_result``, so the bound
+    value *is* the argument, and the question is whether its type has
+    ``__enter__``. The answer comes from a known-non-enterable allowlist: only
+    a value whose type the source pins may answer "no", and everything else
+    answers "maybe", which is what declines the header.
+
+    The "maybe" default is the load-bearing decision, and it is forced by the
+    two errors not being symmetric. Declining reports the assert **live**, so
+    reading an unreadable value as non-enterable calls a live contract dead --
+    the damaging direction. :func:`_value_may_be_enterable` documents the
+    choice and the rows that hold it to CPython.
     """
-    for argument in _null_context_enter_results(expression):
-        if _is_a_call_to_an_enterable_class(argument):
+    for value in _null_context_enter_results(expression, bound):
+        if _value_may_be_enterable(value, bound):
             return True
-        if isinstance(argument, ast.Tuple) and len(argument.elts) == 1:
-            return _null_context_binds_an_enterable(argument.elts[0])
     return False
 
 
-def _is_a_call_to_an_enterable_class(node):
-    """Is this a call whose callee the source pins to a class that enters?
+def _value_may_be_enterable(node, bound):
+    """May ``node`` evaluate to something a ``with`` header can be entered on?
 
-    ``CM()`` is the readable spelling: the callee is a bare name, and CPython
-    calls it, so the result is an instance of whatever it names. A name that
-    is a known non-enterable builtin is excluded first, because
-    ``nullcontext(enter_result=list())`` binds a list and the protocol test
-    would otherwise have called it enterable.
+    The answer is ``False`` only for a value whose type is *pinned* to a
+    non-enterable one, and ``True`` for everything else. A ``None`` constant, a
+    scalar constant, a container display, and a call to a known non-enterable
+    builtin are the pinned cases.
 
-    Anything less direct -- an attribute (``CM.make()``), a subscript, a call
-    to an opaque helper -- could return anything at runtime, and this module
-    declines a value it cannot read rather than assuming the damaging answer.
+    Every other expression answers ``True``, and the reason is the direction of
+    each error rather than a preference. ``True`` declines the header, so the
+    assert is reported **live**; a live assert reported dead is the damaging
+    error, and a dead assert reported live is recoverable. The two are
+    therefore not symmetric, and the unreadable cases have to land on the
+    recoverable one:
+
+        with contextlib.nullcontext(enter_result=[CM()][0]) as cs:
+            pass
+
+    binds a ``CM`` -- the subscript is computed, so the source does not pin its
+    type -- and the assert fires. The same value reached as a walrus, a
+    conditional, a ``BoolOp``, a local name, or a computed ``*``/``**`` is the
+    same live header, and no spelling of it may be read as non-enterable.
+
+    The recursion is over the *values* a container display holds, never over a
+    call's arguments: ``nullcontext(enter_result=(CM(),))`` binds a **tuple**,
+    and the tuple is decided by the display rule. An earlier version recursed
+    into a one-element tuple with the *call* classifier, which read ``.args``
+    off an ``ast.Tuple`` and raised ``AttributeError`` on
+    ``nullcontext(enter_result=((CM(),),))`` -- a crash where CPython simply
+    binds a tuple and raises ``TypeError`` entering it.
     """
-    if not isinstance(node, ast.Call):
+    if isinstance(node, ast.Constant):
+        return not isinstance(node.value, _NON_ENTERABLE_LITERAL_TYPES)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        # A container *display* builds a container, whatever fills it.
         return False
+    if isinstance(node, ast.Dict):
+        # Same for a dict display. A `**` of a dict *display* is different --
+        # that one names parameters -- and is handled by the argument model.
+        return False
+    if isinstance(node, ast.Call):
+        return not _is_a_call_to_a_non_enterable_builtin(node)
+    if isinstance(node, ast.Starred):
+        # A starred expression only appears where the argument model has
+        # already expanded it; reaching one here means an unexpanded container
+        # is being read, and its type is not pinned.
+        return True
+    return True
+
+
+def _is_a_call_to_a_non_enterable_builtin(node):
+    """Is this a call to a builtin whose result type has no ``__enter__``?
+
+    ``nullcontext(enter_result=list())`` binds a list and
+    ``nullcontext(enter_result=int())`` binds an ``int``; neither can be
+    entered, so counting the call as a live superseder declared a dead assert
+    load-bearing. The call is only asked about when the callee is a bare
+    name, because that is the spelling that names a builtin -- an attribute
+    (``mod.list()``) or a subscript is a value this module cannot read, and it
+    answers as unreadable rather than assuming.
+    """
     if not isinstance(node.func, _ENTERABLE_CLASS_NAMES):
         return False
-    return node.func.id not in _NON_ENTERABLE_BUILTIN_CALLS
+    return node.func.id in _NON_ENTERABLE_BUILTIN_CALLS
 
 
-def _null_context_enter_results(expression):
+def _null_context_enter_results(expression, bound):
     """The ``enter_result`` values this ``nullcontext`` call is given.
 
-    Only the two forms that name the parameter *syntactically* are read: a
-    positional argument, and a keyword written ``enter_result=``. A ``**``
-    unpacking is a dict whose keys are computed at runtime, so the mapping is
-    not knowable from the source -- ``nullcontext(**{})`` binds ``None`` and
-    ``nullcontext(**{"enter_result": CM()})`` binds a manager, from text that
-    differs only in a literal this helper cannot read. The unresolved form is
-    declined, which is the same answer the rest of this module gives a value
-    it cannot see.
+    A ``nullcontext`` signature is ``__init__(self, enter_result=None)``, so
+    at most one argument can be effective, and it is the *first* positional
+    value, or else the sole keyword named ``enter_result``. Every spelling is
+    normalised to the value that would actually reach the parameter, in the
+    order CPython applies them -- positional arguments first, then keywords:
+
+    * the first positional node, which binds the parameter;
+    * a ``*`` of a *literal* list/tuple/set, whose elements are the positional
+      arguments -- so the *first element* is the one that binds it, and an
+      empty star supplies nothing at all;
+    * a ``*`` of anything else, which pins no value and so may supply any;
+    * a ``**`` of a *literal dict*, whose ``"enter_result"`` key is the
+      keyword, with the **last** duplicate winning as CPython's dict display
+      does;
+    * a ``**`` of a computed mapping, whose keys are unreadable -- it may
+      carry ``enter_result`` and it may carry anything else, so its value is
+      reported as unreadable rather than as absent.
+
+    Returning the *effective* value rather than every syntactic node is what
+    keeps the cardinality question separate from the type question:
+    ``nullcontext(*[], enter_result=CM())`` unpacks to nothing, so its
+    ``enter_result`` is the keyword, while ``nullcontext(*(), CM())`` supplies
+    ``CM()`` positionally and the empty star contributes nothing.
+
+    Only *one* value is returned, because only one can bind the parameter: the
+    extra values of an over-supplied call are what make it raise, and that is
+    :func:`_null_context_call_raises`'s question rather than this one's.
     """
-    results = []
-    for argument in expression.args:
-        if isinstance(argument, ast.Starred) and _is_literal_sequence(argument.value):
-            # `nullcontext(*[CM()])` unpacks a literal, so the element is right
-            # there in the source. A starred argument is otherwise unreadable
-            # -- `*args` could hold anything -- so it is resolved only where
-            # the container is a literal the checker can open. Each element
-            # is then the argument `enter_result` receives.
-            results.extend(argument.value.elts)
-        else:
-            results.append(argument)
-    results.extend(
-        keyword.value for keyword in expression.keywords if keyword.arg == "enter_result"
-    )
+    positional = _first_positional_value(expression)
+    if positional is not None:
+        return [positional]
     for keyword in expression.keywords:
-        if keyword.arg is None and _dict_literal_value(keyword.value, "enter_result") is not None:
-            # `**{"enter_result": CM()}` names the parameter in a dict literal,
-            # and a literal dict is as readable as a keyword argument. A `**`
-            # of anything computed stays unresolved below, which is the
-            # answer this module gives a value it cannot see.
-            results.append(_dict_literal_value(keyword.value, "enter_result"))
-    return results
+        if keyword.arg == "enter_result":
+            return [keyword.value]
+    for keyword in expression.keywords:
+        if keyword.arg is not None:
+            continue
+        literal = _dict_literal_value(keyword.value, "enter_result")
+        if literal is not None:
+            return [literal]
+        # A `**` of a mapping the source does not pin may carry the key. A
+        # `**` of a literal that simply has no such key cannot, so those are
+        # skipped rather than reported.
+        if _literal_dict_keys(keyword.value) is None:
+            return [_UNREADABLE_VALUE]
+    return []
 
 
-def _is_literal_sequence(node):
-    """Is this a literal list or tuple the checker can read elements from?"""
-    return isinstance(node, (ast.List, ast.Tuple))
+def _first_positional_value(expression):
+    """The value the first positional argument binds, or ``None`` if there is none.
 
-
-def _dict_literal_value(node, key):
-    """The value a literal dict stores under ``key``, or ``None`` if unreadable."""
-    if not isinstance(node, ast.Dict):
-        return None
-    for literal_key, value in zip(node.keys, node.values):
-        if isinstance(literal_key, ast.Constant) and literal_key.value == key:
-            return value
+    A starred argument contributes its elements, so an empty literal star
+    supplies nothing and the argument after it becomes the first
+    (``nullcontext(*(), CM())`` binds ``CM()``). An unreadable star pins
+    nothing, so it is reported as the value and left for the type question.
+    """
+    for argument in expression.args:
+        if not isinstance(argument, ast.Starred):
+            return argument
+        elements = _literal_star_elements(argument.value)
+        if elements is None:
+            return _UNREADABLE_VALUE
+        if elements:
+            return elements[0]
+        # An empty literal star unpacks to nothing; the next argument is first.
     return None
 
 
+#: Sentinel for "a value the source does not pin, so it may be anything".
+_UNREADABLE_VALUE = ast.Name(id="__unreadable__", ctx=ast.Load())
+
+
+def _literal_star_elements(node):
+    """The elements a starred literal unpacks to, or ``None`` if unreadable."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return list(node.elts)
+    return None
+
+
+def _dict_literal_value(node, key):
+    """The value a literal dict stores under ``key``, or ``None`` if unreadable.
+
+    Python keeps the **last** of several duplicate keys, so this walks to the
+    end rather than returning the first match:
+
+        nullcontext(**{"enter_result": CM(), "enter_result": None})
+
+    binds ``None`` -- the second value wins, the header raises entering it --
+    while the same dict with the values swapped binds ``CM()`` and the header
+    is live. Reading the first key reversed both.
+    """
+    if not isinstance(node, ast.Dict):
+        return None
+    value = None
+    for literal_key, literal_value in zip(node.keys, node.values):
+        if isinstance(literal_key, ast.Constant) and literal_key.value == key:
+            value = literal_value
+    return value
+
+
 def _null_context_call_raises(expression):
-    """Does this ``nullcontext`` call pass ``enter_result`` more than once?
+    """Would this ``nullcontext`` call raise before it binds anything?
 
-    ``nullcontext.__init__(self, enter_result=None)`` is the whole signature,
-    so a second value for the parameter -- a second positional argument, or a
-    positional argument beside the keyword -- is a ``TypeError`` raised at the
-    call. The ``with`` statement then fails before it binds anything.
+    ``nullcontext.__init__(self, enter_result=None)`` is the whole signature, so
+    the call raises at bind time when it supplies **more than one** effective
+    argument, or when it names a parameter that does not exist. The ``with``
+    then fails before it can bind ``cs``, so there is no store to exclude and
+    the assert under it is unreachable.
 
-    Measured on CPython 3.12.14 with ``nullcontext(CM(), enter_result=CM())``:
-    ``TypeError: nullcontext.__init__() got multiple values for argument
-    'enter_result'``. The distinction matters because the assert below such a
-    header never runs, so a rule that counted the call as a live superseder
-    would certify a dead contract.
+    The count is over *effective* arguments, not syntax nodes, so the starred
+    spellings are measured by what they unpack to:
+
+    * ``nullcontext(*[CM(), CM()])`` supplies two and raises;
+    * ``nullcontext(*[], enter_result=CM())`` supplies one -- the empty star
+      unpacks to nothing -- and does not;
+    * ``nullcontext(*(), CM())`` likewise supplies one.
+
+    A keyword is unexpected when it is not ``enter_result``. An explicit
+    ``foo=1`` is read directly; a ``**`` mapping is read for the keys it
+    carries, with the last duplicate winning, so
+    ``nullcontext(CM(), **{"foo": 1})`` is seen to raise the same way
+    ``nullcontext(CM(), foo=1)`` does. A ``**`` of a mapping the source does
+    not pin is treated as possibly carrying any key, so it may raise; the
+    store then is not one that can be excluded, which is the recoverable
+    direction.
     """
     if not isinstance(expression, ast.Call):
         return False
-    keywords = [keyword for keyword in expression.keywords if keyword.arg == "enter_result"]
-    return len(expression.args) + len(keywords) > 1
+    positional = 0
+    unknown = False
+    for argument in expression.args:
+        if isinstance(argument, ast.Starred):
+            elements = _literal_star_elements(argument.value)
+            if elements is None:
+                # An unreadable star could hold any *number* of values, so
+                # this cannot say the call raises -- and it must not say it
+                # does not, either, because `nullcontext(*[CM(), CM()])`
+                # really does raise while `nullcontext(*values)` with
+                # `values = [CM()]` does not. Both spellings are therefore
+                # left to the *value* question, which reports the unreadable
+                # one as maybe-enterable. Claiming a raise here would
+                # exclude a live store; this is the recoverable direction.
+                unknown = True
+                continue
+            positional += len(elements)
+        else:
+            positional += 1
+    if unknown:
+        return False
+    keywords = []
+    for keyword in expression.keywords:
+        if keyword.arg is not None:
+            keywords.append(keyword.arg)
+            continue
+        keys = _literal_dict_keys(keyword.value)
+        if keys is None:
+            # A computed mapping may carry any key at all, so this cannot
+            # claim the call raises -- `nullcontext(**values)` with
+            # `values = {"enter_result": CM()}` does not raise, while the same
+            # spelling with an unexpected key does. Both are left to the
+            # *value* question, where an unreadable value is maybe-enterable.
+            # The same reasoning as the unreadable `*` above, in the keyword
+            # position: claiming a raise would exclude a live store.
+            return False
+        keywords.extend(keys)
+    if positional > 1:
+        return True
+    if keywords.count("enter_result") > 1:
+        return True
+    if positional and "enter_result" in keywords:
+        return True
+    return any(name != "enter_result" for name in keywords)
+
+
+def _literal_dict_keys(node):
+    """The keys a literal dict carries, last duplicate winning, else ``None``."""
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = []
+    for literal_key in node.keys:
+        if literal_key is None:
+            # `**` inside a dict display (`{**other}`) is itself unreadable.
+            return None
+        if not isinstance(literal_key, ast.Constant):
+            # A computed key -- `("enter_" + "result")` -- pins no name, so
+            # the mapping it builds is not one the checker can read.
+            return None
+        if literal_key.value in keys:
+            keys.remove(literal_key.value)
+        keys.append(literal_key.value)
+    return keys
 
 
 def _stores_of(name, by_index, index, function):

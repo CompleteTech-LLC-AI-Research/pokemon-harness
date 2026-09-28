@@ -3155,6 +3155,171 @@ FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
         "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=range(3)) as cs:\n            pass\n",
         False,
     ),
+    # --- #388 review findings 2-5: the argument's *type*, not its spelling ---
+    #
+    # Every row below binds `CM` -- a real manager -- through a spelling the
+    # old classifier could not read, and every one of them is **live**. The
+    # first implementation read "not a bare `ast.Call`" as "not enterable"
+    # and declined all of them, which reports a genuinely live assert dead.
+    # That is the damaging direction, so an unreadable value now defaults to
+    # "may be enterable" and only a *pinned* non-enterable type may decline.
+    (
+        "a conditional nullcontext-with a walrus enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(cm := CM())) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a conditional enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(CM() if flag else None)) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with an or-chained enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(None or CM())) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a subscripted enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=[CM()][0]) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a named enter_result is live",
+        "    import os as cs\n    if flag:\n        cm = CM()\n        with contextlib.nullcontext(enter_result=cm) as cs:\n            pass\n",
+        True,
+    ),
+    # A starred *computed* container pins neither the number of values nor
+    # their types, so it may supply exactly one manager.
+    (
+        "a conditional nullcontext-with an unreadable star is live",
+        "    import os as cs\n    if flag:\n        values = [CM()]\n        with contextlib.nullcontext(*values) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with an unreadable mapping is live",
+        '    import os as cs\n    if flag:\n        values = {"enter_result": CM()}\n        with contextlib.nullcontext(**values) as cs:\n            pass\n',
+        True,
+    ),
+    # A **computed** key builds a mapping the source does not pin, so it may
+    # be spelled `enter_result` and bind a manager.
+    (
+        "a conditional nullcontext-with a computed mapping key is live",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{("enter_" + "result"): CM()}) as cs:\n            pass\n',
+        True,
+    ),
+    # Finding 3: the argument count is over *effective* arguments, so an
+    # empty star supplies none. Counting it as one falsely declared a
+    # duplicate parameter and reported this live contract dead.
+    (
+        "a conditional nullcontext-with an empty star then a keyword is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[], enter_result=CM()) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with an empty tuple star then a value is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*(), CM()) as cs:\n            pass\n",
+        True,
+    ),
+    # Finding 3, the other direction: a two-element star supplies two
+    # arguments, which is a `TypeError` at the call.
+    (
+        "a conditional nullcontext-with a two element star is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[CM(), CM()]) as cs:\n            pass\n",
+        False,
+    ),
+    # Finding 4: a `**` mapping carrying an unexpected key raises at the call
+    # even when an enterable value is present, so the store is not one that
+    # can be excluded. Each is a distinct spelling of the same validation.
+    (
+        "a conditional nullcontext-with a positional and a mapped enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM(), **{"enter_result": CM()}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a keyword and a mapped enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=CM(), **{"enter_result": CM()}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a keyword enter_result and an unknown one is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=CM(), foo=1) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a positional and an unknown keyword is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM(), foo=1) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a mapped unknown keyword is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": CM(), "foo": 1}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a positional and a mapped unknown keyword is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM(), **{"foo": 1}) as cs:\n            pass\n',
+        False,
+    ),
+    # Finding 5: a dict display keeps the **last** of several duplicate keys.
+    # Reading the first reversed both of these -- one reported a live header
+    # dead, the other reported a dead header live.
+    (
+        "a conditional nullcontext-with a duplicate key keeping the manager is live",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": None, "enter_result": CM()}) as cs:\n            pass\n',
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a duplicate key keeping None is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": CM(), "enter_result": None}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a duplicate key keeping zero is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": CM(), "enter_result": 0}) as cs:\n            pass\n',
+        False,
+    ),
+    # Finding 6: a nested one-element tuple **crashed** the checker, which
+    # recursed with an `ast.Tuple` into logic that reads `.args` off a call.
+    # CPython binds a tuple and raises entering it, so the answer is
+    # `defeated`; the crash made the question unanswerable instead.
+    (
+        "a conditional nullcontext-with a nested tuple enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=((CM(),),)) as cs:\n            pass\n",
+        False,
+    ),
+    # The builtin call rows below are the *other* direction of the same
+    # rule: `int()`, `dict()` and `set()` are calls whose results have no
+    # `__enter__`, so counting every call as enterable declared them live.
+    (
+        "a conditional nullcontext-with an int enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=int()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a dict enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=dict()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a set enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=set()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a positional builtin is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(list()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a starred builtin is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[int()]) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a mapped builtin is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": int()}) as cs:\n            pass\n',
+        False,
+    ),
     # The name is bound by a *different* item of the same `with`, so the
     # non-enterable sibling says nothing about what `cs` received. Searching
     # the whole statement for a known-`None` manager excluded a store that
