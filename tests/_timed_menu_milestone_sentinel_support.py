@@ -2677,9 +2677,12 @@ def _store_may_bind_enterable(entry, name):
       none of which leaves a usable manager bound;
     * a literal is read through :func:`_literal_runtime_type`; a literal whose
       type is in :data:`NON_CONTEXT_MANAGER_TYPES` cannot be entered;
-    * a target that is not a bare ``Name`` -- a tuple or list target, or a
-      starred one -- binds an *element* of the right-hand side, and the
-      element's type is not readable from the container's syntax;
+    * a **starred** target binds a list whatever the elements are. This is a
+      property of the target, not of the value, so it is decided first and
+      without reading the right-hand side at all;
+    * any other non-bare target -- a tuple or list target -- binds an *element*
+      of the right-hand side, and the element's type is not readable from the
+      container's syntax;
     * a call, an attribute, a subscript, a loop target or a `match` capture is
       **not** read. The value is whatever the call returns or the loop yields,
       which the syntax does not fix -- `nullcontext()` is a real context
@@ -2696,6 +2699,20 @@ def _store_may_bind_enterable(entry, name):
     if isinstance(value, str):
         # A carrier: a module, a function or a class, none enterable.
         return False
+    if _binds_a_starred_name(statement, name):
+        # A starred target pins the name to a **list** whatever the elements
+        # are, so the right-hand side does not have to be readable at all:
+        # `*cs, = (helper,)`, `*cs, = helper` and `first, *cs = pair` all leave
+        # `cs` holding a list, which cannot be entered.
+        #
+        # This has to be asked *before* the readable-literal checks below.
+        # Only the first of those is a tuple literal, so a version that tested
+        # "is this a literal?" first answered "no" for `*cs, = helper` and for
+        # every `= pair` form, reported the store as possibly-enterable, and
+        # made the caller decline -- four more false-live regressions against a
+        # master that answers them correctly. The type is a property of the
+        # target, not of the value.
+        return False
     if value is None:
         # `with ... as cs:`, `del cs`, `except E as cs:` and a loop target.
         # A loop target binds the next element of an iterable this rule cannot
@@ -2707,11 +2724,7 @@ def _store_may_bind_enterable(entry, name):
         # A call is a call. `nullcontext()` returns a real context manager and
         # must not be read as unenterable here.
         return True
-    if (
-        isinstance(statement, ast.Assign)
-        and not _target_is_bare_name(statement, name)
-        and not _binds_a_starred_name(statement, name)
-    ):
+    if isinstance(statement, ast.Assign) and not _target_is_bare_name(statement, name):
         # A destructuring target: `cs, other = (...)` binds `cs` to one
         # *element* of the right-hand side, and the element's type is not
         # readable from the container's syntax. Reading the whole right-hand
@@ -2725,17 +2738,13 @@ def _store_may_bind_enterable(entry, name):
         #     *cs, = (helper,)              # `cs` is a list
         #     cs = (other, x) = (helper, 1)  # `cs` is the whole RHS tuple
         #
-        # Both are pinned non-enterable, so declining them would replace a
-        # correct dead verdict with a false-live one. Reading the statement as
-        # "destructuring happened" and returning early for both got that
-        # wrong in six fixtures. The direct `cs` target in a chain is a bare
-        # name and falls through to the literal reading below, which is right
-        # for it.
-        #
-        # A *starred* target is the exception: `*cs, = (helper,)` builds a
-        # list whatever the elements are, so the name is pinned non-enterable
-        # and falls through to the literal reading, which is what
-        # `_entry_is_dead` already does for the same shape.
+        # The second is pinned non-enterable too, so declining it would replace
+        # a correct dead verdict with a false-live one; the direct `cs` target
+        # in a chain is a bare name and falls through to the literal reading
+        # below, which is right for it. Reading the statement as "destructuring
+        # happened" and returning early for both got that wrong in six
+        # fixtures. The starred half is answered above, before the literal
+        # checks, because it does not depend on the right-hand side at all.
         return True
     kind = _literal_runtime_type(value)
     if kind is None:

@@ -4174,6 +4174,31 @@ DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
         "    class cs:\n        pass",
         "    if flag:\n        cs = (other, x) = (helper, 1)",
     ),
+    (
+        "a starred target on a non-tuple right-hand side",
+        "    import os as cs",
+        "    if flag:\n        *cs, = helper",
+    ),
+    (
+        "a leading starred target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        *cs, rest = pair",
+    ),
+    (
+        "a nested starred target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        a, (b, *cs) = pair",
+    ),
+    (
+        "a trailing starred target after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        first, *cs = pair",
+    ),
+    (
+        "a trailing starred target after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        first, *cs = pair",
+    ),
 )
 
 
@@ -4273,10 +4298,13 @@ def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
     source = (
         "import contextlib\n"
         "from contextlib import nullcontext\n"
-        # `other` is bound by the chained-target rows, so it is a parameter
-        # here rather than an unbound global: CPython has to be able to run
-        # the fixture for the entry contract to mean anything.
-        "def outer(x, flag, helper, other=None):\n"
+        # `other` is bound by the chained-target rows, and the starred rows
+        # unpack `pair` and bind `first`/`rest`/`a`/`b`, so every name they
+        # touch is a parameter here rather than an unbound global: CPython has
+        # to be able to run the fixture for the entry contract to mean
+        # anything. `_assert_entry_contract` calls `outer(1, True, None)`, so
+        # the extra names take their defaults.
+        "def outer(x, flag, helper, other=None, pair=(1, 2), first=None, rest=None, a=None, b=None):\n"
         + carrier
         + "\n"
         + conditional
