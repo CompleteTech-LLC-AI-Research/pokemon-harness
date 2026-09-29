@@ -5489,6 +5489,72 @@ USER_EXIT_SWALLOW_SHAPES = (
         "    helper = Suppressor()\n    with helper:\n        assert x != 1",
         True,
     ),
+    # #330/#339. Every row above binds the instance to a *name* first
+    # (`helper = Suppressor()` / `cs = Suppressor()`), and the rule reads that
+    # binding. The header that constructs the suppressor where it uses it --
+    # `with Suppressor():` -- never goes through a name, so it was never read,
+    # and the assert stayed `enforced` while the interpreter swallowed it.
+    #
+    # That is the damaging direction and it is pre-existing on master: the
+    # inline spelling is what these three issues filed, and the alias spelling
+    # is what the #316 rows above all pin. Both spellings construct the same
+    # object, so they must reach the same verdict.
+    (
+        "inline construction in the with header",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        "    with Suppressor():\n        assert x != 1",
+        False,
+    ),
+    # The same header spelling with the `is`-test #316 also accepts in its
+    # named-exception-parameter form, so the inline path is not special-cased
+    # to one return spelling.
+    (
+        "inline construction, named exception parameter",
+        "def __exit__(self, exc_type, exc, tb):\n    return exc_type is AssertionError",
+        "    with Suppressor():\n        assert x != 1",
+        False,
+    ),
+    # #338. A bare `return True` swallows unconditionally, so the inline
+    # spelling of it is the damaging case too.
+    (
+        "inline construction, unconditional return True",
+        "def __exit__(self, *exc):\n    return True",
+        "    with Suppressor():\n        assert x != 1",
+        False,
+    ),
+    # --- loud controls for the inline spelling ---------------------------
+    # These are what make the repair non-vacuous in the safe direction: an
+    # inline `with` whose `__exit__` does NOT swallow must still be enforced.
+    # Reading every inline call as a suppressor would fail all three.
+    (
+        "inline construction, returns False",
+        "def __exit__(self, *exc):\n    return False",
+        "    with Suppressor():\n        assert x != 1",
+        True,
+    ),
+    (
+        "inline construction, no return at all",
+        "def __exit__(self, *exc):\n    pass",
+        "    with Suppressor():\n        assert x != 1",
+        True,
+    ),
+    (
+        "inline construction, tests for a different exception",
+        "def __exit__(self, *exc):\n    return exc[0] is ValueError",
+        "    with Suppressor():\n        assert x != 1",
+        True,
+    ),
+    # A factory call is *not* a constructor spelling. `make()` is not known to
+    # return a `Suppressor`, so the header stays unreadable and the assert stays
+    # enforced. This is the deliberate limit of the one-step unwrap, and it is
+    # a pre-existing gap rather than something this repair introduces -- it is
+    # pinned here so the limit is visible instead of accidental.
+    (
+        "inline factory call is not a constructor",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        "    with factory():\n        assert x != 1",
+        True,
+    ),
 )
 
 
