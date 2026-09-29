@@ -1343,17 +1343,54 @@ def _store_bindings(function, bound):
         else:
             conditional = statement not in function.body
         for name in _store_target_names(targets):
+            # Order is load-bearing, and it is three steps, not two. The value a
+            # destructuring target receives can be reached through a name at
+            # either level, and each level needs its own deref:
+            #
+            #     t = (contextlib.suppress(AssertionError),)
+            #     cs, = t                 # the RHS is a Name bound to a container
+            #     with cs:
+            #         assert x != 1      # swallowed
+            #
+            #     a, b = b, a             # the *element* is itself a Name
+            #     with a:
+            #         assert x != 1      # swallowed, after the swap
+            #
+            # Deref-first alone fixes the first shape and breaks the second: on
+            # `(b, a)` the deref is a no-op (a tuple is not a name), so the
+            # element `b` is selected but left as a bare `Name`, which is not a
+            # readable suppressor and reports the assert live (#381/#382).
+            # Select-first alone fixes the second and breaks the first, because
+            # the RHS reads as a bare `Name` and no container is ever found
+            # (#374). So the right-hand side is dereferenced first, the element
+            # is picked out of that resolved container, and the element is
+            # dereferenced in turn when it is itself a name.
+            resolved = _deref_alias(
+                value,
+                raw_values,
+                orders,
+                _binding_order(function, statement),
+                name,
+                function,
+            )
+            element = _value_bound_by(targets, resolved, name)
+            if isinstance(element, ast.Name):
+                # The selected element is a name, so it stands for whatever it
+                # was bound to rather than for itself. Resolving it here is what
+                # keeps a swapped pair -- where both names already hold
+                # suppressors -- from reading as a non-suppressor element.
+                element = _deref_alias(
+                    element,
+                    raw_values,
+                    orders,
+                    _binding_order(function, statement),
+                    name,
+                    function,
+                )
             bindings.setdefault(name, []).append(
                 (
                     statement,
-                    _deref_alias(
-                        _value_bound_by(targets, value, name),
-                        raw_values,
-                        orders,
-                        _binding_order(function, statement),
-                        name,
-                        function,
-                    ),
+                    element,
                     conditional,
                 )
             )
@@ -2262,14 +2299,38 @@ def _loop_value_source(statement):
     different question (#336) and it is answered from the literal element,
     which is exactly the distinction `_entry_is_dead` already documents.
 
-    Only a literal container is read, and only its first element, because
-    that is the only position a bare target can take. A ``Name`` or ``Call``
-    iterable returns :data:`UNREADABLE_VALUE`, which is the conservative
-    choice for the same reason an arbitrary iterable is undecidable.
+    #377: element zero is the element bound *during* the body, which is only
+    also the element left behind when the iterable has exactly one element.
+    A loop over more than one leaves the **last** one:
+
+        for cs in (contextlib.nullcontext(),
+                   contextlib.suppress(AssertionError)):
+            pass
+        with cs:
+            assert x != 1        # swallowed -- `cs` is the last element
+
+    and with the order reversed the assert is live. Returning element zero
+    answered the opposite of the truth in *both* orderings, which is worse
+    than a single missed row: a helper that returns a confident wrong answer
+    in the damaging direction and a wrong one in the over-careful direction
+    at the same time. The last element is what survives the loop, so that is
+    what is read; a single-element literal is unchanged by this.
+
+    Measured on CPython 3.12.14 by executing both orderings: over
+    ``(nullcontext, suppress)`` the assert is swallowed, and over
+    ``(suppress, nullcontext)`` it fires. A single-element literal is the one
+    shape on which the two readings agree, so no existing row can distinguish
+    them on its own.
+
+    Only a literal container is read, and only its last element, because
+    that is the position a bare target *leaves bound* once the loop is done.
+    A ``Name`` or ``Call`` iterable returns :data:`UNREADABLE_VALUE`, which is
+    the conservative choice for the same reason an arbitrary iterable is
+    undecidable.
     """
     iterable = statement.iter
     if isinstance(iterable, (ast.Tuple, ast.List)) and iterable.elts:
-        return iterable.elts[0]
+        return iterable.elts[-1]
     return UNREADABLE_VALUE
 
 
@@ -2751,17 +2812,32 @@ def _is_store_statement(node):
             with cs:                 # `cs` IS the loop's live value
                 assert x != 1        # swallowed
 
-    The loop's own binding resolved correctly, and then this function threw it
-    away because the enclosing statement was not one of the two shapes it
-    recognised, so the header saw no binding at all and reported a swallowed
-    assert as live. A ``for`` target binds on every iteration that reaches the
-    body, which is exactly the guarantee the other two shapes are listed for,
-    so it belongs in the same set.
+    A ``for`` target binds on every iteration that reaches the body, which is
+    the guarantee the other two shapes are already listed for, so it belongs in
+    the same set.
 
     ``NamedExpr`` is deliberately still absent: it never appears as a direct
     statement, so it cannot be the ``node`` walked here.
+
+    #378: "on every iteration that reaches the body" is a *conditional*
+    guarantee, and a literal empty container gives a loop that reaches the body
+    exactly zero times:
+
+        cs = contextlib.nullcontext()
+        if True:
+            for x in ():                       # never iterates
+                cs = contextlib.suppress(AssertionError)   # never executes
+            with cs:                          # `cs` is still the nullcontext
+                assert x != 1                 # live
+
+    Counting the ``for`` as a store that ran admits the unexecuted assignment
+    and answers ``defeated``, dropping a live assert from the sentinel. The test
+    is ``_is_empty_literal_iterable``, the same helper the ``for``-defeat rule
+    already uses, so the two agree on what a decidable empty iterable is.
     """
-    return isinstance(node, (ast.Assign, ast.For, ast.AsyncFor)) or (
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return not _is_empty_literal_iterable(node.iter)
+    return isinstance(node, ast.Assign) or (
         isinstance(node, ast.AnnAssign) and node.value is not None
     )
 
