@@ -582,6 +582,116 @@ UNREACHABLE_SHAPES = (
         "    def inner():\n        assert x != 1\n    return inner",
         True,
     ),
+    # #400. A `return` / `raise` / `break` / `continue` that is unconditional
+    # within its own block never falls through, so every statement after it is
+    # dead -- while the assert stays lexically present, so a presence-based
+    # check certifies a contract that can no longer fail. Each of the four
+    # transfer kinds is its own spelling of the same defeat.
+    ("after return", "    return\n    assert x != 1", False),
+    ("after return value", "    return x\n    assert x != 1", False),
+    ("after raise", "    raise ValueError\n    assert x != 1", False),
+    (
+        "after continue",
+        "    for _ in [1]:\n        continue\n        assert x != 1",
+        False,
+    ),
+    (
+        "after break",
+        "    for _ in [1]:\n        break\n        assert x != 1",
+        False,
+    ),
+    # The transfer is not a *statement* in the dead block but kills it anyway:
+    # the interpreter never begins evaluating the `with` / `try` / `if` / `for`
+    # that follows, so the asserts nested under their bodies never run either.
+    # A rule that only looked at the top-level siblings would miss all of these.
+    (
+        "return then with body",
+        "    return\n    with helper():\n        assert x != 1",
+        False,
+    ),
+    (
+        "return then try finally body",
+        "    return\n    try:\n        pass\n    finally:\n        assert x != 1",
+        False,
+    ),
+    (
+        "return then both if branches",
+        "    return\n    if flag:\n        assert x != 1\n    else:\n        assert x != 2",
+        False,
+    ),
+    (
+        "return then match case",
+        "    return\n    match x:\n        case 1:\n            assert x != 1",
+        False,
+    ),
+    (
+        "return then for body",
+        "    return\n    for _ in [1]:\n        assert x != 1",
+        False,
+    ),
+    # Deeply nested under a dead compound statement: the reachability of the
+    # assert follows the *enclosing* block, not just its immediate parent.
+    (
+        "return then nested in while try",
+        (
+            "    return\n    for _ in [1]:\n        while True:\n"
+            "            try:\n                assert x != 1\n"
+            "            except AssertionError:\n                pass"
+        ),
+        False,
+    ),
+    # A class body after a `return` is never executed either, so the assert it
+    # holds is just as dead as one under a plain `if`.
+    (
+        "return then class body",
+        "    return\n    class Inner:\n        assert x != 1",
+        False,
+    ),
+    # #400, the same defeat *inside* a handler block rather than before one.
+    # A `finally` and an `else` are separate statement lists, so a rule that
+    # only ever scans a `body` misses the transfer that sits in the sibling
+    # list directly before the assert.
+    (
+        "return in finally then assert",
+        "    try:\n        pass\n    finally:\n        return\n        assert x != 1",
+        False,
+    ),
+    (
+        "return in else then assert",
+        "    if flag:\n        pass\n    else:\n        return\n        assert x != 1",
+        False,
+    ),
+    # The live controls for #400. A transfer nested in an earlier statement's
+    # own body is conditional with respect to the enclosing block, so it says
+    # nothing about what follows -- and `break` / `continue` bind to the
+    # nearest loop, not to the function.
+    (
+        "guarded continue then assert",
+        ("    for _ in [1]:\n        if flag:\n            continue\n        assert x != 1"),
+        True,
+    ),
+    (
+        "guarded break then assert",
+        "    for _ in [1]:\n        if flag:\n            break\n        assert x != 1",
+        True,
+    ),
+    (
+        "loop with break then assert",
+        "    for _ in [1]:\n        if flag:\n            break\n    assert x != 1",
+        True,
+    ),
+    ("guarded return then assert", "    if flag:\n        return\n    assert x != 1", True),
+    (
+        "guarded raise then assert",
+        "    if flag:\n        raise ValueError\n    assert x != 1",
+        True,
+    ),
+    (
+        "return in try then assert",
+        "    try:\n        return\n    except Exception:\n        pass\n    assert x != 1",
+        True,
+    ),
+    ("plain live assert", "    assert x != 1", True),
 )
 
 
@@ -619,6 +729,63 @@ def test_reachability_rejects_exactly_the_shapes_that_cannot_fail(label, body, l
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+
+
+#: #400 also has to be *positional*: one function can hold a live assert and a
+#: dead one, and answering uniformly either way certifies a real contract as
+#: defeated or hides a defeated one. These rows are checked in source order, so
+#: they catch a rule that gets the direction right on a whole function but the
+#: cut point wrong within it.
+MIXED_REACHABILITY_SHAPES = (
+    (
+        "live then return then dead",
+        "    assert x != 1\n    return\n    assert x != 2",
+        (True, False),
+    ),
+    (
+        "live in with then return then dead",
+        "    with helper():\n        assert x != 1\n    return\n    assert x != 2",
+        (True, False),
+    ),
+    (
+        "dead with body then live after return in branch",
+        "    with helper():\n        return\n        assert x != 1\n    assert x != 2",
+        (False, True),
+    ),
+    (
+        "two live asserts around a helper call",
+        "    assert x != 1\n    helper()\n    assert x != 2",
+        (True, True),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    MIXED_REACHABILITY_SHAPES,
+    ids=[shape[0] for shape in MIXED_REACHABILITY_SHAPES],
+)
+def test_reachability_decides_each_assert_by_its_own_position(label, body, expected):
+    """A live and a dead assert in one function must get opposite verdicts.
+
+    The single-verdict rows above cannot express this: a rule that answers one
+    way for the whole function would satisfy either all-True or all-False
+    fixtures while being wrong about half the asserts in the mixed case. The
+    rows are ordered by source position, so a rule that picks the wrong
+    cut point is caught rather than averaged away.
+    """
+    source = "def probe(x, flag, record, helper):\n" + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = sorted(
+        (node for node in ast.walk(function) if isinstance(node, ast.Assert)),
+        key=lambda node: node.lineno,
+    )
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts, expected {len(expected)}"
+    )
+    results = tuple(_is_enforced(function, node, tree) for node in asserts)
+    assert results == expected, f"{label}: expected {expected}, got {results}"
 
 
 #: The residual defeats of #287: every spelling that keeps the assert in the AST
@@ -3126,6 +3293,299 @@ def test_a_carrier_inside_the_reading_header_leaves_the_name_unenterable(
     assert results == expected, (
         f"{label}: expected verdicts {expected}, got {results}. A carrier that "
         f"cannot be entered makes the assert unreachable, not load-bearing."
+    )
+
+
+#: #367: two stores that share a top-level statement are *tied*, and the
+#: original resolver broke the tie by walk position -- a question the source
+#: does not answer. `max` returns the first maximal entry, so a `for`/`else`
+#: pair resolved to whichever branch the walk reached first, which is fixed
+#: regardless of which branch actually runs.
+#:
+#: The `expected` column is the exact per-assert verdict list, never
+#: ``all(...)``: collapsing it to the first verdict is what let the original
+#: defect ship, and the whole point of a tie rule is that *each* store in the
+#: tie is a candidate the resolver must decline.
+TIED_STORE_ROWS = (
+    # #395. This row's comment used to claim that `items == []` runs the `else`
+    # and binds a `nullcontext` (assert FIRES) while `items == [1]` runs the
+    # body and binds a `suppress` (assert swallowed), so that "the interpreter
+    # disagrees with itself" and the name had to be declined.
+    #
+    # That was false. A `for`'s `else` runs when the loop completes *without
+    # `break`* -- for any iteration count, including zero. It is not the "the
+    # loop was empty" branch:
+    #
+    #     items == []   ->  else runs
+    #     items == [1]  ->  body runs, THEN the else runs
+    #
+    # So `first` is the `nullcontext` on every input, the `with` enters a real
+    # context manager, and `assert x != 1` FIRES whenever `x == 1`. The
+    # correct verdict is `True`, and both `ed9d9b0` and this branch answered
+    # `False` -- a live contract certified as disarmed, the damaging direction
+    # per #308 criterion 1.
+    #
+    # The row is now the shape it was always meant to be: the two stores tie on
+    # `_binding_order`, and the tie is NOT ambiguous, because a loop `else` is
+    # a continuation rather than a peer branch. The later write settles the
+    # name. `_loop_else_always_runs` is what decides it, and the shape that
+    # genuinely needs declining -- the same loop with a `break`, where the two
+    # arms really are exclusive -- is the row below.
+    (
+        "a for/else pair whose else runs on every path settles the name",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [True],
+    ),
+    # The same loop, but the body can `break` out of it. Then the `else` runs
+    # only when the iterable is empty, the two arms really are exclusive, and
+    # which one ran is an input:
+    #
+    #     items == []   ->  else runs, binds a nullcontext, assert FIRES
+    #     items == [1]  ->  body runs, breaks, binds a suppress, swallowed
+    #
+    # The interpreter disagrees with itself here, so no single verdict is
+    # right and the name must be declined -- a defeat, the safe side. This is
+    # the row the first cut of #367 believed it was pinning; it is the one
+    # that actually earns the decline.
+    (
+        "a for/else pair the loop can break out of is declined",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        break\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # A `break` inside a NESTED loop belongs to that inner loop, so it cannot
+    # suppress the outer loop's `else` and the outer store still settles the
+    # name. The rule walks the outer body without descending into an inner
+    # loop, and this row is what keeps that walk honest: a version that
+    # counted every `break` in the subtree would decline here and report this
+    # live assert defeated.
+    (
+        "a break in a nested loop does not suppress the outer loop's else",
+        (
+            "    for item in items:\n"
+            "        for inner in range(2):\n"
+            "            if inner:\n"
+            "                break\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [True],
+    ),
+    # The row above is the easy half of the nested-loop rule, and on its own it
+    # is exactly what makes the hard half look safe. `_breaks_own_loop` stops
+    # at a nested loop because a `break` in its BODY exits the inner loop. A
+    # nested loop's `else`, though, is a plain block rather than a loop, so a
+    # `break` written there binds to the ENCLOSING loop:
+    #
+    #     items == []  ->  outer body never runs, outer else runs,
+    #                     `first` is a nullcontext, assert FIRES
+    #     items == [1] ->  inner loop completes, its else runs `break`,
+    #                     the outer else is SKIPPED, `first` is still the
+    #                     suppress, assert SWALLOWED
+    #
+    # So the outer `else` is NOT guaranteed, the tie between the two stores is
+    # genuinely input-dependent, and the name has to be declined. Reading a
+    # nested loop as a blanket "cannot break the loop we are asking about"
+    # called the outer `else` guaranteed, answered `True`, and certified the
+    # swallowed assert ENFORCED -- head-worse-than-base, and the damaging
+    # direction per #308 criterion 1.
+    (
+        "a break in a nested loop's else does suppress the outer loop's else",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        for inner in range(1):\n"
+            "            pass\n"
+            "        else:\n"
+            "            break\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The same defect reached through `while`, whose `else` is the same kind of
+    # plain block. Without this row the rule could be repaired for `for` only
+    # and the suite would still be green.
+    (
+        "a break in a nested while's else does suppress the outer loop's else",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        inner = 0\n"
+            "        while inner < 1:\n"
+            "            inner += 1\n"
+            "        else:\n"
+            "            break\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The control for the two rows above: a nested loop that does NOT break out
+    # leaves the outer `else` guaranteed, so the outer store still settles the
+    # name and the assert stays live. If the repair were "any nested loop makes
+    # the outer `else` undecidable", this row would report `False` and fail.
+    (
+        "CONTROL a nested loop that never breaks leaves the outer else settled",
+        (
+            "    for item in items:\n"
+            "        first = contextlib.suppress(AssertionError)\n"
+            "        for inner in range(1):\n"
+            "            pass\n"
+            "    else:\n"
+            "        first = contextlib.nullcontext()\n"
+            "    with (cs := first):\n"
+            "        assert x != 1"
+        ),
+        [True],
+    ),
+    # Two stores in one top-level statement where NEITHER is unconditional.
+    # `max` would answer the `suppress` simply because it is walked first, but
+    # neither store provably ran, so the name is declined by the *competing*
+    # rule -- the same safe side, reached before the tie is ever formed. This
+    # row is here to pin that the two paths agree, since #367's tie handling
+    # sits immediately after them and a change to either could drift.
+    (
+        "two conditional stores in one top-level statement",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        if flag:\n"
+            "            cs = contextlib.suppress(ValueError)\n"
+            "        else:\n"
+            "            cs = contextlib.suppress(TypeError)\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # #367's own control, and the row that re-opens #323 if the mixed-tie rule
+    # is written as "any tie is ambiguous". The walrus is unconditional and
+    # runs on every path; the `nullcontext` assignment is later in the same
+    # block. Once the body has run the name IS the `nullcontext`, so the
+    # following header is live and must stay live.
+    (
+        "CONTROL an unconditional walrus beside a later rebind in one block",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # The row that makes the *control* above discriminating rather than
+    # accidental. In the control the walk happens to reach the `nullcontext`
+    # store first, so a resolver that read the first maximal entry would reach
+    # the same answer and the row would pass for the wrong reason. Here the
+    # walk reaches the carried `suppress` walrus first, so picking the first
+    # maximal entry resurrects the stale suppressor and reports the live
+    # second assert defeated -- the damaging direction. Only the mixed-tie
+    # rule, which returns the *conditional* member, answers `True`.
+    #
+    # Both stores sit in the SAME top-level statement, which is what makes
+    # them a tie: the walrus is the `with` header's own named expression
+    # (unconditional -- the header is evaluated on every path that reaches it)
+    # and the `nullcontext` assignment is in that header's own body.
+    (
+        "a carried suppressor walked before its in-block rebind",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    with (cs := base):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        assert x != 1\n"
+            "    with cs:\n"
+            "        assert x != 2"
+        ),
+        [False, True],
+    ),
+    # The mixed tie where the later write cannot be entered at all. `cs` is a
+    # module by the time the second header reads it, so the assert under that
+    # header is unreachable -- and the FIRST assert, under the walrus header,
+    # really is swallowed. Both are `False`, from two different rules: the
+    # first from the alias walk, the second from the dead-entry rule that
+    # #367 makes reachable by recognising the in-header store as settled.
+    (
+        "an unconditional walrus beside a later carrier in one block",
+        (
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        import os as cs\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    TIED_STORE_ROWS,
+    ids=[row[0] for row in TIED_STORE_ROWS],
+)
+def test_two_stores_sharing_one_statement_resolve_without_walk_order(label, body, expected):
+    """A binding tie is declined, never broken by where the walk reached.
+
+    #367. `_binding_order` keys a store by the top-level statement containing
+    it, so two stores inside one statement compare equal *by construction*.
+    Reading that equality as "the first one wins" answers a question the
+    source does not pose: which of two stores in the same block ran last is
+    decided by control flow, not by the order `ast.walk` happened to visit
+    them.
+
+    The rule here is therefore split, and the split is the whole repair:
+
+    * every tied member conditional -- none of them provably ran, so the name
+      is declined and reported as a defeat (#308 criterion 1, the safe side);
+    * a mixed tie -- an unconditional store and a conditional one share the
+      block, the unconditional one ran on every path, and the conditional one
+      is the later *write*, so the value read afterwards is the conditional
+      one's. That is #323's supersession, not an ambiguity, and treating it as
+      one would drop the `CONTROL` row's live assert.
+
+    A mixed tie can still retire the name entirely, when the later write is
+    something that cannot be entered. The last row is that case: an
+    `import ... as cs` in the same block makes the following header raise
+    `TypeError`, so its assert is unreachable. The carrier is recorded as a
+    runtime kind and the dead-entry rule reports it, which is what keeps the
+    row from certifying a `TypeError`-raising header as load-bearing.
+    """
+    source = (
+        "def outer(x, flag, helper, items):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + body + "\n"
+    )
+    tree = ast.parse(source)
+    outer = tree.body[0]
+    asserts = [node for node in ast.walk(outer) if isinstance(node, ast.Assert)]
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts but the row "
+        f"expects {len(expected)} verdicts"
+    )
+    results = [_is_enforced(outer, node, tree) for node in asserts]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A tie must be "
+        f"declined, and a mixed tie must resolve to the later write."
     )
 
 
