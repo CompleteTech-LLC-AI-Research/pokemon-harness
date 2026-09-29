@@ -4128,13 +4128,36 @@ def _cannot_fall_through(node):
     """
     if not isinstance(node, (ast.Try, ast.TryStar)):
         return False
-    if node.handlers and all(_block_ends_in_return(handler.body) for handler in node.handlers):
+    if (
+        node.handlers
+        and not _block_falls_through(node.body)
+        and all(_block_ends_in_return(handler.body) for handler in node.handlers)
+    ):
         # Every handler returns, so the exception path leaves too. `all`, not
         # `any`: with two handlers where only one falls through, the falling
         # one is a real path out of the `try`, so the statements after it
         # stay live. A handler ending in a bare `raise` does not count: it
         # only fires when an exception occurred, and the no-exception path
         # still resumes after the `try`.
+        #
+        # The `_block_falls_through` guard is load-bearing. Without it, a body
+        # that simply *completes* is read as dead even though it resumes after
+        # the `try` and the handlers never run at all:
+        #
+        #     def outer(x):
+        #         try:
+        #             pass                      # no exception, ever
+        #         except ValueError:
+        #             return
+        #         except TypeError:
+        #             return
+        #         assert x != 1                # reached
+        #
+        # That is the over-condemn direction: a live contract dropped from the
+        # sentinel's view, which the #308 criterion counts as its own failure.
+        # The guard is what keeps the clause symmetric with the re-raise
+        # branch below, which already requires the body to have no
+        # falling-off-the-end path before the handlers can be the sole exit.
         return True
     if _block_ends_in_return(node.body):
         return True

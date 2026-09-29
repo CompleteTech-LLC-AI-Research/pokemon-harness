@@ -739,6 +739,40 @@ UNREACHABLE_SHAPES = (
         ),
         True,
     ),
+    # Every handler returns, but the `try` body COMPLETES. Nothing is ever
+    # raised, so no handler ever runs, and control leaves the `try` at the
+    # bottom of the body exactly as it would for a bare `pass`. The assert is
+    # reached. This is the live control for the `_block_falls_through` guard
+    # on the "every handler returns" clause: without the guard, the clause
+    # fires off the handlers alone and this row flips to `False`, dropping a
+    # live contract from the sentinel's view -- the #308 over-condemn
+    # direction, and the mirror image of the dead-row errors #402 exists to
+    # close.
+    (
+        "all handlers return but body completes",
+        (
+            "    try:\n        pass\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        return\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
+    # The same guard, with a body that calls a helper rather than `pass`. A
+    # call that does not raise is a completion just as much as `pass` is, so
+    # the assert is still reached. This is what stops the guard from being
+    # satisfied by accident: the clause has to consult the body's
+    # falling-off-the-end path, not merely its last statement's syntactic kind.
+    (
+        "all handlers return but helper completes",
+        (
+            "    try:\n        helper()\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        return\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
     # A single handler that re-raises is also live: the re-raise only happens
     # when an exception occurred, so the no-exception path still reaches the
     # assert below. `raise` in a handler is not a fall-through.
