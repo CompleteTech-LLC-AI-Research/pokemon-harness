@@ -3712,7 +3712,7 @@ def _statement_always_runs(statement, function):
     return all(
         _is_always_true_branch(block, statement, function) or not _block_never_runs(block, function)
         for block in blocks
-    )
+    ) and not any(_statement_in_unreachable_arm(block, statement, function) for block in blocks)
 
 
 def _is_always_true_branch(block, statement, function):
@@ -3730,7 +3730,77 @@ def _block_never_runs(block, function):
         return _condition_is_never_true(block.test, function)
     if isinstance(block, ast.While):
         return _condition_is_never_true(block.test, function)
-    return isinstance(block, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(block.iter)
+    if isinstance(block, (ast.For, ast.AsyncFor)):
+        return (
+            _is_empty_literal_iterable(block.iter)
+            or _is_empty_literal_string(block.iter)
+            or _is_zero_argument_empty_container(block.iter, function)
+        )
+    return False
+
+
+def _statement_in_unreachable_arm(block, statement, function=None):
+    """Is ``statement`` in an arm of ``block`` that can never be taken?
+
+    An ``else`` arm runs exactly when its ``if`` does **not**, so a store
+    written in the ``else`` of an always-true test never runs:
+
+        if True:
+            if True:
+                pass
+            else:
+                cs = list()          # the inner `if` is true, so this is dead
+
+    The condition itself is true, which is what made the enclosing block look
+    like an always-true branch, and the dead arm was then read as a store that
+    always runs. `cs` stayed the `nullcontext` it was before the branch, so a
+    header CPython enters came back DEAD.
+
+    ``function`` is the scope this condition appears in, for the same reason
+    :func:`_condition_is_always_true` takes it: the call spelling of a
+    literal is only that literal while the name reaches the *builtin*, so a
+    scope that rebinds it keeps the arm undecided.
+
+    An ``elif`` needs no walk of its own. It is an ``else`` whose body is
+    another ``if``, so a chain of always-true tests leaves every ``elif``
+    dead, and the check below already covers everything under it:
+
+        if True:
+            pass
+        elif True:
+            cs = list()          # reached only when the test above is false
+
+    An earlier version recursed into that nested ``if`` to read its own test,
+    which was dead code: the direct check subsumes every ``elif`` body. The
+    recursion was also unsound, because it fell back on the *parent's* test
+    and so labelled a reachable `elif False:` arm dead.
+
+    The always-true test above is redundant for the one caller there is. If
+    some enclosing ``if`` has an always-true test *and* this ``if`` has one
+    too, and the store is in the second's ``else``, then the second's ``if``
+    is the always-true branch holding the store, so the first cannot also hold
+    it -- and the question the test would answer is therefore settled either
+    way. It is kept because it is what makes the helper correct by itself.
+    """
+    if not isinstance(block, ast.If) or not _condition_is_always_true(block.test, function):
+        # A non-`if`, or an `if` that can fail: its whole `else` arm is a
+        # runnable one and there is nothing dead to report. The always-true
+        # test is **redundant** in the `_statement_always_runs` caller, and
+        # that is deliberate -- it keeps the helper answerable on its own.
+        return False
+    return _contains_any(block.orelse, statement)
+
+
+def _is_empty_literal_string(node):
+    """Is this iterable a string literal that is empty, so the loop never runs?
+
+    ``for _ in "":`` is the same never-run body as ``for _ in ():`` -- the
+    string has no elements to yield -- but it is an ``ast.Constant``, not one
+    of the container literals :func:`_is_empty_literal_iterable` matches, so
+    that helper answered `False` and the body was read as running. ``"a"`` has
+    one element, so it is *not* empty and its body does run.
+    """
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and not node.value
 
 
 def _is_bare_name(target, name):

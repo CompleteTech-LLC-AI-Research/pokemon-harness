@@ -4907,16 +4907,160 @@ def test_a_constructor_callee_shadowed_outside_the_body_is_reported_live(
     )
 
 
-#: The round-6 review's findings against `5535135`. Three were **false-dead**
-#: -- the tool reported a header DEAD where CPython enters it, which is the
-#: damaging direction because it certifies a reachable assert as swallowed --
-#: and one was a residual **false-live** inside a single module block.
+#: The round-8 review's findings against `31e3b22`. Both are holes in the
+#: round-7 narrowing, and both are the same shape of mistake: a rule that
+#: proved one part of a path and then stopped looking.
 #:
-#: Every row is *executed* first, with `x=2` so that `assert x != 1` is TRUE.
-#: A clean return therefore proves the with-body was ENTERED (LIVE) and any
-#: exception proves it was not (DEAD). That is the opposite of an
-#: `x=1`-plus-`except AssertionError` harness, which cannot tell a body that
-#: was entered from one whose failure a suppressor ate.
+#: The obvious control for the first finding -- a store in the `else` of a
+#: never-true `if`, whose arm *is* taken -- is deliberately absent. That
+#: spelling is a **pre-existing** false-live: the carrier is bound at module
+#: scope, and a settled `cs = list()` makes the header raise exactly as
+#: `cs = list()` written straight at module scope does. It answers identically
+#: on `fee41bf`, `5535135`, `b90f985` and `31e3b22`, so it is a module-carrier
+#: limitation rather than a gap in this rule, and pinning it here would assert
+#: a fix this series has not made. `test_a_block_nested_module_carrier_is_still_declined`
+#: is where that limitation is already recorded.
+ROUND_EIGHT_SOURCES = (
+    # Review finding 1. The `if True:` above made the block look like an
+    # always-true branch, and the store in the *unreachable* `else` beside the
+    # inner `if True:` was then read as one that always runs. It never does:
+    # the inner condition is true, so the `else` is skipped, and `cs` is still
+    # the `nullcontext()` bound above the branch.
+    (
+        "a store in the unreachable else arm of an always-true test",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if True:\n"
+            "    if True:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same hole one `elif` deeper, which is an `else` whose body is another
+    # `if` and so is reached through the same test.
+    (
+        "a store in the else arm of a nested always-true test",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if True:\n"
+            "    if True:\n"
+            "        if True:\n"
+            "            pass\n"
+            "        else:\n"
+            "            cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control on the `elif` side. An `elif` is an `else` whose
+    # body is another `if`, and the whole arm is skipped while the test above
+    # it holds -- so behind `if False:` even a *later* `elif` is dead and the
+    # header is still the `nullcontext`. The trailing `else` restores a real
+    # manager, so the store in the dead `elif` arm changes nothing and the
+    # header is entered. A rule that walked into the `elif` through the
+    # parent's test would settle that store and report this header DEAD.
+    (
+        "a store in an elif arm behind a never-true elif",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    cs = list()\n"
+            "elif True:\n"
+            "    pass\n"
+            "elif False:\n"
+            "    cs = list()\n"
+            "else:\n"
+            "    cs = nullcontext()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same hole reached through an `elif` rather than a plain `else`, and
+    # the row that fails if the arm is not covered at all. The test above is
+    # true, so the `elif` never runs, `cs` is still the `nullcontext` bound at
+    # the top, and the header is entered.
+    (
+        "a store in an elif arm behind a chain of always-true tests",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if True:\n"
+            "    pass\n"
+            "elif True:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Review finding 2. A string literal is not one of the container literals
+    # the empty-iterable test matched, so `for _ in "":` -- which yields
+    # nothing, exactly like `for _ in ():` -- was read as a body that runs.
+    (
+        "an always-true branch inside a loop over an empty string",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            'for _ in "":\n'
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same hole by the zero-argument `set()` spelling, which is a call
+    # rather than a literal and so is a third shape the loop test had to
+    # cover. `set([1])` is *not* empty, which is why the argument list is
+    # checked rather than the callee name alone.
+    (
+        "an always-true branch inside a loop over an empty set call",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "for _ in set():\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control. `"a"` has one element, so the loop body *does* run
+    # and the store settles the name. Reading every string as empty would
+    # report this header LIVE.
+    (
+        "an always-true branch inside a loop over a non-empty string",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            'for _ in "a":\n'
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
 #: The round-7 review's findings against `b90f985`. These are **regressions the
 #: round-6 repairs introduced**, each caught by execution at `x=2` and each
 #: pinned here with a positive control beside it.
@@ -5014,6 +5158,16 @@ ROUND_SEVEN_SOURCES = (
 )
 
 
+#: The round-6 review's findings against `5535135`. Three were **false-dead**
+#: -- the tool reported a header DEAD where CPython enters it, which is the
+#: damaging direction because it certifies a reachable assert as swallowed --
+#: and one was a residual **false-live** inside a single module block.
+#:
+#: Every row is *executed* first, with `x=2` so that `assert x != 1` is TRUE.
+#: A clean return therefore proves the with-body was ENTERED (LIVE) and any
+#: exception proves it was not (DEAD). That is the opposite of an
+#: `x=1`-plus-`except AssertionError` harness, which cannot tell a body that
+#: was entered from one whose failure a suppressor ate.
 ROUND_SIX_SOURCES = (
     # Finding 1. The call is inside `outer`'s body, and a function body is only
     # reached *after the whole module has executed*. The `def list()` below has
@@ -5179,8 +5333,8 @@ def _fixture_is_entered(label, source):
 
 @pytest.mark.parametrize(
     ("label", "source", "expected_live"),
-    (*ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES),
-    ids=[shape[0] for shape in (*ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES)],
+    (*ROUND_EIGHT_SOURCES, *ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES),
+    ids=[shape[0] for shape in (*ROUND_EIGHT_SOURCES, *ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES)],
 )
 def test_module_scope_order_scope_and_builtins_reading(label, source, expected_live):
     """A function-body call, a handler body and a rebound ``builtins`` are read right.
