@@ -3175,11 +3175,40 @@ def _dotted_class_name(expression):
     Only a plain ``Name`` or an ``Attribute`` chain qualifies. A subscript or a
     call is not statically readable as a class, and guessing would put the
     over-breadth risk back.
+
+    #330/#339. One call shape is an exception, and it is the shape the
+    # ``with`` header itself writes:
+
+        with Suppressor():        # constructed inline, never bound to a name
+            assert 1 == 2
+
+    The user-defined-``__exit__`` rule reached its class only through a *name
+    binding* (``helper = Suppressor()``), so the inline spelling returned
+    ``None`` here and the assert stayed ``enforced`` while the interpreter
+    swallowed it. Executed, on this tree and on master:
+
+        checker=LIVE  cpython=DEAD        # with Suppressor():
+        checker=DEAD  cpython=DEAD        # helper = Suppressor(); with helper:
+
+    The alias spelling already worked; only the inline one was missed, which is
+    why the three issues read as separate but are one hole.
+
+    The unwrapping is deliberately one step and only for a *bare constructor*:
+    a ``Name`` called directly, or an ``Attribute`` chain called directly. A
+    factory (``make_suppressor()``) is still unreadable, because an arbitrary
+    call is not known to return an instance of the class it is named after.
+    Every downstream gate is unchanged -- the class must still be defined in
+    the file under judgement, must define ``__exit__`` there, and that
+    ``__exit__`` must still provably return truthy -- so criterion 3 keeps an
+    ordinary manager on the live side of the line.
     """
     if isinstance(expression, ast.Name):
         return expression.id
     if isinstance(expression, ast.Attribute):
         return ast.unparse(expression)
+    # #330/#339. The header constructs the suppressor where it uses it.
+    if isinstance(expression, ast.Call):
+        return _dotted_class_name(expression.func)
     return None
 
 
