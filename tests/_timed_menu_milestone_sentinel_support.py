@@ -85,6 +85,16 @@ LOUD_DUNDER = object()
 #: cycle (``a = b; b = a``) terminates instead of recursing.
 _ALIAS_CHAIN_LIMIT = 32
 
+#: A store that binds a name without a right-hand side this module can read
+#: (#359). It is a distinct marker rather than ``None`` because ``None`` means
+#: "resolved, and the value is not a suppressor" -- a store that *supersedes* a
+#: carried one and retires it. Collapsing the two is what made a `for` target
+#: invisible and left a swallowed assert reported as live.
+UNREADABLE_VALUE = object()
+
+#: Internal "this target does not bind `name`" signal, distinct from a value.
+_NO_MATCH = object()
+
 #: Dotted paths whose call turns a caught exception into a *pass*. This is a
 #: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
 #: load-bearing, so the two sets stay separate rather than being merged:
@@ -220,6 +230,17 @@ def _count_comparison(tree, node, comparison):
 
 
 def _enclosing_function(tree, target):
+    """The *name* of the function that owns ``target`` in ``tree``.
+
+    Name is load-bearing here: :func:`count_comparisons` keys its triples by
+    it, and :func:`retention_sites_observed` filters on membership of
+    ``RETENTION_COUNT_SITES``. A redefinition of this name with a different
+    signature silently returns ``None`` for every lookup and empties the
+    observed set, which fails the retention-count pins as "observed []" with
+    no other symptom. The #355 work needs an enclosing-function *node* for a
+    different purpose and lives in :func:`_nonlocal_parent_function`; do not
+    fold the two together.
+    """
     for func in tree.body:
         if isinstance(func, ast.FunctionDef) and any(child is target for child in ast.walk(func)):
             return func.name
@@ -1404,7 +1425,27 @@ def _store_bindings(function, bound):
                 (
                     statement,
                     _deref_alias(
-                        value,
+                        # #405. A destructuring target binds one *element* of
+                        # the right-hand side, not the container, so the
+                        # suppressor question has to be asked of the element
+                        # that actually lands on this name. Asking it of the
+                        # container makes the call look unreadable and reports
+                        # a swallowed assert as live:
+                        #
+                        #     cs, other = (contextlib.suppress(AssertionError), 2)
+                        #     with cs:            # `cs` IS the suppressor
+                        #         assert x != 1  # swallowed
+                        #
+                        # #412's enterability question (#388) is the opposite
+                        # one and still needs the whole container, so the
+                        # reduction is applied here only, and
+                        # `_store_may_bind_enterable` recovers the element from
+                        # the statement's own target list rather than from this
+                        # slot.
+                        _value_bound_by(targets, value, name)
+                        if isinstance(statement, ast.Assign)
+                        and not _target_is_bare_name(statement, name)
+                        else value,
                         raw_values,
                         orders,
                         _binding_order(function, statement),
@@ -2006,6 +2047,23 @@ def _deref_alias(value, raw_values, orders=None, index=None, target=None, functi
         revisiting = current.id in seen
         if not revisiting:
             seen.add(current.id)
+        # The store being resolved is the one whose right-hand side *is* this
+        # name, so it can be recognised before the walk rather than after.
+        # Waiting until after the hop leaves the exclusion unused on the first
+        # step, and the store being resolved then competes on equal terms with
+        # any other store sharing its order:
+        #
+        #     for cs in (contextlib.suppress(AssertionError),):
+        #         with (cs := cs):    # both stores sort at the `for`
+        #             assert x != 1
+        #
+        # The loop target and the walrus are one top-level statement, so the
+        # exclusion has to be in place before :func:`_last_store_before` sees
+        # them; otherwise #367's tie branch declines the name and the read
+        # answers `AMBIGUOUS_SUPPRESSOR` for both a suppressor and a
+        # `nullcontext` element.
+        if origin is None and current.id == target:
+            origin = next((e for e in entries if e[1] is current), None)
         chosen = _last_store_before(
             entries,
             orders,
@@ -2203,6 +2261,37 @@ def _raw_store_values(function):
     damaging cell rather than removing it -- and its after-loop variant, where
     the *last* element is the right answer, needs the in-body/after-loop
     distinction designed rather than guessed at. Neither is settled here.
+    A store that binds a name *without* recording a value for it is not simply
+    absent from this table: it is recorded with :data:`UNREADABLE_VALUE`. The
+    distinction is load-bearing and was the whole of #359.
+
+        for cs in (contextlib.suppress(AssertionError),):
+            with (cs := cs):        # `cs` is the loop's live value
+                assert 1 == 2       # swallowed
+
+    A ``for`` target used to contribute *no* entry at all, so the walrus's
+    right-hand side found nothing to adopt, stayed an unreadable ``ast.Name``,
+    and the header was judged live -- a swallowed assert certified as
+    load-bearing. A missing entry has to mean "this name is not bound to
+    anything this table knows", which is a claim the table cannot make: the
+    loop *did* bind it. Recording the store with an explicitly unreadable value
+    lets :func:`_deref_alias` decline instead of guessing, which is the safe
+    direction per #308 criterion 1.
+
+    ``with ... as``, ``except ... as`` and a ``match`` capture bind a name the
+    same way, and are handled the same way. A ``del`` is different: it
+    *unbinds* the name, which is what #336's reachability question is about,
+    and it is deliberately left out of this table so the two do not blur.
+
+    Destructuring is handled per-target rather than per-statement. The old code
+    gave every name the whole right-hand side:
+
+        cs, other = (contextlib.suppress(AssertionError), 2)
+
+    so ``cs`` was recorded as the ``Tuple`` rather than as the suppressor
+    inside it, ``_is_readable_suppressor`` rejected the container, and a
+    swallowed assert was reported live. :func:`_value_bound_by` picks the
+    element that actually lands on each name.
 
     Each entry is the ``(statement, right-hand side)`` pair rather than the
     right-hand side alone. The statement is what :func:`_last_store_before`
@@ -2223,22 +2312,37 @@ def _raw_store_values(function):
             or (isinstance(statement, ast.NamedExpr))
         ):
             targets, value = [statement.target], statement.value
-        # #370. A `for` target binds the current element of the iterable, so it
-        # does carry a value. Recording it is only sound when the iterable is a
-        # literal with a single element: then every iteration binds the same
-        # object and a later read is unambiguous. A multi-element literal is
-        # left unrecorded, because inside the body the target differs per
+        # #370. A `for` target binds the current element of the iterable, so
+        # it does carry a value. Recording it is only sound when the iterable
+        # is a literal with a single element: then every iteration binds the
+        # same object and a later read is unambiguous. A multi-element literal
+        # is left unrecorded, because inside the body the target differs per
         # iteration and no single element is the answer -- see the docstring.
-        elif isinstance(statement, ast.For):
+        # #385 keeps the after-loop case on its own path
+        # (`_loop_target_bindings_after_loop`) rather than by widening this one,
+        # which would put a per-iteration value back into an in-body answer.
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
             element = _single_loop_element(statement.iter)
             if element is None:
                 continue
             # `ast.For.target` is a single node, not a list of them.
             targets, value = [statement.target], element
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            targets = [
+                item.optional_vars
+                for item in statement.items
+                if item.optional_vars is not None
+            ]
+            value = UNREADABLE_VALUE
+        elif isinstance(statement, ast.ExceptHandler):
+            if statement.name is None:
+                continue
+            targets = [ast.Name(id=statement.name, ctx=ast.Store())]
+            value = UNREADABLE_VALUE
         else:
             continue
         for name in _store_target_names(targets):
-            raw.setdefault(name, []).append((statement, value))
+            raw.setdefault(name, []).append((statement, _value_bound_by(targets, value, name)))
     return raw
 
 
@@ -2620,7 +2724,127 @@ def _store_precedes_header_in_shared_block(name, loop, header, raw_values, funct
     return False
 
 
-def _aliased_suppressions(node, function, bound):
+def _value_bound_by(targets, value, name):
+    """The right-hand side that actually lands on ``name``.
+
+    For a plain target the whole right-hand side is the value, so this is the
+    identity. Destructuring is the only case that needs real work:
+
+        cs, other = (contextlib.suppress(AssertionError), 2)
+        [cs] = [contextlib.suppress(AssertionError)]
+        cs, *rest = (suppressor, 2, 3)
+
+    Returning the container itself made every one of those spell the
+    suppressor unreadable, and an unreadable value is indistinguishable from
+    "not a suppressor", so the assert below it was certified live. Matching the
+    target's position against the value's elements recovers the real value.
+
+    A starred target collects the remainder, so its position is not an index;
+    that case, and any shape where the correspondence cannot be established
+    (a nested target whose parent did not match, a length mismatch), returns
+    :data:`UNREADABLE_VALUE` so the caller declines rather than guessing.
+
+    A target that is not itself a container is the identity case and never
+    reaches :func:`_element_for_target`:
+
+        cs = contextlib.suppress(AssertionError)
+        [cs] = [contextlib.suppress(AssertionError)]
+
+    Both bind ``cs`` from the right-hand side, but only the second picks an
+    element out of it. The first has to be returned whole, which is what keeps
+    an ordinary store resolving to its own ``suppress`` call.
+    """
+    if value is UNREADABLE_VALUE or not isinstance(value, (ast.Tuple, ast.List)):
+        return value
+    for target in targets:
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            # A bare target takes the whole right-hand side, so this store
+            # cannot be the one that binds `name` by position -- unless it is
+            # the name itself, which is the identity case handled above.
+            if isinstance(target, ast.Name) and target.id == name:
+                return value
+            continue
+        bound = _element_for_target(target, value.elts, name)
+        if bound is not _NO_MATCH:
+            return bound
+    return UNREADABLE_VALUE
+
+
+def _element_for_target(target, elements, name):
+    """The element of ``elements`` that lands on ``name`` via ``target``.
+
+    Targets and value elements are walked in lockstep, because that is how
+    Python itself destructures: the n-th target receives the n-th element. A
+    nested tuple/list target recurses against the correspondingly nested
+    element, so ``(a, (b, c)) = (1, (2, 3))`` resolves ``b`` to ``2``.
+
+    A ``Starred`` target collects a *run* of elements rather than one, so the
+    positions after it are not the same indices as the targets. Python binds
+    them from the end: in ``a, *rest, cs = (1, 2, 3, 4)`` the star takes
+    ``2, 3`` and ``cs`` gets ``4``, the last element. Returning
+    :data:`UNREADABLE_VALUE` at the star instead would leave every target
+    after it unresolved, so
+
+        a, *rest, cs = (1, 2, 3, contextlib.suppress(AssertionError))
+        with cs:
+            assert x != 1          # swallowed
+
+    was reported ``enforced``. That is the damaging direction, and it is
+    reachable with nothing exotic. The star's own value stays unreadable --
+    it is a list, and a name bound to a list cannot be entered -- so the star
+    itself still declines.
+
+    A target/value length mismatch is likewise unreadable rather than an
+    index error, so a shape this function cannot model degrades to declining.
+
+    The walk is *structural* and must not flatten the target. Flattening
+    ``(a, (b, c))`` to three leaves and indexing one flat list of the value's
+    elements pairs ``b`` with the second element of the *outer* value rather
+    than with the first element of the *nested* one:
+
+        (other, (cs, third)) = (2, (suppress(AssertionError), 3))
+
+    There ``cs` lands on ``3`` that way, so the suppress call was read as
+    unreachable and the swallowed assert was reported live. Descending in step
+    with the value is what keeps the correspondence Python actually performs.
+    """
+    star = next(
+        (i for i, leaf in enumerate(target.elts) if isinstance(leaf, ast.Starred)),
+        None,
+    )
+    for index, leaf in enumerate(target.elts):
+        if index >= len(elements):
+            return UNREADABLE_VALUE
+        if star is not None and index > star:
+            # Targets after a star are bound from the END of the value, so the
+            # correspondence is measured from the other end: the last target
+            # takes the last element, the one before it the second-last, and so
+            # on. In `a, *rest, cs = (1, 2, 3, s)` that is `3 -> s`, which is
+            # the whole point -- `cs` really does receive the suppressor.
+            element_index = len(elements) - 1 - ((len(target.elts) - 1) - index)
+        else:
+            element_index = index
+        if isinstance(leaf, ast.Name):
+            if leaf.id == name:
+                return elements[element_index]
+            continue
+        if isinstance(leaf, ast.Starred):
+            if isinstance(leaf.value, ast.Name) and leaf.value.id == name:
+                return UNREADABLE_VALUE
+            continue
+        if isinstance(leaf, (ast.Tuple, ast.List)):
+            nested = elements[element_index]
+            if not isinstance(nested, (ast.Tuple, ast.List)):
+                return UNREADABLE_VALUE
+            bound = _element_for_target(leaf, nested.elts, name)
+            if bound is not _NO_MATCH:
+                return bound
+            continue
+        return UNREADABLE_VALUE
+    return _NO_MATCH
+
+
+def _aliased_suppressions(node, function, bound, owning=None):
     """Suppressors reached through a bare ``Name`` in a ``with`` header.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -2639,9 +2863,12 @@ def _aliased_suppressions(node, function, bound):
 
     Only names bound by an assignment that *precedes* the ``with`` qualify, and
     only when that assignment's right-hand side is a *readable* suppressor. A
-    name from an outer scope is deliberately not followed: assuming an
-    arbitrary call returns a suppressor would report live asserts as dead on
-    every context manager this check cannot trace.
+    name from an outer scope is deliberately not followed *by default*:
+    assuming an arbitrary call returns a suppressor would report live asserts
+    as dead on every context manager this check cannot trace. The one exception
+    is a name the function explicitly declares ``nonlocal``, which the language
+    guarantees refers to an enclosing function's binding -- see
+    :func:`_nonlocal_suppressors` and #355.
 
     An assignment expression in the header is the same defeat with the binding
     folded into the ``with`` itself:
@@ -2788,6 +3015,21 @@ def _aliased_suppressions(node, function, bound):
                         entered.append(AMBIGUOUS_SUPPRESSOR)
                     if _is_readable_suppressor(resolved, bound):
                         entered.append(resolved)
+                    elif isinstance(walrus.value, ast.Name):
+                        # A `nonlocal` self-alias resolves to nothing locally:
+                        #
+                        #     def inner():
+                        #         nonlocal cs
+                        #         with (cs := cs):   # `cs` is the parent's
+                        #             assert 1 == 2  # suppressor -> swallowed
+                        #
+                        # `raw_values` is built from `inner` alone, and
+                        # `inner` stores no `cs`, so the dereference above
+                        # returns the bare name. The enclosing function's
+                        # binding is the real answer (#355).
+                        entered.extend(
+                            _nonlocal_suppressors(walrus.value.id, function, bound, owning)
+                        )
                 # #367: `_NOT_A_SUPPRESSOR` is a *record*, not a value. It says
                 # the name is bound here and carries nothing this module can
                 # call a suppressor, which is what keeps the previous
@@ -2799,6 +3041,14 @@ def _aliased_suppressions(node, function, bound):
                     and live[expression.id] is not _NOT_A_SUPPRESSOR
                 ):
                     entered.append(live[expression.id])
+                elif isinstance(expression, ast.Name):
+                    # The name is not bound by anything this function can see.
+                    # A `nonlocal` declaration says it *is* bound in an
+                    # enclosing function, and this module walks one function
+                    # at a time, so a suppressor sitting in the parent scope is
+                    # invisible here even though the header really enters it
+                    # (#355).
+                    entered.extend(_nonlocal_suppressors(expression.id, function, bound, owning))
                 if not isinstance(expression, ast.Call) or not isinstance(
                     expression.func, ast.Attribute
                 ):
@@ -2885,6 +3135,115 @@ def _encloses(header, node):
     return any(child is node for child in ast.walk(header))
 
 
+def _nonlocal_declared(function):
+    """The names ``function`` declares ``nonlocal``, or empty.
+
+    A ``nonlocal`` statement is a declaration, not an assignment: it performs
+    no store and binds nothing. It is the one place the source states outright
+    that a name belongs to an enclosing function rather than to this one, so
+    it is exactly the permission needed to look outward -- and it is what
+    keeps the search narrow. A name that is merely inherited by closure, or
+    read from a module global, is *not* listed and is still not followed.
+    """
+    if function is None:
+        return frozenset()
+    declared = set()
+    for node in ast.walk(function):
+        names = getattr(node, "names", None)
+        if isinstance(node, ast.Nonlocal) and names:
+            declared.update(names)
+    return frozenset(declared)
+
+
+def _nonlocal_suppressors(name, function, bound, owning=None):
+    """A readable suppressor this function reaches through a ``nonlocal``.
+
+    ``nonlocal cs`` makes ``cs`` inside ``function`` an alias for the
+    *enclosing* function's variable, so this:
+
+        def outer():
+            cs = contextlib.suppress(AssertionError)
+            def inner():
+                nonlocal cs
+                with (cs := cs):    # `cs` is the parent's suppressor
+                    assert 1 == 2   # swallowed
+            inner()
+
+    really does enter a suppressor and swallow the assert. The walk that
+    classifies headers is handed ``inner`` alone, and ``inner`` contains no
+    store of ``cs``, so the name resolved to nothing and the swallowed assert
+    was certified load-bearing. That is the damaging direction, and it is
+    pre-existing on master (#355, #356).
+
+    Two gates keep this from becoming the over-reading the surrounding rule
+    refuses:
+
+    * The name must be declared ``nonlocal`` *in this function*. A closure
+      variable the source never declared, or a module global, is still not
+      followed -- an arbitrary outer binding is as untraceable as any other.
+    * The enclosing store must resolve to a **readable** suppressor through
+      exactly the same rules used everywhere else. An ordinary call, a
+      parameter, or a ``nullcontext()`` binding contributes nothing, so a live
+      assert stays live.
+
+    Only the immediately enclosing function is consulted. A name declared
+    ``nonlocal`` must exist in some enclosing scope, and the nearest one is
+    the one a read resolves to; if the nearest does not bind it, the read
+    either raises or reaches further out, and neither is a swallowed assert
+    this rule can prove.
+    """
+    if name not in _nonlocal_declared(function):
+        return ()
+    parent = _nonlocal_parent_function(function, owning)
+    if parent is None:
+        return ()
+    _, raw_values = _assigned_suppressors(parent, bound)
+    entries = raw_values.get(name)
+    if not entries:
+        return ()
+    orders = {
+        id(statement): _binding_order(parent, statement)
+        for values in raw_values.values()
+        for statement, _ in values
+    }
+    # The parent's own `with` headers can also bind the name, so those are
+    # folded in; a `with ... as cs` is a store of the name all the same.
+    resolved = []
+    for statement, value in entries:
+        deref = _deref_alias(value, raw_values, orders, _binding_order(parent, statement), name)
+        if _is_readable_suppressor(deref, bound):
+            resolved.append(deref)
+    if resolved:
+        return resolved
+    return ()
+
+
+def _nonlocal_parent_function(function, owning=None):
+    """The nearest function definition enclosing ``function``, or ``None``.
+
+    ``ast`` nodes carry no parent pointer, so the chain is recovered by
+    walking the parsed module that owns ``function`` -- the same module
+    :func:`_owning_module` already resolves for import bindings. A parent is
+    accepted only on *identity*: the candidate function must contain this
+    exact ``function`` object somewhere beneath it. That identity check is what
+    makes the walk safe when ``_owning_module`` falls back to the milestones
+    module for a probe whose own tree is not registered: a same-named function
+    in an unrelated file is never mistaken for the real parent.
+    """
+    trees = [owning] if owning is not None else []
+    trees += [milestones_tree(), _module_tree()]
+    for tree in trees:
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node is function:
+                continue
+            if any(child is function for child in ast.walk(node)):
+                return node
+    return None
+
 def _bindings_before(
     header, statement, bound_so_far, own, function=None, bound=None, raw_values=None
 ):
@@ -2926,6 +3285,30 @@ def _bindings_before(
         # the ordinary rule rather than needing a second path.
         orelse = getattr(block, "orelse", None)
         block_body = body + (orelse if isinstance(orelse, list) else [])
+        # A loop binds its target before the first iteration's body runs, so a
+        # header directly inside that body has already had the target assigned
+        # when it is read (#359):
+        #
+        #     for cs in (contextlib.suppress(AssertionError),):
+        #         with cs:             # the loop's live value, a suppressor
+        #             assert x != 1    # swallowed
+        #
+        # The `for` is the *block* here, not an entry in some enclosing body
+        # list, so the `seen_store` scan below never sees it. Without this the
+        # header reads as carrying nothing, the resolved suppressor is thrown
+        # away, and the swallowed assert is reported live.
+        #
+        # Only the *target* is guaranteed, so only the target's own binding may
+        # be pulled in. `own` is the whole statement's store set, and a store
+        # written further down the same body has not run yet:
+        #
+        #     for a in items:
+        #         with cs:            # `cs` is not bound at all -> NameError
+        #             assert x != 1   # live
+        #         cs = contextlib.suppress(AssertionError)
+        #
+        # Adopting the whole of `own` here would answer that first header with
+        # the `cs =` below it and report a live assert as swallowed.
         seen_store = False
         # Captures owned by this block have run by the time a header inside the
         # same clause body is reached, even though no store *statement* does.
@@ -2997,9 +3380,7 @@ def _bindings_before(
                         return {**bound_so_far, **in_block}
                     return {**bound_so_far, **loop_bindings}
                 return dict(own) if seen_store or captures else bound_so_far
-            if isinstance(node, ast.Assign) or (
-                isinstance(node, ast.AnnAssign) and node.value is not None
-            ):
+            if _is_store_statement(node):
                 seen_store = True
     return bound_so_far
 
@@ -3213,6 +3594,13 @@ def _outermost_first(loops, function):
         return level
 
     return sorted(loops, key=depth)
+
+
+def _loop_target_names(block):
+    """The names a loop statement binds before its body runs, else empty."""
+    if not isinstance(block, (ast.For, ast.AsyncFor)):
+        return ()
+    return frozenset(_store_target_names([block.target]))
 
 
 def _unreadable_suppressor(call, bound):
@@ -5443,6 +5831,16 @@ def _store_may_bind_enterable(entry, name, function=None, starred_asked=False):
     resolved toward "possibly enterable".
     """
     statement, value, _conditional = entry
+    # #405 reduces a destructuring store to the element that lands on `name`
+    # before it reaches this slot, because the suppressor question needs that
+    # element. The enterability question needs the whole right-hand side
+    # instead: `cs, other = (None, 1)` binds `cs` to `None`, and the element
+    # alone no longer says which *container* the targets were matched against.
+    # Recovering it from the statement keeps both readers on their own value,
+    # which is the whole of the #405 x #412 collision: the two questions were
+    # being answered from one slot and each needs the other's value.
+    if isinstance(statement, ast.Assign) and statement.value is not value:
+        value = statement.value
     if isinstance(value, str):
         # A carrier: a module, a function or a class, none enterable.
         return False
@@ -5543,6 +5941,25 @@ def _store_may_bind_enterable(entry, name, function=None, starred_asked=False):
         element = _element_kind_readable_from(statement, value, name)
         if element is not None:
             return element not in NON_CONTEXT_MANAGER_TYPES
+        # #405. The container itself is not the answer, and neither is the
+        # container's type: `cs, other = (suppress(AssertionError), 2)` binds
+        # `cs` to the *first element*, so the header really does enter a
+        # suppressor. #412 answered this by declining the whole shape, which is
+        # safe for the "possibly enterable" question but reports a swallowed
+        # assert as live.
+        #
+        # `_value_bound_by` performs the positional match Python's unpacking
+        # performs -- including the bind-from-the-end rule for targets after a
+        # star -- and yields the element that lands on `name`, or
+        # `UNREADABLE_VALUE` for a shape it cannot model. Asking for the
+        # element's literal type keeps #412's `_pattern_kind` walk (which
+        # reports the *container's* shape and would answer "tuple" here) as the
+        # fallback for targets it cannot reduce.
+        bound_value = _value_bound_by(statement.targets, value, name)
+        if bound_value is not UNREADABLE_VALUE and bound_value is not value:
+            bound_kind = _literal_runtime_type(bound_value)
+            if bound_kind is not None:
+                return bound_kind not in NON_CONTEXT_MANAGER_TYPES
         return True
     kind = _literal_runtime_type(value)
     if kind is None:
@@ -7028,7 +7445,7 @@ def _entered_name_is_dead(header, function, bound, module=None):
     return False
 
 
-def _is_suppressing_with(node, bound, function=None):
+def _is_suppressing_with(node, bound, function=None, owning=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
     if isinstance(node, ast.AsyncWith):
         # `async with` demands an *asynchronous* context manager. Neither
@@ -7061,7 +7478,7 @@ def _is_suppressing_with(node, bound, function=None):
             return True
     if function is None:
         return False
-    for argument in _aliased_suppressions(node, function, bound):
+    for argument in _aliased_suppressions(node, function, bound, owning):
         # An ambiguous binding may be *any* suppressor, so the rule cannot claim
         # the exception is harmless and reports the assert as defeated (#308).
         if argument is AMBIGUOUS_SUPPRESSOR:
@@ -7650,7 +8067,7 @@ def _is_enforced(function, target, tree=None):
         elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
             if not _in_body(ancestor, target):
                 continue
-            if _is_suppressing_with(ancestor, bound, function):
+            if _is_suppressing_with(ancestor, bound, function, owning):
                 return False
             if _is_user_defined_swallowing_with(ancestor, bound, function, owning):
                 return False

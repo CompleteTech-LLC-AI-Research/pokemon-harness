@@ -4109,6 +4109,227 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
 #: the carried suppressor. Every row here is executed, so "does not retire" is
 #: backed by CPython swallowing the assert rather than by the analyzer's
 #: opinion.
+#: #359: the binding forms whose right-hand side is an *element* of a
+#: container, or a loop's next element, rather than the whole value.
+#:
+#: Every row here binds a name to a real ``contextlib.suppress`` and then reads
+#: it back -- directly, or through a self-alias. The assert under it is
+#: genuinely swallowed on all of them, so each row's ``defeated`` verdict is a
+#: *contract* and not a preference.
+#:
+#: These are the spellings the per-statement rules could not read. A ``for``
+#: target was recorded with no value at all, a destructuring target was
+#: recorded with the whole container, and :func:`_bindings_before` did not count
+#: a loop as a store that had run by the time a ``with`` nested in its body was
+#: read. Each of those reported a swallowed assert as ``enforced`` -- a
+#: disarmed contract certified as load-bearing, the damaging direction per #308
+#: criterion 1.
+#:
+#: ``expected_live`` is the exact verdict for the marked assert.
+#: ``control_element`` pairs each row with the same spelling over a
+#: ``nullcontext()`` element, which is genuinely live; without it a rule that
+#: answered "defeated" for everything would pass this table while dropping
+#: every real contract in it. ``None`` means the row has no readable control,
+#: because an arbitrary iterable genuinely is undecidable.
+BINDING_FORM_SHAPES = (
+    (
+        "a tuple-unpack target reads its own element",
+        (
+            "    cs, other = (contextlib.suppress(AssertionError), 2)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a list target reads its own element",
+        (
+            "    [cs] = [contextlib.suppress(AssertionError)]\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested destructuring target reads the nested element",
+        (
+            "    cs, (other, third) = (contextlib.suppress(AssertionError), (2, 3))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested second-position target reads its own element",
+        (
+            "    (other, (cs, third)) = (2, (contextlib.suppress(AssertionError), 3))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a loop target reads the iterated element",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),):\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a self-alias after a loop target keeps the element",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),):\n"
+            "        with (cs := cs):\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a self-alias in a tuple target keeps its own element",
+        (
+            "    cs, other = (contextlib.suppress(AssertionError), 2)\n"
+            "    with (cs := cs):\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a starred target is declined rather than paired with an element",
+        (
+            "    cs, *rest = (contextlib.suppress(AssertionError), 2, 3)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a target after a starred one is bound from the end",
+        (
+            "    first, *rest, cs = (1, 2, 3, contextlib.suppress(AssertionError))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a leading star still binds the trailing target",
+        (
+            "    *rest, cs = (1, 2, contextlib.suppress(AssertionError))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "two targets after a star bind from the end in order",
+        (
+            "    first, *rest, cs, last = "
+            "(1, 2, 3, contextlib.suppress(AssertionError), 5)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a deeply nested target reads the deeply nested element",
+        (
+            "    a, (b, (cs, d)) = "
+            "(1, (2, (contextlib.suppress(AssertionError), 4)))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a loop over an unreadable iterable is declined, not guessed",
+        ('    for cs in helper.items():\n        with cs:\n            assert x != 1, "A1"'),
+        True,
+        None,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live", "control_element"),
+    BINDING_FORM_SHAPES,
+    ids=[row[0] for row in BINDING_FORM_SHAPES],
+)
+def test_a_binding_form_reads_the_value_that_lands_on_the_name(
+    label, body, expected_live, control_element
+):
+    """A destructuring or loop target must resolve to its own element.
+
+    The one question every row asks is whether the analyzer sees the
+    ``suppress`` that really is bound to ``cs``. If it does, the marked assert
+    is swallowed and must be reported defeated; if it does not, the very same
+    code is reported enforced and a disarmed contract is certified as
+    load-bearing.
+
+    Runtime is executed per row, so a ``defeated`` expectation is credible only
+    when CPython really swallows the assert. The control row repeats the
+    spelling with a ``nullcontext()`` element, which does not suppress, and
+    requires that one to be reported live. That pair is what stops this table
+    from degenerating into "report every alias as a suppressor".
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outer = namespace["outer"]
+    # A helper whose `items()` yields nothing, so the unreadable-iterable row
+    # runs its body zero times and cannot swallow an assert of its own.
+    helper = type("H", (), {"items": staticmethod(lambda: ())})()
+    try:
+        outer(1, helper)
+    except AssertionError:
+        raise AssertionError(
+            f"{label}: the assert fired, so this row does not exercise a "
+            f"suppressor. Check the binding form before trusting the verdict."
+        ) from None
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
+
+    if control_element is None:
+        return
+    control = body.replace("contextlib.suppress(AssertionError)", control_element)
+    assert control != body, f"{label}: the control row is identical to the row"
+    control_source = "def outer(x, helper):\n    import contextlib\n" + control + "\n"
+    control_tree = ast.parse(control_source)
+    control_function = control_tree.body[0]
+    control_asserts = [node for node in ast.walk(control_function) if isinstance(node, ast.Assert)]
+    control_results = [
+        _is_enforced(control_function, node, control_tree) for node in control_asserts
+    ]
+    assert control_results == [True], (
+        f"{label}: the nullcontext control must be reported live, got "
+        f"{control_results}. A rule that calls this defeated drops a real "
+        f"contract."
+    )
+
+
 CAPTURE_SCOPE_BOUNDARY_ROWS = (
     # The filed shape. `class C:` opens a new namespace; the capture binds
     # `C.cs`, and `outer`'s `cs` is still the suppressor, so the second assert
