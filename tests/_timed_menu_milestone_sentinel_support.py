@@ -3775,18 +3775,29 @@ def _statement_in_unreachable_arm(block, statement, function=None):
     recursion was also unsound, because it fell back on the *parent's* test
     and so labelled a reachable `elif False:` arm dead.
 
-    The always-true test above is redundant for the one caller there is. If
-    some enclosing ``if`` has an always-true test *and* this ``if`` has one
-    too, and the store is in the second's ``else``, then the second's ``if``
-    is the always-true branch holding the store, so the first cannot also hold
-    it -- and the question the test would answer is therefore settled either
-    way. It is kept because it is what makes the helper correct by itself.
+    The always-true test changes the verdict, though not in a way any current
+    row can pin. An ``else`` whose own test cannot be decided sits inside an
+    always-true branch:
+
+        cs = nullcontext()
+        if True:
+            if os.name:
+                pass
+            else:
+                cs = list()
+
+    Dropping the test reports that arm dead, which leaves the store
+    undecided; keeping it settles the store. **Neither answer is correct** --
+    the arm is not provably dead, and the module-carrier limit means the tool
+    reports a header CPython enters as DEAD either way. The test is kept
+    because "an undecidable test is not a dead arm" is the true statement, and
+    because answering `True` for *any* ``if`` would additionally claim the arm
+    of a never-true test is dead, which is wrong for a different reason.
     """
     if not isinstance(block, ast.If) or not _condition_is_always_true(block.test, function):
         # A non-`if`, or an `if` that can fail: its whole `else` arm is a
-        # runnable one and there is nothing dead to report. The always-true
-        # test is **redundant** in the `_statement_always_runs` caller, and
-        # that is deliberate -- it keeps the helper answerable on its own.
+        # runnable one and there is nothing dead to report. See above: an
+        # undecidable test lands here too, and has to.
         return False
     return _contains_any(block.orelse, statement)
 

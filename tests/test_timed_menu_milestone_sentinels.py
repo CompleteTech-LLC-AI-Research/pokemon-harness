@@ -4920,6 +4920,14 @@ def test_a_constructor_callee_shadowed_outside_the_body_is_reported_live(
 #: limitation rather than a gap in this rule, and pinning it here would assert
 #: a fix this series has not made. `test_a_block_nested_module_carrier_is_still_declined`
 #: is where that limitation is already recorded.
+#:
+#: The mirror shape -- an `else` whose *own* test is undecidable, such as
+#: `if os.name: ... else: cs = list()` inside an `if True:` -- is also absent,
+#: for the same reason. The helper reads that arm as runnable, which is
+#: correct, but the resulting verdict is the same module-carrier false-DEAD.
+#: Dropping the always-true test from `_statement_in_unreachable_arm` *does*
+#: change that shape's verdict, so the test is not redundant; it is merely
+#: unfalsifiable here, because the module-carrier limit masks the answer.
 ROUND_EIGHT_SOURCES = (
     # Review finding 1. The `if True:` above made the block look like an
     # always-true branch, and the store in the *unreachable* `else` beside the
