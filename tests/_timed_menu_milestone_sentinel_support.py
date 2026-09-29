@@ -7784,6 +7784,202 @@ def _is_after_control_transfer(function, target):
         for body in _statement_lists_holding(node, holder):
             if _is_terminated_before(body, holder):
                 return True
+            if any(_cannot_fall_through(sibling) for sibling in body if sibling is not holder):
+                return True
+    return False
+
+
+def _cannot_fall_through(node):
+    """Can this statement never be left by falling out of its bottom?
+
+    #402. A ``try`` whose own body cannot fall through never returns control
+    to the statement *after* the whole ``try``, so everything following the
+    ``try`` in the enclosing block is dead:
+
+        def outer(x):
+            try:
+                return          # the entire try body, unconditional
+            except Exception:
+                pass
+            assert x != 1      # never evaluated
+
+    #400 walks the statement lists of the block holding ``target``, so it
+    sees a bare transfer that is a *sibling* of the target. The transfer
+    here is nested one level down, inside a preceding sibling's ``body``,
+    which is exactly the case #400 documents as belonging to that body:
+
+        for i in items:
+            if i:
+                break          # leaves the loop, not this block
+        assert x != 1
+
+    The difference is that a ``break`` leaves the *enclosing* block and
+    resumes after the loop, while a ``try`` body that always returns or
+    raises means the statements after the ``try`` statement are never
+    reached. So a ``try`` is not walked for a bare transfer -- it is asked
+    whether control can leave its bottom.
+
+    What counts:
+
+    * the ``try`` body ends in a bare ``return`` -- there is nowhere for it
+      to resume, so nothing after the ``try`` runs. A ``raise`` is excluded
+      in this position: the handlers exist to catch it and execution
+      resumes after the ``try``;
+    * the ``else`` clause ends in a bare ``return`` -- the ``else`` runs on
+      the no-exception path, which is the normal path, so returning from it
+      also leaves the statements after the ``try`` unreachable;
+    * *every* ``except`` handler ends in a bare ``return`` -- the handler is
+      the only other way through, so if all of them return, the whole
+      statement cannot fall through. One handler that merely falls through
+      is a real path out, so `all` is required and `any` is not. A handler
+      ending in ``raise`` does not count, because it only fires when an
+      exception occurred and the no-exception path still resumes;
+    * a ``finally`` that ends in a bare ``return``, which overrides every
+      path out of the ``try``.
+
+    What does not count, and must keep the following statements live:
+
+    * a ``try`` body that merely *may* raise (``helper()``), because the
+      exception is caught and execution continues after the ``try``;
+    * a *guarded* transfer inside the ``try`` body, which leaves the other
+      path open;
+    * a ``try`` with no handlers at all, where a raising body propagates
+      and a non-raising one falls through -- the source cannot say which;
+    * a single handler that ends in ``raise``: the re-raise propagates out
+      of the function, but only on the path where an exception occurred, so
+      the ordinary path still resumes after the ``try``:
+
+          def outer(x):
+              try:
+                  pass
+              except Exception:
+                  raise
+              assert x != 1      # reached on the no-exception path
+    """
+    if not isinstance(node, (ast.Try, ast.TryStar)):
+        return False
+    if (
+        node.handlers
+        and not _block_falls_through(node.body)
+        and all(_block_ends_in_return(handler.body) for handler in node.handlers)
+    ):
+        # Every handler returns, so the exception path leaves too. `all`, not
+        # `any`: with two handlers where only one falls through, the falling
+        # one is a real path out of the `try`, so the statements after it
+        # stay live. A handler ending in a bare `raise` does not count: it
+        # only fires when an exception occurred, and the no-exception path
+        # still resumes after the `try`.
+        #
+        # The `_block_falls_through` guard is load-bearing. Without it, a body
+        # that simply *completes* is read as dead even though it resumes after
+        # the `try` and the handlers never run at all:
+        #
+        #     def outer(x):
+        #         try:
+        #             pass                      # no exception, ever
+        #         except ValueError:
+        #             return
+        #         except TypeError:
+        #             return
+        #         assert x != 1                # reached
+        #
+        # That is the over-condemn direction: a live contract dropped from the
+        # sentinel's view, which the #308 criterion counts as its own failure.
+        # The guard is what keeps the clause symmetric with the re-raise
+        # branch below, which already requires the body to have no
+        # falling-off-the-end path before the handlers can be the sole exit.
+        return True
+    if _block_ends_in_return(node.body):
+        return True
+    if (
+        not _block_falls_through(node.body)
+        and node.handlers
+        and all(_block_ends_in_transfer(handler.body) for handler in node.handlers)
+    ):
+        # The body has no falling-off-the-end path, so the only way out of
+        # the `try` is an exception into a handler. When every handler then
+        # transfers -- a bare `raise` re-raising is the usual case -- the
+        # statement cannot fall through at all:
+        #
+        #     def outer(x):
+        #         try:
+        #             raise ValueError
+        #         except ValueError:
+        #             raise          # the only path out
+        #         assert x != 1      # never evaluated
+        #
+        # The `_block_falls_through` guard is what makes this safe. A body
+        # that merely *may* raise still has an ordinary path that resumes
+        # after the `try`, so a re-raising handler there is not the sole exit
+        # and the assert stays live.
+        return True
+    if node.orelse and _block_ends_in_return(node.orelse):
+        # The `else` of a `try` runs when the body did not raise, which is
+        # the ordinary path. A `return` there is reached without any
+        # exception, so it leaves the same way.
+        return True
+    # A `finally` that returns overrides every path out of the `try`.
+    return bool(node.finalbody) and _block_ends_in_return(node.finalbody)
+
+
+def _block_falls_through(body):
+    """Can execution reach the bottom of this statement list?
+
+    The mirror of :func:`_block_ends_in_return`, and deliberately
+    conservative. Only a list whose *last* statement is an unconditional
+    ``return`` / ``raise`` is answered ``False``; anything else is ``True``,
+    because a compound statement's body may or may not transfer and the
+    source cannot say. Used only to decide whether a re-raising handler is
+    the *sole* exit from a ``try``.
+    """
+    for node in reversed(body):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            # A docstring is not a statement that can transfer.
+            continue
+        return not _is_bare_transfer(node)
+    return True
+
+
+def _block_ends_in_transfer(body):
+    """Does this statement list end in an unconditional control transfer?
+
+    Unlike #400's :func:`_is_terminated_before`, which asks whether a
+    transfer sits *before* a target, this asks whether the list has no
+    falling-off-the-end path at all. The last statement therefore decides,
+    and a transfer nested inside a compound statement's body is still
+    conditional with respect to this list.
+    """
+    for node in reversed(body):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            # A docstring is not a statement that can transfer.
+            continue
+        return _is_bare_transfer(node)
+    return False
+
+
+def _block_ends_in_return(body):
+    """Does this statement list end in an unconditional ``return``?
+
+    A ``raise`` in the ``try`` body is deliberately *not* counted. The whole
+    point of the handlers is to catch it, so a body that ends in ``raise``
+    still hands control to the handler and execution resumes after the
+    ``try``:
+
+        def outer(x):
+            try:
+                raise ValueError()
+            except ValueError:
+                pass
+            assert x != 1      # reached -- the handler fell through
+
+    ``return`` is different: there is nowhere for it to resume, so a body
+    that ends in one never returns to the statement after the ``try``.
+    """
+    for node in reversed(body):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            # A docstring is not a statement that can transfer.
+            continue
+        return isinstance(node, ast.Return)
     return False
 
 

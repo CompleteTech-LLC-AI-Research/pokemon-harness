@@ -686,10 +686,182 @@ UNREACHABLE_SHAPES = (
         "    if flag:\n        raise ValueError\n    assert x != 1",
         True,
     ),
+    # #402. This row was a *live control* for #400 and pinned `True`, on the
+    # reading that a transfer nested in an earlier statement's body says
+    # nothing about what follows. That reading is right for `break` and
+    # `continue`, which leave the *enclosing* loop and resume after it, and
+    # wrong for a `try` whose body is a bare `return`: there is nowhere for
+    # the `return` to resume, so the statements after the whole `try` are
+    # never reached. Measured on CPython 3.12.14 the assert is never
+    # evaluated, so the correct verdict is `False`, and the row moves from
+    # the control block to the dead block above.
     (
         "return in try then assert",
         "    try:\n        return\n    except Exception:\n        pass\n    assert x != 1",
+        False,
+    ),
+    # The `raise` counterpart is the live control that keeps this rule from
+    # degenerating into "a `try` body that ends in a transfer is dead". A
+    # `raise` in the `try` body is exactly what the handlers exist to catch,
+    # so the no-exception path -- or the handler itself falling through --
+    # resumes after the `try` and the assert is reached.
+    (
+        "raise in try then assert",
+        "    try:\n        raise ValueError\n    except ValueError:\n        pass\n    assert x != 1",
         True,
+    ),
+    # The `else` clause runs on the no-exception path, which is the ordinary
+    # one, so a `return` there leaves the same way a `return` in the `try`
+    # body does. The `try` body and every handler both fall through here, so
+    # the `else` is the only remaining path out.
+    (
+        "return in try else then assert",
+        "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        return\n    assert x != 1",
+        False,
+    ),
+    # A `finally` that returns overrides every path out of the `try`, so the
+    # statements after it are dead even though both the `try` body and the
+    # handler fall through.
+    (
+        "return in try finally then assert",
+        "    try:\n        pass\n    finally:\n        return\n    assert x != 1",
+        False,
+    ),
+    # Two handlers where only one falls through: the falling handler is a real
+    # path out of the `try`, so the assert is reached. This is what makes the
+    # handler test `all` and not `any` -- an `any` reading would call this
+    # dead and drop a live contract.
+    (
+        "one of two handlers falls through",
+        (
+            "    try:\n        pass\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        pass\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
+    # Every handler returns, but the `try` body COMPLETES. Nothing is ever
+    # raised, so no handler ever runs, and control leaves the `try` at the
+    # bottom of the body exactly as it would for a bare `pass`. The assert is
+    # reached. This is the live control for the `_block_falls_through` guard
+    # on the "every handler returns" clause: without the guard, the clause
+    # fires off the handlers alone and this row flips to `False`, dropping a
+    # live contract from the sentinel's view -- the #308 over-condemn
+    # direction, and the mirror image of the dead-row errors #402 exists to
+    # close.
+    (
+        "all handlers return but body completes",
+        (
+            "    try:\n        pass\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        return\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
+    # The same guard, with a body that calls a helper rather than `pass`. A
+    # call that does not raise is a completion just as much as `pass` is, so
+    # the assert is still reached. This is what stops the guard from being
+    # satisfied by accident: the clause has to consult the body's
+    # falling-off-the-end path, not merely its last statement's syntactic kind.
+    (
+        "all handlers return but helper completes",
+        (
+            "    try:\n        helper()\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        return\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
+    # A single handler that re-raises is also live: the re-raise only happens
+    # when an exception occurred, so the no-exception path still reaches the
+    # assert below. `raise` in a handler is not a fall-through.
+    (
+        "handler reraise then assert",
+        "    try:\n        pass\n    except Exception:\n        raise\n    assert x != 1",
+        True,
+    ),
+    # The mirror of the row above, and the one place a bare `raise` in a
+    # handler *is* load-bearing: here the `try` body always raises, so there
+    # is no ordinary path at all and the re-raising handler is the only exit.
+    # The `_block_falls_through` guard is what separates the two rows -- with
+    # it removed, the row above would be answered dead and this one right.
+    (
+        "raise in try reraise handler then assert",
+        "    try:\n        raise ValueError\n    except ValueError:\n        raise\n    assert x != 1",
+        False,
+    ),
+    # A `try/finally` whose `finally` merely falls through is decided by the
+    # `try` body alone, and a body that may raise leaves the `finally` and
+    # then the statement after it reachable. This is the live control for the
+    # `finally` clause: without it, a rule that treated any `finally` as
+    # terminal would drop this assert.
+    (
+        "try finally falls through then assert",
+        "    try:\n        helper()\n    finally:\n        pass\n    assert x != 1",
+        True,
+    ),
+    # `except*` is the same statement with a different handler type, and the
+    # walk must not skip it by testing for `ast.Try` alone.
+    (
+        "return in try star then assert",
+        "    try:\n        return\n    except* Exception:\n        pass\n    assert x != 1",
+        False,
+    ),
+    # The transfer kills the statements after the `try` *statement*, so
+    # anything nested under a later compound statement is dead too -- the
+    # interpreter never begins evaluating it.
+    (
+        "return in try then with body",
+        "    try:\n        return\n    except Exception:\n        pass\n    with helper():\n        assert x != 1",
+        False,
+    ),
+    # A bare string expression is not a transfer, so it must not decide
+    # whether a block ends in one. `_block_falls_through` skips a trailing
+    # `Expr` constant and keeps looking, because a string literal is a
+    # statement that can neither transfer nor fall out of the block in the way
+    # a `return` or `raise` does.
+    #
+    # These three rows are the only things that exercise that skip, and the
+    # first of them is load-bearing: with the skip disabled,
+    # `_block_falls_through` answers from the trailing string instead of from
+    # the `raise` beneath it, the re-raise clause stops firing, and this row
+    # flips to `True` -- certifying as ENFORCED an assert that CPython never
+    # evaluates. That is the blocking direction of the #308 criterion, so the
+    # skip is a real rule and not decoration.
+    (
+        "trailing string after raise then reraise",
+        (
+            "    try:\n        raise ValueError\n        'dead'\n"
+            "    except ValueError:\n        raise\n    assert x != 1"
+        ),
+        False,
+    ),
+    # The same shape with a body that *completes* rather than raises. Here the
+    # block genuinely can fall out of its bottom -- `helper()` returns, the
+    # string is evaluated, and control leaves after the string -- so the
+    # re-raise handler is not the sole exit and the assert is reached. The
+    # trailing string must not be mistaken for a transfer that stops it.
+    (
+        "trailing string after call then reraise",
+        (
+            "    try:\n        helper()\n        'tail'\n"
+            "    except Exception:\n        raise\n    assert x != 1"
+        ),
+        True,
+    ),
+    # And the filed #402 shape carrying the same trailing string, which keeps
+    # the `return` answer stable when the body is a bare transfer followed by
+    # a non-transfer statement.
+    (
+        "return then trailing string in try",
+        (
+            "    try:\n        return\n        'dead'\n"
+            "    except Exception:\n        pass\n    assert x != 1"
+        ),
+        False,
     ),
     ("plain live assert", "    assert x != 1", True),
 )
