@@ -4843,6 +4843,136 @@ TIED_STORE_ROWS = (
         ),
         [True],
     ),
+    # --- the loop body is a BLOCK, and the header is rarely a direct child.
+    #
+    # The five rows above that test an in-body header all write it as the
+    # loop's *first statement*. Every one of these nests it one level down,
+    # where the loop still binds the name but `node.body` holds the `if`/`try`
+    # /inner-loop instead:
+    #
+    #     for cs in [contextlib.suppress(AssertionError)]:
+    #         if flag:
+    #             with cs:
+    #                 assert x != 1     # executed: swallowed
+    #
+    # Containment was tested against `node.body` directly, so all five read
+    # `enforced` while the interpreter swallowed the assert -- five false
+    # LIVE verdicts, the damaging direction. They are pinned here because the
+    # first cut of #370 passed the whole suite with all five wrong.
+    (
+        "#370 a loop target reaches a header nested under an if",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop target reaches a header in an else arm",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        if flag:\n"
+            "            pass\n"
+            "        else:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop target reaches a header inside a try body",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        try:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        except ValueError:\n"
+            "            pass"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop target reaches a header under an inner while",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        while flag:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "            break"
+        ),
+        [False],
+    ),
+    # An inner loop that binds a DIFFERENT name must not hide the outer loop's
+    # target. `range(1)` is not a single-element literal, so an implementation
+    # that took the innermost enclosing loop regardless of its target would
+    # decline here and leave the assert `enforced`.
+    (
+        "#370 an inner loop binding another name does not hide the target",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for _ in range(1):\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # The converse: an inner loop that rebinds the SAME name owns the header,
+    # and its element is the one in force. The inner target is the
+    # `nullcontext`, so the assert is live.
+    (
+        "#370 an inner loop rebinding the name supersedes the outer target",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.nullcontext()]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
+    # Two nested loops where only the inner one binds a suppressor. The inner
+    # is the one in force, and it is not the walk's first match.
+    (
+        "#370 the innermost binding loop wins over an outer unrelated one",
+        (
+            "    for other in [0]:\n"
+            "        for cs in [contextlib.suppress(AssertionError)]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # The limit still holds one level down: a multi-element element nested
+    # inside the body binds a different value per iteration, so the header
+    # stays unreadable and the assert stays `enforced`. Without this row, an
+    # implementation that fixed the nesting by walking the body could record
+    # the first element and answer `False` here.
+    (
+        "CONTROL a nested multi-element loop target stays live while undecided",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
+    # A carried binding the loop never touches, read from a nested header. The
+    # exception stays additive one level down, and the element is still read
+    # through the element's own value.
+    (
+        "CONTROL a nested header still reads a carried binding",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    for other in [0]:\n"
+            "        if flag:\n"
+            "            with base:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
 )
 
 

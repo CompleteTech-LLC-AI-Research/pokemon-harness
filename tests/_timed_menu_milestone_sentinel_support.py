@@ -2541,6 +2541,24 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
         body = getattr(block, "body", None)
         if not isinstance(body, list):
             continue
+        # An `else` / `for ... else` arm is a block of its own, and a header
+        # written in one is reached by exactly the same rule as one in `body`.
+        # Walking only `body` left the arm unread, so a binding in force at
+        # that header was not seen:
+        #
+        #     for cs in [contextlib.suppress(AssertionError)]:
+        #         if flag:
+        #             pass
+        #         else:
+        #             with cs:            # `cs` IS bound here
+        #                 assert x != 1  # executed: swallowed
+        #
+        # The arm's own earlier stores count the same way they do in `body`:
+        # the arm runs to the header when the stores precede it, and raises
+        # `UnboundLocalError` when they follow, which is the ordinary case
+        # this function already handles.
+        orelse = getattr(block, "orelse", None)
+        block_body = body + (orelse if isinstance(orelse, list) else [])
         seen_store = False
         # Captures owned by this block have run by the time a header inside the
         # same clause body is reached, even though no store *statement* does.
@@ -2553,7 +2571,7 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
         }
-        for node in body:
+        for node in block_body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
@@ -2600,6 +2618,90 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
     return bound_so_far
 
 
+def _enclosing_loops(function, header):
+    """The ``for``/``async for`` loops whose body contains ``header``, innermost first.
+
+    #370. ``ast.walk`` is scope-blind, so containment is decided here rather
+    than in the caller: a header inside a nested ``def``/``lambda``/``class`` is
+    a different scope's local, and the loop outside it binds nothing for that
+    header. Every such scope boundary stops the descent.
+
+    The result is ordered by *depth* rather than by the order the walk reached
+    the loops, because only depth answers which target is in force. A header
+    inside an inner loop that rebinds the name reads the inner target:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            for cs in [contextlib.nullcontext()]:     # this one wins
+                with cs:
+                    assert x != 1                   # live
+
+    That verdict is decided by the innermost loop, so returning the walk order
+    would let the outer target be read for a header the inner one owns.
+    """
+    found = []
+
+    def visit(node, depth):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                # A new scope: the header inside it is not this loop's.
+                continue
+            if isinstance(child, (ast.For, ast.AsyncFor)):
+                # The loop encloses the header if the header sits anywhere
+                # inside a statement the loop runs. `_contains` is the same
+                # containment test the rest of this module uses, so the answer
+                # does not depend on how the header is nested.
+                if _contains_scope(child, header):
+                    found.append((depth + 1, child))
+                    # Keep descending: an *inner* loop also encloses the
+                    # header, and it is the one whose target is in force. The
+                    # depth sort below puts it first.
+                    visit(child, depth + 1)
+                    continue
+                if visit(child, depth + 1):
+                    return True
+                continue
+            if visit(child, depth):
+                return True
+        return False
+
+    visit(function, 0)
+    found.sort(key=lambda pair: -pair[0])
+    return [node for _, node in found]
+
+
+def _contains_scope(statement, target):
+    """Does ``statement`` enclose ``target``, without crossing a scope boundary?
+
+    :func:`_contains` is scope-blind, which is right for the rules that ask
+    whether a node is *reachable*. This one asks a narrower question -- is the
+    target inside this statement's own scope -- and a ``with`` inside a nested
+    ``def`` is not:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            def inner():
+                with cs:        # `cs` is `inner`'s free variable, not the
+                    ...        # loop target in force at this point
+    """
+
+    def walk(node):
+        for child in ast.iter_child_nodes(node):
+            if child is target:
+                return True
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                continue
+            if walk(child):
+                return True
+        return False
+
+    return walk(statement)
+
+
 def _loop_target_bindings(function, header, bound=None, raw_values=None):
     """Bindings a containing loop's own target puts in force around ``header``.
 
@@ -2614,12 +2716,27 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
     ``enforced``, which is the safe direction. #385 measured that choosing an
     index instead moves a damaging cell rather than removing it.
 
-    The enclosing body is found by looking for the *header* rather than for
-    the list the caller is iterating, because a single-statement loop body
-    puts the ``with`` directly in ``node.body`` while the caller's list is the
-    enclosing block. A ``while`` body has no target, and an ``if``/``try`` body
-    is not a loop body, so both return ``{}`` and the ordinary rule still
-    applies.
+    The owning loop is found by containment rather than by source position, and
+    the *innermost* one wins. ``ast.walk`` has no scope information, so the
+    header is located by walking each loop body and refusing to descend into a
+    nested ``def``/``lambda``/``class``, where the name is a different scope's
+    local. The nearest enclosing loop is the one whose target is in force:
+    a header inside an inner loop that rebinds the name reads the inner target,
+    not the outer's.
+
+    Containment, not direct membership, is the test that has to hold. A loop
+    body is usually a *block*, and the header is rarely a direct child of it:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            if flag:
+                with cs:            # one level down, still in the body
+                    assert x != 1
+
+    Every one of those executed swallows the assert. Matching only
+    ``node.body`` answered ``enforced`` for all of them -- the damaging
+    direction, on five shapes. A ``while`` body has no target and an
+    ``if``/``try`` body is not a loop body, so those still return ``{}`` and the
+    ordinary rule applies.
 
     ``bound`` is the module's import bindings, needed to decide whether the
     element is a suppressor at all, and ``raw_values`` is the whole-function
@@ -2631,13 +2748,20 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
         return {}
     if raw_values is None:
         raw_values = _raw_store_values(function)
-    for node in ast.walk(function):
-        if not isinstance(node, (ast.For, ast.AsyncFor)):
-            continue
-        if not any(child is header for child in node.body):
-            continue
-        if _single_loop_element(getattr(node, "iter", None)) is None:
-            return {}
+    for node in _enclosing_loops(function, header):
+        # Innermost wins, but a loop that binds nothing the header reads is
+        # not a candidate at all -- it is a scope the header merely happens to
+        # sit inside:
+        #
+        #     for cs in [contextlib.suppress(AssertionError)]:
+        #         for _ in range(1):
+        #             with cs:          # still the OUTER loop's `cs`
+        #                 assert x != 1
+        #
+        # `range(1)` is not a single-element literal, so declining here would
+        # leave the header `enforced` while the interpreter swallows the
+        # assert. Skipping to the next loop outward is the continuation, not a
+        # decision: the loop that binds the name is further out.
         resolved = {}
         for name in _store_target_names([node.target]):
             for entry_statement, value in raw_values.get(name, []):
@@ -2662,7 +2786,8 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
                     # loop that just overwrote it.
                     readable = value if _is_readable_suppressor(value, bound) else _NOT_A_SUPPRESSOR
                     resolved[name] = readable
-        return resolved
+        if resolved:
+            return resolved
     return {}
 
 
