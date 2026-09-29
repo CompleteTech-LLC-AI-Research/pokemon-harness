@@ -2265,6 +2265,361 @@ def _single_loop_element(iterable):
     return iterable.elts[0]
 
 
+def _loop_element_for_read_after(iterable):
+    """The element a ``for`` target holds once the loop has finished, or ``None``.
+
+    #385. :func:`_single_loop_element` refuses a multi-element literal because a
+    header *inside* the body sees a different value on each iteration, and no
+    one element answers for all of them. A header *after* the loop is the
+    opposite case and the refusal is wrong there:
+
+        for cs in (contextlib.nullcontext(),
+                   contextlib.suppress(AssertionError)):
+            pass
+        with cs:                 # `cs` is the LAST element, the suppressor
+            assert x == 99       # executed: swallowed
+
+    After the last iteration the target holds the final element, so that one is
+    what any later read sees -- and it is the same answer on every path, which
+    is the property the in-body case lacks. Executed, the analyzer above
+    reported this header ``enforced``: a disarmed contract certified as
+    load-bearing (#308 criterion 1).
+
+    Refusing it was the safe direction for the *in-body* question and the
+    damaging one here, so the two are separated by position rather than
+    averaged. The value is only used by a caller that has already established
+    the header is positioned after the loop; :func:`_single_loop_element`
+    remains what the in-body path consults, so the multi-element limit the
+    sentinel suite pins is untouched.
+
+    A non-literal iterable still returns ``None``: which element survives is
+    then a runtime property of the object, and declining leaves the contract
+    ``enforced`` rather than guessing.
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return None
+    if not iterable.elts:
+        return None
+    return iterable.elts[-1]
+
+
+def _loop_target_bindings_after_loop(function, header, bound=None, raw_values=None):
+    """Bindings a *completed* loop leaves in force at a header read after it.
+
+    #385. :func:`_loop_target_bindings` answers for a header written **inside** a
+    loop's body, where the target holds a different value on each iteration.
+    Its refusal to guess is right there and is left untouched. This function
+    answers the different question raised by a header positioned **after** the
+    loop has run to exhaustion:
+
+        for cs in (contextlib.nullcontext(),
+                   contextlib.suppress(AssertionError)):
+            pass
+        with cs:                 # `cs` is the LAST element, the suppressor
+            assert x == 99       # executed: swallowed
+
+    Once the last iteration is done the target holds the final element, and
+    that is the same answer on every path -- the property the in-body case
+    lacks. Executed, the analyzer reported this header ``enforced``: a disarmed
+    contract certified as load-bearing (#308 criterion 1).
+
+    Three conditions gate the answer, and all three are required:
+
+    * the loop must **precede** the header in the block that sequences them, so
+      the target has reached its final value rather than an in-flight one;
+    * the loop must be able to run to **exhaustion**. A ``break`` leaves the
+      target on whichever element was current, not the last one, so a loop
+      containing one is declined;
+    * the loop **body must not rebind the name**. The body runs after the
+      target on every pass, so a rebound name is whatever the body's own store
+      left behind and the iterable's final element says nothing about it.
+
+    A ``return`` in the body is *not* a reason to decline. It stops the loop on
+    the header's own path, so the header is only ever reached when the loop
+    finished -- which is exactly the case being claimed.
+
+    A non-literal or empty iterable is declined too: which element survives is
+    then a property of the object rather than of the syntax, and an empty one
+    binds nothing at all (CPython raises ``UnboundLocalError`` at the header
+    rather than entering a context). Both leave the contract ``enforced``,
+    the safe direction.
+
+    The loop's own binding is offered only while nothing later has overwritten
+    the name. :func:`_raw_store_values` declines to record a multi-element loop
+    at all, so a store that follows one is absent from the table too; the
+    positional check below is therefore made against every recorded store of
+    the name rather than against the table's completeness. That is what keeps
+    a later ``cs = nullcontext()`` from inheriting the loop's suppressor.
+    """
+    if function is None:
+        return {}
+    if raw_values is None:
+        raw_values = _raw_store_values(function)
+    header_order = _binding_order(function, header)
+    resolved = {}
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        if not _loop_completes_before(node, header, function):
+            continue
+        loop_order = _binding_order(function, node)
+        for name in _store_target_names([node.target]):
+            if _loop_body_rebinds_the_name(node, name):
+                continue
+            element = _loop_element_for_read_after(node.iter)
+            if element is None:
+                continue
+            if _name_rebound_after_loop(name, loop_order, header_order, raw_values, function):
+                continue
+            if _store_precedes_header_in_shared_block(name, node, header, raw_values, function):
+                continue
+            # A readable element stands in for the name's binding. An
+            # unreadable one is recorded as `_NOT_A_SUPPRESSOR` so the loop
+            # still retires a suppressor carried in from an enclosing block,
+            # exactly as the in-body path does. Dropping it instead would let
+            # a stale carried value outlive the loop that overwrote it.
+            resolved[name] = (
+                element if _is_readable_suppressor(element, bound) else _NOT_A_SUPPRESSOR
+            )
+    return resolved
+
+
+def _loop_completes_before(loop, header, function):
+    """Is ``header`` read only after ``loop`` has run to exhaustion?
+
+    A header in the loop's own *body* is the in-body question and is answered
+    by :func:`_loop_target_bindings`; a loop that merely encloses the header
+    has not finished when the header is evaluated, so it is excluded here
+    rather than consulted twice.
+
+    The ``else`` arm was excluded alongside the body and that was wrong, and
+    measurably so. An ``else`` arm runs *after* the iterable is exhausted --
+    that is the only way to reach it without a ``break`` -- so the target
+    holds the final element there for the same reason a header after the loop
+    does:
+
+        for cs in (nullcontext(), suppress(AssertionError)):
+            pass
+        else:
+            with cs:                 # `cs` IS the last element
+                assert x == 99       # executed: swallowed
+
+    Executed, that assert never fires; reported ``enforced`` it certifies a
+    disarmed contract as load-bearing. Grouping the arm with the body was a
+    reading of :func:`_loop_arms_reach`, which answers "is this header in an
+    arm of the loop" and cannot distinguish the two by itself. The arm is
+    therefore separated here, where the question is which value the target
+    holds, and it is left to :func:`_loop_target_bindings` to decline when the
+    element is not a single readable one.
+
+    ``break`` is the other exclusion. It leaves the loop part-way, so the
+    target holds the element that was current at the break rather than the
+    last one, and reading the last would be a guess about which iteration
+    stopped the loop.
+
+        for cs in (nullcontext(), suppress(AssertionError)):
+            if flag:
+                break
+        with cs:                 # the element current at the break, not the last
+            assert x != 1
+
+    Executed, the two values of ``flag`` disagree -- swallowed on one, live on
+    the other -- so the loop is declined and the header stays ``enforced``,
+    which is the safe direction. ``continue`` is deliberately not treated the
+    same way: it still ends on the final element, so the answer it leaves
+    behind is the one being claimed.
+    """
+    if _header_in_loop_body(loop, header):
+        return False
+    # A `break` anywhere in the body means the `else` arm is skipped on that
+    # path, but a header *inside* the arm is only ever reached when the loop
+    # ran to exhaustion -- so the arm is not declined for the break. The
+    # position check below is what places it after the loop.
+    # `_breaks_own_loop` answers for a NON-loop node: handed a loop it reads
+    # only the `else` arm, because a nested loop's own `break` belongs to that
+    # nested loop. So it is asked about each statement of this loop's body,
+    # which is the shape it was written for.
+    if not _header_in_loop_else(loop, header) and any(
+        _breaks_own_loop(child) for child in loop.body
+    ):
+        return False
+    if _header_in_loop_else(loop, header):
+        return True
+    return _precedes_in_shared_block(loop, header, function)
+
+
+def _header_in_loop_body(loop, header):
+    """Is ``header`` inside ``loop``'s own ``body``?"""
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return False
+    return any(child is header for statement in loop.body for child in ast.walk(statement))
+
+
+def _header_in_loop_else(loop, header):
+    """Is ``header`` inside ``loop``'s ``else`` arm?"""
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return False
+    return any(child is header for statement in loop.orelse for child in ast.walk(statement))
+
+
+def _precedes_in_shared_block(first, second, function):
+    """Does ``first`` come before ``second`` in the innermost block holding both?
+
+    Top-level statement index is the module's usual order key, but it is too
+    coarse here: a loop and a header written inside one ``if`` share that index
+    by construction, which would decline the ordinary in-one-block reading:
+
+        if flag:
+            for cs in (contextlib.nullcontext(), suppress(AssertionError)):
+                pass
+            with cs: ...
+
+    The block that actually sequences the two is the innermost one enclosing
+    both, so that is the list the positions are read from. Ordering is compared
+    there and nowhere else, which is what makes a loop written *after* the
+    header keep declining.
+
+    """
+    first_parent = _enclosing_node(function, first)
+    second_parent = _enclosing_node(function, second)
+    if first_parent is None or first_parent is not second_parent:
+        return False
+    body = _statements_of_block(first_parent)
+    first_position = _position_of_child(body, first)
+    second_position = _position_of_child(body, second)
+    if first_position is None or second_position is None:
+        return False
+    return first_position < second_position
+
+
+def _enclosing_node(function, target):
+    """The statement whose body directly holds ``target``, or ``None``."""
+    for parent in ast.walk(function):
+        for child in ast.iter_child_nodes(parent):
+            if child is target:
+                return parent
+            if any(node is target for node in ast.walk(child)):
+                break
+    return function if target in getattr(function, "body", []) else None
+
+
+def _statements_of_block(block):
+    """The statement list a node executes, with a function's own body included.
+
+    :func:`_block_body` opens the branch constructs (``if``/``try``/``match``/
+    loop) because the rules that use it care which *branch* a store sits in.
+    This question is different: it asks what order two siblings are evaluated
+    in, and a function's top-level body is the block in which a loop and a
+    trailing ``with`` are siblings. That case has no entry in
+    :func:`_block_body`, so it is added here rather than widening that helper
+    and changing the branch test every other caller depends on.
+    """
+    if isinstance(block, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return list(block.body)
+    return _block_body(block)
+
+
+def _position_of_child(statements, target):
+    """Index of the direct child of ``statements`` that holds ``target``."""
+    for index, child in enumerate(statements):
+        if child is target or any(grandchild is target for grandchild in ast.walk(child)):
+            return index
+    return None
+
+
+def _name_rebound_after_loop(name, loop_order, header_order, raw_values, function):
+    """Does a later store of ``name`` supersede ``loop_order`` before the header?
+
+    The check is positional rather than a search for "the last recorded store",
+    because :func:`_raw_store_values` records a multi-element loop as *nothing*.
+    A store written between the loop and the header is absent from the table
+    whenever the loop itself is unrecorded, so a table-completeness argument
+    would read the loop as the final write and hand the header a stale
+    suppressor:
+
+        for cs in (suppress(AssertionError), nullcontext()):
+            pass
+        cs = nullcontext()
+        with cs:                 # the nullcontext, not the loop's suppressor
+            assert x != 1
+
+    The same check has to run over the *statement list* that sequences the
+    header, because :func:`_binding_order` cannot separate two stores that
+    share a top-level statement -- it maps both to the same index and says so
+    in its own docstring. A store written in a loop's ``else`` arm is the
+    exact case:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            pass
+        else:
+            cs = contextlib.nullcontext()   # same top-level index as the loop
+            with cs:                        # the nullcontext wins
+                assert x != 1
+
+    Read through the order key alone the arm's store compared *equal* to the
+    loop, the strict ``<`` never fired, and the loop's suppressor was layered
+    over a name the arm had already rebound -- reporting the assert defeated
+    and dropping a contract that really fires. :func:`_precedes_in_shared_block`
+    is what carries the ordering the order key cannot express.
+    """
+    for statement, _ in raw_values.get(name, []):
+        order = _binding_order(function, statement)
+        if loop_order < order <= header_order:
+            return True
+    return False
+
+
+def _store_precedes_header_in_shared_block(name, loop, header, raw_values, function):
+    """Does a store of ``name`` sit between ``loop`` and ``header`` in one block?
+
+    :func:`_name_rebound_after_loop` asks the same question through
+    :func:`_binding_order`, which maps every store inside one top-level
+    statement to the same index and explicitly documents that equal keys carry
+    no ordering. A loop and a store in its ``else`` arm are exactly that pair,
+    so the arm's store is invisible to the order key and the loop's element
+    would be layered over a name already rebound:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            pass
+        else:
+            cs = contextlib.nullcontext()
+            with cs:                 # the nullcontext, not the loop's element
+                assert x == 99
+
+    Executed, that assert fires; reporting it defeated drops a load-bearing
+    contract. The check is the positional one, over the block that actually
+    sequences the two, so it holds for an arm and for an ordinary block alike.
+
+    The store is declined whether or not it is *guaranteed* to have run, and
+    that is the same safe direction the ambiguity rule takes. A store inside an
+    ``if`` between the loop and the header may not have run, in which case the
+    loop's element really is in force -- so the loop's value is right on that
+    path. But the store's value is right on the other, and the two disagree:
+
+        for cs in (nullcontext(), suppress(AssertionError)):
+            pass
+        if flag:
+            cs = nullcontext()
+        with cs:                 # nullcontext when flag, suppressor otherwise
+            assert x != 1
+
+    Executed, the assert fires when ``flag`` is true and is swallowed when it
+    is false, so no single verdict is right and the loop is declined. Layering
+    the loop's element over the store answers ``enforced`` and is a false LIVE
+    on the ``flag=True`` path.
+
+    Every recorded store of the name is considered rather than only the last,
+    because :func:`_raw_store_values` records a multi-element loop as nothing
+    and the table is therefore not a complete account of the name's writes.
+    """
+    for statement, _ in raw_values.get(name, []):
+        if statement is loop:
+            continue
+        if _precedes_in_shared_block(statement, header, function):
+            return True
+    return False
+
+
 def _aliased_suppressions(node, function, bound):
     """Suppressors reached through a bare ``Name`` in a ``with`` header.
 
@@ -2374,6 +2729,17 @@ def _aliased_suppressions(node, function, bound):
                     raw_values,
                 )
             )
+            # #385. A header that reads a loop target *after* the loop has
+            # finished is not the in-body question `_bindings_before` asks,
+            # and the raw table cannot answer it: `_raw_store_values` records a
+            # multi-element loop as nothing at all, so the name has no entry to
+            # resolve against and the header reads as an ordinary unbound name.
+            # The loop's own binding is layered on for that case only, and
+            # `live` is copied rather than mutated so the hand-off to the next
+            # top-level statement is unaffected.
+            after_loop = _loop_target_bindings_after_loop(function, header, bound, raw_values)
+            if after_loop:
+                live = {**live, **after_loop}
             for item in header.items:
                 expression = item.context_expr
                 # `with (cs := contextlib.suppress(AssertionError)):` binds the
