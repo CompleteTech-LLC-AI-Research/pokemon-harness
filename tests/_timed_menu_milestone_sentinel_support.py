@@ -4128,13 +4128,35 @@ def _cannot_fall_through(node):
     """
     if not isinstance(node, (ast.Try, ast.TryStar)):
         return False
-    if node.handlers and all(_block_ends_in_return(handler.body) for handler in node.handlers):
+    if (
+        node.handlers
+        and not _block_falls_through(node.body)
+        and all(_block_ends_in_return(handler.body) for handler in node.handlers)
+    ):
         # Every handler returns, so the exception path leaves too. `all`, not
         # `any`: with two handlers where only one falls through, the falling
         # one is a real path out of the `try`, so the statements after it
         # stay live. A handler ending in a bare `raise` does not count: it
         # only fires when an exception occurred, and the no-exception path
         # still resumes after the `try`.
+        #
+        # The body guard is load-bearing in the same way (#414). The body is
+        # the ORDINARY path: a handler runs only when the body raises, so a
+        # body that completes normally hands control straight to the
+        # statement after the `try` no matter what the handlers do. Deciding
+        # from the handlers alone reported `defeated` for
+        #
+        #     def outer(x):
+        #         try:
+        #             pass                 # completes normally
+        #         except Exception:
+        #             return
+        #         assert x != 1            # reached, and it fires
+        #
+        # which drops a live contract. Requiring the body to have no
+        # fall-through path is what makes "every handler returns" mean "no
+        # way out"; the handler-only answer is sound exactly when the body
+        # cannot fall through on its own.
         return True
     if _block_ends_in_return(node.body):
         return True
