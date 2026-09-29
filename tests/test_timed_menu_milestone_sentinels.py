@@ -23,6 +23,7 @@ import ast
 import asyncio
 import contextlib
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -4903,4 +4904,225 @@ def test_a_constructor_callee_shadowed_outside_the_body_is_reported_live(
         f"{label}: expected the header to be reported LIVE. A callee shadowed "
         f"by a parameter or a module binding is a different callable, so the "
         f"store must be read as possibly-enterable and the assert kept."
+    )
+
+
+#: The round-6 review's findings against `5535135`. Three were **false-dead**
+#: -- the tool reported a header DEAD where CPython enters it, which is the
+#: damaging direction because it certifies a reachable assert as swallowed --
+#: and one was a residual **false-live** inside a single module block.
+#:
+#: Every row is *executed* first, with `x=2` so that `assert x != 1` is TRUE.
+#: A clean return therefore proves the with-body was ENTERED (LIVE) and any
+#: exception proves it was not (DEAD). That is the opposite of an
+#: `x=1`-plus-`except AssertionError` harness, which cannot tell a body that
+#: was entered from one whose failure a suppressor ate.
+ROUND_SIX_SOURCES = (
+    # Finding 1. The call is inside `outer`'s body, and a function body is only
+    # reached *after the whole module has executed*. The `def list()` below has
+    # therefore already run by the time `outer(2)` is called, so `cs` holds a
+    # `nullcontext` and the assert is reachable. Cutting the module walk at
+    # `outer`'s own `def` -- correct for a *module-scope* call -- read the
+    # builtin `list` instead and reported the header DEAD.
+    (
+        "a module binding written after the function definition",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+            "def list():\n"
+            "    return nullcontext()\n"
+        ),
+        True,
+    ),
+    # Finding 1, second spelling. An assignment binds the module name exactly
+    # as a `def` does, so the position argument is the same and the answer has
+    # to be the same.
+    (
+        "a module assignment written after the function definition",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+            "list = nullcontext\n"
+        ),
+        True,
+    ),
+    # Finding 2. An `except` handler body runs in the scope that encloses it,
+    # and this one has plainly run by the time `cs = list()` is evaluated. The
+    # module walk opened `try` bodies, `else` and `finally` but not the
+    # handlers, so the binding was skipped and the builtin `list` was read.
+    (
+        "a module binding inside an except handler",
+        (
+            "from contextlib import nullcontext\n"
+            "try:\n"
+            "    raise ValueError\n"
+            "except ValueError:\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Finding 3. `builtins.attr` only names the real module while `builtins`
+    # itself is unbound. A store that replaces the name makes the attribute
+    # lookup reach an arbitrary object, and `builtins.list()` is then
+    # `nullcontext()`. Answering `False` for every `builtins.*` callee read
+    # the shadowed call as the builtin and reported the header DEAD.
+    (
+        "a rebound builtins name read through an attribute",
+        (
+            "from contextlib import nullcontext\n"
+            "from types import SimpleNamespace\n"
+            "builtins = SimpleNamespace(list=nullcontext)\n"
+            "cs = builtins.list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Finding 3, function-local spelling. The same attribute read, but the
+    # store is a local rather than a module one, so it is caught by the
+    # function-scope half of the question rather than the module half.
+    (
+        "a function-local builtins name read through an attribute",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    from types import SimpleNamespace\n"
+            "    builtins = SimpleNamespace(list=nullcontext)\n"
+            "    cs = builtins.list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Finding 4, the residual false-live. `cs = list()` runs BEFORE the
+    # `def list()` beside it, so the call really is the builtin and binds the
+    # empty list, which `with` cannot enter. The order cut used to stop at the
+    # enclosing `if` as a whole statement, so the `def` inside that same block
+    # read as though it shadowed the call, and a `TypeError`-raising header
+    # came back LIVE.
+    (
+        "a later binding inside the same module block as the call",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    cs = list()\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # The positive control for finding 4, and the one that would break if the
+    # always-true branch were ignored. The shadow is written *before* the call
+    # inside the same block, so the call really is the shadow and the assert is
+    # reachable.
+    (
+        "an earlier binding inside the same module block as the call",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control for finding 3. `import builtins` is the ordinary
+    # import that brings the *real* module in, so the qualified spelling still
+    # reaches the builtin and the empty list cannot be entered. Reading the
+    # canonical import as a rebinding would report this header LIVE.
+    (
+        "the canonical import of builtins read through an attribute",
+        (
+            "import builtins\n"
+            "cs = builtins.list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
+def _fixture_is_entered(label, source):
+    """Does CPython enter the with-body? Executed, never assumed.
+
+    The fixture is called with ``x=2``, which makes ``assert x != 1`` true. A
+    clean return therefore means the body ran (LIVE); any exception means it
+    did not (DEAD). The assert is therefore never *reached as a failure*: the
+    question is only whether entry raised before it, so the harness counts a
+    clean return as LIVE rather than catching ``AssertionError`` as success.
+    """
+    namespace = {"nullcontext": contextlib.nullcontext, "SimpleNamespace": SimpleNamespace}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](2)
+    except Exception:  # noqa: BLE001 - any exception means the body was not entered
+        return False
+    return True
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected_live"),
+    ROUND_SIX_SOURCES,
+    ids=[shape[0] for shape in ROUND_SIX_SOURCES],
+)
+def test_module_scope_order_scope_and_builtins_reading(label, source, expected_live):
+    """A function-body call, a handler body and a rebound ``builtins`` are read right.
+
+    #388-5e. The round-6 review found three false-deads and one false-live in
+    the module-scope shadowing rule, each from a different place where the walk
+    stopped short of the truth:
+
+    * a function body runs only *after* the whole module has executed, so a
+      module binding written **after** the function's ``def`` still shadows the
+      callee there -- the order cut is only valid for a module-scope call;
+    * an ``except`` **handler** body runs in the enclosing scope, so a binding
+      in one is a module binding, and the walk has to open the handlers;
+    * ``builtins.attr`` only names the real module while ``builtins`` itself is
+      unbound, so the qualified spelling needs the base name checked -- while
+      ``import builtins`` must keep counting as the real module;
+    * and a binding *after* the call **inside the same block** does not shadow
+      it, which needs the descent to be order-aware rather than to stop at the
+      enclosing statement.
+
+    Each row is executed under real CPython with ``x=2`` before its verdict is
+    checked, so the expectation is CPython's own answer. A fixture that does
+    not behave as the row claims fails here rather than passing vacuously.
+    """
+    assert _fixture_is_entered(label, source) is expected_live, (
+        f"{label}: CPython "
+        f"{'entered' if expected_live else 'did not enter'} the with-body, so this "
+        f"row cannot pin the opposite verdict. Either the fixture is wrong or "
+        f"the expectation is."
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    assert [_is_enforced(function, asserts[0], tree)] == [expected_live], (
+        f"{label}: expected the header to be reported "
+        f"{'LIVE' if expected_live else 'DEAD'}. A callee shadowed by a module "
+        f"binding that has already run is a different callable; one that has "
+        f"not run yet still reaches the real builtin."
     )

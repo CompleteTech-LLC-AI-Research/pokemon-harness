@@ -473,9 +473,29 @@ def _block_body(statement):
     knows how to open -- a ``def`` inside a case is still a module binding on
     the path that matches, and reading past it reported a header DEAD that
     CPython enters.
+
+    An ``except`` handler is a body too, and it is a body that has plainly run
+    by the time anything below the ``try`` is evaluated:
+
+        try:
+            raise ValueError
+        except ValueError:
+            def list(): return nullcontext()
+        cs = list()          # the handler's `list`, not the builtin
+
+    Leaving handler bodies out of the walk skipped the binding entirely and
+    reported that ``cs`` as the builtin ``list`` -- a ``TypeError``-raising
+    header as LIVE. A handler's ``name`` (``except E as exc``) is a binding too,
+    but that one is *deleted* when the handler exits, so the handler body is
+    what is walked and the bound name is read from it like any other.
     """
     if isinstance(statement, ast.Try):
-        return [*statement.body, *statement.orelse, *statement.finalbody]
+        return [
+            *statement.body,
+            *statement.orelse,
+            *statement.finalbody,
+            *(nested for handler in statement.handlers for nested in handler.body),
+        ]
     if isinstance(statement, ast.Match):
         return [nested for case in statement.cases for nested in case.body]
     if isinstance(statement, (ast.If, ast.While)):
@@ -2529,6 +2549,47 @@ def _name_is_shadowed_in(func, function):
     return False
 
 
+def _name_is_rebound_away_from_module(name_node, function):
+    """Is ``name_node.id`` rebound to something other than its own module?
+
+    The question is asked only of a name that a qualified ``builtins.attr``
+    call is written through, so the answer separates the one import that
+    *is* the module from every other way the name can be taken:
+
+    * ``import builtins`` and ``import builtins as builtins`` bring the real
+      module in and leave the name meaning that module;
+    * a parameter, a local store, a function-local ``def``/``class``, or a
+      module-level store of any kind replace it with an arbitrary object, so
+      ``builtins.attr`` is then some attribute of *that* object.
+
+    ``from builtins import list`` does not bind the name ``builtins`` at all,
+    so it never reaches here; a store that is the module's own canonical import
+    is the only shape that keeps the qualified form trustworthy.
+    """
+    name = name_node.id
+    if function is None:
+        # No scope to consult, so the name cannot be proved to be the module.
+        return True
+    if name in _signature_bound_names(function):
+        return True
+    for node in _own_scope_bindings(function):
+        if node is name_node:
+            continue
+        for bound in _names_bound_by_statement(node, name):
+            if bound and not _is_canonical_module_import(node, name):
+                return True
+    return _module_rebinds_name(function, name)
+
+
+def _is_canonical_module_import(statement, name):
+    """Is this binding the ordinary ``import <name>`` of the module itself?"""
+    if not isinstance(statement, ast.Import):
+        return False
+    return any(
+        (alias.asname or alias.name) == name and alias.name == name for alias in statement.names
+    )
+
+
 def _callee_is_shadowed(func, function, call=None):
     """Is ``func`` a call target that does not reach the real builtin?
 
@@ -2561,16 +2622,22 @@ def _callee_is_shadowed(func, function, call=None):
     """
     if isinstance(func, ast.Attribute):
         # `builtins.int` only means the builtin when `builtins` itself is not
-        # rebound, so the question moves to the attribute's own base name --
-        # with one exception. `import builtins` is not a *rebinding* of the
-        # name, it is the ordinary import that brings the real module in, and
-        # every other `import x` in the file is exactly the spelling that means
-        # "this is the module named x". Recursing into the attribute's base
-        # therefore made the canonical way of naming a builtin read as
-        # shadowed, and `cs = builtins.list()` came back LIVE where CPython
-        # raises `TypeError`.
+        # rebound, so the question moves to the attribute's own base name.
+        # Returning `False` for the name outright answered every `builtins.*`
+        # call as the real module, including one through a name that some
+        # store has replaced:
+        #
+        #     builtins = SimpleNamespace(list=nullcontext)
+        #     cs = builtins.list()      # any callable, not the builtin `list`
+        #
+        # That read a `TypeError`-raising header as LIVE. `import builtins` is
+        # the one binding that must still count as canonical: it is not a
+        # *rebinding* but the ordinary import that brings the real module in,
+        # and every other `import x` in the file is exactly the spelling that
+        # means "this is the module named x". Treating it as a shadow would
+        # make `cs = builtins.list()` LIVE where CPython raises.
         if isinstance(func.value, ast.Name) and func.value.id == "builtins":
-            return False
+            return _name_is_rebound_away_from_module(func.value, function)
         return _callee_is_shadowed(func.value, function, call)
     if not isinstance(func, ast.Name):
         return False
@@ -2623,20 +2690,31 @@ def _module_binds_name(function, name, call=None):
       this walk existed the question was reached through the module, so a
       function-local definition was answered twice: once correctly by
       :func:`_name_is_shadowed_in` and once, wrongly, from here.
-    * the binding must come **before the call runs**. A name bound later is
-      not yet bound where the call is evaluated, so the call still reaches the
-      builtin:
+    * the binding must be in force **where the call is evaluated**, and that
+      point is not the same for the two kinds of call:
 
-          cs = list()             # the builtin -- runs first
-          def list(): return None # too late to matter for the line above
+      - a call written at **module scope** is evaluated as the module runs, so
+        only the statements before it count:
 
-      Reading that ``cs`` as shadowed reported a ``TypeError``-raising header
-      as LIVE. The cut is placed at the earlier of the two relevant points:
-      the module statement holding the call, and the ``def`` that introduces
-      the function. A call inside a function body is only reached once the
-      whole module has executed, so every binding up to its ``def`` counts;
-      a call written at module scope is reached as the module runs, so the
-      statements after it do not count.
+            cs = list()             # the builtin -- runs first
+            def list(): return None # too late to matter for the line above
+
+      - a call inside a **function body** is evaluated only when that function
+        is called, which is after the *whole* module has finished executing.
+        Every module binding therefore counts, including one written after the
+        function's own ``def``:
+
+            def outer(x):
+                cs = list()         # `list` is whatever the module ended with
+                with cs: ...
+            def list(): return nullcontext()
+
+        Reading that ``cs`` as the builtin reported a header CPython enters as
+        DEAD. Cutting the walk at the function's ``def`` was the fix for the
+        module-scope case above, and it is exactly wrong for this one.
+
+      The two are told apart by whether the call is inside the analysed
+      function's own scope, which :func:`_call_runs_at_module_scope` answers.
 
     The walk descends into module-level blocks -- a binding inside a
     module-level ``if`` still binds the name whenever that branch is taken --
@@ -2651,21 +2729,145 @@ def _module_binds_name(function, name, call=None):
     module = _module_for_function(function)
     if module is None:
         return False
-    body = getattr(module, "body", [])
-    for statement in body:
-        if statement is function or _contains(statement, call):
-            # A binding written after this point has not run where the call is
-            # evaluated, and a binding inside the function is not a module
-            # binding at all. The module store itself is the statement that
-            # holds the call, so its own targets are still counted -- the walk
-            # checks the statement before stopping.
-            break
+    if _call_runs_at_module_scope(function, call):
+        return _module_binds_name_at_module_scope(module, function, call, name)
+    # The call is inside a function body, so it runs only after the whole
+    # module has executed and every module binding is in force. A nested
+    # `def`/`class` *body* is still a separate scope and is not counted.
+    for statement in getattr(module, "body", []):
         if any(_names_bound_by_statement(statement, name)):
             return True
         for node in _module_level_bindings(statement):
             if any(_names_bound_by_statement(node, name)):
                 return True
     return False
+
+
+def _module_rebinds_name(function, name):
+    """Does the module holding ``function`` bind ``name`` to something else?
+
+    Unlike :func:`_module_binds_name` this asks the question without a call
+    node, so it is the whole module: any module-level binding of ``name``
+    counts, at any position. It is used for the ``builtins.attr`` form, where
+    the question is "is the qualified name still the module itself" rather than
+    "is this call shadowed", and the ordinary ``import builtins`` is excluded
+    by the caller so that the canonical spelling stays trustworthy.
+    """
+    module = _module_for_function(function)
+    if module is None:
+        return False
+    for statement in getattr(module, "body", []):
+        if _is_canonical_module_import(statement, name):
+            # The ordinary `import builtins` IS the module, so it is not a
+            # rebinding of the name. Skipping it here is what keeps the
+            # canonical qualified spelling `cs = builtins.list()` reading as
+            # the builtin, where CPython raises `TypeError` on the empty list.
+            continue
+        if any(_names_bound_by_statement(statement, name)):
+            return True
+        for node in _module_level_bindings(statement):
+            if _is_canonical_module_import(node, name):
+                continue
+            if any(_names_bound_by_statement(node, name)):
+                return True
+    return False
+
+
+def _call_runs_at_module_scope(function, call):
+    """Is ``call`` evaluated while the module runs, rather than in a body?
+
+    A call written among the module's own statements is reached as the module
+    executes, so only the bindings before it are in force. A call inside the
+    analysed function -- or inside any other nested scope -- is reached later,
+    when the module has finished, so every module binding counts. The question
+    is answered by position: a call that is *not* under ``function`` is a
+    module-scope one, which is also the safe answer for a caller that supplied
+    no call node at all.
+    """
+    if call is None:
+        return True
+    return not _contains(function, call)
+
+
+def _module_binds_name_at_module_scope(module, function, call, name):
+    """Module bindings in force where a module-scope ``call`` is evaluated.
+
+    The walk runs the module's statements in source order, descending into
+    module-level blocks so that a binding *inside* a block is ordered with
+    respect to the call rather than to the block as a whole. That ordering is
+    what separates
+
+        if True:
+            cs = list()             # the builtin; runs first
+            def list(): return None # too late to matter for the line above
+
+    from the same block with the two the other way round, where ``cs`` really
+    is the shadow and the header is dead. Stopping at the enclosing block
+    instead of at the statement holding the call answered the first as
+    shadowed -- a false-live, since CPython raises ``TypeError`` there.
+
+    The walk stops at the first statement at or after the call's own position,
+    and the statement holding the call has already been checked, so a store
+    written on that same line still counts.
+    """
+    for statement in getattr(module, "body", []):
+        if _module_statement_binds_name_before_call(statement, call, name):
+            return True
+        if _module_statement_precedes_call(statement, function, call):
+            break
+    return False
+
+
+def _module_statement_precedes_call(statement, function, call):
+    """Has execution reached ``call`` by the end of ``statement``?"""
+    if statement is function:
+        # The function's own definition binds its name; the body that follows
+        # is a separate scope. A module-scope call is not inside it, so
+        # reaching the `def` means the call has already been evaluated.
+        return True
+    return _contains(statement, call)
+
+
+def _module_statement_binds_name_before_call(statement, call, name):
+    """Does ``statement`` bind ``name``, counting only what runs before ``call``?
+
+    When the call is not inside ``statement`` the whole statement has run, so
+    every binding it contains counts. When it is inside, the walk descends in
+    order and stops once the call's own statement is reached, so a binding
+    written after the call inside the same block is correctly ignored.
+    """
+    if not _contains(statement, call):
+        return any(_names_bound_by_statement(statement, name)) or any(
+            _names_bound_by_statement(node, name) for node in _module_level_bindings(statement)
+        )
+    # The call lives inside this statement, so descend in source order and
+    # stop at the first inner statement that has already run it. The call's
+    # own statement is checked before stopping, so a store on the same line
+    # (`cs = list()`) is still counted.
+    for inner in _module_level_bindings_in_order(statement):
+        if any(_names_bound_by_statement(inner, name)):
+            return True
+        if _contains(inner, call):
+            break
+    return False
+
+
+def _module_level_bindings_in_order(statement):
+    """Like :func:`_module_level_bindings`, but the blocks' own statements too.
+
+    The order matters only for a statement that holds the call, because that is
+    the one case where a later binding in the same block must not be counted.
+    Each block's children are yielded before the block itself so that the
+    reader sees them in the order they run.
+    """
+    ordered = []
+    for node in _module_level_bindings(statement):
+        if isinstance(node, _MODULE_LEVEL_BLOCKS):
+            ordered.append(node)
+            ordered.extend(_module_level_bindings_in_order(node))
+        else:
+            ordered.append(node)
+    return ordered
 
 
 def _module_level_bindings(statement):
@@ -3399,6 +3601,70 @@ def _condition_is_never_true(node, function=None):
     return False
 
 
+def _condition_is_always_true(node, function=None):
+    """A condition that is true for every binding, so its body always runs.
+
+    This is the mirror of :func:`_condition_is_never_true`, and it matters for
+    the same reason. A store inside ``if True:`` is written as a conditional
+    one, but the body runs on every import, so the store settles the name just
+    as an unconditional store would:
+
+        if True:
+            cs = list()             # runs on every import; `cs` is a `list`
+            def list(): return nullcontext()
+
+    Read as genuinely conditional, the ``cs = list()`` above settled nothing
+        and the name was left to a later store, which reported the `TypeError`
+    CPython raises as a live header. Reading it as conditional is only right
+        when the condition may or may not hold, so the always-true case has to
+        be told apart rather than left to the conservative default.
+
+    Only shapes decidable from the syntax are matched, exactly as in the
+    never-true direction. A condition this cannot read is *not* always-true,
+    which keeps the caller's existing treatment of it.
+    """
+    if _is_literal_true(node):
+        return True
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        # `a or b` is true whenever *any* operand is, so one literal-true
+        # operand settles it. The `and` case is the opposite: `flag and True`
+        # is false whenever `flag` is, so a true operand there says nothing.
+        return any(_condition_is_always_true(value, function) for value in node.values)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        return all(_condition_is_always_true(value, function) for value in node.values)
+    return False
+
+
+def _statement_always_runs(statement, function):
+    """Is this store written inside a branch that provably always executes?
+
+    The counterpart to :func:`_statement_never_runs`, used for the same
+    purpose from the other side: a store that always runs settles the name, so
+    it belongs with the unconditional ones in :func:`_stores_of` rather than
+    being left to a later conditional store that may never have written.
+    """
+    if function is None:
+        return False
+    for enclosing in _enclosing_blocks(statement, function):
+        # Only the body of the branch runs on every pass. An `else` beside
+        # a literal-true condition never runs at all, which is the
+        # never-true rule's business and not this one's.
+        if (
+            isinstance(enclosing, ast.If)
+            and _condition_is_always_true(enclosing.test, function)
+            and _contains_any(enclosing.body, statement)
+        ):
+            return True
+    for node in ast.walk(statement):
+        if (
+            isinstance(node, ast.If)
+            and _condition_is_always_true(node.test, function)
+            and _contains_any(node.body, statement)
+        ):
+            return True
+    return False
+
+
 def _is_bare_name(target, name):
     """Is this loop target the plain name ``name``, with no unpacking?"""
     return isinstance(target, ast.Name) and target.id == name
@@ -3779,8 +4045,24 @@ def _stores_of(name, by_index, index, function):
     # usable context manager afterwards -- if the handler ran, CPython deleted
     # the name when the handler exited, and if it did not run, the previous
     # binding is still in force and is settled by an unconditional store.
+    # A store inside an always-true branch joins them from the other side:
+    # `if True:` runs its body on every import, so the store settles the name
+    # exactly as an unconditional one does. Left out, it settled nothing and a
+    # later conditional store was read as the one in force -- which reported
+    # the `TypeError` CPython raises for
+    #
+    #     if True:
+    #         cs = list()
+    #         def list(): return nullcontext()
+    #
+    # as a live header. Only a branch that is true for every binding counts, so
+    # a condition this cannot read keeps its existing treatment.
     decidable = [
-        entry for entry in entries if not entry[2] or isinstance(entry[0], ast.ExceptHandler)
+        entry
+        for entry in entries
+        if not entry[2]
+        or isinstance(entry[0], ast.ExceptHandler)
+        or _statement_always_runs(entry[0], function)
     ]
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
     if latest is None:
@@ -4535,6 +4817,17 @@ def _is_enforced(function, target, tree=None):
 def _contains(statement, target):
     """True if ``target`` is ``statement`` or lies anywhere beneath it."""
     return statement is target or any(node is target for node in ast.walk(statement))
+
+
+def _contains_any(statements, target):
+    """True if ``target`` is one of ``statements`` or lies beneath any of them.
+
+    :func:`_contains` answers the same question for a single node, but the
+    ``if``/``else`` split is a pair of *statement lists*, and asking a list for
+    its ``_fields`` raised inside a decision function. A branch membership test
+    is the question several rules ask of one of those lists.
+    """
+    return any(_contains(statement, target) for statement in statements or ())
 
 
 def guard_rejects_the_deadline_terminal_state():
