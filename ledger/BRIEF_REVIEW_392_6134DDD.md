@@ -131,6 +131,19 @@ The candidate matches the best local chain and introduces no regression. The one
 residual false-LIVE is fixture 19 (`if`/`else` both arms enterable), identical to
 `2031d7d` and `31e3b22` — pre-existing and unchanged, not introduced here.
 
+### Mutation checks on the fix
+
+Three mutations of the two changed lines. All killed:
+
+| # | Mutation | Killed by |
+|---|---|---|
+| 1 | tie-break back over raw `entries` (the pre-fix defect) | `test_a_conditional_store_superseding_a_local_carrier_is_declined[a loop body rebinding the target to a manager]` + `test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier[a loop body rebinding the target to a suppressor]` |
+| 2 | `candidates = entries` (drop the collapse's influence) | `test_a_conditional_store_superseding_a_local_carrier_is_declined[a loop body rebinding the target to a manager]` |
+| 3 | `candidates = competing` (drop the unconditional fallback) | 6 tests, incl. `test_a_constructor_callee_shadowed_outside_the_body_is_reported_live[...]` and `test_module_scope_order_scope_and_builtins_reading[...]` |
+
+The worktree was restored to `1168d5d` after each run and re-verified
+byte-identical to `HEAD`; the final run is 443 passed.
+
 The wider `tests/` run shows 20 failures, all in `test_probe_*` spawn tests. These
 are **pre-existing and environmental** — `/dev/shm` is read-only here, so
 `tempfile` raises `OSError: [Errno 30]`. Verified identical on a clean `6b72bf6`
