@@ -580,6 +580,116 @@ UNREACHABLE_SHAPES = (
         "    def inner():\n        assert x != 1\n    return inner",
         True,
     ),
+    # #400. A `return` / `raise` / `break` / `continue` that is unconditional
+    # within its own block never falls through, so every statement after it is
+    # dead -- while the assert stays lexically present, so a presence-based
+    # check certifies a contract that can no longer fail. Each of the four
+    # transfer kinds is its own spelling of the same defeat.
+    ("after return", "    return\n    assert x != 1", False),
+    ("after return value", "    return x\n    assert x != 1", False),
+    ("after raise", "    raise ValueError\n    assert x != 1", False),
+    (
+        "after continue",
+        "    for _ in [1]:\n        continue\n        assert x != 1",
+        False,
+    ),
+    (
+        "after break",
+        "    for _ in [1]:\n        break\n        assert x != 1",
+        False,
+    ),
+    # The transfer is not a *statement* in the dead block but kills it anyway:
+    # the interpreter never begins evaluating the `with` / `try` / `if` / `for`
+    # that follows, so the asserts nested under their bodies never run either.
+    # A rule that only looked at the top-level siblings would miss all of these.
+    (
+        "return then with body",
+        "    return\n    with helper():\n        assert x != 1",
+        False,
+    ),
+    (
+        "return then try finally body",
+        "    return\n    try:\n        pass\n    finally:\n        assert x != 1",
+        False,
+    ),
+    (
+        "return then both if branches",
+        "    return\n    if flag:\n        assert x != 1\n    else:\n        assert x != 2",
+        False,
+    ),
+    (
+        "return then match case",
+        "    return\n    match x:\n        case 1:\n            assert x != 1",
+        False,
+    ),
+    (
+        "return then for body",
+        "    return\n    for _ in [1]:\n        assert x != 1",
+        False,
+    ),
+    # Deeply nested under a dead compound statement: the reachability of the
+    # assert follows the *enclosing* block, not just its immediate parent.
+    (
+        "return then nested in while try",
+        (
+            "    return\n    for _ in [1]:\n        while True:\n"
+            "            try:\n                assert x != 1\n"
+            "            except AssertionError:\n                pass"
+        ),
+        False,
+    ),
+    # A class body after a `return` is never executed either, so the assert it
+    # holds is just as dead as one under a plain `if`.
+    (
+        "return then class body",
+        "    return\n    class Inner:\n        assert x != 1",
+        False,
+    ),
+    # #400, the same defeat *inside* a handler block rather than before one.
+    # A `finally` and an `else` are separate statement lists, so a rule that
+    # only ever scans a `body` misses the transfer that sits in the sibling
+    # list directly before the assert.
+    (
+        "return in finally then assert",
+        "    try:\n        pass\n    finally:\n        return\n        assert x != 1",
+        False,
+    ),
+    (
+        "return in else then assert",
+        "    if flag:\n        pass\n    else:\n        return\n        assert x != 1",
+        False,
+    ),
+    # The live controls for #400. A transfer nested in an earlier statement's
+    # own body is conditional with respect to the enclosing block, so it says
+    # nothing about what follows -- and `break` / `continue` bind to the
+    # nearest loop, not to the function.
+    (
+        "guarded continue then assert",
+        ("    for _ in [1]:\n        if flag:\n            continue\n        assert x != 1"),
+        True,
+    ),
+    (
+        "guarded break then assert",
+        "    for _ in [1]:\n        if flag:\n            break\n        assert x != 1",
+        True,
+    ),
+    (
+        "loop with break then assert",
+        "    for _ in [1]:\n        if flag:\n            break\n    assert x != 1",
+        True,
+    ),
+    ("guarded return then assert", "    if flag:\n        return\n    assert x != 1", True),
+    (
+        "guarded raise then assert",
+        "    if flag:\n        raise ValueError\n    assert x != 1",
+        True,
+    ),
+    (
+        "return in try then assert",
+        "    try:\n        return\n    except Exception:\n        pass\n    assert x != 1",
+        True,
+    ),
+    ("plain live assert", "    assert x != 1", True),
 )
 
 
@@ -617,6 +727,63 @@ def test_reachability_rejects_exactly_the_shapes_that_cannot_fail(label, body, l
         f"{label}: expected every assert to be "
         f"{'enforced' if live else 'unenforced'}, got {results}"
     )
+
+
+#: #400 also has to be *positional*: one function can hold a live assert and a
+#: dead one, and answering uniformly either way certifies a real contract as
+#: defeated or hides a defeated one. These rows are checked in source order, so
+#: they catch a rule that gets the direction right on a whole function but the
+#: cut point wrong within it.
+MIXED_REACHABILITY_SHAPES = (
+    (
+        "live then return then dead",
+        "    assert x != 1\n    return\n    assert x != 2",
+        (True, False),
+    ),
+    (
+        "live in with then return then dead",
+        "    with helper():\n        assert x != 1\n    return\n    assert x != 2",
+        (True, False),
+    ),
+    (
+        "dead with body then live after return in branch",
+        "    with helper():\n        return\n        assert x != 1\n    assert x != 2",
+        (False, True),
+    ),
+    (
+        "two live asserts around a helper call",
+        "    assert x != 1\n    helper()\n    assert x != 2",
+        (True, True),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    MIXED_REACHABILITY_SHAPES,
+    ids=[shape[0] for shape in MIXED_REACHABILITY_SHAPES],
+)
+def test_reachability_decides_each_assert_by_its_own_position(label, body, expected):
+    """A live and a dead assert in one function must get opposite verdicts.
+
+    The single-verdict rows above cannot express this: a rule that answers one
+    way for the whole function would satisfy either all-True or all-False
+    fixtures while being wrong about half the asserts in the mixed case. The
+    rows are ordered by source position, so a rule that picks the wrong
+    cut point is caught rather than averaged away.
+    """
+    source = "def probe(x, flag, record, helper):\n" + body + "\n"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = sorted(
+        (node for node in ast.walk(function) if isinstance(node, ast.Assert)),
+        key=lambda node: node.lineno,
+    )
+    assert len(asserts) == len(expected), (
+        f"{label}: fixture declared {len(asserts)} asserts, expected {len(expected)}"
+    )
+    results = tuple(_is_enforced(function, node, tree) for node in asserts)
+    assert results == expected, f"{label}: expected {expected}, got {results}"
 
 
 #: The residual defeats of #287: every spelling that keeps the assert in the AST

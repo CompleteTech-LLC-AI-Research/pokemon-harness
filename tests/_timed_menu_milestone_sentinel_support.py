@@ -3931,6 +3931,22 @@ def _is_enforced(function, target, tree=None):
     """
     owning = tree if tree is not None else _owning_module(function)
     bound = _bound_names(owning, function)
+    if _is_after_control_transfer(function, target):
+        # #400. A statement that follows `return` / `raise` / `break` /
+        # `continue` in the SAME block is dead -- control can never reach it --
+        # yet it is still a lexically present `assert`, so the reachability walk
+        # above had no reason to look at it and answered "enforced":
+        #
+        #     def outer(x):
+        #         return
+        #         assert x != 1        # never evaluated
+        #
+        # That certifies a defeated contract as load-bearing, which is #308
+        # criterion 1 in the self-direction. The branch-shaped defeats above
+        # (`if False:`, `for _ in []:`) do not cover it: those are about a
+        # *container* that may not be entered, while this is a statement
+        # positioned after one that can never fall through.
+        return False
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
@@ -3973,6 +3989,117 @@ def _is_enforced(function, target, tree=None):
 def _contains(statement, target):
     """True if ``target`` is ``statement`` or lies anywhere beneath it."""
     return statement is target or any(node is target for node in ast.walk(statement))
+
+
+_CONTROL_TRANSFERS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+
+#: The AST fields that hold statements executed as one sequential block. Only
+#: these are walked by the #400 reachability rule; `with` also has an `items`
+#: list and a `for` an `orelse`, and neither is interleaved with statements.
+_BLOCK_FIELDS = frozenset({"body", "orelse", "finalbody"})
+
+
+def _is_after_control_transfer(function, target):
+    """Is ``target`` dead because an earlier sibling can never fall through?
+
+    #400. A ``return`` / ``raise`` / ``break`` / ``continue`` that is
+    unconditional *within its own block* makes every later statement in that
+    block -- and everything nested under a later statement's body --
+    unreachable:
+
+        def outer(x):
+            return
+            assert x != 1        # dead
+
+    A transfer that terminates the *whole function* (`return` / `raise`) also
+    kills a later `with`, `try` or `if` wholesale, because the interpreter never
+    begins evaluating that statement at all:
+
+        def outer(x):
+            return
+            with open("f") as fh:  # never entered
+                assert x != 1      # dead
+
+    The chain therefore continues through the *bodies* of every statement
+    after the transfer, not just through the statements themselves. A transfer
+    nested inside an earlier statement's own body belongs to *that* body, so it
+    says nothing about the statements that follow:
+
+        for i in items:
+            if i:
+                break            # leaves the loop, not this block
+            assert x != 1
+        assert x != 2              # still reached after the loop
+
+    A guarded transfer likewise leaves the block reachable on the other path:
+
+        for i in items:
+            if i:
+                continue
+            assert x != 1        # still reached when `i` is falsy
+
+    `break` and `continue` are scoped to the nearest enclosing loop, so they
+    only kill what follows them in *that* loop's body. A `break` after the loop
+    ends cannot suppress an assert placed after the loop, and one inside a
+    nested `if` is guarded.
+
+    So the rule is a forward walk down the chain of blocks that hold ``target``:
+    at each level, the entry that *is* (or contains) ``target`` is the holder,
+    and only the siblings *before* the holder are candidates. A sibling that
+    comes after the holder says nothing about the holder's own reachability,
+    which is why the walk stops at the holder rather than at ``target``.
+    """
+    ancestors = _ancestors(function, target)
+    for node, holder in zip([function, *ancestors], [*ancestors, target]):
+        for body in _statement_lists_holding(node, holder):
+            if _is_terminated_before(body, holder):
+                return True
+    return False
+
+
+def _statement_lists_holding(node, target):
+    """Yield each statement list in ``node`` that directly contains ``target``.
+
+    Only the fields that are *executed as a block* are considered. A `with`
+    also carries a list of `items`, and a `for` an `orelse`; neither is
+    interleaved with the statements, so a transfer sitting in a preceding
+    sibling says nothing about them.
+    """
+    for field, value in ast.iter_fields(node):
+        if (
+            field in _BLOCK_FIELDS
+            and isinstance(value, list)
+            and any(item is target for item in value)
+        ):
+            yield value
+
+
+def _is_terminated_before(body, target):
+    """Does ``body`` stop being reachable at some point strictly before ``target``?
+
+    The walk is positional but transitive: once the block is terminated, every
+    later statement is unreachable, *including* the bodies of compound
+    statements that follow, because the interpreter never starts them.
+    """
+    for node in body:
+        if node is target:
+            return False
+        if _is_bare_transfer(node):
+            return True
+    return False
+
+
+def _is_bare_transfer(node):
+    """Is ``node`` itself an unconditional ``return`` / ``raise`` / ``break`` / ``continue``?
+
+    A transfer hidden inside a compound statement's body is conditional with
+    respect to the enclosing block, so it is not a bare transfer here. An
+    ``assert`` is a statement and can be a transfer target, so it is skipped
+    rather than ending the search.
+    """
+    return isinstance(node, _CONTROL_TRANSFERS) and not isinstance(
+        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    )
 
 
 def guard_rejects_the_deadline_terminal_state():
