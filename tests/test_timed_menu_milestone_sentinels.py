@@ -4109,6 +4109,782 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
 #: the carried suppressor. Every row here is executed, so "does not retire" is
 #: backed by CPython swallowing the assert rather than by the analyzer's
 #: opinion.
+#: #359: the binding forms whose right-hand side is an *element* of a
+#: container, or a loop's next element, rather than the whole value.
+#:
+#: Every row here binds a name to a real ``contextlib.suppress`` and then reads
+#: it back -- directly, or through a self-alias. The assert under it is
+#: genuinely swallowed on all of them, so each row's ``defeated`` verdict is a
+#: *contract* and not a preference.
+#:
+#: These are the spellings the per-statement rules could not read. A ``for``
+#: target was recorded with no value at all, a destructuring target was
+#: recorded with the whole container, and :func:`_bindings_before` did not count
+#: a loop as a store that had run by the time a ``with`` nested in its body was
+#: read. Each of those reported a swallowed assert as ``enforced`` -- a
+#: disarmed contract certified as load-bearing, the damaging direction per #308
+#: criterion 1.
+#:
+#: ``expected_live`` is the exact verdict for the marked assert.
+#: ``control_element`` pairs each row with the same spelling over a
+#: ``nullcontext()`` element, which is genuinely live; without it a rule that
+#: answered "defeated" for everything would pass this table while dropping
+#: every real contract in it. ``None`` means the row has no readable control,
+#: because an arbitrary iterable genuinely is undecidable.
+BINDING_FORM_SHAPES = (
+    (
+        "a tuple-unpack target reads its own element",
+        (
+            "    cs, other = (contextlib.suppress(AssertionError), 2)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a list target reads its own element",
+        (
+            "    [cs] = [contextlib.suppress(AssertionError)]\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested destructuring target reads the nested element",
+        (
+            "    cs, (other, third) = (contextlib.suppress(AssertionError), (2, 3))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested second-position target reads its own element",
+        (
+            "    (other, (cs, third)) = (2, (contextlib.suppress(AssertionError), 3))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a loop target reads the iterated element",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),):\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a self-alias after a loop target keeps the element",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),):\n"
+            "        with (cs := cs):\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a self-alias in a tuple target keeps its own element",
+        (
+            "    cs, other = (contextlib.suppress(AssertionError), 2)\n"
+            "    with (cs := cs):\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a starred target is declined rather than paired with an element",
+        (
+            "    cs, *rest = (contextlib.suppress(AssertionError), 2, 3)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a target after a starred one is bound from the end",
+        (
+            "    first, *rest, cs = (1, 2, 3, contextlib.suppress(AssertionError))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a leading star still binds the trailing target",
+        (
+            "    *rest, cs = (1, 2, contextlib.suppress(AssertionError))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "two targets after a star bind from the end in order",
+        (
+            "    first, *rest, cs, last = "
+            "(1, 2, 3, contextlib.suppress(AssertionError), 5)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a deeply nested target reads the deeply nested element",
+        (
+            "    a, (b, (cs, d)) = "
+            "(1, (2, (contextlib.suppress(AssertionError), 4)))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a loop over an unreadable iterable is declined, not guessed",
+        ('    for cs in helper.items():\n        with cs:\n            assert x != 1, "A1"'),
+        True,
+        None,
+    ),
+    (
+            "a tuple target over a named container reads the element",
+            (
+                "    t = (contextlib.suppress(AssertionError),)\n"
+                "    cs, = t\n"
+                "    with cs:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            "contextlib.nullcontext()",
+        ),
+    (
+            "a first-of-two target over a named container reads the element",
+            (
+                "    t = (contextlib.suppress(AssertionError), 2)\n"
+                "    cs, other = t\n"
+                "    with cs:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            "contextlib.nullcontext()",
+        ),
+    (
+            "a second-of-two target over a named container reads the element",
+            (
+                "    t = (2, contextlib.suppress(AssertionError))\n"
+                "    other, cs = t\n"
+                "    with cs:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            "contextlib.nullcontext()",
+        ),
+    (
+            "a nested target over a named container reads the nested element",
+            (
+                "    t = (2, (contextlib.suppress(AssertionError), 3))\n"
+                "    other, (cs, third) = t\n"
+                "    with cs:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            "contextlib.nullcontext()",
+        ),
+    (
+            "a swapped element that lands a suppressor is defeated",
+            (
+                "    a = contextlib.nullcontext()\n"
+                "    b = contextlib.suppress(AssertionError)\n"
+                "    a, b = b, a\n"
+                "    with a:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            # Each swap row is the other's control: exchanging the two elements
+            # flips the verdict, and a rule that cannot tell them apart fails one.
+            # A `nullcontext()` substitution would not help here, because the whole
+            # question is *which* element the target receives.
+            None,
+        ),
+    (
+            "a swapped element that lands a live manager is enforced",
+            (
+                "    a = contextlib.suppress(AssertionError)\n"
+                "    b = contextlib.nullcontext()\n"
+                "    a, b = b, a\n"
+                "    with a:\n"
+                '        assert x != 1, "A1"'
+            ),
+            True,
+            None,
+        ),
+    (
+            "a list target over a named container reads the element",
+            (
+                "    t = [contextlib.suppress(AssertionError)]\n"
+                "    [cs] = t\n"
+                "    with cs:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            "contextlib.nullcontext()",
+        ),
+    (
+            "a target over an aliased named container reads the element",
+            (
+                "    t = (contextlib.suppress(AssertionError), 2)\n"
+                "    u = t\n"
+                "    cs, other = u\n"
+                "    with cs:\n"
+                '        assert x != 1, "A1"'
+            ),
+            False,
+            "contextlib.nullcontext()",
+        ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live", "control_element"),
+    BINDING_FORM_SHAPES,
+    ids=[row[0] for row in BINDING_FORM_SHAPES],
+)
+def test_a_binding_form_reads_the_value_that_lands_on_the_name(
+    label, body, expected_live, control_element
+):
+    """A destructuring or loop target must resolve to its own element.
+
+    The one question every row asks is whether the analyzer sees the
+    ``suppress`` that really is bound to ``cs``. If it does, the marked assert
+    is swallowed and must be reported defeated; if it does not, the very same
+    code is reported enforced and a disarmed contract is certified as
+    load-bearing.
+
+    Runtime is executed per row, so a ``defeated`` expectation is credible only
+    when CPython really swallows the assert. The control row repeats the
+    spelling with a ``nullcontext()`` element, which does not suppress, and
+    requires that one to be reported live. That pair is what stops this table
+    from degenerating into "report every alias as a suppressor".
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outer = namespace["outer"]
+    # A helper whose `items()` yields exactly one *non-suppressing* manager.
+    # Yielding nothing was the original spelling and it made this fixture
+    # vacuous: the unreadable-iterable row ran its body zero times, never
+    # reached the assert, and passed its runtime check without executing the
+    # code it claims to pin. With one real element the body really runs, the
+    # assert really is reached, and because the element is a `nullcontext` it
+    # cannot swallow anything -- so a rule that answered "defeated" for every
+    # unreadable iterable now fails here instead of passing silently.
+    _yielded = [contextlib.nullcontext()]
+    helper = type("H", (), {"items": staticmethod(lambda: _yielded)})()
+    fired = False
+    try:
+        outer(1, helper)
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    # The runtime half is a cross-check against the verdict this row expects,
+    # not a one-sided "it did not fire" test. A row that claims the assert is
+    # swallowed must be shown CPython swallowing it, and a row that claims the
+    # assert is live must be shown the failure actually escaping -- otherwise a
+    # fixture that never reaches its assert passes either way. `fired` and
+    # `expected_live` describe the same two states, so they must be equal, and
+    # that also keeps the live rows honest: they are the ones that were
+    # previously vacuous.
+    assert fired is expected_live, (
+        f"{label}: expected the assert to "
+        f"{'fire' if expected_live else 'be swallowed'}, but it "
+        f"{'did not fire' if expected_live else 'was swallowed'}."
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
+
+    if control_element is None:
+        return
+    control = body.replace("contextlib.suppress(AssertionError)", control_element)
+    assert control != body, f"{label}: the control row is identical to the row"
+    control_source = "def outer(x, helper):\n    import contextlib\n" + control + "\n"
+    control_tree = ast.parse(control_source)
+    control_function = control_tree.body[0]
+    control_asserts = [node for node in ast.walk(control_function) if isinstance(node, ast.Assert)]
+    control_results = [
+        _is_enforced(control_function, node, control_tree) for node in control_asserts
+    ]
+    assert control_results == [True], (
+        f"{label}: the nullcontext control must be reported live, got "
+        f"{control_results}. A rule that calls this defeated drops a real "
+        f"contract."
+    )
+
+
+LOOP_ELEMENT_LIVE_SHAPES = (
+    (
+        "a multi-element loop with the suppressor first leaves it live",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The pair for the row above. Same shape, elements swapped, so the LAST one
+    # is the suppressor and the assert is really swallowed. Reading element zero
+    # in both directions answered `enforced` where it is swallowed and
+    # `defeated` where it is live -- a confident answer that was wrong in both
+    # directions at once, which one row on its own cannot pin.
+    (
+        "a multi-element loop with the suppressor last swallows",
+        (
+            "    for cs in (contextlib.nullcontext(),\n"
+            "               contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    # #378: a loop over an empty literal reaches its body zero times, so the
+    # store inside it never ran. Counting the `for` as a store that had executed
+    # admitted the dead assignment and reported this live assert as defeated.
+    # Master answers `enforced` here, so this was a regression the change
+    # introduced rather than a pre-existing gap.
+    (
+        "a zero-iteration loop does not count as having run its body",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for x in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The non-empty loop is the control for the row above: one element, so the
+    # body really does run and the assert really is swallowed. Without it a rule
+    # that declined *every* loop would pass both rows.
+    (
+        "a one-iteration loop does count as having run its body",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for x in (1,):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live", "swallowed"),
+    LOOP_ELEMENT_LIVE_SHAPES,
+    ids=[row[0] for row in LOOP_ELEMENT_LIVE_SHAPES],
+)
+def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, swallowed):
+    """A ``for`` over a literal must resolve to what the loop leaves bound.
+
+    Two questions, and both directions are load-bearing. Which element survives
+    a multi-element loop is the LAST one, not the first, and which direction
+    that decides depends on the order. And a loop that provably iterates zero
+    times must not be treated as proof that its body's stores ran.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    fired = False
+    # One real, non-suppressing element, for the same reason as the
+    # binding-form table: an empty `items()` made the `with cs:` body
+    # unreachable, so `fired` stayed False for every row regardless of what
+    # the analyzer said and the runtime half of this test proved nothing.
+    _yielded = [contextlib.nullcontext()]
+    try:
+        namespace["outer"](1, type("H", (), {"items": staticmethod(lambda: _yielded)})())
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+    # Stated, not assumed: a fixture that stops behaving as described fails
+    # loudly rather than quietly testing nothing.
+    assert fired is not swallowed, (
+        f"{label}: expected the assert to "
+        f"{'fire' if not swallowed else 'be swallowed'}, but it "
+        f"{'was swallowed' if not swallowed else 'fired'}."
+    )
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
+
+
+#: Every spelling of a loop that provably iterates ZERO times.
+#:
+#: ``_is_store_statement`` treats a loop as proof that the block's stores ran,
+#: so any iterable it reads as non-empty admits a store that never happened and
+#: reports the live assert below as defeated. The original rule read only
+#: ``List``/``Tuple``/``Set``/``Dict`` literals, which left twelve other
+#: provably-empty spellings counted as loops that ran. Every row is executed,
+#: so "reaches its body zero times" is measured rather than assumed.
+#:
+#: The non-empty rows are the controls that stop a rule which simply declined
+#: *every* loop from passing: ``range(1)`` really does reach its body, and the
+#: assert below it really is swallowed.
+ZERO_ITERATION_SPELLINGS = (
+    ("empty tuple literal", "()", True),
+    ("empty list literal", "[]", True),
+    ("empty set literal", "{}", True),
+    ("empty string literal", "''", True),
+    ("empty double-quoted string literal", '""', True),
+    ("empty bytes literal", "b''", True),
+    ("set()", "set()", True),
+    ("frozenset()", "frozenset()", True),
+    ("dict()", "dict()", True),
+    ("bytearray()", "bytearray()", True),
+    ("list()", "list()", True),
+    ("tuple()", "tuple()", True),
+    ("range(0)", "range(0)", True),
+    ("range(0, 0)", "range(0, 0)", True),
+    ("range(0, 0, 1)", "range(0, 0, 1)", True),
+    ("range(0, 1, -1)", "range(0, 1, -1)", True),
+    ("range(0, 0, -1)", "range(0, 0, -1)", True),
+    ("range(0, 0, -2)", "range(0, 0, -2)", True),
+    ("range(-2, -1, -2)", "range(-2, -1, -2)", True),
+    ("range(0, 0, 5)", "range(0, 0, 5)", True),
+    ("range(-3)", "range(-3)", True),
+    ("range(-0)", "range(-0)", True),
+    # An arithmetic argument of entirely literal operands is decided by the
+    # same fold the containers use, so it is settled rather than declined.
+    ("range(2 - 2)", "range(2 - 2)", True),
+    ("range(0 * 5)", "range(0 * 5)", True),
+    # `bool` is an `int` subclass, and reading it as one is correct rather than
+    # a trap: `range(False)` really is empty and `range(True)` really is one
+    # element. Both spellings are pinned from both sides so the subclass
+    # reading cannot be "fixed" into a wrong answer later.
+    ("range(False)", "range(False)", True),
+    # Controls: these DO reach the body, so the assert is swallowed.
+    ("range(1)", "range(1)", False),
+    ("range(2)", "range(2)", False),
+    ("range(1, 5, 2)", "range(1, 5, 2)", False),
+    ("range(5, 0, -1)", "range(5, 0, -1)", False),
+    # `range(5, 0, -2)` yields 5 and 3: two elements, so a step that walks
+    # *past* the bound without hitting it exactly is the near-miss control for
+    # the negative-step rule above. Reading it as empty is the damaging error.
+    ("range(5, 0, -2) walks past the bound", "range(5, 0, -2)", False),
+    ("range(1, 0, -1) stops one short", "range(1, 0, -1)", False),
+    ("range(3, 0, -2)", "range(3, 0, -2)", False),
+    ("range(2, 0, -2) lands exactly on the bound", "range(2, 0, -2)", False),
+    ("range(1 + 1)", "range(1 + 1)", False),
+    ("range(2 * 2)", "range(2 * 2)", False),
+    ("range(True)", "range(True)", False),
+    ("one-element tuple", "(1,)", False),
+    ("non-empty dict literal", "{1: 1}", False),
+    # A constructor given an argument is not the empty spelling any more.
+    ("dict(a=1)", "dict(a=1)", False),
+    ("set([1])", "set([1])", False),
+    ("list([1])", "list([1])", False),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "iterable", "expected_live"),
+    ZERO_ITERATION_SPELLINGS,
+    ids=[row[0] for row in ZERO_ITERATION_SPELLINGS],
+)
+def test_a_zero_iteration_loop_is_not_a_store_that_ran(label, iterable, expected_live):
+    """A loop over a provably empty iterable must not count as having run.
+
+    Both halves are checked against the interpreter. The fixture is executed
+    with ``x=1`` so ``assert x != 1`` is false, and the row's declared
+    ``expected_live`` is *derived* from what actually happened rather than
+    trusted: a loop that never runs leaves ``cs`` as the nullcontext and the
+    assert fires; a loop that runs rebinds ``cs`` to a real suppressor and the
+    assert is swallowed.
+    """
+    source = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if True:\n"
+        f"        for _ in {iterable}:\n"
+        "            cs = contextlib.suppress(AssertionError)\n"
+        "        with cs:\n"
+        '            assert x != 1, "A1"\n'
+        "    return 'completed'\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+        executed_live = False
+    except AssertionError:
+        executed_live = True
+    assert executed_live is expected_live, (
+        f"{label}: CPython {'raised the assert' if executed_live else 'swallowed it'}, "
+        f"so the row's declared liveness is stale."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert [_is_enforced(function, node, tree) for node in asserts] == [expected_live], (
+        f"{label}: the analyzer disagrees with the executed fixture."
+    )
+
+
+#: A shadowed builtin is not the builtin, and a rule that reasons about
+#: builtins has to notice.
+#:
+#: Reading ``range(0)`` as "provably empty" from the call shape alone is wrong
+#: the moment the name is rebound: executed, every row below reaches the loop
+#: body and swallows the assert. Each row rebinds the name inside ``outer``
+#: itself, which is the only scope where the rebinding can affect that loop.
+SHADOWED_BUILTIN_SPELLINGS = (
+    ("range rebound by a def", "range", "    def range(*a, **k):\n        return [1, 2, 3]\n"),
+    ("range rebound by a lambda", "range", "    range = lambda *a, **k: [1, 2]\n"),
+    ("range rebound by an assignment", "range", "    range = [1, 2, 3]\n"),
+    ("list rebound by a def", "list", "    def list(*a, **k):\n        return [1]\n"),
+    ("set rebound by a def", "set", "    def set(*a, **k):\n        return {1}\n"),
+    ("tuple rebound by a def", "tuple", "    def tuple(*a, **k):\n        return (1,)\n"),
+    ("dict rebound by a def", "dict", "    def dict(*a, **k):\n        return {1: 1}\n"),
+    ("bytearray rebound by a def", "bytearray", "    def bytearray(*a, **k):\n        return b'x'\n"),
+    (
+        "frozenset rebound by a def",
+        "frozenset",
+        # Built from a set literal rather than a nested `frozenset(...)` call,
+        # which would rebind the name and recurse forever.
+        "    def frozenset(*a, **k):\n        return {1}\n",
+    ),
+    (
+        "range rebound by a class",
+        "range",
+        "    class range:\n        def __iter__(self):\n            return iter([1, 2])\n",
+    ),
+    # The boundary control, and it runs the other way. A *nested* def opens its
+    # own scope, so it cannot shadow `range` for `outer`'s own code: `range(0)`
+    # really is the empty builtin there and the assert really is live. Treating
+    # the nested def as shadowing would discard that correct reading.
+    (
+        "nested def does not shadow for the outer function",
+        "range",
+        "    def _helper():\n        return range\n",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "name", "prelude"),
+    SHADOWED_BUILTIN_SPELLINGS,
+    ids=[row[0] for row in SHADOWED_BUILTIN_SPELLINGS],
+)
+def test_a_shadowed_builtin_is_not_read_as_the_builtin(label, name, prelude):
+    """Rebinding a builtin must make the empty-iterable reading unavailable.
+
+    A rebound ``set``/``dict``/... returns something that is not a context
+    manager, so entry raises before the body runs; that still means the assert
+    is unreachable, which is the non-live answer the row declares.
+    """
+    expected_live = label.startswith("nested def")
+    iterable = "range(0)" if name == "range" else f"{name}()"
+    source = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        f"{prelude}"
+        "    cs = contextlib.nullcontext()\n"
+        "    if True:\n"
+        f"        for _ in {iterable}:\n"
+        "            cs = contextlib.suppress(AssertionError)\n"
+        "        with cs:\n"
+        '            assert x != 1, "A1"\n'
+        "    return 'completed'\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+        executed_live = False
+    except AssertionError:
+        executed_live = True
+    except (TypeError, NameError, UnboundLocalError):
+        executed_live = False
+    assert executed_live is expected_live, (
+        f"{label}: CPython {'raised the assert' if executed_live else 'did not'}, "
+        f"so the row's declared liveness is stale."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert [_is_enforced(function, node, tree) for node in asserts] == [expected_live], (
+        f"{label}: the analyzer disagrees with the executed fixture."
+    )
+
+
+def test_a_builtin_named_as_a_parameter_is_not_read_as_the_builtin():
+    """A parameter shadowing a builtin must withhold the empty-iterable reading.
+
+    This is the one shadowing form the ``SHADOWED_BUILTIN_SPELLINGS`` table
+    cannot express, because every row there rebinds the name inside the function
+    body while this one binds it in the signature. Executed, a ``range``
+    parameter bound to a callable that yields two elements makes the loop
+    iterate twice, so the assert below it is swallowed; reading ``range(0)`` as
+    empty would report it dead and drop a live contract.
+
+    The second half is the control in the other direction: with the parameter
+    defaulted to the builtin, nothing shadows the name and the loop really does
+    iterate zero times. That keeps a rule which simply declined every
+    parameterised ``range`` from passing unnoticed.
+    """
+    shadowed = (
+        "def outer(x, range):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if True:\n"
+        "        for _ in range(0):\n"
+        "            cs = contextlib.suppress(AssertionError)\n"
+        "        with cs:\n"
+        '            assert x != 1, "A1"\n'
+        "    return 'completed'\n"
+    )
+    namespace = {}
+    exec(compile(shadowed, "<shadowed-parameter>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, lambda *a, **k: [1, 2])
+        executed_live = False
+    except AssertionError:
+        executed_live = True
+    assert executed_live is False, (
+        "a range parameter yielding two elements must iterate twice and swallow "
+        "the assert; the row's premise changed."
+    )
+    tree = ast.parse(shadowed)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert [_is_enforced(function, node, tree) for node in asserts] == [False], (
+        "the analyzer read a parameter-shadowed `range(0)` as the empty builtin."
+    )
+
+    # A second function with no `range` parameter at all. Defaulting the
+    # shadowing parameter would not work as a control, because the default
+    # expression is itself a binding in the signature.
+    unshadowed = shadowed.replace("def outer(x, range):", "def outer(x):").replace(
+        "outer", "unshadowed_outer"
+    )
+    namespace = {}
+    exec(compile(unshadowed, "<unshadowed-parameter>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["unshadowed_outer"](1)
+        executed_live = False
+    except AssertionError:
+        executed_live = True
+    assert executed_live is True, (
+        "an unshadowed `range(0)` must iterate zero times and leave the assert "
+        "live; the control row's premise changed."
+    )
+    tree = ast.parse(unshadowed)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert [_is_enforced(function, node, tree) for node in asserts] == [True], (
+        "the analyzer declined a genuinely empty unshadowed `range(0)`."
+    )
+
+
+UNREADABLE_RANGE_ARGUMENTS = (
+    ("range over an unreadable bound", "range(stop)"),
+    ("range with a call argument", "range(len(str(x)))"),
+    ("range with a zero step", "range(0, 5, 0)"),
+    ("range with a subscript argument", "range(values[0])"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "iterable"),
+    UNREADABLE_RANGE_ARGUMENTS,
+    ids=[row[0] for row in UNREADABLE_RANGE_ARGUMENTS],
+)
+def test_an_unreadable_range_argument_is_never_read_as_empty(label, iterable):
+    """An argument the rule cannot read must leave the loop counted as run.
+
+    ``range(0, 5, 0)`` raises ``ValueError`` rather than iterating, but not
+    *because* the range was empty, so it is declined too.
+
+    A literal-only ``BinOp`` argument is *not* in this table: the fold decides
+    it, and ``range(2 - 2)`` is pinned as genuinely empty in the table above.
+    Neither is a ``bool``: ``range(False)`` is genuinely empty and
+    ``range(True)`` genuinely is not, so the subclass reading decides both
+    correctly and both are pinned in the table above. What stays unreadable is
+    an argument that reads runtime state, which is the boundary the rule is
+    drawn at.
+    """
+    source = (
+        "def outer(x, stop=1, values=(1, 2, 3)):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if True:\n"
+        f"        for _ in {iterable}:\n"
+        "            cs = contextlib.suppress(AssertionError)\n"
+        "        with cs:\n"
+        '            assert x != 1, "A1"\n'
+        "    return 'completed'\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+        executed_live = False
+    except AssertionError:
+        executed_live = True
+    except ValueError:
+        # The zero-step row never reaches the loop at all.
+        executed_live = False
+    assert executed_live is False, (
+        f"{label}: CPython raised the assert, so the row's premise changed."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert [_is_enforced(function, node, tree) for node in asserts] == [False], (
+        f"{label}: the analyzer called an unreadable range empty."
+    )
+
+
 CAPTURE_SCOPE_BOUNDARY_ROWS = (
     # The filed shape. `class C:` opens a new namespace; the capture binds
     # `C.cs`, and `outer`'s `cs` is still the suppressor, so the second assert
