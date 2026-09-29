@@ -4917,6 +4917,103 @@ def test_a_constructor_callee_shadowed_outside_the_body_is_reported_live(
 #: exception proves it was not (DEAD). That is the opposite of an
 #: `x=1`-plus-`except AssertionError` harness, which cannot tell a body that
 #: was entered from one whose failure a suppressor ate.
+#: The round-7 review's findings against `b90f985`. These are **regressions the
+#: round-6 repairs introduced**, each caught by execution at `x=2` and each
+#: pinned here with a positive control beside it.
+ROUND_SEVEN_SOURCES = (
+    # Review finding 1. `_statement_always_runs` decides that a store inside
+    # `if True:` always runs, but it only looked at the *innermost* block. The
+    # store here is also inside a `for _ in ():` that never iterates, so it
+    # never runs at all: `cs` is still the `nullcontext()` bound above it, the
+    # header is entered, and the assert is reachable. Treating the store as
+    # unconditional settled `cs` on the `cs = list()` that never ran and
+    # reported a `TypeError`-raising header DEAD. Every block on the path has
+    # to run for the rule to fire.
+    (
+        "an always-true branch inside a loop that never runs",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "for _ in ():\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same defect by the `while False:` spelling of a never-run body.
+    (
+        "an always-true branch inside a while loop that never runs",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "while False:\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control for finding 1. The loop *does* iterate, so the
+    # always-true store really does run and really does rebind `cs` to the
+    # empty list, which `with` cannot enter. A fix that simply stopped
+    # counting always-true stores would report this header LIVE.
+    (
+        "an always-true branch inside a loop that does run",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "for _ in (1,):\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # Review finding 3. `builtins` is rebound *after* the call, so it is not
+    # yet in force where the call is evaluated: `cs` holds the empty list the
+    # real builtin returned, and `with cs:` raises. The module rebinding check
+    # scanned the whole module, so it counted a store that had not run and
+    # read the rebound attribute, reporting the `TypeError` as LIVE.
+    (
+        "builtins rebound after the qualified call",
+        (
+            "from types import SimpleNamespace\n"
+            "import builtins\n"
+            "cs = builtins.list()\n"
+            "builtins = SimpleNamespace(list=len)\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # The positive control for the *other* direction: the same rebinding
+    # before the call, but to something that does build a real context manager.
+    # The store is shadowed for real here, so the assert is reachable.
+    (
+        "builtins rebound to a manager before the qualified call",
+        (
+            "from contextlib import nullcontext\n"
+            "from types import SimpleNamespace\n"
+            "import builtins\n"
+            "builtins = SimpleNamespace(list=nullcontext)\n"
+            "cs = builtins.list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+)
+
+
 ROUND_SIX_SOURCES = (
     # Finding 1. The call is inside `outer`'s body, and a function body is only
     # reached *after the whole module has executed*. The `def list()` below has
@@ -5082,8 +5179,8 @@ def _fixture_is_entered(label, source):
 
 @pytest.mark.parametrize(
     ("label", "source", "expected_live"),
-    ROUND_SIX_SOURCES,
-    ids=[shape[0] for shape in ROUND_SIX_SOURCES],
+    (*ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES),
+    ids=[shape[0] for shape in (*ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES)],
 )
 def test_module_scope_order_scope_and_builtins_reading(label, source, expected_live):
     """A function-body call, a handler body and a rebound ``builtins`` are read right.
@@ -5103,6 +5200,17 @@ def test_module_scope_order_scope_and_builtins_reading(label, source, expected_l
     * and a binding *after* the call **inside the same block** does not shadow
       it, which needs the descent to be order-aware rather than to stop at the
       enclosing statement.
+
+    #388-5f. The round-7 review then found two *regressions* those repairs
+    # introduced, and both are the same mistake in opposite directions: a rule
+    # that keys on one enclosing block and ignores the rest of the path.
+
+    * ``_statement_always_runs`` read the innermost ``if True:`` and ignored a
+      ``for _ in ():`` around it, so a store that never runs settled the name;
+    * the ``builtins`` rebinding check scanned the whole module, so a store
+      written *after* a module-scope call counted even though it had not run
+      yet. Both are checked here, each beside a positive control that fails if
+      the rule is dropped rather than narrowed.
 
     Each row is executed under real CPython with ``x=2`` before its verdict is
     checked, so the expectation is CPython's own answer. A fixture that does

@@ -2549,7 +2549,7 @@ def _name_is_shadowed_in(func, function):
     return False
 
 
-def _name_is_rebound_away_from_module(name_node, function):
+def _name_is_rebound_away_from_module(name_node, function, call=None):
     """Is ``name_node.id`` rebound to something other than its own module?
 
     The question is asked only of a name that a qualified ``builtins.attr``
@@ -2578,7 +2578,7 @@ def _name_is_rebound_away_from_module(name_node, function):
         for bound in _names_bound_by_statement(node, name):
             if bound and not _is_canonical_module_import(node, name):
                 return True
-    return _module_rebinds_name(function, name)
+    return _module_rebinds_name(function, name, call)
 
 
 def _is_canonical_module_import(statement, name):
@@ -2637,7 +2637,7 @@ def _callee_is_shadowed(func, function, call=None):
         # means "this is the module named x". Treating it as a shadow would
         # make `cs = builtins.list()` LIVE where CPython raises.
         if isinstance(func.value, ast.Name) and func.value.id == "builtins":
-            return _name_is_rebound_away_from_module(func.value, function)
+            return _name_is_rebound_away_from_module(func.value, function, call)
         return _callee_is_shadowed(func.value, function, call)
     if not isinstance(func, ast.Name):
         return False
@@ -2743,30 +2743,44 @@ def _module_binds_name(function, name, call=None):
     return False
 
 
-def _module_rebinds_name(function, name):
+def _module_rebinds_name(function, name, call=None):
     """Does the module holding ``function`` bind ``name`` to something else?
 
-    Unlike :func:`_module_binds_name` this asks the question without a call
-    node, so it is the whole module: any module-level binding of ``name``
-    counts, at any position. It is used for the ``builtins.attr`` form, where
-    the question is "is the qualified name still the module itself" rather than
-    "is this call shadowed", and the ordinary ``import builtins`` is excluded
-    by the caller so that the canonical spelling stays trustworthy.
+    This is the ``builtins.attr`` form's own question -- "is the qualified name
+    still the module itself" -- and it takes the call node so the answer is
+    scoped the same way :func:`_module_binds_name` scopes its own. A store
+    written *after* a module-scope call has not run when the call is evaluated,
+    so the callee still reached the real module:
+
+        import builtins
+        cs = builtins.list()          # the builtin; runs first
+        builtins = SimpleNamespace(list=nullcontext)
+
+    Counting that later store read the rebound attribute and reported the
+    ``TypeError`` CPython raises as LIVE. A function-body call is reached after
+    the whole module has run, so for one every store counts and the same order
+    cut is not applied.
+
+    The ordinary ``import builtins`` is not a rebinding and is skipped here, so
+    the canonical spelling stays trustworthy.
     """
     module = _module_for_function(function)
     if module is None:
         return False
+    at_module_scope = _call_runs_at_module_scope(function, call)
     for statement in getattr(module, "body", []):
+        if at_module_scope and _module_statement_precedes_call(statement, function, call):
+            # The call has been evaluated by the end of this statement, so a
+            # binding written from here on is not yet in force where it was.
+            break
         if _is_canonical_module_import(statement, name):
-            # The ordinary `import builtins` IS the module, so it is not a
-            # rebinding of the name. Skipping it here is what keeps the
-            # canonical qualified spelling `cs = builtins.list()` reading as
-            # the builtin, where CPython raises `TypeError` on the empty list.
             continue
         if any(_names_bound_by_statement(statement, name)):
             return True
         for node in _module_level_bindings(statement):
             if _is_canonical_module_import(node, name):
+                continue
+            if at_module_scope and _node_precedes_call(statement, node, call):
                 continue
             if any(_names_bound_by_statement(node, name)):
                 return True
@@ -2826,6 +2840,31 @@ def _module_statement_precedes_call(statement, function, call):
         # reaching the `def` means the call has already been evaluated.
         return True
     return _contains(statement, call)
+
+
+def _node_precedes_call(statement, node, call):
+    """Has execution reached ``call`` before ``node`` inside ``statement``?
+
+    ``node`` is a binding found *inside* ``statement`` by the block descent,
+    so the two are ordered within that one statement rather than across the
+    module. Only the path the descent actually took is walked, and a nested
+    ``def``/``class`` body -- a separate scope -- stops the walk rather than
+    being scanned, because nothing there has run.
+    """
+    if node is statement:
+        return False
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return False
+    if not _contains(statement, call):
+        # The call is not in this statement at all, so every binding in it
+        # runs before the call does.
+        return False
+    for inner in _module_level_bindings_in_order(statement):
+        if inner is node:
+            return True
+        if _contains(inner, call):
+            return False
+    return False
 
 
 def _module_statement_binds_name_before_call(statement, call, name):
@@ -3642,27 +3681,56 @@ def _statement_always_runs(statement, function):
     purpose from the other side: a store that always runs settles the name, so
     it belongs with the unconditional ones in :func:`_stores_of` rather than
     being left to a later conditional store that may never have written.
+
+    *Every* block between the store and the top of the function has to run
+    every time, not just the innermost one. A literal-true branch nested inside
+    a loop that never iterates never runs either:
+
+        cs = nullcontext()
+        for _ in ():
+            if True:
+                cs = list()          # the `if` is true, but the loop never runs
+
+    Reading only the `if` settled the name on the `cs = list()` above, and the
+    `nullcontext` that was in force was never reached -- a `TypeError`-raising
+    header reported DEAD where CPython enters it. The same applies to a
+    `while False:` body and to an `else` arm, which runs exactly when its `if`
+    does *not*.
     """
     if function is None:
         return False
-    for enclosing in _enclosing_blocks(statement, function):
-        # Only the body of the branch runs on every pass. An `else` beside
-        # a literal-true condition never runs at all, which is the
-        # never-true rule's business and not this one's.
-        if (
-            isinstance(enclosing, ast.If)
-            and _condition_is_always_true(enclosing.test, function)
-            and _contains_any(enclosing.body, statement)
-        ):
-            return True
-    for node in ast.walk(statement):
-        if (
-            isinstance(node, ast.If)
-            and _condition_is_always_true(node.test, function)
-            and _contains_any(node.body, statement)
-        ):
-            return True
-    return False
+    blocks = _enclosing_blocks(statement, function)
+    if not any(_is_always_true_branch(block, statement, function) for block in blocks):
+        # The store is not inside an always-true branch at all, so there is
+        # nothing to claim. This is the ordinary case and the cheap exit.
+        return False
+    # It is inside one, so every other block on the path has to run every time
+    # as well. A never-true `if`, a loop over an empty literal, a `while False`
+    # and an `else` beside a literal-true test are all read by the same
+    # never-runs question, which is the safe direction: the store is left
+    # conditional, so whatever the enclosing scope really does still decides.
+    return all(
+        _is_always_true_branch(block, statement, function) or not _block_never_runs(block, function)
+        for block in blocks
+    )
+
+
+def _is_always_true_branch(block, statement, function):
+    """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?"""
+    return (
+        isinstance(block, ast.If)
+        and _condition_is_always_true(block.test, function)
+        and _contains_any(block.body, statement)
+    )
+
+
+def _block_never_runs(block, function):
+    """Is ``block`` a construct that provably never reaches its body?"""
+    if isinstance(block, ast.If):
+        return _condition_is_never_true(block.test, function)
+    if isinstance(block, ast.While):
+        return _condition_is_never_true(block.test, function)
+    return isinstance(block, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(block.iter)
 
 
 def _is_bare_name(target, name):
