@@ -4257,12 +4257,107 @@ def _statement_always_runs(statement, function):
 
 
 def _is_always_true_branch(block, statement, function):
-    """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?"""
+    """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?
+
+    "Always-true" is about the test alone, which is enough only when the body
+    is reached on every call. That is true of a standalone ``if True:`` and
+    false of an ``elif`` link: an ``elif`` body runs only when every test above
+    it in the chain failed, so its own always-true test says nothing about
+    whether it is ever entered (#416):
+
+        from contextlib import nullcontext
+
+        def outer(x):
+            cs = nullcontext()
+            if x:
+                pass
+            elif True:
+                cs = list()      # reached only when x is FALSE
+            with cs:
+                assert x != 1    # CPython, x=1: fires
+
+    The ``elif True:`` link satisfies the test on its own, so the store was
+    promoted to an unconditional one and the header answered ``defeated`` --
+    a live contract dropped. The store settles the name only when ``x`` is
+    false, so the header is undecidable and must not be settled.
+
+    :func:`_elif_link_is_reached` supplies that missing question, and it is
+    the same reachability the ``_always_true_arm_within`` chain walk already
+    models for the arm case.
+    """
     return (
         isinstance(block, ast.If)
         and _condition_is_always_true(block.test, function)
         and _contains_any(block.body, statement)
+        and _elif_link_is_reached(block, function)
     )
+
+
+def _elif_link_is_reached(block, function):
+    """Is this ``if`` link's body entered on every call, or is it an ``elif``?
+
+    Returns ``True`` for a link that is not part of an ``orelse`` chain: a
+    standalone ``if True:`` and the opening link of a chain are both reached
+    whenever their test holds, and here the test does hold.
+
+    For a link reached *through* an ``orelse`` -- the ``elif`` shape -- the
+    body runs only when every test above it failed, so each of those has to be
+    never-true for the link to be entered on every call. One test that can
+    hold ends the walk and this returns ``False``, leaving the store
+    conditional.
+    """
+    return _link_is_always_entered(block, function)
+
+
+def _link_is_always_entered(block, function):
+    """Is this ``if`` node's body entered on every call?
+
+    Walks the ``orelse`` chain containing ``block`` from the outermost link
+    inward, which is the only direction that can answer the question: a link
+    deeper in the chain is reached only when every test above it failed.
+
+    A node that is not inside any chain is a standalone ``if`` or the opening
+    link of one, and is entered whenever its own test holds -- the caller's
+    question is about the test, so the answer here is ``True`` and the test
+    itself is judged by the caller.
+    """
+    outer_link = _outermost_chain_link(block, function)
+    if outer_link is None:
+        return True
+    link = outer_link
+    while True:
+        if link is block:
+            return True
+        if not isinstance(link, ast.If) or len(link.orelse) != 1:
+            return False
+        nxt = link.orelse[0]
+        if not isinstance(nxt, ast.If):
+            # A trailing plain `else`. `block` is not in this arm, so it is
+            # never reached through this chain.
+            return False
+        # `nxt` is an `elif`: it is entered only when `link`'s test failed, so
+        # `link` must be never-true for the walk to continue inward.
+        if not _condition_is_never_true(link.test, function):
+            return False
+        link = nxt
+
+
+def _outermost_chain_link(block, function):
+    """The opening ``if`` of the ``orelse`` chain containing ``block``.
+
+    ``None`` when ``block`` is not inside such a chain. Only a genuine
+    ``elif`` -- a node that is the single element of some ``if``'s
+    ``orelse`` -- has a parent link, and the search is by identity through
+    the function so an unrelated nested ``if`` cannot be mistaken for one.
+    """
+    if function is None:
+        return None
+    for node in ast.walk(function):
+        if not isinstance(node, ast.If) or len(node.orelse) != 1:
+            continue
+        if node.orelse[0] is block:
+            return node
+    return None
 
 
 def _is_always_true_arm(block, statement, function):

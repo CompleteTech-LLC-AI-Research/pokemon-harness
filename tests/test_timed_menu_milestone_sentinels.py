@@ -6655,6 +6655,54 @@ ROUND_EIGHT_SOURCES = (
         ),
         False,
     ),
+    # #416. The discriminator for the row above. The `elif True:` link has
+    # the same always-true test and the same store in its body -- the ONLY
+    # difference is the link above it. `if False:` can never hold, so this
+    # arm is entered on every call and the store settles the name (row
+    # above, `False` because the settled `list()` is not enterable).
+    #
+    # `if flag:` CAN hold, so the `elif` is entered only when `flag` is
+    # false. The store then settles the name on some calls only, the
+    # `nullcontext()` stays in force on the others, and the header is
+    # undecidable -- so it must be left `enforced` (live). Reading the
+    # `elif`'s own test alone promoted the store to an unconditional one and
+    # answered `defeated`, dropping a contract that fires.
+    (
+        "an elif True store behind a conditional if is not unconditional",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = nullcontext()\n"
+            "    if x:\n"
+            "        pass\n"
+            "    elif True:\n"
+            "        cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same chain one link deeper: a never-true opener still settles the
+    # arm, so this must agree with the `if False:` row above rather than with
+    # the conditional one. Without it, a rule that simply refused every
+    # `elif` body would pass both discriminating rows and still be wrong.
+    (
+        "an elif True store behind a second never-true link settles the name",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = nullcontext()\n"
+            "    if False:\n"
+            "        pass\n"
+            "    elif False:\n"
+            "        pass\n"
+            "    elif True:\n"
+            "        cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
     # The same arm reached through a plain `else:` rather than an `elif`. An
     # `else` runs exactly when its `if` does not, so a never-true `if` makes
     # this arm run on every call -- the same settling question, spelled
