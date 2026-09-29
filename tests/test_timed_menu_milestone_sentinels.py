@@ -21,7 +21,9 @@ backstop that keeps them from being quietly removed.
 
 import ast
 import asyncio
+import contextlib
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -2819,6 +2821,1161 @@ def test_a_conditional_module_store_after_a_carrier_is_declined(label, rebind, l
     )
 
 
+#: #388: a **function-scope** carrier superseded by a conditional store.
+#:
+#: `_module_stores` was given the ordered decline by #375, but the function
+#: path was not: `_stores_of` keeps only unconditional stores, so an
+#: unconditional function-scope carrier survived a *later conditional*
+#: non-carrier store, went stale, and was read as the settled value. The
+#: answer was `defeated` on asserts the interpreter really evaluates --
+#: a live pinned contract dropped, which is the damaging direction this whole
+#: rule exists to correct.
+#:
+#: Every row below is a store form that **may** have rebound the name to a
+#: real `nullcontext()` after the carrier ran. Each is executed by
+#: `_assert_entry_contract`, so the `live` column is held to CPython rather
+#: than asserted about the checker.
+#:
+#: Every one of these ten rows is a **regression**: all ten answer `defeated`
+#: against a live assert on `ed9d9b0`, and all ten answer correctly on the
+#: pre-#375 base `0529c8a`. The three shapes that were *already* wrong on that
+#: base are not here -- they are a separate defect, pinned as a known limit in
+#: :func:`test_a_function_carrier_supersession_limit_is_still_declined`.
+FUNCTION_CARRIER_SUPERSESSION_SHAPES = (
+    (
+        "a conditional store after a function-scope carrier is declined",
+        "    import os as cs\n    if flag:\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "a conditional walrus after a function-scope carrier is declined",
+        "    import os as cs\n    if flag:\n        (cs := contextlib.nullcontext())\n",
+        True,
+    ),
+    (
+        "a conditional tuple-unpack after a function-scope carrier is declined",
+        "    import os as cs\n    if flag:\n        cs, other = (contextlib.nullcontext(), 2)\n",
+        True,
+    ),
+    (
+        "a conditional annotated store after a function-scope carrier is declined",
+        "    import os as cs\n    if flag:\n        cs: object = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "a loop target after a function-scope carrier is declined",
+        "    import os as cs\n    for cs in (contextlib.nullcontext(),):\n        pass\n",
+        True,
+    ),
+    (
+        "a nested conditional store after a function-scope carrier is declined",
+        "    import os as cs\n    if flag:\n        if flag:\n            cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "a store inside a with-block after a function-scope carrier is declined",
+        "    import os as cs\n    with contextlib.nullcontext():\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "a while-body store after a function-scope carrier is declined",
+        "    import os as cs\n    while flag:\n        cs = contextlib.nullcontext()\n        break\n",
+        True,
+    ),
+    (
+        "a try/else store after a function-scope carrier is declined",
+        "    import os as cs\n    try:\n        pass\n    except Exception:\n        pass\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    # Two carriers with a conditional store *between* them. The decline has to
+    # compare against the **last** carrier, not the first: `def cs()` runs
+    # unconditionally and re-binds the name to a function, so the conditional
+    # store is already stale and the header is genuinely `defeated`. Reading
+    # the first carrier instead would decline this row.
+    (
+        "a conditional store between two carriers is decided by the last carrier",
+        "    import os as cs\n    if flag:\n        cs = contextlib.nullcontext()\n    def cs():\n        pass\n",
+        False,
+    ),
+    # No carrier at all: an unconditional real store, then a conditional one.
+    # The decline is about a *stale carrier*, so with no carrier to go stale
+    # the last unconditional binding settles the value and the row stays live.
+    # A decline keyed on "any conditional store" rather than on a carrier
+    # would get this backwards.
+    (
+        "a conditional store after an unconditional non-carrier is still live",
+        "    cs = contextlib.nullcontext()\n    if flag:\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    # The two rows below are the *negative* of the row above, and they are
+    # what stops the decline from being keyed on "a conditional store exists"
+    # rather than on "a carrier may have been superseded". There is no carrier
+    # in either one, so there is nothing to go stale and the unconditional
+    # `cs = None` settles the value; the later conditional store never runs on
+    # this path, and `with cs:` raises on the `None`. The `if False` row is
+    # exactly the store-not-taken case, and the `def` row is the nested-scope
+    # case whose store binds a different local.
+    #
+    # The store-not-taken row was spelled `if not flag:` and was measured to be
+    # wrong: that branch is *taken* for `flag=False`, where the store installs
+    # a real manager and the assert does fire. `_assert_entry_contract` calls
+    # `outer(1, True, None)`, so it only ever saw the `flag=True` path and
+    # could not tell the two apart -- the row was claiming a property of the
+    # fixture that the fixture did not have. `if False:` is the spelling that
+    # actually makes the store unreachable, and it is dead for every value of
+    # `flag`, which is what "the branch is not taken" has to mean. Verified by
+    # execution on CPython 3.12.14 at both `flag=True` and `flag=False`.
+    (
+        "a conditional store in a nested def does not supersede a non-carrier",
+        "    cs = None\n    def inner():\n        cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    (
+        "a conditional store whose branch is not taken does not supersede",
+        "    cs = None\n    if False:\n        cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    # The ordering bound itself. The conditional store is *after* the `with`,
+    # so it cannot have superseded anything the header read; the carrier is
+    # still in force and the header genuinely raises.
+    (
+        "CONTROL a conditional store after the header does not supersede it",
+        "    import os as cs\n    with cs:\n        assert x != 1\n    if flag:\n        cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    # `del cs` *unbinds*; it never installs an enterable value. So it cannot
+    # supersede the carrier, and the header stays `defeated` on both paths:
+    # with flag=False the carrier raises TypeError, with flag=True CPython has
+    # deleted the name and it raises UnboundLocalError. Counting the delete as
+    # a superseding store would decline the header, and a decline reports
+    # `enforced` -- inventing a dead assert. Found as a blocking review
+    # finding on #388.
+    (
+        "CONTROL a conditional del after a function-scope carrier is defeated",
+        "    import os as cs\n    if flag:\n        del cs\n",
+        False,
+    ),
+    (
+        "CONTROL an unconditional store after a function-scope carrier is live",
+        "    import os as cs\n    cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "CONTROL a conditional store before a function-scope carrier is defeated",
+        "    if flag:\n        cs = contextlib.nullcontext()\n    import os as cs\n",
+        False,
+    ),
+    (
+        "CONTROL an except-as after a function-scope carrier is defeated",
+        "    import os as cs\n    try:\n        pass\n    except Exception as cs:\n        pass\n",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    FUNCTION_CARRIER_SUPERSESSION_SHAPES,
+    ids=[shape[0] for shape in FUNCTION_CARRIER_SUPERSESSION_SHAPES],
+)
+def test_a_conditional_function_store_after_a_carrier_is_declined(label, body, live):
+    """A function-scope carrier a conditional store may have superseded.
+
+    The carrier is written straight into the function body, so it is an
+    *unconditional* store and `_stores_of` keeps it -- even when a later
+    store nested in a block may already have replaced the name with an
+    enterable value. Answering from the stale carrier reported `defeated` on
+    an assert CPython evaluates, dropping a live pinned contract. #388.
+
+    All three controls pin the boundaries of the decline, and none of them
+    is optional:
+
+    * An *unconditional* later store is settled -- the last binding wins and
+      the assert is live, so a rule that declined every store after a carrier
+      would fail here.
+    * A conditional store *before* the carrier is genuinely superseded by it.
+      The name is a module again, so ``defeated`` is the correct answer and no
+      decline is warranted.
+    * ``except ... as cs:`` *unbinds* rather than supersedes -- CPython deletes
+      the name when the handler exits, so the carrier is what remains in
+      force. Counting it as a superseding store would flip a correct
+      ``defeated`` to ``enforced``.
+
+    The rows differ from :data:`MODULE_CARRIER_SHAPES` in scope, not in kind:
+    the carrier and every competing store are in the *same* function, so the
+    function-scope store table is what decides the verdict and no module body
+    is consulted at all.
+    """
+    # The "conditional store after the header" row writes its own `with`, so
+    # that it can put a store *after* the assert; every other row gets the
+    # header appended. Splitting on the marker keeps one table able to express
+    # both positions without a second, near-identical fixture builder.
+    if "with cs:" in body:
+        source = "import contextlib\ndef outer(x, flag, helper):\n" + body
+    else:
+        source = (
+            "import contextlib\n"
+            "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+        )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A conditional "
+        f"store after the last carrier can have replaced it with an enterable "
+        f"value, so the header must be judged on the last *binding*, not on a "
+        f"carrier that may be stale."
+    )
+
+
+#: #388 follow-up: which competing stores the decline must **not** count.
+#:
+#: A decline reports the assert live, so counting a store that cannot possibly
+#: have installed an enterable value reports a *dead* assert as load-bearing.
+#: These rows are the four categories that cannot, and the two controls that
+#: keep each exclusion from being applied more widely than it was measured.
+#:
+#: Every row is executed by `_assert_entry_contract`, so `live` is held to
+#: CPython rather than asserted about the checker. Two of the rows depend on a
+#: class defined in the prelude -- a `with` on an arbitrary manager and a
+#: starred unpack -- which is why this table builds its own source rather than
+#: reusing the prelude of :data:`FUNCTION_CARRIER_SUPERSESSION_SHAPES`.
+FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS = (
+    # `with EXPR as cs:` binds `EXPR.__enter__()`, so whether the name still
+    # holds something enterable is a question about the *manager*, not about
+    # the syntax of the `with`. `nullcontext.__enter__` is `return None`, so
+    # the header is entered with `None` and raises before the assert runs --
+    # on both paths, since the carrier is a module on the other one. The
+    # carrier therefore stays in force and the header is dead.
+    (
+        "a conditional nullcontext-with after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext() as cs:\n            pass\n",
+        False,
+    ),
+    # The same argument for `suppress`, whose `__enter__` is a bare `pass`
+    # and so returns None implicitly. Kept as a separate row so the two
+    # spellings of "provably None" cannot drift apart silently.
+    (
+        "a conditional suppress-with after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.suppress(AssertionError) as cs:\n            pass\n",
+        False,
+    ),
+    # The control that makes the two rows above *mean* something. A custom
+    # manager's `__enter__` returns `self`, which IS enterable, so the same
+    # `with ... as cs:` form leaves a live header on the flag=True path. A
+    # blanket exclusion of every `With` store -- which is what a first cut
+    # did -- answers `defeated` here and drops a live pinned contract. This
+    # is the row that rules that implementation out.
+    (
+        "CONTROL a conditional custom-manager-with after a carrier is live",
+        "    import os as cs\n    if flag:\n        with CM() as cs:\n            pass\n",
+        True,
+    ),
+    # `*cs, = (...)` builds a list, and entering a list raises. Note this is
+    # the *starred* target only: `cs, *rest = (...)` leaves `cs` holding the
+    # first element, which is very often a real context manager, so it is a
+    # control below rather than part of this exclusion.
+    (
+        "a conditional starred-unpack after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        *cs, = (contextlib.nullcontext(),)\n",
+        False,
+    ),
+    # The named control for the row above.
+    (
+        "CONTROL a conditional element store after a carrier is live",
+        "    import os as cs\n    if flag:\n        cs, rest = (contextlib.nullcontext(), 2)\n",
+        True,
+    ),
+    # A nested `def` owns its locals, so the store binds *that* scope's `cs`
+    # and the carrier is untouched. The header is dead on both paths, exactly
+    # as it is for the `nullcontext` rows, but for a different reason: there
+    # is no competing binding at all rather than a competing non-binding one.
+    (
+        "a conditional store in a nested def after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        def inner():\n            cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    (
+        "a conditional store in a nested lambda after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        f = lambda: (cs := contextlib.nullcontext())\n",
+        False,
+    ),
+    # A class body is its own namespace, so `C.cs` is bound and `outer`'s
+    # `cs` is still the module. Same conclusion, third spelling of the
+    # boundary.
+    (
+        "a conditional store in a nested class body after a carrier is defeated",
+        "    import os as cs\n    if flag:\n        class C:\n            cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    # A `nonlocal` store is the control for the three rows above: it writes an
+    # *enclosing* scope's `cs` rather than its own local, so the nested scope
+    # is not a boundary for it and the carrier really is superseded. The
+    # inner function is a genuine closure here -- `outer` holds `cs` -- so
+    # `nonlocal cs` binds the very name the carrier set. This is the case a
+    # scope test that stopped at the nested boundary would wrongly exclude,
+    # and it is the pair that makes "nested scope" mean "a different local"
+    # rather than merely "a nested node".
+    (
+        "CONTROL a conditional nonlocal-scoped store after a carrier is live",
+        "    import os as cs\n    if flag:\n        def _rebind():\n            nonlocal cs\n            cs = contextlib.nullcontext()\n        _rebind()\n",
+        True,
+    ),
+    # `global cs` names the *module* namespace, so it cannot supersede a
+    # function-scope carrier -- and this store does not bind a local either,
+    # so the nested scope is a real boundary for it. Reading the declaration
+    # without asking which scope it governs excluded the store, and the
+    # checker answered `enforced` on a header that raises `TypeError` on both
+    # paths. Regression on `bee3e78`; a review finding on #388.
+    (
+        "a global-scoped store in a nested def after a function carrier is defeated",
+        "    import os as cs\n    if flag:\n        def _rebind():\n            global cs\n            cs = contextlib.nullcontext()\n        _rebind()\n",
+        False,
+    ),
+    # The same question asked through a *class* body, so the boundary cannot
+    # be satisfied by special-casing `def` alone. A class body is its own
+    # namespace, so `global cs` there is a module declaration that never
+    # touches `outer`'s local -- third spelling of the same answer.
+    (
+        "a global-scoped store in a nested class body is defeated",
+        "    import os as cs\n    if flag:\n        class C:\n            global cs\n            cs = contextlib.nullcontext()\n",
+        False,
+    ),
+    # A declaration in a scope nested *inside* the owner says nothing about
+    # the store sitting in the owner. `ast.walk` cannot tell them apart, so
+    # this reads `enforced` unless the walk stops at the nested boundary.
+    # Regression on `bee3e78`; a review finding on #388.
+    (
+        "a global declared only in a grandchild does not govern the owner's store",
+        "    import os as cs\n    if flag:\n        def inner():\n            cs = contextlib.nullcontext()\n            def grandchild():\n                global cs\n        inner()\n",
+        False,
+    ),
+    # A `nonlocal` in the grandchild fails the same way, and pins that the
+    # exclusion is not keyed on the declaration being present at all. The
+    # declaration needs a real enclosing binding to name, so `outer` is given
+    # a second local of the same name and `inner` is made to read *that* one
+    # rather than the carrier -- otherwise `nonlocal cs` inside `inner` would
+    # be a `SyntaxError` and the row would test nothing.
+    (
+        "a nonlocal declared only in a grandchild does not govern the owner's store",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        def inner():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            def grandchild():\n"
+            "                nonlocal cs\n"
+            "        inner()\n"
+        ),
+        False,
+    ),
+    # The grandchild need not be a direct child of the owner. Wrapped in an
+    # `if`, the declaration is still the grandchild's alone, and a boundary
+    # that only stopped at *directly* nested scopes reached straight through
+    # the wrapper. Review finding on `de23eea`.
+    (
+        "a nonlocal declared in a grandchild under an if is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        def inner():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            if True:\n"
+            "                def grandchild():\n"
+            "                    nonlocal cs\n"
+            "        inner()\n"
+        ),
+        False,
+    ),
+    (
+        "a global declared in a grandchild under an if is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        def inner():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            while False:\n"
+            "                def grandchild():\n"
+            "                    global cs\n"
+            "        inner()\n"
+        ),
+        False,
+    ),
+    # `contextlib.nullcontext(CM())` returns its `enter_result`, so the
+    # header is entered with `CM()` and the assert fires. Excluding every
+    # `nullcontext` call regardless of arguments reported `defeated` on a
+    # live contract. Pre-existing before #388; a review finding on #388.
+    (
+        "a conditional nullcontext-with carrying enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM()) as cs:\n            pass\n",
+        True,
+    ),
+    # The same argument with the `enter_result` spelled the only way it can
+    # be, since the parameter is keyword-only: a call carrying it has an
+    # *empty* positional argument list, so checking `args` alone read it as
+    # the no-argument form. Review finding on `de23eea`.
+    (
+        "a conditional nullcontext-with carrying a keyword enter_result is live",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext(enter_result=CM()) as cs:\n"
+            "            pass\n"
+        ),
+        True,
+    ),
+    # A literal `None` is the value the no-argument form produces, so the
+    # keyword spelling of it is the same null context and must keep the
+    # exclusion. Without this the fix above would over-claim and report a
+    # dead assert as load-bearing.
+    (
+        "a conditional nullcontext-with carrying a None enter_result is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext(enter_result=None) as cs:\n"
+            "            pass\n"
+        ),
+        False,
+    ),
+    # A second value for the same parameter is a `TypeError` at the call, so
+    # the `with` statement raises before the header is entered and the assert
+    # under it never runs. Counting the call as a superseding store would
+    # report that dead assert as load-bearing.
+    (
+        "a conditional nullcontext-with bound twice is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext(CM(), enter_result=CM()) as cs:\n"
+            "            pass\n"
+        ),
+        False,
+    ),
+    # A starred argument unpacks a literal, so the value is right there in the
+    # source and is not the unreadable case a keyword `enter_result` is.
+    (
+        "a conditional nullcontext-with unpacking its enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[CM()]) as cs:\n            pass\n",
+        True,
+    ),
+    # A falsy `enter_result` is not `None`: measured on 3.12.14,
+    # `nullcontext(enter_result=0).__enter__()` returns `0`, not `None`. The
+    # store is therefore counted -- a *decline* would report the assert live,
+    # and here the header raises on `0` -- while the end-to-end verdict is
+    # still `defeated`, because `0` cannot be entered either. That is the
+    # point of the row: "cannot be entered" and "is the null context" are
+    # different questions, and this rule answers the second.
+    (
+        "a conditional nullcontext-with a falsy enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=0) as cs:\n            pass\n",
+        False,
+    ),
+    # A container holding a manager is still not a manager, and a *literal*
+    # one is the case a truthiness test gets wrong: `enter_result=(CM(),)`
+    # is truthy and binds a tuple that cannot be entered.
+    (
+        "a conditional nullcontext-with a tuple enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(CM(),)) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a list enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=[CM()]) as cs:\n            pass\n",
+        False,
+    ),
+    # A dict *display* binds a dict, exactly as the list and tuple rows above
+    # bind a list and a tuple -- including one that holds a manager, which is
+    # still a dict. These rows exist because the dict arm of the allowlist was
+    # otherwise unexercised: deleting it outright left the whole lane green, so
+    # nothing was pinning it. A `**` of a dict is a different question (it
+    # names parameters) and is answered by the argument model instead.
+    (
+        "a conditional nullcontext-with a dict enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result={"a": CM()}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with an empty dict enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result={}) as cs:\n            pass\n",
+        False,
+    ),
+    # A `**` unpacking of a *literal dict* is as readable as the keyword
+    # itself, and a manager inside one does leave an enterable value bound.
+    (
+        "a conditional nullcontext-with a dict-literal enter_result is live",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            '        with contextlib.nullcontext(**{"enter_result": CM()}) as cs:\n'
+            "            pass\n"
+        ),
+        True,
+    ),
+    # Naming a parameter that does not exist is a `TypeError` at the call, so
+    # the statement raises before it binds anything.
+    (
+        "a conditional nullcontext-with an unknown keyword is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(foo=CM()) as cs:\n            pass\n",
+        False,
+    ),
+    # An empty star unpacks to nothing, which is the no-argument form.
+    (
+        "a conditional nullcontext-with an empty star unpacking is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*()) as cs:\n            pass\n",
+        False,
+    ),
+    # A builtin container call is a *call*, and "a call binds something
+    # enterable" is wrong for every one of these -- each binds an object with
+    # no `__enter__`, so the header raises. Reading the argument's type
+    # rather than its spelling is what tells `list()` from `CM()`.
+    (
+        "a conditional nullcontext-with a builtin container enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=list()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a frozenset enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=frozenset()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a range enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=range(3)) as cs:\n            pass\n",
+        False,
+    ),
+    # --- #388 review findings 2-5: the argument's *type*, not its spelling ---
+    #
+    # Every row below binds `CM` -- a real manager -- through a spelling the
+    # old classifier could not read, and every one of them is **live**. The
+    # first implementation read "not a bare `ast.Call`" as "not enterable"
+    # and declined all of them, which reports a genuinely live assert dead.
+    # That is the damaging direction, so an unreadable value now defaults to
+    # "may be enterable" and only a *pinned* non-enterable type may decline.
+    (
+        "a conditional nullcontext-with a walrus enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(cm := CM())) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a conditional enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(CM() if flag else None)) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with an or-chained enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=(None or CM())) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a subscripted enter_result is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=[CM()][0]) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a named enter_result is live",
+        "    import os as cs\n    if flag:\n        cm = CM()\n        with contextlib.nullcontext(enter_result=cm) as cs:\n            pass\n",
+        True,
+    ),
+    # A starred *computed* container pins neither the number of values nor
+    # their types, so it may supply exactly one manager.
+    (
+        "a conditional nullcontext-with an unreadable star is live",
+        "    import os as cs\n    if flag:\n        values = [CM()]\n        with contextlib.nullcontext(*values) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with an unreadable mapping is live",
+        '    import os as cs\n    if flag:\n        values = {"enter_result": CM()}\n        with contextlib.nullcontext(**values) as cs:\n            pass\n',
+        True,
+    ),
+    # A **computed** key builds a mapping the source does not pin, so it may
+    # be spelled `enter_result` and bind a manager.
+    (
+        "a conditional nullcontext-with a computed mapping key is live",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{("enter_" + "result"): CM()}) as cs:\n            pass\n',
+        True,
+    ),
+    # Finding 3: the argument count is over *effective* arguments, so an
+    # empty star supplies none. Counting it as one falsely declared a
+    # duplicate parameter and reported this live contract dead.
+    (
+        "a conditional nullcontext-with an empty star then a keyword is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[], enter_result=CM()) as cs:\n            pass\n",
+        True,
+    ),
+    (
+        "a conditional nullcontext-with an empty tuple star then a value is live",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*(), CM()) as cs:\n            pass\n",
+        True,
+    ),
+    # Finding 3, the other direction: a two-element star supplies two
+    # arguments, which is a `TypeError` at the call.
+    (
+        "a conditional nullcontext-with a two element star is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[CM(), CM()]) as cs:\n            pass\n",
+        False,
+    ),
+    # Finding 4: a `**` mapping carrying an unexpected key raises at the call
+    # even when an enterable value is present, so the store is not one that
+    # can be excluded. Each is a distinct spelling of the same validation.
+    (
+        "a conditional nullcontext-with a positional and a mapped enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM(), **{"enter_result": CM()}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a keyword and a mapped enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=CM(), **{"enter_result": CM()}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a keyword enter_result and an unknown one is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=CM(), foo=1) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a positional and an unknown keyword is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM(), foo=1) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a mapped unknown keyword is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": CM(), "foo": 1}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a positional and a mapped unknown keyword is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(CM(), **{"foo": 1}) as cs:\n            pass\n',
+        False,
+    ),
+    # Finding 5: a dict display keeps the **last** of several duplicate keys.
+    # Reading the first reversed both of these -- one reported a live header
+    # dead, the other reported a dead header live.
+    (
+        "a conditional nullcontext-with a duplicate key keeping the manager is live",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": None, "enter_result": CM()}) as cs:\n            pass\n',
+        True,
+    ),
+    (
+        "a conditional nullcontext-with a duplicate key keeping None is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": CM(), "enter_result": None}) as cs:\n            pass\n',
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a duplicate key keeping zero is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": CM(), "enter_result": 0}) as cs:\n            pass\n',
+        False,
+    ),
+    # Finding 6: a nested one-element tuple **crashed** the checker, which
+    # recursed with an `ast.Tuple` into logic that reads `.args` off a call.
+    # CPython binds a tuple and raises entering it, so the answer is
+    # `defeated`; the crash made the question unanswerable instead.
+    (
+        "a conditional nullcontext-with a nested tuple enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=((CM(),),)) as cs:\n            pass\n",
+        False,
+    ),
+    # The builtin call rows below are the *other* direction of the same
+    # rule: `int()`, `dict()` and `set()` are calls whose results have no
+    # `__enter__`, so counting every call as enterable declared them live.
+    (
+        "a conditional nullcontext-with an int enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=int()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a dict enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=dict()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a set enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=set()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a positional builtin is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(list()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a starred builtin is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*[int()]) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a mapped builtin is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(**{"enter_result": int()}) as cs:\n            pass\n',
+        False,
+    ),
+    # A builtin call is decided by *name*, not by whether it is a container.
+    # `bool()`, `object()`, `complex()` and `bytearray()` are as fixed as
+    # `list()` -- each binds an object with no `__enter__` -- and the first
+    # cut of the allowlist listed only containers and numbers, so these four
+    # were read as may-enterable and declared a dead header live. Regression
+    # found by an adversarial sweep against base `ed9d9b0`, which got all four
+    # right.
+    (
+        "a conditional nullcontext-with a bool enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=bool()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with an object enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=object()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a complex enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=complex()) as cs:\n            pass\n",
+        False,
+    ),
+    (
+        "a conditional nullcontext-with a bytearray enter_result is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=bytearray()) as cs:\n            pass\n",
+        False,
+    ),
+    # An f-string is a `str` whatever it interpolates, and `ast` gives it an
+    # `ast.JoinedStr` rather than folding it into `ast.Constant`. Left to the
+    # unreadable default it answered "may be enterable" on a value that is
+    # provably a string.
+    (
+        "a conditional nullcontext-with an f-string enter_result is defeated",
+        '    import os as cs\n    if flag:\n        with contextlib.nullcontext(enter_result=f"{x}") as cs:\n            pass\n',
+        False,
+    ),
+    # A `*` of a *readable* dict display unpacks to its keys, so `*{}` unpacks
+    # to nothing and supplies no argument at all -- the same no-argument form
+    # as `nullcontext()`, binding `None`. Reading it as an unreadable star made
+    # it supply a "maybe enterable" value instead.
+    (
+        "a conditional nullcontext-with an empty dict star is defeated",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext(*{}) as cs:\n            pass\n",
+        False,
+    ),
+    # A **computed** key is a distinct entry beside a readable `enter_result`
+    # and cannot overwrite it, and `nullcontext` takes one parameter -- so the
+    # call raises whatever the computed key evaluates to. A `**` *spread*
+    # (`{**other}`) is the opposite and can overwrite, so it is not counted as
+    # an extra key. Reading both the same way got the first one backwards.
+    (
+        "a conditional nullcontext-with a computed key beside enter_result is defeated",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            '        with contextlib.nullcontext(**{("enter_" + "r"): 1, "enter_result": CM()}) as cs:\n'
+            "            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL a conditional nullcontext-with a mapping spread is live",
+        (
+            "    import os as cs\n"
+            "    other = {'enter_result': CM()}\n"
+            "    if flag:\n"
+            '        with contextlib.nullcontext(**{"enter_result": CM(), **other}) as cs:\n'
+            "            pass\n"
+        ),
+        True,
+    ),
+    # The name is bound by a *different* item of the same `with`, so the
+    # non-enterable sibling says nothing about what `cs` received. Searching
+    # the whole statement for a known-`None` manager excluded a store that
+    # binds an enterable value. Pre-existing before #388.
+    (
+        "a conditional with whose nullcontext sibling binds another name is live",
+        "    import os as cs\n    if flag:\n        with CM() as cs, contextlib.nullcontext() as other:\n            pass\n",
+        True,
+    ),
+    # `asyncio` has no `suppress` in CPython 3.12.14, so the name is whatever
+    # the program put there. Inheriting the spelling into the
+    # `None`-returning set excluded a store bound to a real manager. The
+    # rebind is written in the row itself because that *is* the case: a
+    # module attribute can be replaced, and the exclusion has to notice.
+    (
+        "a conditional with on a rebound asyncio-suppress is live",
+        (
+            "    import os as cs\n"
+            "    import asyncio\n"
+            "    asyncio.suppress = CM\n"
+            "    if flag:\n"
+            "        with asyncio.suppress() as cs:\n"
+            "            pass\n"
+        ),
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS,
+    ids=[shape[0] for shape in FUNCTION_CARRIER_NON_ENTERABLE_SUPERSEDERS],
+)
+def test_a_function_carrier_decline_ignores_non_enterable_stores(label, body, live):
+    """The decline must not count a store that cannot bind an enterable value.
+
+    The four exclusions -- unbinding, a known `None`-returning `with`, a
+    starred unpack, and a nested-scope store -- all share one property: none of
+    them can leave `cs` bound to something `with` can enter. Counting one of
+    them would decline the header, and a decline reports the assert live, so
+    the error would be a dead assert certified as load-bearing.
+
+    The `with` exclusion is the narrowest of the four and the rows below it are
+    what keep it narrow: it applies to the item that binds *the queried name*,
+    and only when that item is a `None`-returning call outright. A sibling
+    item's manager, an `enter_result` argument, and a rebound `asyncio` spelling
+    each put an enterable value on the name, and each of those is a row here
+    rather than a gap.
+
+    The controls matter as much as the rows. A `with` on a *custom* manager and
+    a `nonlocal`-scoped store both leave an enterable value bound to the
+    outer name, so both must be counted; and a non-starred element store
+    (`cs, rest = (...)`) leaves `cs` holding a real `nullcontext()`. Together
+    they pin each exclusion to the category it was measured on, so the next
+    change cannot widen one of them into its neighbourhood.
+    """
+    source = (
+        "import contextlib\n"
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return False\n"
+        "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A store that "
+        f"cannot bind an enterable value must not decline the header, and a "
+        f"store that can must."
+    )
+
+
+#: #388 review: the ``global``/``nonlocal`` pair, asked from module scope.
+#:
+#: Telling those two declarations apart by the scope they target only works if
+#: the module path is still covered, and the module path is the one the fix
+#: could plausibly have broken: it is what makes #375's `_rebind` shape live.
+#: The function-scope table above cannot reach it -- every row there binds the
+#: carrier *inside* `outer`, which is exactly the case `global cs` does not
+#: reach -- so these rows are written against module-scope sources.
+MODULE_SCOPED_DECLARATION_SHAPES = (
+    (
+        "a module carrier superseded by a global-scoped store is live",
+        (
+            "import os as cs\n"
+            "def _rebind():\n"
+            "    global cs\n"
+            "    cs = contextlib.nullcontext()\n"
+            "_rebind()\n"
+        ),
+        True,
+    ),
+    # The mirror: a `nonlocal` inside a nested def names a *function* scope, so
+    # it cannot supersede a module-level carrier, and the nested def is a real
+    # boundary for it. This is the same pair the function table pins, read from
+    # the other side. The inner `def` reads a *function* local rather than the
+    # module name, because `nonlocal cs` needs a real enclosing function
+    # binding to name -- a `nonlocal` that resolved to the module would be a
+    # `SyntaxError`, and a `global` spelling would be the row above.
+    (
+        "a module carrier is not superseded by a nonlocal-scoped store",
+        (
+            "import os as cs\n"
+            "def _rebind():\n"
+            "    cs = os\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        cs = contextlib.nullcontext()\n"
+            "    inner()\n"
+            "_rebind()\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "prelude", "live"),
+    MODULE_SCOPED_DECLARATION_SHAPES,
+    ids=[shape[0] for shape in MODULE_SCOPED_DECLARATION_SHAPES],
+)
+def test_a_module_carrier_reads_global_and_nonlocal_apart(label, prelude, live):
+    """``global`` supersedes a module carrier; ``nonlocal`` does not.
+
+    The scope test that keeps a nested store from counting has to let a
+    declaration *through* when the declaration really does name the queried
+    carrier's namespace, or #375's `_rebind` regresses to `defeated` on a live
+    header. Reading the declaration without asking which scope it targets
+    breaks it the other way -- on a function-local carrier, where neither
+    spelling reaches -- which is the other half of the pair.
+
+    Every row is executed, so `live` is held to CPython rather than asserted
+    about the checker.
+    """
+    source = (
+        "import contextlib\n"
+        "import os\n"
+        + prelude
+        + "def outer(x, flag, helper):\n    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [live], (
+        f"{label}: expected {[live]}, got {results}. `global` names the module "
+        f"and `nonlocal` names an enclosing function, so exactly one of them "
+        f"can supersede a module-level carrier."
+    )
+
+
+#: Each non-enterable category, paired with the helper that excludes it.
+#:
+#: The table above holds the end-to-end verdict to CPython. That is not
+#: enough to show the exclusions are load-bearing, and the reason is worth
+#: recording: for three of these four shapes the verdict is *already* correct
+#: without the decline at all, because `_stores_of` drops the conditional
+#: store and the unconditional carrier is what settles the name. So an
+#: end-to-end row cannot move when the exclusion is taken away -- it was never
+#: the rule deciding that row.
+#:
+#: What decides them is the decline, and the decline is only observable
+#: directly. These rows therefore assert the decline itself: that each helper
+#: is what keeps its category from counting as a superseding store, and that
+#: removing the helper makes it count. The end-to-end consequence is pinned
+#: separately, and only where it exists, by the control rows.
+NON_ENTERABLE_EXCLUSION_ROWS = (
+    (
+        "the known-None with exclusion keeps its store out of the decline",
+        "    import os as cs\n    if flag:\n        with contextlib.nullcontext() as cs:\n            pass\n",
+        "_with_binds_a_known_non_enterable",
+        False,
+    ),
+    (
+        "the starred-target exclusion keeps its store out of the decline",
+        "    import os as cs\n    if flag:\n        *cs, = (contextlib.nullcontext(),)\n",
+        "_target_is_starred",
+        False,
+    ),
+    (
+        "the nested-scope exclusion keeps its store out of the decline",
+        "    import os as cs\n    if flag:\n        def inner():\n            cs = contextlib.nullcontext()\n",
+        "_store_is_in_scope",
+        True,
+    ),
+)
+
+
+def _decline_fires_for(source):
+    """Does the #388 decline fire on the ``with cs:`` header in `source`?"""
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    header = next(
+        node
+        for node in function.body
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Name) and item.context_expr.id == "cs"
+            for item in node.items
+        )
+    )
+    index = function.body.index(header)
+    bindings, _raw = support._store_bindings(function, set())
+    orders = {
+        id(statement): support._binding_order(function, statement)
+        for entries in bindings.values()
+        for statement, _value, _conditional in entries
+    }
+    return support._carrier_may_have_been_superseded(
+        bindings.get("cs", ()),
+        orders,
+        index,
+        support._bound_names(tree, function),
+        function,
+        "cs",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "helper", "neutralised"),
+    NON_ENTERABLE_EXCLUSION_ROWS,
+    ids=[row[0] for row in NON_ENTERABLE_EXCLUSION_ROWS],
+)
+def test_each_non_enterable_exclusion_is_load_bearing(
+    label, body, helper, neutralised, monkeypatch
+):
+    """Neutralising an exclusion must make its store count in the decline.
+
+    The helper is replaced with one that reports the opposite of what it
+    normally reports, which turns its exclusion off. The decline has to go from
+    silent to firing, because a store that cannot bind an enterable value must
+    not be read as a stale carrier.
+
+    The value that removes an exclusion is not the same for every helper, and
+    working that out is part of what these rows pin. Two of the helpers are
+    consulted positively -- "is this store in the same scope", "is the name the
+    starred target" -- so `True` removes the exclusion for the scope test and
+    `False` removes it for the starred test, because the caller negates the
+    scope answer and not the starred one. The `with` helper is a negative test
+    whose answer is negated by its caller, so `False` removes that exclusion
+    too. Each row's value is written in the table rather than derived from a
+    rule, because deriving it is what got this wrong twice while writing it.
+
+    The first assertion also matters: it pins that the row is *silent* to begin
+    with. Without it, a shape whose decline already fired would satisfy the
+    second assertion for the wrong reason, and the row would stop testing the
+    exclusion it names.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    assert _decline_fires_for(source) is False, (
+        f"{label}: the decline already fires for this row, so the exclusion it "
+        f"names is not what keeps the store out."
+    )
+    monkeypatch.setattr(support, helper, lambda *args, **kwargs: neutralised)
+    assert _decline_fires_for(source) is True, (
+        f"{label}: neutralising `{helper}` did not make the store count, so "
+        f"the exclusion is not load-bearing -- the decline is answering for "
+        f"some other reason and this row is not testing it."
+    )
+
+
+#: #388: the shapes this repair does **not** reach, and why.
+#:
+#: These three also read `defeated` against a live assert, and they read that
+#: way on the pre-#375 base `0529c8a` as well -- so they are a **separate
+#: pre-existing defect**, not part of the #388 regression, and closing #388
+#: does not close them.
+#:
+#: The ordered decline in :func:`_carrier_may_have_been_superseded` does fire
+#: on all three: each does have an unconditional carrier followed by a
+#: conditional non-carrier store. They still end up `defeated` because a
+#: *different* rule answers first -- `_aliased_suppressions` records the name
+#: as :data:`AMBIGUOUS_SUPPRESSOR` (#308 criterion 1: a name bound by several
+#: stores cannot be resolved by source order, so it is reported as a
+#: suppression), and `_is_suppressing_with` turns that into a defeat. So the
+#: carrier decline is silent here for a reason outside its own scope.
+#:
+#: They are kept in this file rather than dropped so the boundary is explicit
+#: instead of being rediscovered later: a future change to the #308 ambiguity
+#: rule that reads a total branch rebinding as settled will move these, and
+#: the move has to be argued for on its own matrix.
+FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES = (
+    (
+        "an if/else after a function-scope carrier is still declined",
+        "    import os as cs\n    if flag:\n        cs = contextlib.nullcontext()\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "an if/elif/else after a function-scope carrier is still declined",
+        "    import os as cs\n    if flag:\n        cs = contextlib.nullcontext()\n    elif flag:\n        cs = contextlib.nullcontext()\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    (
+        "a conditional del-then-store after a function-scope carrier is still declined",
+        "    import os as cs\n    if flag:\n        del cs\n        cs = contextlib.nullcontext()\n",
+        True,
+    ),
+    # A `with` that binds the same name from two items leaves the store table
+    # with two entries for it, so #308 reads the name as ambiguous and answers
+    # before the carrier decline is consulted. `with nullcontext() as cs, CM()
+    # as cs:` really does leave `cs` enterable -- the last item wins -- so
+    # `defeated` is the wrong end-to-end answer here, and it is the wrong
+    # answer on `ed9d9b0` too. Held here for the same reason as the rows above:
+    # the #388 repair must not widen it, and closing it belongs to #308.
+    (
+        "a with rebinding the name from two items is still declined",
+        (
+            "    import os as cs\n"
+            "    if flag:\n"
+            "        with contextlib.nullcontext() as cs, CM() as cs:\n"
+            "            pass\n"
+        ),
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "live"),
+    FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES,
+    ids=[shape[0] for shape in FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES],
+)
+def test_a_function_carrier_supersession_limit_is_still_declined(label, body, live):
+    """Pin the known limit of this repair, so it cannot widen silently.
+
+    With `flag=True` the store runs on every path and ``with cs:`` succeeds on
+    every row, so `defeated` is the **wrong** answer for all of them -- they
+    drop a live pinned contract. They are held to `defeated` here anyway,
+    because that is what the analyzer actually says; a test asserting the
+    *right* answer would be a failing test rather than a pin. The `live`
+    column is what keeps that claim honest: it is read from the interpreter
+    rather than assumed, and it is per-row because a `with` that binds the
+    same name twice leaves a different value behind than the store forms do.
+
+    The row is not claiming the verdict is correct. It pins **where this
+    repair stops**: the #308 ambiguity rule answers these shapes first, so
+    nothing here can widen the carrier decline without the #308 matrix moving
+    too. #388 repairs the ten regression rows only; these three are tracked
+    separately rather than absorbed, because they were already wrong on
+    `0529c8a`, the base of the #375 branch.
+
+    The interpreter half runs first, and it is the half that matters: it holds
+    CPython to the claim that the assert is live, so the table's own comment --
+    that this is a real defect rather than a quibble about the checker -- is
+    verified rather than asserted.
+    """
+    source = (
+        "import contextlib\n"
+        "class CM:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *exc):\n"
+        "        return False\n"
+        "def outer(x, flag, helper):\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"expected the current (wrong) [False] for this shape, got {results}. "
+        f"CPython disagrees -- the assert is live -- so whatever eventually "
+        f"fixes these rows will land here as a deliberate change to a pinned "
+        f"answer, argued on its own matrix, not as a side effect of some "
+        f"other repair."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "rebind", "is_async", "second_assert_live"),
     WALRUS_REBINDING_SHAPES,
@@ -3532,6 +4689,367 @@ TIED_STORE_ROWS = (
             "        assert x != 1"
         ),
         [False],
+    ),
+    # --- #370: a `for` target binds a value, and the single-element literal
+    # --- is the shape where that value is unambiguous.
+    #
+    # #324 made a loop target *visible* so it could retire a carried
+    # suppressor, and it recorded that store with no value at all. Recording
+    # nothing is enough to retire -- a later write of the name wins either
+    # way -- but it leaves the name equally unresolvable in the other
+    # direction, so a loop that binds a suppressor of its own is invisible:
+    #
+    #     for cs in [contextlib.suppress(AssertionError)]:
+    #         with cs:
+    #             assert x != 1     # executed: swallowed
+    #
+    # Executed, that assert never fires. Reported `enforced`, it certifies a
+    # disarmed contract as load-bearing -- the damaging direction per #308
+    # criterion 1. The target does receive a value (the current element of
+    # the iterable), and with exactly one element every iteration binds the
+    # same object, so recording it is sound both inside the body and after
+    # the loop.
+    (
+        "#370 a single-element loop target reaches a header in its own body",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # The same loop read *after* it completes. The body ran and the name
+    # survived it, so the trailing header enters the same suppressor. A fix
+    # that only taught the in-body header would leave this one live.
+    (
+        "#370 a single-element loop target survives the loop it was bound in",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The self-alias spelling. The loop binds the suppressor, and the header
+    # rebinds `cs` to itself, so the entered value is unchanged and the
+    # assert is still swallowed. This is the row that pins the walrus path
+    # against the loop's own store rather than only the bare-`Name` path.
+    (
+        "#370 a loop-bound suppressor reached through a self-aliasing walrus",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # CONTROL: the same loop shape over a *non*-suppressing element. The
+    # repair must not read "single-element loop" as "swallows" -- the verdict
+    # here is decided by the element, exactly as it is for a plain store.
+    (
+        "CONTROL a single-element loop target over a nullcontext stays live",
+        ("    for cs in [contextlib.nullcontext()]:\n        with cs:\n            assert x != 1"),
+        [True],
+    ),
+    # The multi-element limit, stated as a row rather than left implicit.
+    # Inside the body the target holds a *different* value per iteration, so
+    # for the tuple below the first pass swallows the assert and the second
+    # does not -- one static answer cannot be right for both, and guessing
+    # either way is a coin flip that lands on a false verdict half the time.
+    # Declining leaves the assert `enforced`, which is the safe direction: an
+    # over-cautious sentinel still reports the contract it was asked to
+    # protect.
+    #
+    # #385 measured this trade on a real head. Indexing to one element or the
+    # other does not remove the damaging cell, it moves it. Its after-loop
+    # variant -- where the *last* element is the right answer -- additionally
+    # needs the in-body/after-loop distinction designed rather than guessed
+    # at, so neither is settled by this row.
+    (
+        "CONTROL a multi-element loop target stays live while undecided",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
+    # The ordinary same-block case, and the reason the exception is scoped to
+    # the loop that owns the body. Here the store comes *after* the header, so
+    # `cs` is not bound when the header is read and entry raises
+    # `UnboundLocalError` on every path. A repair that treated any enclosing
+    # block as "its stores are already in force" would report this live
+    # assert defeated and drop a contract that raises loudly.
+    (
+        "CONTROL a same-block store after the header does not bind it early",
+        (
+            "    if flag:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        [True],
+    ),
+    # A `while` body has no target, so the same exception must not fire for
+    # it. Here the loop target is the whole point: the store is inside the
+    # loop and is seen by the ordinary "a store earlier in this block has run"
+    # rule, with no help from #370.
+    (
+        "CONTROL a while body needs no loop-target exception",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    while flag:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        break"
+        ),
+        [False],
+    ),
+    # A name the loop does NOT bind, read inside the loop body. The exception
+    # #370 adds is scoped to the loop's own target, so it must leave every
+    # other carried binding alone -- the suppressor `base` is still in force
+    # under `with base:`, and the assert is swallowed.
+    #
+    # This is the row that pins the exception as *additive*. Reading the loop
+    # target and returning it in place of what the enclosing blocks carried
+    # reports this defeated-to-live (`True`), certifying a swallowed assert as
+    # load-bearing. The loop binds `other`, so `base` is never among the
+    # bindings that get merged -- which is exactly why a replacement cannot
+    # be told apart from a merge by any of the rows above.
+    (
+        "CONTROL a loop leaves a carried binding the loop never touches",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    for other in [0]:\n"
+            "        with base:\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # The same source with the loop rebinding the name. Here the loop's own
+    # store really is the latest write, so it supersedes the carried
+    # suppressor and the assert is live. Read together with the row above,
+    # the pair says the merge is layered in binding order rather than either
+    # dropped or always winning.
+    # The body is *walked*, not matched against `node.body` directly, so a
+    # header nested one block down inside the loop is reached the same way the
+    # direct-header row above is. Executed, every one of these swallows the
+    # assert, so a rule scoped to the direct body reports them `enforced` --
+    # #308 criterion 1, a disarmed contract certified as load-bearing -- while
+    # still passing the direct-header row. The direct row cannot catch this.
+    (
+        "#370 a loop-bound suppressor reaches a header nested under an if",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop-bound suppressor reaches a header nested under a try",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        try:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        except ValueError:\n"
+            "            pass"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop-bound suppressor reaches a header under an inner loop",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for _ in range(1):\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # A loop that binds a name the header never reads must not *retire* the
+    # binding that loop's sibling does supply. `other` binds nothing the
+    # header uses, so `cs` still resolves to the inner loop's suppressor, and
+    # a rule that returned the first enclosing loop's bindings -- or that let a
+    # non-matching loop end the search -- reports this live when it is
+    # swallowed. This is the row that pins the search as "every enclosing loop,
+    # merged", not "the first one found".
+    (
+        "#370 an enclosing loop that binds nothing does not hide the inner one",
+        (
+            "    for other in [0]:\n"
+            "        for cs in [contextlib.suppress(AssertionError)]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # The inner loop's target is the LAST write before the header, so it wins
+    # over the outer loop's. Taking the outermost loop's element instead --
+    # which is what source order and breadth-first `ast.walk` both suggest --
+    # reads the suppressor and reports the assert defeated, removing a contract
+    # that really does fire. This is the damaging direction for this rule, and
+    # it is the row that says the merge is layered in *containment* order.
+    (
+        "CONTROL an inner loop's target supersedes the outer loop's",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.nullcontext()]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
+    # Three levels deep, with the suppressor at the bottom and a non-suppressor
+    # in each enclosing loop. Only the innermost loop's target is the last write
+    # before the header, so only its element decides the verdict; a rule that
+    # stopped at the first or the last enclosing loop it happened to visit gets
+    # one of the two other answers, both of which are wrong. Written with the
+    # same name throughout so each loop genuinely overwrites the last.
+    (
+        "#370 the innermost of three nested loop targets decides the header",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.nullcontext()]:\n"
+            "            for cs in [contextlib.suppress(AssertionError)]:\n"
+            "                with cs:\n"
+            "                    assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "CONTROL the innermost of three nested loop targets can be benign",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.suppress(AssertionError)]:\n"
+            "            for cs in [contextlib.nullcontext()]:\n"
+            "                with cs:\n"
+            "                    assert x != 1"
+        ),
+        [True],
+    ),
+    # Only a store *before* the header counts, and these three pin that
+    # boundary. A mutation that drops "strictly before" reads a store that has
+    # not run yet, and all three flip -- which is how the guard was found to be
+    # load-bearing rather than decorative.
+    #
+    # The first two are `False`, not `True`: the loop's own target *is* in
+    # force when the header is evaluated, so the assert really is swallowed and
+    # the later `cs = nullcontext()` changes nothing about it. They are here to
+    # pin that the later store is ignored, not to claim a loud failure.
+    (
+        "CONTROL an else-arm store after the header does not rebind it",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.nullcontext()"
+        ),
+        [False],
+    ),
+    (
+        "CONTROL a store after a nested header does not rebind it either",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.nullcontext()"
+        ),
+        [False],
+    ),
+    # The mirror image, and the damaging one. Here the loop's target is a
+    # `nullcontext`, so the header is live and the assert really does fire; the
+    # suppressor stored *after* it has not run yet. A rule that counted that
+    # store would read the suppressor and report the assert defeated, deleting a
+    # contract that is load-bearing. This is the row that says the cutoff runs
+    # in the safe direction.
+    (
+        "CONTROL a suppressor stored after the header does not reach it",
+        (
+            "    for cs in [contextlib.nullcontext()]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        [True],
+    ),
+    # A loop's `else` arm is a block of its own, and the target is bound by the
+    # time it runs -- the body once per iteration, the arm once after the loop
+    # finishes. The arm is a sibling list rather than a child, so a walk of
+    # `node.body` never reached it and the header reported `enforced` while
+    # executed it is swallowed. Same defect as the nested-body rows above, on
+    # the one arm that is easy to overlook.
+    (
+        "#370 a loop-bound suppressor reaches a header in the else arm",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # The arm's own store is the latest write and supersedes the loop target.
+    # This one is the damaging direction: reading the loop's element instead
+    # reports the assert defeated and drops a contract that really fires. It
+    # also pins that the arm is read as a block in its own right -- `own` is
+    # keyed by position in `function.body`, and a store in an `else` arm has no
+    # index there, so it is only reachable through the raw store table.
+    (
+        "CONTROL a store in the else arm supersedes the loop target",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
+    (
+        "CONTROL a non-suppressing loop target keeps the else arm live",
+        (
+            "    for cs in [contextlib.nullcontext()]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
+    # The nested form of the multi-element limit, which is the shape the
+    # walk-based match newly makes reachable. Undecided inside the body, and
+    # undecided here for the same reason, so it stays `enforced`.
+    (
+        "CONTROL a nested multi-element loop target stays live while undecided",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
+    (
+        "CONTROL a loop target supersedes a carried binding of the same name",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    for base in [contextlib.nullcontext()]:\n"
+            "        with base:\n"
+            "            assert x != 1"
+        ),
+        [True],
     ),
 )
 
@@ -4526,4 +6044,1331 @@ def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
     assert _is_enforced(probe, target, tree), (
         "a module-scope lookup descended into an unrelated function body and "
         "adopted its binding; a live assert was reported as defeated"
+    )
+
+
+#: #375 round 4. A **conditional** store that may have superseded a
+#: function-local carrier. The carrier is unconditional and settles the name on
+#: its own, but a later conditional store can replace it with something
+#: enterable, and then the assert under the header is live. The value is
+#: therefore undecidable and the rule must decline.
+#:
+#: Every row is executed under CPython with ``flag`` **true** by
+#: ``_assert_entry_contract``, which is the path on which the store runs and the
+#: assert really fires. These are the four false-dead verdicts ``origin/master``
+#: (``ed9d9b0``) returned for exactly these sources.
+STALE_LOCAL_CARRIER_SHAPES = (
+    (
+        "an import carrier superseded by a conditional store",
+        "    import os as cs",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a def carrier superseded by a conditional store",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a class carrier superseded by a conditional store",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    (
+        "an import carrier superseded by a loop store",
+        "    import os as cs",
+        "    for _ in (1,):\n        cs = nullcontext()",
+    ),
+    # Controls for the third review round, all of which must stay LIVE. Each
+    # is a shape the second round read as decidable-and-dead, and each is in
+    # fact decidable-and-live: a false operand in an `or` does not make the
+    # condition false, and a loop whose *last* element is a context manager
+    # leaves that element bound.
+    (
+        "a false operand in an or-ed condition",
+        "    import os as cs",
+        "    if flag or False:\n        cs = nullcontext()",
+    ),
+    (
+        "a false operand in an or-ed condition after a def carrier",
+        "    def cs():\n        pass",
+        "    if False or flag:\n        cs = nullcontext()",
+    ),
+    (
+        "a loop whose last element is a context manager",
+        "    import os as cs",
+        "    if flag:\n        for cs in (None, nullcontext()):\n            pass",
+    ),
+    # The rows below are the fourth review round. An independent reviewer
+    # executed 73 fixtures under real CPython and found these three reported
+    # DEAD while CPython reaches the assert. A false-dead is the damaging
+    # direction: it certifies a real contract as swallowed, so each row below
+    # is a LIVE header that an earlier revision got backwards.
+    (
+        "a shadowed builtin constructor returning a manager",
+        "    import os as cs\n    def int():\n        return nullcontext()",
+        "    if flag:\n        cs = int()",
+    ),
+    (
+        "a loop body rebinding the target to a manager",
+        "    import os as cs",
+        "    if flag:\n        for cs in (None,):\n            cs = nullcontext()",
+    ),
+    (
+        "a conditional manager after an unconditional none store",
+        "    import os as cs\n    cs = None",
+        "    if flag:\n        cs = nullcontext()",
+    ),
+    # The row below is the fifth review round's one *live* carrier row. A fresh
+    # review of `86fab6d` reproduced all four findings by execution; this one is
+    # the case where CPython genuinely enters the header, so the correct verdict
+    # is LIVE.
+    #
+    # #388-5c. The condition path was handed no enclosing scope at all, so a
+    # *locally* defined `list()` was read as the builtin and `if list():` was
+    # decided as the empty builtin -- retiring a branch CPython enters, because
+    # the local definition returns a real context manager.
+    (
+        "a locally shadowed constructor guarding a branch",
+        "    import os as cs\n    def list():\n        return nullcontext()",
+        "    if list():\n        cs = nullcontext()",
+    ),
+    # #388-5a's discriminating half. The row above pins the *zero-argument*
+    # form, whose branch genuinely never runs. These four pin the
+    # **argument-bearing** forms, whose branches CPython *does* enter because
+    # the argument produces an element. Emptiness was decided from the
+    # constructor *type* rather than from the call's argument list, so every
+    # one of them was read as the empty builtin and the branch was retired --
+    # a false-dead, which is the damaging direction.
+    #
+    # Each row is therefore executed under CPython with `flag` true, so the
+    # fixture proves the branch really is entered before the LIVE verdict is
+    # checked.
+    (
+        "a branch guarded by a set built from a literal",
+        "    import os as cs",
+        "    if set([1]):\n        cs = nullcontext()",
+    ),
+    (
+        "a branch guarded by a list built from a tuple",
+        "    import os as cs",
+        "    if list((1,)):\n        cs = nullcontext()",
+    ),
+    (
+        "a branch guarded by a dict built from a keyword",
+        "    import os as cs",
+        "    if dict(a=1):\n        cs = nullcontext()",
+    ),
+    (
+        "a branch guarded by a bytearray built from bytes",
+        "    import os as cs",
+        "    if bytearray(b'x'):\n        cs = nullcontext()",
+    ),
+)
+
+
+#: The mirror of :data:`STALE_LOCAL_CARRIER_SHAPES`, and the reason a first cut
+#: of the guard above was rejected. A conditional store that is itself pinned
+#: **non-enterable** cannot rescue the header on the path where it runs, so the
+#: carrier still decides every path and the assert is unreachable either way.
+#: Declining these would replace a correct dead verdict with a false-live one
+#: -- a regression against ``origin/master``, not a repair.
+#:
+#: Measured on CPython 3.12.14 with ``outer(1, False, None)`` and
+#: ``outer(1, True, None)``: both raise ``TypeError`` for all four rows, so the
+#: assert is unreachable on both paths and the correct verdict is dead.
+DEAD_CONDITION_AFTER_CARRIER_SHAPES = (
+    (
+        "a None store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = None",
+    ),
+    (
+        "a None store after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = None",
+    ),
+    (
+        "a None store after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = None",
+    ),
+    (
+        "an int store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = 42",
+    ),
+    (
+        "a list store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = [1]",
+    ),
+    (
+        "a str store after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = 'x'",
+    ),
+    (
+        "a starred target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        *cs, = (helper,)",
+    ),
+    (
+        "a starred target after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        *cs, = (helper,)",
+    ),
+    (
+        "a starred target after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        *cs, = (helper,)",
+    ),
+    (
+        "a chained bare target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = (other, x) = (helper, 1)",
+    ),
+    (
+        "a chained bare target after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = (other, x) = (helper, 1)",
+    ),
+    (
+        "a chained bare target after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        cs = (other, x) = (helper, 1)",
+    ),
+    (
+        "a starred target on a non-tuple right-hand side",
+        "    import os as cs",
+        "    if flag:\n        *cs, = helper",
+    ),
+    (
+        "a leading starred target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        *cs, rest = pair",
+    ),
+    (
+        "a nested starred target after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        a, (b, *cs) = pair",
+    ),
+    (
+        "a trailing starred target after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        first, *cs = pair",
+    ),
+    (
+        "a trailing starred target after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag:\n        first, *cs = pair",
+    ),
+    # The rows below are the second review round. The first cut of this repair
+    # declined any conditional store whose value it could not read as a literal,
+    # and that is true too often: a builtin constructor call, an element taken
+    # from a literal container, and a store inside a branch that provably never
+    # runs are each decidable, and declining them reported a dead header live
+    # where CPython raises on every path.
+    (
+        "a builtin constructor call after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = int()",
+    ),
+    (
+        "a builtin constructor call after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = list()",
+    ),
+    (
+        "a builtin constructor with an argument",
+        "    import os as cs",
+        "    if flag:\n        cs = bool(1)",
+    ),
+    (
+        "an element of a literal container",
+        "    import os as cs",
+        "    if flag:\n        cs, other = (None, 1)",
+    ),
+    (
+        "a list-target element of a literal container",
+        "    import os as cs",
+        "    if flag:\n        [cs] = [None]",
+    ),
+    (
+        "a literal element inside a nested pattern",
+        "    import os as cs",
+        "    if flag:\n        cs, (other, third) = (None, (1, 2))",
+    ),
+    (
+        "a loop over a literal container of None",
+        "    import os as cs",
+        "    if flag:\n        for cs in (None,):\n            pass",
+    ),
+    (
+        "a store in a literally false branch",
+        "    import os as cs",
+        "    if False:\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a conjunctively false branch",
+        "    import os as cs",
+        "    if flag and False:\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a false branch after a class carrier",
+        "    class cs:\n        pass",
+        "    if flag and False:\n        cs = nullcontext()",
+    ),
+    # The rows below are the third review round. Each was a regression the
+    # second round introduced while fixing the first, and each is the kind of
+    # mistake that only a fresh fixture finds: a type missing from the
+    # non-enterable set, a boolean operator read the wrong way round, a loop
+    # spelling of a dead branch, and a loop whose *last* element -- not its
+    # first -- is the value left bound.
+    (
+        "a range constructor after an import carrier",
+        "    import os as cs",
+        "    if flag:\n        cs = range(3)",
+    ),
+    (
+        "an argument-less range constructor",
+        "    import os as cs",
+        "    if flag:\n        cs = range()",
+    ),
+    (
+        "a frozenset constructor after a def carrier",
+        "    def cs():\n        pass",
+        "    if flag:\n        cs = frozenset()",
+    ),
+    (
+        "a store in an and-ed empty-literal branch",
+        "    import os as cs",
+        "    if flag and ():\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a while-false branch",
+        "    import os as cs",
+        "    while False:\n        cs = nullcontext()",
+    ),
+    (
+        "a loop whose last element is not enterable",
+        "    import os as cs",
+        "    if flag:\n        for cs in (nullcontext(), None):\n            pass",
+    ),
+    (
+        "a loop over an empty builtin container",
+        "    import os as cs",
+        "    if flag:\n        for cs in set():\n            pass",
+    ),
+    (
+        "a nested pattern holding a starred element",
+        "    import os as cs",
+        "    if flag:\n        cs, (other, rest3) = (None, (1, 2))",
+    ),
+    # The remaining fourth-round rows were reported LIVE while CPython raises
+    # before the assert. These are the false-live direction: they do not hide a
+    # contract, but they claim an entry works when it cannot, which is the
+    # mirror error and still blocks a merge.
+    (
+        "a store in a branch guarded by an or of false operands",
+        "    import os as cs",
+        "    if flag and (False or ()):\n        cs = nullcontext()",
+    ),
+    (
+        "a store in a branch guarded by an empty builtin call",
+        "    import os as cs",
+        "    if set():\n        cs = nullcontext()",
+    ),
+    (
+        "a loop over an empty bytearray",
+        "    import os as cs",
+        "    if flag:\n        for cs in bytearray():\n            pass",
+    ),
+    (
+        "an unconditional constructor store",
+        "    import os as cs\n    cs = int()",
+        "",
+    ),
+    (
+        "a store in a branch guarded by an empty dict",
+        "    import os as cs",
+        "    if {}:\n        cs = nullcontext()",
+    ),
+    # The rows below are the fifth review round's remaining carrier rows. A
+    # fresh review of `86fab6d` reproduced all four findings by execution, and
+    # these three are the ones where CPython raises before the assert anyway, so
+    # the correct verdict is DEAD. A regression here shows up as a row flipping
+    # to LIVE -- the mild direction, but still a row claiming an entry works
+    # when it cannot.
+    #
+    # #388-5a. Emptiness was decided from the constructor *type* rather than from
+    # the call's argument list, so `set([1])`, `list((1,))`, `dict(a=1)` and
+    # `bytearray(b"x")` -- all truthy -- were read as empty containers and their
+    # branch was treated as one that never runs.
+    (
+        "a set built from a literal is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = set([1])",
+    ),
+    (
+        "a list built from a tuple is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = list((1,))",
+    ),
+    (
+        "a dict built from a keyword is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = dict(a=1)",
+    ),
+    (
+        "a bytearray built from bytes is not an empty container",
+        "    import os as cs",
+        "    if flag:\n        cs = bytearray(b'x')",
+    ),
+    # #388-5d. Collapsing a loop target into its body's rebind retired the
+    # target, and the resolution then still sorted over *every* entry, so the
+    # retired target won the source-order tie against the body's store and the
+    # suppressor was dropped in favour of the element the target yielded.
+    (
+        "a loop body rebinding the target to a suppressor",
+        "    import os as cs\n    cs = None",
+        "    if flag:\n        for cs in (None,):\n            cs = suppress(AssertionError)",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "carrier", "conditional"),
+    STALE_LOCAL_CARRIER_SHAPES,
+    ids=[shape[0] for shape in STALE_LOCAL_CARRIER_SHAPES],
+)
+def test_a_conditional_store_superseding_a_local_carrier_is_declined(label, carrier, conditional):
+    """A carrier a conditional store may have replaced is not still in force.
+
+    The rule must not report the entry dead on the strength of a carrier that
+    a later conditional store may have replaced. Every row is executed under
+    CPython with ``flag`` **true**, which is the path on which the assert is
+    live, so the fixture proves the header really is enterable and the
+    ``enforced`` verdict is the correct answer.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import nullcontext\n"
+        "def outer(x, flag, helper):\n" + carrier + "\n" + conditional + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    # `_assert_entry_contract` calls `outer(1, True, None)`: `x=1` makes the
+    # assert false, and `flag=True` makes the conditional store run, so the
+    # name holds a real context manager and the assert is live.
+    _assert_entry_contract(label, source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}: expected verdicts [True], got {results}. A conditional store "
+        f"that may have superseded the carrier leaves the header's value "
+        f"undecidable, so the rule must decline instead of reporting the "
+        f"entry dead."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "carrier", "conditional"),
+    DEAD_CONDITION_AFTER_CARRIER_SHAPES,
+    ids=[shape[0] for shape in DEAD_CONDITION_AFTER_CARRIER_SHAPES],
+)
+def test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier(
+    label, carrier, conditional
+):
+    """A conditional store that cannot be entered leaves the carrier decisive.
+
+    The counterpart to
+    :func:`test_a_conditional_store_superseding_a_local_carrier_is_declined`.
+    There the later store could bind a real context manager, so the header's
+    value is undecidable; here it is pinned to a module, a class, a function or
+    a non-enterable literal, so *every* path through the header raises before
+    the assert is evaluated. Declining would certify a dead contract as
+    enforced, which is the damaging direction, so the rule must answer from the
+    carrier as usual.
+
+    The last six rows are the ones an independent review caught on the first
+    cut of the repair. Deciding "this assignment destructures, so the value is
+    unreadable" from the *statement* is wrong in both directions at once:
+
+    * ``*cs, = (helper,)`` builds a **list** for ``cs`` whatever the elements
+      are, so the name is pinned non-enterable and the assert is dead;
+    * ``cs = (other, x) = (helper, 1)`` gives the bare ``cs`` the **whole**
+      right-hand side -- a tuple -- while ``other`` and ``x`` get elements of
+      it. Deciding the statement once calls ``cs`` unreadable and declines.
+
+    Both were reported live on the first cut, against a master that answers
+    them correctly. Whether a store pins *this* name is a question about that
+    name's own target, which is what `_store_may_bind_enterable` is now asked.
+
+    Both rows are executed under CPython here too -- ``_assert_entry_contract``
+    is called with ``second_assert_live=False``, which requires the fixture to
+    raise something *other* than ``AssertionError``. That is what distinguishes
+    "unreachable" from "swallowed", and it is what makes these rows
+    non-vacuous rather than an assertion about the checker.
+
+    **A known limit this table deliberately does not cover.** A conditional
+    store that is itself a *carrier* --
+
+        def outer(x, flag, helper):
+            import os as cs
+            if flag:
+                import os as cs
+            with cs:
+                assert x != 1
+
+    -- is dead under CPython on both paths, and `origin/master` (``ed9d9b0``)
+    reports it `True` just the same. That is a separate pre-existing gap in
+    `_carrier_runtime_kinds` on the carrier path, unchanged by this repair and
+    not visible to the guard here, which reads the *settled* store. It is left
+    alone rather than folded in: widening this table to cover it would make
+    the non-vacuity proof below depend on a second repair.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import nullcontext\n"
+        # `other` is bound by the chained-target rows, and the starred rows
+        # unpack `pair` and bind `first`/`rest`/`a`/`b`, so every name they
+        # touch is a parameter here rather than an unbound global: CPython has
+        # to be able to run the fixture for the entry contract to mean
+        # anything. `_assert_entry_contract` calls `outer(1, True, None)`, so
+        # the extra names take their defaults.
+        "def outer(x, flag, helper, other=None, pair=(1, 2), first=None, rest=None, a=None, b=None, third=None, rest3=None):\n"
+        + carrier
+        + "\n"
+        + conditional
+        + "\n"
+        + "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, False)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}: expected verdicts [False], got {results}. A conditional store "
+        f"that is itself pinned non-enterable cannot make the header enterable, "
+        f"so the carrier still settles the name and the assert stays unreachable."
+    )
+
+
+#: The fifth review round's signature- and module-scope shadowing rows.
+#:
+#: These cannot live in either carrier table, because both build their fixture
+#: with a **fixed** signature ``outer(x, flag, helper)``. A row that needs the
+#: *callee's own name* to be a parameter cannot be expressed through a carrier
+#: string at all, and a module-level binding cannot be either. Each row
+#: therefore supplies its whole source, which is what lets both halves of
+#: #388-5b be expressed:
+#:
+#: * a **parameter** binds for the whole call, so ``def outer(list, x)`` calls
+#:   whatever the caller passed -- never the builtin ``list``. Positional,
+#:   keyword-only, ``*args`` and ``**kwargs`` each bind in their own way, and
+#:   ``ast`` records the last two under ``vararg``/``kwarg`` rather than in the
+#:   flat ``args`` list, so a filter reading only ``args`` misses them.
+#: * a **module-level** ``def list(): ...`` binds the name for every function
+#:   in the file, and a module-scope ``cs = list()`` is a store that has already
+#:   run by the time any header reads it.
+#:
+#: Each row is **executed** before its verdict is asserted, so no row can pin a
+#: verdict the interpreter does not agree with.
+SHADOWED_CALLEE_SOURCES = (
+    (
+        "a positional parameter shadowing a builtin constructor",
+        ("def outer(list, x):\n    cs = list()\n    with cs:\n        assert x != 1\n"),
+        (contextlib.nullcontext,),
+        {"x": 1},
+    ),
+    (
+        "a keyword-only parameter shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x, *, list=nullcontext):\n"
+            "    cs = list()\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1},
+    ),
+    (
+        "a vararg parameter shadowing a builtin constructor",
+        "def outer(*list, x):\n    cs = list[0]()\n    with cs:\n        assert x != 1\n",
+        (contextlib.nullcontext,),
+        {"x": 1},
+    ),
+    (
+        "a kwarg parameter shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x, **list):\n"
+            "    cs = list['k']()\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "k": contextlib.nullcontext},
+    ),
+    (
+        "a module-level def shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "def list():\n"
+            "    return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1},
+    ),
+    (
+        "a module-level assignment shadowing a builtin constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "list = nullcontext\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1},
+    ),
+    # #388-5d. The positive half of the module-scope rule, and the case a
+    # naive "only descend into plain statements" fix would break: a `def`
+    # inside a module-level `if` is still a **module** binding, because the
+    # block runs in the scope that encloses it. The branch has run by the time
+    # `cs = list()` is evaluated, so the call really is the shadow and the
+    # header really is LIVE. This is what stops the false-lives above from
+    # being "fixed" by simply refusing to look inside any block.
+    (
+        "a module-level if branch defining the shadowing constructor",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x, flag, helper):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "flag": True, "helper": None},
+    ),
+    # #388-5d. The same binding one level deeper: a block inside a block. A
+    # walk that only descends one level reports the name unshadowed and retires
+    # a header CPython enters, so the descent has to be recursive.
+    (
+        "a shadowing constructor defined in a nested module if",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    if True:\n"
+            "        def list():\n"
+            "            return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x, flag, helper):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "flag": True, "helper": None},
+    ),
+    # #388-5d. A `match` clause runs in the scope that encloses it, exactly as
+    # an `if` body does. `Case` is not one of the block shapes the walk opens,
+    # so the clause has to be flattened to its statements; reading past it made
+    # this a false-dead on an earlier draft of the repair.
+    (
+        "a shadowing constructor defined in a module match case",
+        (
+            "from contextlib import nullcontext\n"
+            "match 1:\n"
+            "    case 1:\n"
+            "        def list():\n"
+            "            return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x, flag, helper):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+        (),
+        {"x": 1, "flag": True, "helper": None},
+    ),
+)
+
+
+def _shadowed_callee_reaches_assert(label, source, arguments, keywords):
+    """Does CPython reach the assert in this row? Executed, never assumed."""
+    namespace = {"nullcontext": contextlib.nullcontext}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](*arguments, **keywords)
+    except AssertionError:
+        return True
+    except (TypeError, AttributeError, KeyError, IndexError, NameError, UnboundLocalError):
+        return False
+    raise AssertionError(
+        f"{label}: the fixture returned normally, so neither the assert nor an "
+        f"entry failure was observed and the row proves nothing."
+    ) from None
+
+
+#: The round-5 review's findings against `d921aac`, all **false-live**: the tool
+#: reported a header LIVE where CPython raises before the assert. The direction
+#: is the mild one -- a header reported as enterable when it is not -- but these
+#: were *introduced* by the module-scope shadowing that #388-5b added, so they
+#: are regressions against `86fab6d` and had to be repaired.
+#:
+#: Each row is executed first: `x=2` makes `assert x != 1` true, so a clean
+#: return proves the with-body was entered (LIVE) and any exception proves it
+#: was not (DEAD). The expected verdict is DEAD in all four.
+MODULE_SCOPE_FALSE_LIVE_SOURCES = (
+    # #388-5d(f1). `cs = list()` runs BEFORE the `def list()` below it, so the
+    # call is still the real builtin and binds the empty list -- which cannot be
+    # entered. Scanning the whole module regardless of order called the name
+    # shadowed, and a `TypeError`-raising header came back LIVE.
+    (
+        "a module binding that runs after the call",
+        "cs = list()\ndef list():\n    return None\ndef outer(x):\n    with cs:\n        assert x != 1\n",
+    ),
+    # #388-5d(f1b). The same, with the later binding inside a module-level `if`
+    # rather than at the top level. The branch has not run when `cs = list()`
+    # is evaluated, so it does not count either.
+    (
+        "a later module binding inside a module if",
+        (
+            "cs = list()\n"
+            "if True:\n"
+            "    def list():\n"
+            "        return None\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    # #388-5d(f2). `list` is bound in `unrelated`'s LOCALS, when `unrelated` is
+    # called. Nothing has called it, so the module never binds `list` and
+    # `cs = list()` is still the builtin. Descending into a nested function body
+    # read the `TypeError` a real call raises as a callable the header enters.
+    (
+        "a binding in another function's body",
+        (
+            "def unrelated():\n"
+            "    def list(): return None\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    # #388-5d(f2b). A `class` body is a separate scope for the same reason: a
+    # method named `list` does not bind the module name.
+    (
+        "a binding in a class body",
+        (
+            "class Holder:\n"
+            "    def list(self): return None\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    # #388-5d(f3). `import builtins` is the ordinary import that brings the
+    # real module in -- the same `import x` spelling that everywhere else in
+    # this file means "this is the module named x". Treating it as a rebinding
+    # of the name `builtins` made `cs = builtins.list()`, the canonical way of
+    # naming a builtin, read as shadowed.
+    (
+        "a qualified builtin call through the builtins module",
+        "import builtins\ncs = builtins.list()\ndef outer(x):\n    with cs:\n        assert x != 1\n",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    MODULE_SCOPE_FALSE_LIVE_SOURCES,
+    ids=[shape[0] for shape in MODULE_SCOPE_FALSE_LIVE_SOURCES],
+)
+def test_a_name_the_module_does_not_bind_at_call_time_is_reported_dead(label, source):
+    """A name is shadowed only by a module binding that has actually run.
+
+    #388-5d. #388-5b added a module-scope shadowing rule, and reading the whole
+    module without regard to *when* the binding runs, or to *which scope* it is
+    written in, produced false-lives on `d921aac`:
+
+    * a binding written **after** the call, which has not run yet;
+    * a binding inside **another function's** or a **class body**, which binds
+      a local, not the module name;
+    * `import builtins`, which is an ordinary import rather than a rebinding,
+      so the qualified `builtins.list()` was read as shadowed.
+
+    Every row is executed before its verdict is checked, so the DEAD
+    expectation is CPython's own answer rather than an assumption. A row whose
+    fixture turns out to reach the assert fails here rather than passing
+    vacuously.
+    """
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](2)
+    except AssertionError:
+        pytest.fail(
+            f"{label}: CPython reached the assert, so this row cannot pin a DEAD "
+            f"verdict. Either the fixture is wrong or the expectation is."
+        )
+    except (AttributeError, IndexError, KeyError, NameError, TypeError, UnboundLocalError):
+        pass
+    else:
+        pytest.fail(f"{label}: the fixture returned normally, so it proves nothing.")
+
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    assert [_is_enforced(function, asserts[0], tree)] == [False], (
+        f"{label}: expected the header to be reported DEAD. A binding that has "
+        f"not run, or that binds another scope's name, leaves the call reaching "
+        f"the real builtin, and the empty list it returns cannot be entered."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "arguments", "keywords"),
+    SHADOWED_CALLEE_SOURCES,
+    ids=[shape[0] for shape in SHADOWED_CALLEE_SOURCES],
+)
+def test_a_constructor_callee_shadowed_outside_the_body_is_reported_live(
+    label, source, arguments, keywords
+):
+    """A callee shadowed by a parameter or a module binding is not a builtin.
+
+    #388-5b. The shadowing check looked only inside the function body, so two
+    bindings that are never *written* in the body were invisible:
+
+    * the **signature** -- a parameter binds for the whole call, so
+      ``def outer(list, x): cs = list()`` calls whatever the caller passed and
+      never the builtin ``list``;
+    * **module scope** -- a module-level ``def list(): ...`` binds the name for
+      every function in the file, and a module-level ``cs = list()`` has
+      already run by the time any header reads it.
+
+    Both were read as the builtin, and both are a **false-dead** when the shadow
+    happens to return a real context manager: the tool reported the header DEAD
+    where CPython enters it and the assert is genuinely reachable. That is the
+    damaging direction -- it certifies a live contract as swallowed -- so it is
+    the direction these rows pin.
+
+    Every row is executed first, so the LIVE verdict is checked against CPython's
+    own answer rather than asserted from the fixture's shape. A row whose
+    fixture does not actually reach the assert fails here rather than passing
+    vacuously.
+    """
+    assert _shadowed_callee_reaches_assert(label, source, arguments, keywords) is True, (
+        f"{label}: CPython does not reach the assert here, so the row cannot "
+        f"pin a LIVE verdict. Either the fixture is wrong or the expectation is."
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    assert [_is_enforced(function, asserts[0], tree)] == [True], (
+        f"{label}: expected the header to be reported LIVE. A callee shadowed "
+        f"by a parameter or a module binding is a different callable, so the "
+        f"store must be read as possibly-enterable and the assert kept."
+    )
+
+
+#: The round-8 review's findings against `31e3b22`. Both are holes in the
+#: round-7 narrowing, and both are the same shape of mistake: a rule that
+#: proved one part of a path and then stopped looking.
+#:
+#: The obvious control for the first finding -- a store in the `else` of a
+#: never-true `if`, whose arm *is* taken -- is deliberately absent. That
+#: spelling is a **pre-existing** false-live: the carrier is bound at module
+#: scope, and a settled `cs = list()` makes the header raise exactly as
+#: `cs = list()` written straight at module scope does. It answers identically
+#: on `fee41bf`, `5535135`, `b90f985` and `31e3b22`, so it is a module-carrier
+#: limitation rather than a gap in this rule, and pinning it here would assert
+#: a fix this series has not made. `test_a_block_nested_module_carrier_is_still_declined`
+#: is where that limitation is already recorded.
+#:
+#: The mirror shape -- an `else` whose *own* test is undecidable, such as
+#: `if os.name: ... else: cs = list()` inside an `if True:` -- is also absent,
+#: for the same reason. The helper reads that arm as runnable, which is
+#: correct, but the resulting verdict is the same module-carrier false-DEAD.
+#: Dropping the always-true test from `_statement_in_unreachable_arm` *does*
+#: change that shape's verdict, so the test is not redundant; it is merely
+#: unfalsifiable here, because the module-carrier limit masks the answer.
+ROUND_EIGHT_SOURCES = (
+    # Review finding 1. The `if True:` above made the block look like an
+    # always-true branch, and the store in the *unreachable* `else` beside the
+    # inner `if True:` was then read as one that always runs. It never does:
+    # the inner condition is true, so the `else` is skipped, and `cs` is still
+    # the `nullcontext()` bound above the branch.
+    (
+        "a store in the unreachable else arm of an always-true test",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if True:\n"
+            "    if True:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same hole one `elif` deeper, which is an `else` whose body is another
+    # `if` and so is reached through the same test.
+    (
+        "a store in the else arm of a nested always-true test",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if True:\n"
+            "    if True:\n"
+            "        if True:\n"
+            "            pass\n"
+            "        else:\n"
+            "            cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control on the `elif` side. An `elif` is an `else` whose
+    # body is another `if`, and the whole arm is skipped while the test above
+    # it holds -- so behind `if False:` even a *later* `elif` is dead and the
+    # header is still the `nullcontext`. The trailing `else` restores a real
+    # manager, so the store in the dead `elif` arm changes nothing and the
+    # header is entered. A rule that walked into the `elif` through the
+    # parent's test would settle that store and report this header DEAD.
+    (
+        "a store in an elif arm behind a never-true elif",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    cs = list()\n"
+            "elif True:\n"
+            "    pass\n"
+            "elif False:\n"
+            "    cs = list()\n"
+            "else:\n"
+            "    cs = nullcontext()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same hole reached through an `elif` rather than a plain `else`, and
+    # the row that fails if the arm is not covered at all. The test above is
+    # true, so the `elif` never runs, `cs` is still the `nullcontext` bound at
+    # the top, and the header is entered.
+    (
+        "a store in an elif arm behind a chain of always-true tests",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if True:\n"
+            "    pass\n"
+            "elif True:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Review finding 2. A string literal is not one of the container literals
+    # the empty-iterable test matched, so `for _ in "":` -- which yields
+    # nothing, exactly like `for _ in ():` -- was read as a body that runs.
+    (
+        "an always-true branch inside a loop over an empty string",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            'for _ in "":\n'
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same hole by the zero-argument `set()` spelling, which is a call
+    # rather than a literal and so is a third shape the loop test had to
+    # cover. `set([1])` is *not* empty, which is why the argument list is
+    # checked rather than the callee name alone.
+    (
+        "an always-true branch inside a loop over an empty set call",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "for _ in set():\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control. `"a"` has one element, so the loop body *does* run
+    # and the store settles the name. Reading every string as empty would
+    # report this header LIVE.
+    (
+        "an always-true branch inside a loop over a non-empty string",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            'for _ in "a":\n'
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
+#: The round-7 review's findings against `b90f985`. These are **regressions the
+#: round-6 repairs introduced**, each caught by execution at `x=2` and each
+#: pinned here with a positive control beside it.
+ROUND_SEVEN_SOURCES = (
+    # Review finding 1. `_statement_always_runs` decides that a store inside
+    # `if True:` always runs, but it only looked at the *innermost* block. The
+    # store here is also inside a `for _ in ():` that never iterates, so it
+    # never runs at all: `cs` is still the `nullcontext()` bound above it, the
+    # header is entered, and the assert is reachable. Treating the store as
+    # unconditional settled `cs` on the `cs = list()` that never ran and
+    # reported a `TypeError`-raising header DEAD. Every block on the path has
+    # to run for the rule to fire.
+    (
+        "an always-true branch inside a loop that never runs",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "for _ in ():\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The same defect by the `while False:` spelling of a never-run body.
+    (
+        "an always-true branch inside a while loop that never runs",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "while False:\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control for finding 1. The loop *does* iterate, so the
+    # always-true store really does run and really does rebind `cs` to the
+    # empty list, which `with` cannot enter. A fix that simply stopped
+    # counting always-true stores would report this header LIVE.
+    (
+        "an always-true branch inside a loop that does run",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "for _ in (1,):\n"
+            "    if True:\n"
+            "        cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # Review finding 3. `builtins` is rebound *after* the call, so it is not
+    # yet in force where the call is evaluated: `cs` holds the empty list the
+    # real builtin returned, and `with cs:` raises. The module rebinding check
+    # scanned the whole module, so it counted a store that had not run and
+    # read the rebound attribute, reporting the `TypeError` as LIVE.
+    (
+        "builtins rebound after the qualified call",
+        (
+            "from types import SimpleNamespace\n"
+            "import builtins\n"
+            "cs = builtins.list()\n"
+            "builtins = SimpleNamespace(list=len)\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # The positive control for the *other* direction: the same rebinding
+    # before the call, but to something that does build a real context manager.
+    # The store is shadowed for real here, so the assert is reachable.
+    (
+        "builtins rebound to a manager before the qualified call",
+        (
+            "from contextlib import nullcontext\n"
+            "from types import SimpleNamespace\n"
+            "import builtins\n"
+            "builtins = SimpleNamespace(list=nullcontext)\n"
+            "cs = builtins.list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+)
+
+
+#: The round-6 review's findings against `5535135`. Three were **false-dead**
+#: -- the tool reported a header DEAD where CPython enters it, which is the
+#: damaging direction because it certifies a reachable assert as swallowed --
+#: and one was a residual **false-live** inside a single module block.
+#:
+#: Every row is *executed* first, with `x=2` so that `assert x != 1` is TRUE.
+#: A clean return therefore proves the with-body was ENTERED (LIVE) and any
+#: exception proves it was not (DEAD). That is the opposite of an
+#: `x=1`-plus-`except AssertionError` harness, which cannot tell a body that
+#: was entered from one whose failure a suppressor ate.
+ROUND_SIX_SOURCES = (
+    # Finding 1. The call is inside `outer`'s body, and a function body is only
+    # reached *after the whole module has executed*. The `def list()` below has
+    # therefore already run by the time `outer(2)` is called, so `cs` holds a
+    # `nullcontext` and the assert is reachable. Cutting the module walk at
+    # `outer`'s own `def` -- correct for a *module-scope* call -- read the
+    # builtin `list` instead and reported the header DEAD.
+    (
+        "a module binding written after the function definition",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+            "def list():\n"
+            "    return nullcontext()\n"
+        ),
+        True,
+    ),
+    # Finding 1, second spelling. An assignment binds the module name exactly
+    # as a `def` does, so the position argument is the same and the answer has
+    # to be the same.
+    (
+        "a module assignment written after the function definition",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+            "list = nullcontext\n"
+        ),
+        True,
+    ),
+    # Finding 2. An `except` handler body runs in the scope that encloses it,
+    # and this one has plainly run by the time `cs = list()` is evaluated. The
+    # module walk opened `try` bodies, `else` and `finally` but not the
+    # handlers, so the binding was skipped and the builtin `list` was read.
+    (
+        "a module binding inside an except handler",
+        (
+            "from contextlib import nullcontext\n"
+            "try:\n"
+            "    raise ValueError\n"
+            "except ValueError:\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Finding 3. `builtins.attr` only names the real module while `builtins`
+    # itself is unbound. A store that replaces the name makes the attribute
+    # lookup reach an arbitrary object, and `builtins.list()` is then
+    # `nullcontext()`. Answering `False` for every `builtins.*` callee read
+    # the shadowed call as the builtin and reported the header DEAD.
+    (
+        "a rebound builtins name read through an attribute",
+        (
+            "from contextlib import nullcontext\n"
+            "from types import SimpleNamespace\n"
+            "builtins = SimpleNamespace(list=nullcontext)\n"
+            "cs = builtins.list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Finding 3, function-local spelling. The same attribute read, but the
+    # store is a local rather than a module one, so it is caught by the
+    # function-scope half of the question rather than the module half.
+    (
+        "a function-local builtins name read through an attribute",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    from types import SimpleNamespace\n"
+            "    builtins = SimpleNamespace(list=nullcontext)\n"
+            "    cs = builtins.list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Finding 4, the residual false-live. `cs = list()` runs BEFORE the
+    # `def list()` beside it, so the call really is the builtin and binds the
+    # empty list, which `with` cannot enter. The order cut used to stop at the
+    # enclosing `if` as a whole statement, so the `def` inside that same block
+    # read as though it shadowed the call, and a `TypeError`-raising header
+    # came back LIVE.
+    (
+        "a later binding inside the same module block as the call",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    cs = list()\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # The positive control for finding 4, and the one that would break if the
+    # always-true branch were ignored. The shadow is written *before* the call
+    # inside the same block, so the call really is the shadow and the assert is
+    # reachable.
+    (
+        "an earlier binding inside the same module block as the call",
+        (
+            "from contextlib import nullcontext\n"
+            "if True:\n"
+            "    def list():\n"
+            "        return nullcontext()\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # The positive control for finding 3. `import builtins` is the ordinary
+    # import that brings the *real* module in, so the qualified spelling still
+    # reaches the builtin and the empty list cannot be entered. Reading the
+    # canonical import as a rebinding would report this header LIVE.
+    (
+        "the canonical import of builtins read through an attribute",
+        (
+            "import builtins\n"
+            "cs = builtins.list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
+def _fixture_is_entered(label, source):
+    """Does CPython enter the with-body? Executed, never assumed.
+
+    The fixture is called with ``x=2``, which makes ``assert x != 1`` true. A
+    clean return therefore means the body ran (LIVE); any exception means it
+    did not (DEAD). The assert is therefore never *reached as a failure*: the
+    question is only whether entry raised before it, so the harness counts a
+    clean return as LIVE rather than catching ``AssertionError`` as success.
+    """
+    namespace = {"nullcontext": contextlib.nullcontext, "SimpleNamespace": SimpleNamespace}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](2)
+    except Exception:  # noqa: BLE001 - any exception means the body was not entered
+        return False
+    return True
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected_live"),
+    (*ROUND_EIGHT_SOURCES, *ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES),
+    ids=[shape[0] for shape in (*ROUND_EIGHT_SOURCES, *ROUND_SEVEN_SOURCES, *ROUND_SIX_SOURCES)],
+)
+def test_module_scope_order_scope_and_builtins_reading(label, source, expected_live):
+    """A function-body call, a handler body and a rebound ``builtins`` are read right.
+
+    #388-5e. The round-6 review found three false-deads and one false-live in
+    the module-scope shadowing rule, each from a different place where the walk
+    stopped short of the truth:
+
+    * a function body runs only *after* the whole module has executed, so a
+      module binding written **after** the function's ``def`` still shadows the
+      callee there -- the order cut is only valid for a module-scope call;
+    * an ``except`` **handler** body runs in the enclosing scope, so a binding
+      in one is a module binding, and the walk has to open the handlers;
+    * ``builtins.attr`` only names the real module while ``builtins`` itself is
+      unbound, so the qualified spelling needs the base name checked -- while
+      ``import builtins`` must keep counting as the real module;
+    * and a binding *after* the call **inside the same block** does not shadow
+      it, which needs the descent to be order-aware rather than to stop at the
+      enclosing statement.
+
+    #388-5f. The round-7 review then found two *regressions* those repairs
+    # introduced, and both are the same mistake in opposite directions: a rule
+    # that keys on one enclosing block and ignores the rest of the path.
+
+    * ``_statement_always_runs`` read the innermost ``if True:`` and ignored a
+      ``for _ in ():`` around it, so a store that never runs settled the name;
+    * the ``builtins`` rebinding check scanned the whole module, so a store
+      written *after* a module-scope call counted even though it had not run
+      yet. Both are checked here, each beside a positive control that fails if
+      the rule is dropped rather than narrowed.
+
+    Each row is executed under real CPython with ``x=2`` before its verdict is
+    checked, so the expectation is CPython's own answer. A fixture that does
+    not behave as the row claims fails here rather than passing vacuously.
+    """
+    assert _fixture_is_entered(label, source) is expected_live, (
+        f"{label}: CPython "
+        f"{'entered' if expected_live else 'did not enter'} the with-body, so this "
+        f"row cannot pin the opposite verdict. Either the fixture is wrong or "
+        f"the expectation is."
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    assert [_is_enforced(function, asserts[0], tree)] == [expected_live], (
+        f"{label}: expected the header to be reported "
+        f"{'LIVE' if expected_live else 'DEAD'}. A callee shadowed by a module "
+        f"binding that has already run is a different callable; one that has "
+        f"not run yet still reaches the real builtin."
     )
