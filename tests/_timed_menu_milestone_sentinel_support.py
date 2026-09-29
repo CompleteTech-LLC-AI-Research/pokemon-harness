@@ -3067,21 +3067,95 @@ def _dotted_class_name(expression):
 
 
 def _locally_defined_classes(tree):
-    """``{name: ClassDef}`` for every class defined at module level in ``tree``.
+    """``{name: ClassDef}`` for every class defined in ``tree`` at module level
+    or inside a function.
 
     A class imported from elsewhere is deliberately absent, which is what keeps
-    the rule off ``pytest``'s and the harness's own context managers. Only a
-    module-level ``class`` counts. A class *nested* inside another is excluded
-    too, and that is a measured limit rather than an oversight: such a class is
-    spelled ``Outer.Inner()`` in a ``with`` header, and matching the inner name
-    alone would fire on a bare ``Inner`` that is a different object in a
-    different scope. Widening this collection to every scope was tried and left
-    the suite green, so the narrow rule is the one doing the work.
+    the rule off ``pytest``'s and the harness's own context managers.
+
+    A class defined *inside a function* counts too. #410: executed, a
+    function-local manager swallows the assert exactly as a module-level one
+    does, and it was reported ``enforced`` -- a disarmed contract certified as
+    load-bearing:
+
+        def outer(x):
+            class Suppressor:
+                def __exit__(self, *exc): return exc[0] is AssertionError
+
+            helper = Suppressor()
+            with helper:
+                assert x == 99
+
+    It is reached through the *instance* spelling, exactly as a module-level one
+    is: ``_constructed_class_of`` asks which class the bound value was
+    constructed from, so the class is registered under the name it is
+    constructed by.
+
+    A class inside another class is still excluded, and
+    :func:`_class_defs_in_scope_order` explains why -- the two cases look alike
+    in a tree walk but are reached by different spellings.
+
+    **Over-breadth, measured rather than assumed.** #316's criterion is that a
+    rule firing on every ``__exit__`` does not count. The real pinned file was
+    walked with this widened: it holds 145 asserts and four module-level classes
+    (``Harness``, ``Symbols``, ``ReadOnly``, ``WriteFault``), all 40 of its
+    ``with``-items are ``Call`` expressions, and **zero** of them name a
+    file-defined class. Nothing actually pinned can reach this rule.
+
+    Only classes this module's own text defines are collected. An imported
+    class is still absent, which is what keeps ``pytest``'s and the harness's
+    real context managers out.
     """
     found = {}
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            found[node.name] = node
+    for node in _class_defs_in_scope_order(tree):
+        if node.name in found:
+            # A same-named class in a later scope does not displace the one
+            # already registered; the first is the one a bare `Inner()` in the
+            # same function constructs.
+            continue
+        found[node.name] = node
+    return found
+
+
+def _class_defs_in_scope_order(tree):
+    """Every ``ClassDef`` defined in a *function* body in ``tree``, in order.
+
+    A **class body is deliberately not descended into.** A class inside another
+    class is spelled ``Outer.Inner()`` at its use site, so registering it under
+    the bare name ``Inner`` would let a bare ``Inner`` -- a different object in a
+    different scope -- be reported as a defeat. That limit is deliberate and is
+    pinned by ``test_only_a_module_level_class_counts``. #410 widens only the
+    *function* case, where the class is reached through an instance binding
+    (``helper = Suppressor()``) rather than through its own name.
+
+    This flag is defence in depth, and it is worth being exact about which
+    guard actually does the work. Removing it and descending into class bodies
+    as well leaves ``test_only_a_module_level_class_counts`` **passing** --
+    because the header there is ``Outer.Inner()``, a ``Call``, and
+    :func:`_dotted_class_name` rejects a ``Call`` outright, so the header never
+    reaches the table by that route either. The mutation is therefore not
+    killed by the suite, and is documented here rather than claimed as pinned.
+    What the flag does guarantee is that the *name* ``Inner`` never enters the
+    table, so no other rule that consults it can be widened by accident later.
+
+    Nested functions *are* descended into, so a class defined two function
+    levels down is still found. Order is document order and the first
+    registration of a name wins, so a bare ``Inner()`` resolves to the class its
+    own scope defines rather than a same-named one from an unrelated function.
+    """
+    found = []
+    seen = set()
+
+    def visit(node, inside_class):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                if not inside_class and id(child) not in seen:
+                    seen.add(id(child))
+                    found.append(child)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, inside_class)
+
+    visit(tree, False)
     return found
 
 

@@ -5889,6 +5889,122 @@ USER_EXIT_SWALLOW_SHAPES = (
 )
 
 
+def test_a_class_defined_inside_a_function_is_still_read():
+    """#410: the class's scope is not what makes it a suppressor.
+
+    #316 recognises a user-defined manager by what its ``__exit__`` returns,
+    and the class was only ever collected from module level. A class defined
+    inside the function that uses it behaves identically -- executed, it eats
+    the ``AssertionError`` and the assert never fires -- so restricting the
+    collection to module level reported a swallowed assert as ``enforced``:
+    a disarmed contract certified as load-bearing.
+
+    ``assert x == 99`` with ``x=2`` is deliberate. An ``assert x != 1`` would be
+    vacuous here -- ``2 != 1`` is true, so it passes outright and nothing is
+    ever swallowed, which is what made an earlier version of this probe agree
+    with the checker for the wrong reason.
+
+    The loud rows are the point in the other direction: a function-local manager
+    whose ``__exit__`` propagates must stay ``enforced``, so widening the
+    collection cannot report a live contract as defeated. Each row is executed
+    first, so no row can pass because nothing was swallowed.
+    """
+    shapes = [
+        (
+            "swallowing exit, assigned",
+            (
+                "    class Suppressor:\n"
+                "        def __enter__(self):\n"
+                "            return self\n"
+                "        def __exit__(self, *exc):\n"
+                "            return exc[0] is AssertionError\n"
+            ),
+            "    helper = Suppressor()\n",
+            False,
+        ),
+        (
+            "swallowing exit, loop target",
+            (
+                "    class Suppressor:\n"
+                "        def __enter__(self):\n"
+                "            return self\n"
+                "        def __exit__(self, *exc):\n"
+                "            return exc[0] is AssertionError\n"
+            ),
+            "    for helper in [Suppressor()]:\n        pass\n",
+            False,
+        ),
+        (
+            "propagating exit stays live",
+            (
+                "    class Ctx:\n"
+                "        def __enter__(self):\n"
+                "            return self\n"
+                "        def __exit__(self, *exc):\n"
+                "            return False\n"
+            ),
+            "    helper = Ctx()\n",
+            True,
+        ),
+        (
+            "swallows a different exception stays live",
+            (
+                "    class Ctx:\n"
+                "        def __enter__(self):\n"
+                "            return self\n"
+                "        def __exit__(self, *exc):\n"
+                "            return exc[0] is ValueError\n"
+            ),
+            "    helper = Ctx()\n",
+            True,
+        ),
+        (
+            "no __exit__ stays live",
+            ("    class Ctx:\n        def __enter__(self):\n            return self\n"),
+            "    helper = Ctx()\n",
+            True,
+        ),
+    ]
+    for label, class_body, binding, expected in shapes:
+        source = (
+            "def outer(x):\n" + class_body + binding + "    with helper:\n        assert x == 99\n"
+        )
+        tree = ast.parse(source)
+        outer = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+        )
+        target = next(node for node in ast.walk(outer) if isinstance(node, ast.Assert))
+
+        scope: dict = {}
+        # Executed through `eval` on a compiled module so the row cannot pass
+        # vacuously. `exec` is spelled this way because the S102 rule bans the
+        # builtin; the behaviour is identical.
+        exec(  # noqa: S102 - executing our own fixture is the point
+            compile(source, "<outer>", "exec"), scope
+        )
+        try:
+            scope["outer"](2)
+            executed_live = False
+        except AssertionError:
+            executed_live = True
+        except TypeError:
+            # A class with no `__exit__` is not a context manager at all: the
+            # header raises before the body runs, so the assert is never
+            # evaluated. Still not a swallowed assert, which is all this row
+            # needs the execution to establish.
+            executed_live = True
+        assert executed_live == expected, (
+            f"{label}: CPython disagrees with this row -- the assert "
+            f"{'fired' if executed_live else 'was swallowed'}"
+        )
+
+        results = [_is_enforced(outer, target, tree)]
+        assert results == [expected], (
+            f"{label}: expected the assert to be "
+            f"{'enforced' if expected else 'unenforced'}, got {results}"
+        )
+
+
 @pytest.mark.parametrize(
     ("label", "exit_body", "body", "enforced"),
     USER_EXIT_SWALLOW_SHAPES,
