@@ -6629,6 +6629,77 @@ ROUND_EIGHT_SOURCES = (
         ),
         True,
     ),
+    # #403. The mirror of the row above, and the one the arm rule exists for.
+    # There the `elif` was **unreachable**, so the store settled nothing and
+    # `cs` kept the `nullcontext` bound at the top. Here the test above the
+    # arm is *never* true, so the arm is reached on every call and the store
+    # settles the name just as an unconditional one would: `cs` is a `list`,
+    # so `with cs:` raises `TypeError` and the assert is unreachable.
+    #
+    # Reading the arm's own test alone settles this store too, which is why the
+    # rule has to be paired with the chain walk in `_always_true_arm_within`
+    # -- the always-true *body* and the always-run *arm* are different
+    # questions, and each of the two rows above pins one of them.
+    (
+        "a store in an elif arm that always runs settles the name",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    pass\n"
+            "elif True:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # The same arm reached through a plain `else:` rather than an `elif`. An
+    # `else` runs exactly when its `if` does not, so a never-true `if` makes
+    # this arm run on every call -- the same settling question, spelled
+    # without the nested `if` that makes an `elif` recognisable. A rule that
+    # only walked `orelse` chains of single `if`s would miss this one.
+    (
+        "a store in an else arm that always runs settles the name",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    pass\n"
+            "else:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    # The chain walked two links deep, with a genuinely conditional test in the
+    # middle. The middle test is a name the module binds, so it may be either
+    # value at run time: the trailing arm runs on some calls and not others,
+    # the store settles the name only sometimes, and the header is therefore
+    # undecidable and reported live. This is the row that fails if the chain
+    # walk reads each test independently and settles the arm because the
+    # *last* test happens to be true.
+    (
+        "a store in an elif arm behind a conditional test stays undecided",
+        (
+            "from contextlib import nullcontext\n"
+            "flag = bool(int('1'))\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    pass\n"
+            "elif flag:\n"
+            "    pass\n"
+            "elif True:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
     # Review finding 2. A string literal is not one of the container literals
     # the empty-iterable test matched, so `for _ in "":` -- which yields
     # nothing, exactly like `for _ in ():` -- was read as a body that runs.
