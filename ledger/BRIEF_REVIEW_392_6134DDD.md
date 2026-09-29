@@ -2,17 +2,34 @@
 
 ## What to review
 
-**Exact SHA: `6134dddf17609e7703f19afcfb3484d4c171f308`**
+**Exact SHA: read it from the approval-target file. Do not take it from this
+document.**
 
 Branch `fix/375-local-carrier-stale` in `/workspace/poke-harness/FIX-375r4`.
 
-This is a merge commit. Parents are `2031d7d` (the #392 local repair chain) and
+The candidate is a merge commit plus ledger-only commits on top. Its merge parent
+is `6134ddd`, whose parents are `2031d7d` (the #392 local repair chain) and
 `6b72bf6` (current `origin/master`). Ancestry is preserved — no rebase, no
 force-push, both tips remain reachable.
 
+## Where the approval target lives
+
+This brief is part of the branch, so it cannot name its own tip SHA — every edit
+to it changes that SHA. Two earlier cuts of this brief were wrong for exactly
+that reason. The target is recorded **outside** the tree:
+
+```bash
+cat /workspace/poke-harness/ledger/APPROVAL_TARGET_392.txt
+```
+
+Approve only the SHA in that file. Commits after `6134ddd` touch `ledger/` alone;
+the `tests/` tree is byte-identical across all of them
+(`git rev-parse <sha>:tests` == `447e8f1`), but approval is per full SHA, so
+`6134ddd` and any intermediate SHA are **not** valid targets.
+
 Reply with one of:
 
-- `APPROVE 6134dddf17609e7703f19afcfb3484d4c171f308`
+- `APPROVE <the full 40-char SHA from APPROVAL_TARGET_392.txt>`
 - `REQUEST CHANGES` with the specific finding and file/line
 
 An approval applies to **that full SHA only**. Any further change to the tree
