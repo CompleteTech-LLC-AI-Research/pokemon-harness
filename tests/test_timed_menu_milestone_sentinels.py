@@ -684,10 +684,103 @@ UNREACHABLE_SHAPES = (
         "    if flag:\n        raise ValueError\n    assert x != 1",
         True,
     ),
+    # #402. This row was a *live control* for #400 and pinned `True`, on the
+    # reading that a transfer nested in an earlier statement's body says
+    # nothing about what follows. That reading is right for `break` and
+    # `continue`, which leave the *enclosing* loop and resume after it, and
+    # wrong for a `try` whose body is a bare `return`: there is nowhere for
+    # the `return` to resume, so the statements after the whole `try` are
+    # never reached. Measured on CPython 3.12.14 the assert is never
+    # evaluated, so the correct verdict is `False`, and the row moves from
+    # the control block to the dead block above.
     (
         "return in try then assert",
         "    try:\n        return\n    except Exception:\n        pass\n    assert x != 1",
+        False,
+    ),
+    # The `raise` counterpart is the live control that keeps this rule from
+    # degenerating into "a `try` body that ends in a transfer is dead". A
+    # `raise` in the `try` body is exactly what the handlers exist to catch,
+    # so the no-exception path -- or the handler itself falling through --
+    # resumes after the `try` and the assert is reached.
+    (
+        "raise in try then assert",
+        "    try:\n        raise ValueError\n    except ValueError:\n        pass\n    assert x != 1",
         True,
+    ),
+    # The `else` clause runs on the no-exception path, which is the ordinary
+    # one, so a `return` there leaves the same way a `return` in the `try`
+    # body does. The `try` body and every handler both fall through here, so
+    # the `else` is the only remaining path out.
+    (
+        "return in try else then assert",
+        "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        return\n    assert x != 1",
+        False,
+    ),
+    # A `finally` that returns overrides every path out of the `try`, so the
+    # statements after it are dead even though both the `try` body and the
+    # handler fall through.
+    (
+        "return in try finally then assert",
+        "    try:\n        pass\n    finally:\n        return\n    assert x != 1",
+        False,
+    ),
+    # Two handlers where only one falls through: the falling handler is a real
+    # path out of the `try`, so the assert is reached. This is what makes the
+    # handler test `all` and not `any` -- an `any` reading would call this
+    # dead and drop a live contract.
+    (
+        "one of two handlers falls through",
+        (
+            "    try:\n        pass\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        pass\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
+    # A single handler that re-raises is also live: the re-raise only happens
+    # when an exception occurred, so the no-exception path still reaches the
+    # assert below. `raise` in a handler is not a fall-through.
+    (
+        "handler reraise then assert",
+        "    try:\n        pass\n    except Exception:\n        raise\n    assert x != 1",
+        True,
+    ),
+    # The mirror of the row above, and the one place a bare `raise` in a
+    # handler *is* load-bearing: here the `try` body always raises, so there
+    # is no ordinary path at all and the re-raising handler is the only exit.
+    # The `_block_falls_through` guard is what separates the two rows -- with
+    # it removed, the row above would be answered dead and this one right.
+    (
+        "raise in try reraise handler then assert",
+        "    try:\n        raise ValueError\n    except ValueError:\n        raise\n    assert x != 1",
+        False,
+    ),
+    # A `try/finally` whose `finally` merely falls through is decided by the
+    # `try` body alone, and a body that may raise leaves the `finally` and
+    # then the statement after it reachable. This is the live control for the
+    # `finally` clause: without it, a rule that treated any `finally` as
+    # terminal would drop this assert.
+    (
+        "try finally falls through then assert",
+        "    try:\n        helper()\n    finally:\n        pass\n    assert x != 1",
+        True,
+    ),
+    # `except*` is the same statement with a different handler type, and the
+    # walk must not skip it by testing for `ast.Try` alone.
+    (
+        "return in try star then assert",
+        "    try:\n        return\n    except* Exception:\n        pass\n    assert x != 1",
+        False,
+    ),
+    # The transfer kills the statements after the `try` *statement*, so
+    # anything nested under a later compound statement is dead too -- the
+    # interpreter never begins evaluating it.
+    (
+        "return in try then with body",
+        "    try:\n        return\n    except Exception:\n        pass\n    with helper():\n        assert x != 1",
+        False,
     ),
     ("plain live assert", "    assert x != 1", True),
 )
