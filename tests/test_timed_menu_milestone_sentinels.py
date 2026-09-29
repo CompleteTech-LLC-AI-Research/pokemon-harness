@@ -4718,6 +4718,60 @@ TIED_STORE_ROWS = (
         ),
         [False],
     ),
+    # The body is walked rather than matched directly, so a header nested
+    # inside the loop's body is reached the same way. Each of these is the
+    # row above with one more block between the loop and the header, and
+    # executed all of them swallow the assert -- so reporting any of them
+    # `enforced` is the damaging direction.
+    #
+    # These pin the walk. A repair scoped to `node.body` alone passes the
+    # direct-header row and fails all three, which is the whole point of
+    # having them: the direct row cannot tell the two implementations apart.
+    (
+        "#370 a loop-bound suppressor reaches a header nested under an if",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop-bound suppressor reaches a header nested under a try",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        try:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        except ValueError:\n"
+            "            pass"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop-bound suppressor reaches a header under an inner loop",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for _ in [0]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # CONTROL for the walk: the same nesting over a *non*-suppressing element.
+    # Walking deeper must not read as "reached a suppressor" any more than
+    # the direct row does -- the verdict is still decided by the element.
+    (
+        "CONTROL a nested header over a nullcontext loop target stays live",
+        (
+            "    for cs in [contextlib.nullcontext()]:\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
     # The same loop read *after* it completes. The body ran and the name
     # survived it, so the trailing header enters the same suppressor. A fix
     # that only taught the in-body header would leave this one live.

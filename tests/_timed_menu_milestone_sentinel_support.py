@@ -2634,7 +2634,23 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
     for node in ast.walk(function):
         if not isinstance(node, (ast.For, ast.AsyncFor)):
             continue
-        if not any(child is header for child in node.body):
+        # The body is walked rather than tested directly, because a loop body
+        # is usually a *block* and the header is rarely the block itself:
+        #
+        #     for cs in [contextlib.suppress(AssertionError)]:
+        #         if flag:
+        #             with cs:          # one level down, still in the body
+        #                 assert x != 1
+        #
+        # Matching only `node.body` closed the exception for the direct-header
+        # case and left every nested one reporting `enforced` -- executed, all
+        # of them swallow the assert, so that is the damaging direction. The
+        # walk is still bounded by the loop, so an unrelated loop further out
+        # cannot reach in; and `ast.walk` is breadth-first, so a *nested* loop
+        # is visited before its enclosing one and is the binding that decides
+        # the name -- which is the same source order the rest of this module
+        # already relies on.
+        if not any(child is header for statement in node.body for child in ast.walk(statement)):
             continue
         if _single_loop_element(getattr(node, "iter", None)) is None:
             return {}
