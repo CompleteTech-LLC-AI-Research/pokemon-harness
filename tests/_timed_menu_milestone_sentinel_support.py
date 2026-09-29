@@ -2789,7 +2789,7 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
                     scoped.update({n: own[n] for n in loop_target if n in own})
                     return scoped
                 return bound_so_far
-            if _is_store_statement(node):
+            if _is_store_statement(node, function):
                 seen_store = True
     return bound_so_far
 
@@ -2801,7 +2801,7 @@ def _loop_target_names(block):
     return frozenset(_store_target_names([block.target]))
 
 
-def _is_store_statement(node):
+def _is_store_statement(node, function=None):
     """Does reaching this point in a block mean the block's stores have run?
 
     #359: this list was ``ast.Assign``/``ast.AnnAssign`` only, so a ``for``
@@ -2834,9 +2834,15 @@ def _is_store_statement(node):
     and answers ``defeated``, dropping a live assert from the sentinel. The test
     is ``_is_empty_literal_iterable``, the same helper the ``for``-defeat rule
     already uses, so the two agree on what a decidable empty iterable is.
+    That helper recognizes empty *strings* and *bytes*, the zero-argument
+    ``list``/``tuple``/``set``/``frozenset``/``dict``/``bytearray`` spellings,
+    and ``range`` calls whose literal bounds settle the emptiness exactly.
+    Counting a ``range(0)`` as having reached its body was the same defect in
+    a different spelling, and ``_is_empty_literal_iterable``'s docstring
+    records the executed measurements.
     """
     if isinstance(node, (ast.For, ast.AsyncFor)):
-        return not _is_empty_literal_iterable(node.iter)
+        return not _is_empty_literal_iterable(node.iter, function)
     return isinstance(node, ast.Assign) or (
         isinstance(node, ast.AnnAssign) and node.value is not None
     )
@@ -4004,7 +4010,7 @@ def _falsy_literal(node):
     return isinstance(node, ast.Constant) and not node.value
 
 
-def _is_empty_literal_iterable(node):
+def _is_empty_literal_iterable(node, function=None):
     """Is this iterable a literal container that provably yields nothing?
 
     ``for _ in []:`` keeps the assert in the AST and never runs it, which is the
@@ -4013,15 +4019,213 @@ def _is_empty_literal_iterable(node):
     ``(0,)`` and ``(False, True)`` all have a decidable value, and the
     emptiness test is then exact.
 
-    A call such as ``range(0)`` or ``dict()`` is deliberately *not* matched
-    even though it too yields nothing. Deciding those means reasoning about
-    builtins rather than reading a literal, and a wrong answer there drops a
-    live contract from the sentinel's view -- the more damaging error. The rule
-    answers only the question a literal settles on its own.
+    Measured gap, closed here. Restricting this to ``List``/``Tuple``/``Set``/
+    ``Dict`` left every other spelling of "provably empty" reading as
+    non-empty, and the caller in ``_is_store_statement`` counts a non-empty
+    iterable as *proof the loop body ran*. Executed on real CPython 3.12, all
+    of these reach the loop body zero times, so counting each one as a store
+    that ran admitted a store that never happened:
+
+        cs = contextlib.nullcontext()
+        if True:
+            for _ in range(0):            # provably zero iterations
+                cs = contextlib.suppress(AssertionError)
+            with cs:                      # `cs` is still the nullcontext
+                assert x != 1             # live
+
+    Thirteen spellings were wrong, and all in the damaging direction -- the
+    tool said DEAD while CPython raised ``AssertionError``: ``''``, ``""``,
+    ``b''``, ``set()``, ``frozenset()``, ``dict()``, ``bytearray()``,
+    ``range(0)``, ``range(0, 0)``, ``range(0, 1, -1)``, ``list()`` and
+    ``tuple()``. (The thirteenth, a literal dict ``{1: 1}``, is not a defect
+    at all -- it is genuinely non-empty -- and is counted as such.)
+
+    These are recognized by *what they are*, not by trusting a name lookup.
+    ``range(0)`` is settled by reading the literal arguments and applying the
+    real ``range`` emptiness rule; the zero-argument constructors are settled
+    by their closed-form empty result.
+
+    The spelling must still be the *unshadowed* builtin, and that is the part
+    a name-based rule gets wrong. Executed, every one of these reaches the loop
+    body:
+
+        def outer(x, range):
+            def range(*a): return [1, 2, 3]      # shadows the builtin
+            for _ in range(0):                   # NOT empty
+                cs = contextlib.suppress(AssertionError)
+
+    so calling ``_is_empty_builtin_iterable`` on the shape alone answered
+    "empty", counted the loop as a store that ran, and dropped the live assert
+    -- the same damaging direction the rule exists to prevent. ``function`` is
+    therefore consulted for a binding of the called name, and any binding at
+    all (a parameter, a ``def``, an assignment, an import, a capture) makes
+    the spelling unreadable, so the loop keeps being counted as one that ran.
+    The unshadowed case is still recognized, because a name that nothing binds
+    resolves to the builtin exactly.
+
+    Non-empty and undecidable shapes are still declined, which keeps
+    ``range(1)``, ``range(n)``, ``(1,)`` and any call taking an unreadable
+    argument counted as a loop that really did reach its body.
     """
-    if not isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        value = _literal_value(node)
+        return value is not _NOT_LITERAL and not value
+    if isinstance(node, ast.Constant):
+        # `''`, `b''` and friends are readable constants whose emptiness is
+        # exact. `_literal_value` would answer for them too, but asking it to
+        # decide *emptiness* through `not value` conflates the genuinely empty
+        # with, say, `0` -- which is not an iterable and must never be
+        # reported as an empty one.
+        return isinstance(node.value, (str, bytes)) and not node.value
+    if isinstance(node, ast.Call):
+        return _is_empty_builtin_iterable(node, function)
+    return False
+
+
+#: Zero-argument constructors whose result is provably empty for every input.
+#:
+#: Listed as spellings rather than resolved through ``__builtins__``, because a
+#: local ``def range(...)`` or an assigned name would otherwise let a
+#: user-defined callable masquerade as the builtin. An empty result is the
+#: property being relied on, and it holds for each of these regardless of
+#: arguments, which is what makes the closed form safe rather than a guess.
+_EMPTY_CONSTRUCTORS = frozenset({"bytearray", "dict", "frozenset", "list", "set", "tuple"})
+
+
+def _is_empty_builtin_iterable(node, function=None):
+    """Is this call an unshadowed builtin spelling of a provably empty iterable?
+
+    ``range`` is the only one of these whose emptiness depends on its
+    arguments, and that dependency is settled exactly rather than by guessing:
+    a ``range`` is empty precisely when no integer ``i`` satisfies
+    ``start <= i < stop`` with ``i`` advancing by ``step``, which for a
+    positive step means ``start >= stop`` and for a negative one means
+    ``start <= stop``, with a zero step being a ``ValueError`` at runtime
+    rather than an empty range.
+
+    Every argument must be a readable integer literal or unary-signed literal.
+    Anything else -- a ``Name``, a call, an arithmetic expression -- returns
+    ``False``, so an unreadable loop keeps being counted as one that reached
+    its body. That is the direction that cannot drop a live contract.
+
+    A name bound anywhere in ``function``'s own scope is declined for the same
+    reason, since it may not be the builtin at all. Nested scopes are not
+    consulted: a ``def`` inside the function does not rebind a name for the
+    function's own code, and treating it as though it did would discard the
+    unshadowed reading of every function that happens to define a helper.
+    """
+    func = node.func
+    if not isinstance(func, ast.Name):
         return False
-    return not _literal_value(node)
+    name = func.id
+    if name not in _EMPTY_CONSTRUCTORS and name != "range":
+        return False
+    if _name_is_bound_in_scope(func.id, function):
+        return False
+    if name in _EMPTY_CONSTRUCTORS:
+        # Zero-argument only. `list([1])` and `set([1])` are non-empty, and an
+        # argument this function cannot read is not evidence of emptiness.
+        return not node.args and not node.keywords
+    return _range_is_empty(node.args)
+
+
+def _name_is_bound_in_scope(name, function):
+    """Does ``function``'s own scope bind ``name``, so it may not be the builtin?
+
+    Deliberately an over-approximation, in the safe direction. It answers True
+    for a parameter, a ``def``/``class``, an assignment or augmented
+    assignment, an import, a ``for``/``with`` target, a walrus, a comprehension
+    or exception-handler name, and a ``match`` capture -- anything that could
+    have rebound the name before the loop ran. A False here is trusted; a True
+    only ever declines a call spelling, which leaves the loop counted as one
+    that reached its body.
+    """
+    if function is None:
+        return False
+    arguments = function.args
+    for group in (
+        getattr(arguments, "posonlyargs", []),
+        arguments.args,
+        arguments.kwonlyargs,
+        [getattr(arguments, "vararg", None), getattr(arguments, "kwarg", None)],
+    ):
+        for argument in group:
+            if argument is not None and argument.arg == name:
+                return True
+    # `_scope_body_nodes` is the module's own boundary walk: it stops at nested
+    # `def`/`lambda`/`class` bodies, which bind into their own namespace. A
+    # helper defined inside the function must therefore not make its own name
+    # look shadowed for the function's own code.
+    for node in _scope_body_nodes(function):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if (alias.asname or alias.name.split(".")[0]) == name:
+                    return True
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                return True
+        elif (isinstance(node, ast.ExceptHandler) and node.name == name) or (
+            isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name
+        ):
+            return True
+    # `def cs` / `class cs` / `import os as cs` carry the bound name as a plain
+    # `str` on the statement rather than as a `Store`-context `Name`, so the
+    # walk above cannot see them. `_carrier_runtime_kinds` already collects
+    # exactly these forms over the same scope, and reusing it keeps this rule
+    # from drifting away from the carrier machinery it must agree with.
+    if name in _carrier_runtime_kinds(function):
+        return True
+    # A `match` capture carries its name on a pattern node rather than as a
+    # `Store` context, so it needs the same separate walk the other capture
+    # rules in this module use.
+    for owner in _match_capture_names(function).values():
+        for captured in _match_capture_names_for(owner):
+            if captured == name:
+                return True
+    return False
+
+
+def _range_is_empty(args):
+    """Does this ``range(...)`` argument list spell an empty range?"""
+    if not 1 <= len(args) <= 3:
+        return False
+    bounds = [_literal_int(argument) for argument in args]
+    if any(bound is _NOT_LITERAL for bound in bounds):
+        return False
+    if len(bounds) == 1:
+        start, stop, step = 0, bounds[0], 1
+    elif len(bounds) == 2:
+        start, stop, step = bounds[0], bounds[1], 1
+    else:
+        start, stop, step = bounds
+    if step == 0:
+        # `range(0, 5, 0)` raises ValueError when evaluated, so the loop body
+        # is never reached for a reason that has nothing to do with emptiness.
+        return False
+    return start >= stop if step > 0 else start <= stop
+
+
+def _literal_int(node):
+    """This expression's value if it is a readable integer literal, else ``_NOT_LITERAL``.
+
+    The fold is the module's own :func:`_literal_value`, so a signed or
+    arithmetic literal argument is decided rather than declined. Declining
+    ``range(2 - 2)`` would count that loop as having reached its body, admit a
+    store that never ran, and report the live assert below it as defeated --
+    the same damaging direction this rule exists to close, reached by a
+    different spelling.
+
+    A ``bool`` is *not* excluded even though it is an ``int`` subclass, and the
+    reason is that the subclass reading is the correct one here: ``range(True)``
+    is a one-element range and ``range(False)`` is empty, which is exactly what
+    reading the value as the integer ``1`` and ``0`` predicts. An earlier draft
+    excluded it defensively; mutation testing showed the exclusion changed no
+    verdict, because there was never a wrong answer for it to prevent.
+    """
+    value = _literal_value(node)
+    if value is _NOT_LITERAL or not isinstance(value, int):
+        return _NOT_LITERAL
+    return value
 
 
 def _is_uncalled_nested_def(function, node):
