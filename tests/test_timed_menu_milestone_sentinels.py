@@ -782,6 +782,51 @@ UNREACHABLE_SHAPES = (
         "    try:\n        return\n    except Exception:\n        pass\n    with helper():\n        assert x != 1",
         False,
     ),
+    # A bare string expression is not a transfer, so it must not decide
+    # whether a block ends in one. `_block_falls_through` skips a trailing
+    # `Expr` constant and keeps looking, because a string literal is a
+    # statement that can neither transfer nor fall out of the block in the way
+    # a `return` or `raise` does.
+    #
+    # These three rows are the only things that exercise that skip, and the
+    # first of them is load-bearing: with the skip disabled,
+    # `_block_falls_through` answers from the trailing string instead of from
+    # the `raise` beneath it, the re-raise clause stops firing, and this row
+    # flips to `True` -- certifying as ENFORCED an assert that CPython never
+    # evaluates. That is the blocking direction of the #308 criterion, so the
+    # skip is a real rule and not decoration.
+    (
+        "trailing string after raise then reraise",
+        (
+            "    try:\n        raise ValueError\n        'dead'\n"
+            "    except ValueError:\n        raise\n    assert x != 1"
+        ),
+        False,
+    ),
+    # The same shape with a body that *completes* rather than raises. Here the
+    # block genuinely can fall out of its bottom -- `helper()` returns, the
+    # string is evaluated, and control leaves after the string -- so the
+    # re-raise handler is not the sole exit and the assert is reached. The
+    # trailing string must not be mistaken for a transfer that stops it.
+    (
+        "trailing string after call then reraise",
+        (
+            "    try:\n        helper()\n        'tail'\n"
+            "    except Exception:\n        raise\n    assert x != 1"
+        ),
+        True,
+    ),
+    # And the filed #402 shape carrying the same trailing string, which keeps
+    # the `return` answer stable when the body is a bare transfer followed by
+    # a non-transfer statement.
+    (
+        "return then trailing string in try",
+        (
+            "    try:\n        return\n        'dead'\n"
+            "    except Exception:\n        pass\n    assert x != 1"
+        ),
+        False,
+    ),
     ("plain live assert", "    assert x != 1", True),
 )
 
