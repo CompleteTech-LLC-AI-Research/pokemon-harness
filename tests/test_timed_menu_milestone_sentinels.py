@@ -757,6 +757,32 @@ UNREACHABLE_SHAPES = (
         "    try:\n        raise ValueError\n    except ValueError:\n        raise\n    assert x != 1",
         False,
     ),
+    # #414. A handler that *returns* is only the sole exit when the body
+    # cannot fall through on its own. Here the body is `pass`, so it
+    # completes normally and control reaches the assert; the handler never
+    # runs at all. Deciding from the handlers alone answered `defeated` and
+    # dropped a live contract, while the `raise` rows above are unaffected
+    # because they already require a body that cannot fall through.
+    #
+    # This is the `return` counterpart of "handler reraise then assert":
+    # same ordinary path, opposite reason for the handler not to matter.
+    # The pair pins that the body guard applies to a returning handler too,
+    # not only to a re-raising one.
+    (
+        "handler returns but body falls through then assert",
+        "    try:\n        pass\n    except Exception:\n        return\n    assert x != 1",
+        True,
+    ),
+    # The discriminator against the row above: make the BODY the returning
+    # half as well and the `try` genuinely has no way out, so the assert is
+    # dead. These two rows differ only in the body, which is exactly the term
+    # the fix adds -- with the body guard removed, this row is still right
+    # and the one above is wrong, so neither alone can pass by accident.
+    (
+        "body and handler both return then assert",
+        "    try:\n        return\n    except Exception:\n        return\n    assert x != 1",
+        False,
+    ),
     # A `try/finally` whose `finally` merely falls through is decided by the
     # `try` body alone, and a body that may raise leaves the `finally` and
     # then the statement after it reachable. This is the live control for the
