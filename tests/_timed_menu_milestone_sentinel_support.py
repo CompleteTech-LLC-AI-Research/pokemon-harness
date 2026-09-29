@@ -3005,6 +3005,24 @@ def _assigned_value(name, scope):
     assignment and the two scopes would not be distinguishable. The module
     scope is therefore its own top-level statement list, which is what makes
     the function-first lookup in :func:`_constructed_class_of` meaningful.
+
+    A ``for`` target is a store too, and it is the one this used to miss. #370
+    taught the module to record a loop target's element for the *suppression*
+    question; :func:`_constructed_class_of` asks the same "what does this name
+    hold" question, so the same answer has to be readable here:
+
+        for cs in [Suppressor()]:      # `__exit__` returns True for AssertionError
+            with cs:
+                assert x != 1          # swallowed; was reported enforced
+
+    Read by :func:`_single_loop_element`, so the limit is #370's already-measured
+    one rather than a second, looser rule: only a single-element literal
+    iterable contributes, and a multi-element or non-literal iterable stays
+    ``None`` and keeps the assert ``enforced`` -- the safe direction, since a
+    guessed value would read a suppressor that is not the one in force.
+
+    Only an ``ast.Name`` target is followed, matching the ``Assign`` arm: a
+    tuple target (``for a, b in ...``) unpacks and is not read here.
     """
     if scope is None:
         return None
@@ -3016,6 +3034,16 @@ def _assigned_value(name, scope):
         nodes = iter(())
     value = None
     for node in nodes:
+        if isinstance(node, ast.For):
+            if not (isinstance(node.target, ast.Name) and node.target.id == name):
+                continue
+            element = _single_loop_element(node.iter)
+            if element is None:
+                # Undecidable: leave any earlier `Assign` in force rather than
+                # overwrite it with a guess. #385 measured the alternative.
+                continue
+            value = element
+            continue
         if not isinstance(node, ast.Assign):
             continue
         if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):

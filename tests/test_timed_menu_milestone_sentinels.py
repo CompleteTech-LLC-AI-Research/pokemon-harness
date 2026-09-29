@@ -5850,6 +5850,42 @@ USER_EXIT_SWALLOW_SHAPES = (
         "    helper = Suppressor()\n    with helper:\n        assert x != 1",
         True,
     ),
+    # A `for` target binds the name just as an assignment does, and the class
+    # is reached the same way -- through the value the loop target holds. The
+    # spelling below is the reported false LIVE: executed, `Suppressor().__exit__`
+    # returns True for the `AssertionError`, so the assert is swallowed, yet the
+    # header was reported `enforced` -- a disarmed contract certified as
+    # load-bearing. `_assigned_value` only ever followed `ast.Assign`, so a
+    # loop target left the name holding nothing to resolve against.
+    (
+        "constructed as a single-element loop target",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        ("    for helper in [Suppressor()]:\n        with helper:\n            assert x != 1"),
+        False,
+    ),
+    # The loop arm must not over-reach. #385 measured that guessing an element
+    # out of a multi-element literal moves a damaging cell rather than removing
+    # one, so only the single-element case is decided and this stays `enforced`:
+    # which of the two instances the header sees is not statically knowable.
+    (
+        "multi-element loop target stays undecidable",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        (
+            "    for helper in [Suppressor(), Suppressor()]:\n        with helper:\n"
+            "            assert x != 1"
+        ),
+        True,
+    ),
+    # A non-literal iterable is the same undecidable case, and the direction
+    # matters: an unreadable name leaves the contract `enforced`, which is the
+    # safe answer here. Reading a suppressor that is not the one in force would
+    # drop a live assert instead.
+    (
+        "non-literal loop target stays undecidable",
+        "def __exit__(self, *exc):\n    return exc[0] is AssertionError",
+        ("    for helper in make_helpers():\n        with helper:\n            assert x != 1"),
+        True,
+    ),
 )
 
 
