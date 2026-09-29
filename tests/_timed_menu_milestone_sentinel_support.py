@@ -1350,7 +1350,20 @@ def _store_bindings(function, bound):
             # `ast.Name` targets left this invisible and let a stale
             # suppressor outrank the loop's own binding.
             targets = [statement.target]
-            value = None
+            # #370. `value = None` above made the binding *retire* a carried
+            # suppressor, which is what #324 needed, but it also left the name
+            # carrying nothing at all -- so a `for` that binds a suppressor was
+            # invisible in the other direction too:
+            #
+            #     for cs in [contextlib.suppress(AssertionError)]:
+            #         with cs:
+            #             assert 1 == 2      # reported enforced; swallowed
+            #
+            # A loop target does receive a value, and the single-element case
+            # records it so `_resolve_bindings` can see the suppressor. The
+            # `None` is kept for every other iterable, which is where the
+            # retirement behaviour is all that is sound.
+            value = _single_loop_element(getattr(statement, "iter", None))
         elif isinstance(statement, (ast.With, ast.AsyncWith)):
             # #324: `with ... as cs:` is a store too, and the item expression
             # is what the `with` would evaluate. A walrus carried in from
@@ -2154,11 +2167,42 @@ def _raw_store_values(function):
     unrecorded name, which is unreadable, and the assert it guards would be
     reported live while the interpreter swallows it.
 
-    Only the forms that carry a *value* are listed. A ``for`` target, a
-    ``with ... as``, an ``except ... as``, a ``del`` and a ``match`` capture
-    bind a name without one, and :func:`_deref_alias` stops on a missing entry
-    exactly as it does for an unbound name -- which is right, because a later
-    store of that name is what retires the carried value anyway.
+    Only the forms that carry a *value* are listed. A ``with ... as``, an
+    ``except ... as``, a ``del`` and a ``match`` capture bind a name without
+    one, and :func:`_deref_alias` stops on a missing entry exactly as it does
+    for an unbound name -- which is right, because a later store of that name
+    is what retires the carried value anyway.
+
+    #370. A ``for`` target was in that list too, and it should not have been.
+    A loop target does receive a value -- the current element of the iterable --
+    so recording nothing left the name with no entry to resolve against and
+    every ``for``-bound suppressor invisible:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            with cs:
+                assert 1 == 2        # reported enforced; swallowed
+
+    The value recorded is the iterable's element only when the iterable is a
+    literal with **exactly one** element, which is the only case where every
+    iteration binds the same thing and the read is unambiguous.
+
+    A multi-element literal is deliberately left unrecorded, and that limit is
+    the point rather than an oversight. Inside the body the target holds a
+    *different* value per iteration, so for
+
+        for cs in (suppress(AssertionError), nullcontext()):
+            with cs:
+                assert 1 == 2
+
+    the first iteration swallows the assert and the second does not. One static
+    answer cannot be right for both, and guessing either way is a coin flip
+    that lands on a false verdict half the time. Leaving it unreadable keeps
+    the assert *enforced*, which is the safe direction: an over-cautious
+    sentinel still reports the contract it was asked to protect. #385 measured
+    this exact trade -- indexing to one element or the other simply moves a
+    damaging cell rather than removing it -- and its after-loop variant, where
+    the *last* element is the right answer, needs the in-body/after-loop
+    distinction designed rather than guessed at. Neither is settled here.
 
     Each entry is the ``(statement, right-hand side)`` pair rather than the
     right-hand side alone. The statement is what :func:`_last_store_before`
@@ -2179,11 +2223,46 @@ def _raw_store_values(function):
             or (isinstance(statement, ast.NamedExpr))
         ):
             targets, value = [statement.target], statement.value
+        # #370. A `for` target binds the current element of the iterable, so it
+        # does carry a value. Recording it is only sound when the iterable is a
+        # literal with a single element: then every iteration binds the same
+        # object and a later read is unambiguous. A multi-element literal is
+        # left unrecorded, because inside the body the target differs per
+        # iteration and no single element is the answer -- see the docstring.
+        elif isinstance(statement, ast.For):
+            element = _single_loop_element(statement.iter)
+            if element is None:
+                continue
+            # `ast.For.target` is a single node, not a list of them.
+            targets, value = [statement.target], element
         else:
             continue
         for name in _store_target_names(targets):
             raw.setdefault(name, []).append((statement, value))
     return raw
+
+
+def _single_loop_element(iterable):
+    """The one element a ``for`` over ``iterable`` binds, or ``None``.
+
+    #370. Only a literal tuple or list with exactly one element qualifies. That
+    is the shape where every iteration binds the same object, so recording the
+    element is sound regardless of where the later read sits -- inside the body
+    or after the loop.
+
+    Everything else returns ``None`` and the ``for`` target stays unrecorded,
+    which leaves the name unreadable rather than misread. In particular a
+    multi-element literal is refused even though its last element is the right
+    answer for a header *after* the loop, because the same recorded value is
+    also what an in-body header would resolve to, and there it is wrong. #385
+    measured that trade on a real head: picking an index moves a damaging cell
+    rather than removing it.
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return None
+    if len(iterable.elts) != 1:
+        return None
+    return iterable.elts[0]
 
 
 def _aliased_suppressions(node, function, bound):
@@ -2286,7 +2365,12 @@ def _aliased_suppressions(node, function, bound):
                 bound_so_far
                 if header is statement
                 else _bindings_before(
-                    header, statement, bound_so_far, by_index.get(index, {}), function
+                    header,
+                    statement,
+                    bound_so_far,
+                    by_index.get(index, {}),
+                    function,
+                    bound,
                 )
             )
             for item in header.items:
@@ -2434,7 +2518,7 @@ def _encloses(header, node):
     return any(child is node for child in ast.walk(header))
 
 
-def _bindings_before(header, statement, bound_so_far, own, function=None):
+def _bindings_before(header, statement, bound_so_far, own, function=None, bound=None):
     """The bindings in force at a nested ``with`` inside ``statement``.
 
     A store that appears *before* the nested header in the same block has run
@@ -2473,12 +2557,113 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
+                # #370. A loop body is the one exception: the loop's own target
+                # is assigned before the body runs, so a header in the first
+                # position already sees it.
+                #
+                #     for cs in [contextlib.suppress(AssertionError)]:
+                #         with cs:            # `cs` IS bound here
+                #             assert 1 == 2
+                #
+                # Executed, that assert is swallowed, so reporting it enforced
+                # certifies a disarmed contract as load-bearing. The ordinary
+                # same-block case is the opposite and must keep raising loudly:
+                #
+                #     if flag:
+                #         with cs:            # NameError -- not bound yet
+                #             assert 1 == 2
+                #         cs = contextlib.suppress(AssertionError)
+                #
+                # so the exception is scoped to the loop that owns the body.
+                loop_bindings = _loop_target_bindings(function, header, bound)
+                if loop_bindings:
+                    # The loop's own target is *one more* store in force at
+                    # this point, not a replacement for what the enclosing
+                    # blocks already carried in. A name the loop does not
+                    # bind still has the value it had on entry, so the
+                    # carried bindings are kept and the loop's are layered
+                    # on top:
+                    #
+                    #     base = contextlib.suppress(AssertionError)
+                    #     for other in [0]:
+                    #         with base:            # still the suppressor
+                    #             assert x != 1
+                    #
+                    # Substituting instead of merging would drop `base` and
+                    # report that assert live.
+                    return {**bound_so_far, **loop_bindings}
                 return dict(own) if seen_store or captures else bound_so_far
             if isinstance(node, ast.Assign) or (
                 isinstance(node, ast.AnnAssign) and node.value is not None
             ):
                 seen_store = True
     return bound_so_far
+
+
+def _loop_target_bindings(function, header, bound=None, raw_values=None):
+    """Bindings a containing loop's own target puts in force around ``header``.
+
+    #370. A ``for`` target is assigned before its body runs, so it is the one
+    same-block store already in force at a header written in the body's first
+    position. Executed both ways: the loop shape swallows the assert, while the
+    ``if`` shape above raises ``UnboundLocalError`` on entry.
+
+    Only a single-element literal iterable contributes. A multi-element or
+    non-literal iterable binds a *different* value per iteration, so no single
+    element is the answer and the name stays unreadable -- keeping the header
+    ``enforced``, which is the safe direction. #385 measured that choosing an
+    index instead moves a damaging cell rather than removing it.
+
+    The enclosing body is found by looking for the *header* rather than for
+    the list the caller is iterating, because a single-statement loop body
+    puts the ``with`` directly in ``node.body`` while the caller's list is the
+    enclosing block. A ``while`` body has no target, and an ``if``/``try`` body
+    is not a loop body, so both return ``{}`` and the ordinary rule still
+    applies.
+
+    ``bound`` is the module's import bindings, needed to decide whether the
+    element is a suppressor at all, and ``raw_values`` is the whole-function
+    store table, accepted from the caller when it already has one and rebuilt
+    otherwise. Only the entries belonging to this loop are read, so the lookup
+    stays narrow regardless of how many stores the function contains.
+    """
+    if function is None:
+        return {}
+    if raw_values is None:
+        raw_values = _raw_store_values(function)
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        if not any(child is header for child in node.body):
+            continue
+        if _single_loop_element(getattr(node, "iter", None)) is None:
+            return {}
+        resolved = {}
+        for name in _store_target_names([node.target]):
+            for entry_statement, value in raw_values.get(name, []):
+                if entry_statement is node:
+                    # The element has to clear the same readability bar every
+                    # other store value clears before it can stand in for a
+                    # name's binding. Without it a `nullcontext` element is
+                    # handed to `_aliased_suppressions` as though it were a
+                    # suppressor, and that rule appends a live `live[...]`
+                    # value without re-testing it -- so
+                    #
+                    #     for cs in [contextlib.nullcontext()]:
+                    #         with cs:
+                    #             assert x != 1
+                    #
+                    # reports the assert defeated, certifying a contract that
+                    # really does fire. `None` and an unreadable value are
+                    # different, though: the name IS bound here, so the
+                    # "not a suppressor" answer has to be recorded as
+                    # `_NOT_A_SUPPRESSOR` rather than dropped, or a suppressor
+                    # carried in from an enclosing block is carried past the
+                    # loop that just overwrote it.
+                    readable = value if _is_readable_suppressor(value, bound) else _NOT_A_SUPPRESSOR
+                    resolved[name] = readable
+        return resolved
+    return {}
 
 
 def _unreadable_suppressor(call, bound):

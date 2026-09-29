@@ -4690,6 +4690,159 @@ TIED_STORE_ROWS = (
         ),
         [False],
     ),
+    # --- #370: a `for` target binds a value, and the single-element literal
+    # --- is the shape where that value is unambiguous.
+    #
+    # #324 made a loop target *visible* so it could retire a carried
+    # suppressor, and it recorded that store with no value at all. Recording
+    # nothing is enough to retire -- a later write of the name wins either
+    # way -- but it leaves the name equally unresolvable in the other
+    # direction, so a loop that binds a suppressor of its own is invisible:
+    #
+    #     for cs in [contextlib.suppress(AssertionError)]:
+    #         with cs:
+    #             assert x != 1     # executed: swallowed
+    #
+    # Executed, that assert never fires. Reported `enforced`, it certifies a
+    # disarmed contract as load-bearing -- the damaging direction per #308
+    # criterion 1. The target does receive a value (the current element of
+    # the iterable), and with exactly one element every iteration binds the
+    # same object, so recording it is sound both inside the body and after
+    # the loop.
+    (
+        "#370 a single-element loop target reaches a header in its own body",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # The same loop read *after* it completes. The body ran and the name
+    # survived it, so the trailing header enters the same suppressor. A fix
+    # that only taught the in-body header would leave this one live.
+    (
+        "#370 a single-element loop target survives the loop it was bound in",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 1"
+        ),
+        [False],
+    ),
+    # The self-alias spelling. The loop binds the suppressor, and the header
+    # rebinds `cs` to itself, so the entered value is unchanged and the
+    # assert is still swallowed. This is the row that pins the walrus path
+    # against the loop's own store rather than only the bare-`Name` path.
+    (
+        "#370 a loop-bound suppressor reached through a self-aliasing walrus",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # CONTROL: the same loop shape over a *non*-suppressing element. The
+    # repair must not read "single-element loop" as "swallows" -- the verdict
+    # here is decided by the element, exactly as it is for a plain store.
+    (
+        "CONTROL a single-element loop target over a nullcontext stays live",
+        ("    for cs in [contextlib.nullcontext()]:\n        with cs:\n            assert x != 1"),
+        [True],
+    ),
+    # The multi-element limit, stated as a row rather than left implicit.
+    # Inside the body the target holds a *different* value per iteration, so
+    # for the tuple below the first pass swallows the assert and the second
+    # does not -- one static answer cannot be right for both, and guessing
+    # either way is a coin flip that lands on a false verdict half the time.
+    # Declining leaves the assert `enforced`, which is the safe direction: an
+    # over-cautious sentinel still reports the contract it was asked to
+    # protect.
+    #
+    # #385 measured this trade on a real head. Indexing to one element or the
+    # other does not remove the damaging cell, it moves it. Its after-loop
+    # variant -- where the *last* element is the right answer -- additionally
+    # needs the in-body/after-loop distinction designed rather than guessed
+    # at, so neither is settled by this row.
+    (
+        "CONTROL a multi-element loop target stays live while undecided",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
+    # The ordinary same-block case, and the reason the exception is scoped to
+    # the loop that owns the body. Here the store comes *after* the header, so
+    # `cs` is not bound when the header is read and entry raises
+    # `UnboundLocalError` on every path. A repair that treated any enclosing
+    # block as "its stores are already in force" would report this live
+    # assert defeated and drop a contract that raises loudly.
+    (
+        "CONTROL a same-block store after the header does not bind it early",
+        (
+            "    if flag:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        [True],
+    ),
+    # A `while` body has no target, so the same exception must not fire for
+    # it. Here the loop target is the whole point: the store is inside the
+    # loop and is seen by the ordinary "a store earlier in this block has run"
+    # rule, with no help from #370.
+    (
+        "CONTROL a while body needs no loop-target exception",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    while flag:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        break"
+        ),
+        [False],
+    ),
+    # A name the loop does NOT bind, read inside the loop body. The exception
+    # #370 adds is scoped to the loop's own target, so it must leave every
+    # other carried binding alone -- the suppressor `base` is still in force
+    # under `with base:`, and the assert is swallowed.
+    #
+    # This is the row that pins the exception as *additive*. Reading the loop
+    # target and returning it in place of what the enclosing blocks carried
+    # reports this defeated-to-live (`True`), certifying a swallowed assert as
+    # load-bearing. The loop binds `other`, so `base` is never among the
+    # bindings that get merged -- which is exactly why a replacement cannot
+    # be told apart from a merge by any of the rows above.
+    (
+        "CONTROL a loop leaves a carried binding the loop never touches",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    for other in [0]:\n"
+            "        with base:\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # The same source with the loop rebinding the name. Here the loop's own
+    # store really is the latest write, so it supersedes the carried
+    # suppressor and the assert is live. Read together with the row above,
+    # the pair says the merge is layered in binding order rather than either
+    # dropped or always winning.
+    (
+        "CONTROL a loop target supersedes a carried binding of the same name",
+        (
+            "    base = contextlib.suppress(AssertionError)\n"
+            "    for base in [contextlib.nullcontext()]:\n"
+            "        with base:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
 )
 
 
