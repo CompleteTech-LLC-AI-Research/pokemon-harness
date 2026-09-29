@@ -5188,7 +5188,33 @@ def _store_may_bind_enterable(entry, name, function=None, starred_asked=False):
         # happened" and returning early for both got that wrong in six
         # fixtures. The starred half is answered above, before the literal
         # checks, because it does not depend on the right-hand side at all.
-        element = _element_kind_readable_from(statement, value, name)
+        # `value` is the value *this name* receives, which `_store_bindings`
+        # has already narrowed to the element the destructuring target
+        # selects. The element-readability rule, though, needs the
+        # **container**: it walks the target and the container's elements in
+        # lockstep, exactly as Python's unpacking does, so handing it the
+        # already-selected element makes it find no container and answer
+        # `None` for every row.
+        #
+        #     if flag:
+        #         cs, other = (None, 1)
+        #
+        # `cs` receives `None`, and both rules agree the store pins it to a
+        # non-enterable literal. But passing the selected `None` in makes
+        # `_element_kind_readable_from` decline, the store is reported as
+        # possibly-enterable, the stale carrier is treated as superseded, and
+        # a header CPython settles with `TypeError` on both paths is reported
+        # live. That is the damaging direction of #308: a disarmed contract
+        # certified as load-bearing.
+        #
+        # So the container is read from the statement itself, which is
+        # unchanged by the narrowing, and the two rules keep reading the same
+        # shape rather than the same object.
+        element = _element_kind_readable_from(
+            statement,
+            statement.value if isinstance(statement, ast.Assign) else value,
+            name,
+        )
         if element is not None:
             return element not in NON_CONTEXT_MANAGER_TYPES
         return True
