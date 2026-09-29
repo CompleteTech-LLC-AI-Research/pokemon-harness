@@ -4833,6 +4833,214 @@ TIED_STORE_ROWS = (
     # suppressor and the assert is live. Read together with the row above,
     # the pair says the merge is layered in binding order rather than either
     # dropped or always winning.
+    # The body is *walked*, not matched against `node.body` directly, so a
+    # header nested one block down inside the loop is reached the same way the
+    # direct-header row above is. Executed, every one of these swallows the
+    # assert, so a rule scoped to the direct body reports them `enforced` --
+    # #308 criterion 1, a disarmed contract certified as load-bearing -- while
+    # still passing the direct-header row. The direct row cannot catch this.
+    (
+        "#370 a loop-bound suppressor reaches a header nested under an if",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop-bound suppressor reaches a header nested under a try",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        try:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        except ValueError:\n"
+            "            pass"
+        ),
+        [False],
+    ),
+    (
+        "#370 a loop-bound suppressor reaches a header under an inner loop",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for _ in range(1):\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # A loop that binds a name the header never reads must not *retire* the
+    # binding that loop's sibling does supply. `other` binds nothing the
+    # header uses, so `cs` still resolves to the inner loop's suppressor, and
+    # a rule that returned the first enclosing loop's bindings -- or that let a
+    # non-matching loop end the search -- reports this live when it is
+    # swallowed. This is the row that pins the search as "every enclosing loop,
+    # merged", not "the first one found".
+    (
+        "#370 an enclosing loop that binds nothing does not hide the inner one",
+        (
+            "    for other in [0]:\n"
+            "        for cs in [contextlib.suppress(AssertionError)]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [False],
+    ),
+    # The inner loop's target is the LAST write before the header, so it wins
+    # over the outer loop's. Taking the outermost loop's element instead --
+    # which is what source order and breadth-first `ast.walk` both suggest --
+    # reads the suppressor and reports the assert defeated, removing a contract
+    # that really does fire. This is the damaging direction for this rule, and
+    # it is the row that says the merge is layered in *containment* order.
+    (
+        "CONTROL an inner loop's target supersedes the outer loop's",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.nullcontext()]:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
+    # Three levels deep, with the suppressor at the bottom and a non-suppressor
+    # in each enclosing loop. Only the innermost loop's target is the last write
+    # before the header, so only its element decides the verdict; a rule that
+    # stopped at the first or the last enclosing loop it happened to visit gets
+    # one of the two other answers, both of which are wrong. Written with the
+    # same name throughout so each loop genuinely overwrites the last.
+    (
+        "#370 the innermost of three nested loop targets decides the header",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.nullcontext()]:\n"
+            "            for cs in [contextlib.suppress(AssertionError)]:\n"
+            "                with cs:\n"
+            "                    assert x != 1"
+        ),
+        [False],
+    ),
+    (
+        "CONTROL the innermost of three nested loop targets can be benign",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        for cs in [contextlib.suppress(AssertionError)]:\n"
+            "            for cs in [contextlib.nullcontext()]:\n"
+            "                with cs:\n"
+            "                    assert x != 1"
+        ),
+        [True],
+    ),
+    # Only a store *before* the header counts, and these three pin that
+    # boundary. A mutation that drops "strictly before" reads a store that has
+    # not run yet, and all three flip -- which is how the guard was found to be
+    # load-bearing rather than decorative.
+    #
+    # The first two are `False`, not `True`: the loop's own target *is* in
+    # force when the header is evaluated, so the assert really is swallowed and
+    # the later `cs = nullcontext()` changes nothing about it. They are here to
+    # pin that the later store is ignored, not to claim a loud failure.
+    (
+        "CONTROL an else-arm store after the header does not rebind it",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.nullcontext()"
+        ),
+        [False],
+    ),
+    (
+        "CONTROL a store after a nested header does not rebind it either",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.nullcontext()"
+        ),
+        [False],
+    ),
+    # The mirror image, and the damaging one. Here the loop's target is a
+    # `nullcontext`, so the header is live and the assert really does fire; the
+    # suppressor stored *after* it has not run yet. A rule that counted that
+    # store would read the suppressor and report the assert defeated, deleting a
+    # contract that is load-bearing. This is the row that says the cutoff runs
+    # in the safe direction.
+    (
+        "CONTROL a suppressor stored after the header does not reach it",
+        (
+            "    for cs in [contextlib.nullcontext()]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        [True],
+    ),
+    # A loop's `else` arm is a block of its own, and the target is bound by the
+    # time it runs -- the body once per iteration, the arm once after the loop
+    # finishes. The arm is a sibling list rather than a child, so a walk of
+    # `node.body` never reached it and the header reported `enforced` while
+    # executed it is swallowed. Same defect as the nested-body rows above, on
+    # the one arm that is easy to overlook.
+    (
+        "#370 a loop-bound suppressor reaches a header in the else arm",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [False],
+    ),
+    # The arm's own store is the latest write and supersedes the loop target.
+    # This one is the damaging direction: reading the loop's element instead
+    # reports the assert defeated and drops a contract that really fires. It
+    # also pins that the arm is read as a block in its own right -- `own` is
+    # keyed by position in `function.body`, and a store in an `else` arm has no
+    # index there, so it is only reachable through the raw store table.
+    (
+        "CONTROL a store in the else arm supersedes the loop target",
+        (
+            "    for cs in [contextlib.suppress(AssertionError)]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
+    (
+        "CONTROL a non-suppressing loop target keeps the else arm live",
+        (
+            "    for cs in [contextlib.nullcontext()]:\n"
+            "        pass\n"
+            "    else:\n"
+            "        with cs:\n"
+            "            assert x != 1"
+        ),
+        [True],
+    ),
+    # The nested form of the multi-element limit, which is the shape the
+    # walk-based match newly makes reachable. Undecided inside the body, and
+    # undecided here for the same reason, so it stays `enforced`.
+    (
+        "CONTROL a nested multi-element loop target stays live while undecided",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        if flag:\n"
+            "            with cs:\n"
+            "                assert x != 1"
+        ),
+        [True],
+    ),
     (
         "CONTROL a loop target supersedes a carried binding of the same name",
         (

@@ -2371,6 +2371,7 @@ def _aliased_suppressions(node, function, bound):
                     by_index.get(index, {}),
                     function,
                     bound,
+                    raw_values,
                 )
             )
             for item in header.items:
@@ -2518,7 +2519,9 @@ def _encloses(header, node):
     return any(child is node for child in ast.walk(header))
 
 
-def _bindings_before(header, statement, bound_so_far, own, function=None, bound=None):
+def _bindings_before(
+    header, statement, bound_so_far, own, function=None, bound=None, raw_values=None
+):
     """The bindings in force at a nested ``with`` inside ``statement``.
 
     A store that appears *before* the nested header in the same block has run
@@ -2541,6 +2544,22 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
         body = getattr(block, "body", None)
         if not isinstance(body, list):
             continue
+        # A loop's `else` arm is a block of its own and a header written in one
+        # is decided by exactly the same rule as one in the body. Reading only
+        # `body` never reached the arm at all:
+        #
+        #     for cs in [contextlib.suppress(AssertionError)]:
+        #         pass
+        #     else:
+        #         with cs:            # `cs` IS bound here
+        #             assert x != 1  # executed: swallowed
+        #
+        # The arm's own earlier stores still win, exactly as they do in `body`:
+        # a store before the header in the arm has run, and one after it has
+        # not. `seen_store` is shared across both lists, so that falls out of
+        # the ordinary rule rather than needing a second path.
+        orelse = getattr(block, "orelse", None)
+        block_body = body + (orelse if isinstance(orelse, list) else [])
         seen_store = False
         # Captures owned by this block have run by the time a header inside the
         # same clause body is reached, even though no store *statement* does.
@@ -2553,7 +2572,7 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
         }
-        for node in body:
+        for node in block_body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
@@ -2591,6 +2610,25 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
                     #
                     # Substituting instead of merging would drop `base` and
                     # report that assert live.
+                    # A store *in this very block*, before the header, is the
+                    # latest write and supersedes the loop's target:
+                    #
+                    #     for cs in [contextlib.suppress(AssertionError)]:
+                    #         pass
+                    #     else:
+                    #         cs = contextlib.nullcontext()
+                    #         with cs:            # the nullcontext
+                    #             assert x != 1
+                    #
+                    # Reading the loop's element here would report the assert
+                    # defeated and drop a contract that fires. The arm's own
+                    # store is read from the raw table rather than from `own`,
+                    # because `own` is keyed by position in `function.body` and
+                    # a store in a loop's `else` arm has no index of its own --
+                    # it is filed under the loop, so `own` alone never sees it.
+                    in_block = _block_store_bindings(block_body, header, raw_values, bound)
+                    if in_block:
+                        return {**bound_so_far, **in_block}
                     return {**bound_so_far, **loop_bindings}
                 return dict(own) if seen_store or captures else bound_so_far
             if isinstance(node, ast.Assign) or (
@@ -2598,6 +2636,49 @@ def _bindings_before(header, statement, bound_so_far, own, function=None, bound=
             ):
                 seen_store = True
     return bound_so_far
+
+
+def _block_store_bindings(block_body, header, raw_values, bound):
+    """Bindings written by a store that precedes ``header`` in ``block_body``.
+
+    #370b. The ``own`` map this function otherwise reads is keyed by position in
+    ``function.body``, so it answers for a header's *enclosing statement* but not
+    for a store written in a block that has no index of its own -- a loop's
+    ``else`` arm among them. That store is still in force at the header, so the
+    raw table is consulted directly and every store appearing before the header
+    in the same block contributes.
+
+    Only stores strictly before the header count. A store after it has not run
+    when the header is evaluated -- that is the ``UnboundLocalError`` case the
+    caller handles by falling through to the carried bindings -- so counting it
+    would report a loud failure as a swallowed one.
+    """
+    if not raw_values or header not in block_body:
+        return {}
+    cutoff = block_body.index(header)
+    resolved = {}
+    for entries in raw_values.values():
+        for entry_statement, value in entries:
+            if entry_statement not in block_body or block_body.index(entry_statement) >= cutoff:
+                continue
+            if not _is_store_statement(entry_statement):
+                continue
+            targets = (
+                entry_statement.targets
+                if isinstance(entry_statement, ast.Assign)
+                else [entry_statement.target]
+            )
+            for name in _store_target_names(targets):
+                readable = value if _is_readable_suppressor(value, bound) else _NOT_A_SUPPRESSOR
+                resolved[name] = readable
+    return resolved
+
+
+def _is_store_statement(statement):
+    """Is ``statement`` a binding form whose value is known?"""
+    return isinstance(statement, (ast.Assign, ast.For, ast.AsyncFor)) or (
+        isinstance(statement, ast.AnnAssign) and statement.value is not None
+    )
 
 
 def _loop_target_bindings(function, header, bound=None, raw_values=None):
@@ -2631,14 +2712,10 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
         return {}
     if raw_values is None:
         raw_values = _raw_store_values(function)
-    for node in ast.walk(function):
-        if not isinstance(node, (ast.For, ast.AsyncFor)):
-            continue
-        if not any(child is header for child in node.body):
-            continue
+    resolved = {}
+    for node in _enclosing_loops(function, header):
         if _single_loop_element(getattr(node, "iter", None)) is None:
-            return {}
-        resolved = {}
+            continue
         for name in _store_target_names([node.target]):
             for entry_statement, value in raw_values.get(name, []):
                 if entry_statement is node:
@@ -2661,9 +2738,115 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
                     # carried in from an enclosing block is carried past the
                     # loop that just overwrote it.
                     readable = value if _is_readable_suppressor(value, bound) else _NOT_A_SUPPRESSOR
+                    # A later loop in this ordering is nested inside this one,
+                    # so its target is the LAST write before the header runs
+                    # and its element is the binding actually in force. Writing
+                    # it over the outer loop's entry is what keeps
+                    #
+                    #     for cs in [suppress(AssertionError)]:
+                    #         for cs in [nullcontext()]:
+                    #             with cs:          # nullcontext, not suppress
+                    #                 assert x != 1
+                    #
+                    # reporting the assert live when it is really swallowed.
                     resolved[name] = readable
-        return resolved
-    return {}
+    return resolved
+
+
+def _enclosing_loops(function, header):
+    """The ``for``/``async for`` loops whose body contains ``header``, outermost first.
+
+    #370b. The binding a header sees comes from the *innermost* loop that binds
+    the name, because an inner loop's target is the last write before the header
+    runs:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            for cs in [contextlib.nullcontext()]:
+                with cs:                     # `nullcontext` is in force
+                    assert x != 1
+
+    Matching only the direct body list answered for `for other in [0]:` bodies
+    containing a *nested* header as well, so every header one block down still
+    reported `enforced` when executed it is swallowed. The body is therefore
+    walked, and the walk is bounded by the loop so an unrelated loop elsewhere
+    in the function cannot contribute.
+
+    Innermost-last ordering matters: a loop that does not bind the header's name
+    contributes nothing, so a name bound only by the outer loop still resolves,
+    while a name rebound by the inner loop resolves to the inner element. A
+    loop whose iterable is undecidable is *skipped* rather than treated as a
+    barrier, so it cannot retire an outer loop's readable binding -- declining
+    to read a name is not the same as saying the name is not a suppressor.
+    """
+    loops = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, (ast.For, ast.AsyncFor)) and _loop_arms_reach(node, header)
+    ]
+    if not loops:
+        return []
+    return _outermost_first(loops, function)
+
+
+def _loop_arms_reach(loop, header):
+    """Does ``header`` sit inside ``loop``'s body or inside its ``else`` arm?
+
+    #370b. Both arms run only after the target has been assigned, so a header in
+    either one reads it. The body is the common case; the ``else`` arm is easy to
+    miss because it is a sibling list rather than a child:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            pass
+        else:
+            with cs:                 # `cs` IS bound here
+                assert x != 1       # executed: swallowed
+
+    The walk is deliberately scope-blind, the same test the body uses. Descending
+    only to the loop's own scope was measured, and it is *worse*: a ``with`` in a
+    nested ``def`` reads the loop variable as a free variable, so refusing to
+    descend there turns a correct ``False`` into a false LIVE. The shape that
+    guard was meant to protect -- a nested ``def`` rebinding the name as its own
+    local -- is already correct without it, because the walk finds the nested
+    ``def``'s own store first and that store is the later write. A ``while`` loop
+    has no target at all, so it is never a candidate here and the ordinary rules
+    still decide its headers.
+    """
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return False
+    arms = [*loop.body, *loop.orelse]
+    return any(child is header for statement in arms for child in ast.walk(statement))
+
+
+def _outermost_first(loops, function):
+    """``loops`` ordered so an enclosing loop always precedes a nested one.
+
+    ``ast.walk`` is breadth-first, so its order is neither source order nor
+    containment order, and the order decides which loop's element a name
+    resolves to. Sorting on the parent chain states the intent directly.
+
+    For a nested ``for`` this coincides with sorting on line number -- an
+    enclosed statement cannot start before the header that encloses it -- so a
+    mutation to line-number order is behaviourally equivalent here and is not
+    covered by a test row. The parent chain is kept because it is the property
+    that actually matters, and because it stays correct if a future construct
+    ever moves a loop body out of source order (``while``/``else``, ``match``
+    guards). Two rows do pin the *outcome* of this ordering: the inner target
+    superseding the outer one, and the three-deep chain.
+    """
+    parents = {}
+    for parent in ast.walk(function):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def depth(node):
+        level = 0
+        current = parents.get(id(node))
+        while current is not None:
+            level += 1
+            current = parents.get(id(current))
+        return level
+
+    return sorted(loops, key=depth)
 
 
 def _unreadable_suppressor(call, bound):
