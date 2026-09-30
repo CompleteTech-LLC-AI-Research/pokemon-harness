@@ -1316,7 +1316,10 @@ def _store_bindings(function, bound):
     # written last". A read only sees the stores that precede it, so both
     # resolution sites pass the position they are resolving at and let
     # :func:`_last_store_before` pick the entry that had actually run.
-    raw_values = _raw_store_values(function)
+    # #413: `bound` is handed on so a `for` over a literal whose elements all
+    # agree can be recorded from the recording walk itself, which is where
+    # every other value-bearing form is recorded.
+    raw_values = _raw_store_values(function, bound)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in raw_values.values()
@@ -2151,7 +2154,7 @@ def _last_store_before(entries, orders, index, exclude=None, function=None):
     return tied[0][1]
 
 
-def _raw_store_values(function):
+def _raw_store_values(function, bound=None):
     """Every store's right-hand side, keyed by the name it binds.
 
     The point is to have the whole table available *before* any binding is
@@ -2204,6 +2207,12 @@ def _raw_store_values(function):
     the *last* element is the right answer, needs the in-body/after-loop
     distinction designed rather than guessed at. Neither is settled here.
 
+    ``bound`` is the caller's import bindings, and it is consulted only by the
+    #413 unanimity rule below, which has to decide whether a literal's
+    elements are *all* readable suppressors. The other recorded forms do not
+    look at it: they record the right-hand side as written and let the
+    resolution that follows decide readability.
+
     Each entry is the ``(statement, right-hand side)`` pair rather than the
     right-hand side alone. The statement is what :func:`_last_store_before`
     orders by, so a read resolves against the stores that precede it and not
@@ -2232,7 +2241,41 @@ def _raw_store_values(function):
         elif isinstance(statement, ast.For):
             element = _single_loop_element(statement.iter)
             if element is None:
-                continue
+                # #413. `_single_loop_element` refuses a multi-element
+                # literal because the in-body target holds a *different*
+                # value per iteration, so no single element is the answer.
+                # That reasoning is right when the elements disagree, and it
+                # is what keeps
+                #
+                #     for cs in (suppress(), nullcontext()):
+                #         with cs:
+                #             assert 1 == 2
+                #
+                # unreadable -- the first iteration swallows the assert and
+                # the second does not, so one static answer would be wrong
+                # half the time.
+                #
+                # It does not apply when the elements *agree*. If every
+                # element of the literal is itself a value that cannot be
+                # entered, then whichever iteration the header is read on,
+                # `cs` is that non-enterable value, `with cs:` raises before
+                # the body, and the assert is unreachable on **every**
+                # iteration. That is decidable from the syntax, so declining
+                # it certified a dead contract as load-bearing:
+                #
+                #     for cs in (suppress(), suppress()):
+                #         with cs:
+                #             assert 1 == 2      # swallowed, reported enforced
+                #
+                # The recording below is the one shape where "every element
+                # agrees" and "the value does not depend on the iteration"
+                # are the same statement, so a single recorded value is
+                # sound for an in-body read as well as an after-loop one.
+                # Anything short of unanimity still returns `None` and keeps
+                # the #336/#385 decline.
+                element = _unanimous_non_enterable_element(statement.iter, bound)
+                if element is None:
+                    continue
             # `ast.For.target` is a single node, not a list of them.
             targets, value = [statement.target], element
         else:
@@ -2261,6 +2304,54 @@ def _single_loop_element(iterable):
     if not isinstance(iterable, (ast.Tuple, ast.List)):
         return None
     if len(iterable.elts) != 1:
+        return None
+    return iterable.elts[0]
+
+
+def _unanimous_non_enterable_element(iterable, bound):
+    """#413. One element standing for a literal whose elements all agree.
+
+    Returns an element of ``iterable`` when the iterable is a literal with at
+    least two elements and *every* one of them is a value that cannot be
+    entered, and ``None`` in every other case.
+
+    A `for` over a literal binds a different object per iteration, so the
+    in-body target is normally unreadable and declining is correct -- see
+    :func:`_single_loop_element`. That reasoning rests on the elements
+    *disagreeing*: `(suppress(), nullcontext())` is swallowed on the first
+    iteration and live on the second, so no single recorded value describes
+    both. When the elements agree there is no disagreement to preserve. Each
+    iteration binds a value that is itself non-enterable, `with cs:` raises
+    before the body every time, and the assert is unreachable on every
+    iteration. The verdict does not depend on which iteration is read, so the
+    thing that made the multi-element case undecidable is absent.
+
+    Only a readable suppressor counts as non-enterable here. Anything this
+    module cannot read as a suppressor -- an arbitrary call, a bare name, a
+    starred element -- makes the answer `None`, so a literal containing one
+    keeps the existing decline. That is the conservative direction and it
+    matches the single-element rule, which only ever records a value it can
+    read.
+
+    The first element is returned because the recorded value is never read as
+    *this* element: unanimity is what makes the choice irrelevant, and the
+    caller only needs a readable value to stand for "all of them".
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return None
+    if len(iterable.elts) < 2:
+        return None
+    # `bound` is whatever import bindings the caller had. Every caller passes
+    # either the real map or a stand-in for "no imports recorded" -- `None` from
+    # a defaulted signature, an empty `set()` from `_module_stores`, which
+    # passes one deliberately -- and `_resolved_dotted` looks names up with
+    # `.get`. A stand-in that is not a mapping has no `.get`, so an empty dict
+    # stands in for all of them. That is the conservative answer: with no
+    # import recorded, `contextlib.suppress(...)` does not resolve, no element
+    # reads as a suppressor, unanimity fails, and the caller keeps the decline.
+    if not hasattr(bound, "get"):
+        bound = {}
+    if not all(_is_readable_suppressor(element, bound) for element in iterable.elts):
         return None
     return iterable.elts[0]
 
@@ -3061,6 +3152,30 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
     ``enforced``, which is the safe direction. #385 measured that choosing an
     index instead moves a damaging cell rather than removing it.
 
+    #413. A multi-element literal is admitted by one further test, and the
+    distinction is *agreement* rather than *count*. When every element of the
+    literal is a readable suppressor there is no per-iteration disagreement to
+    preserve: each iteration binds a value that cannot be entered, so the
+    `with` header raises before the body and the assert is unreachable on every
+    iteration. The recorded representative is never read as "this element" --
+    unanimity is what makes the choice irrelevant.
+
+        for cs in (suppress(AssertionError), suppress(AssertionError)):
+            with cs:
+                assert 1 == 2        # swallowed on every iteration
+
+    A literal whose elements merely *happen* to include a suppressor still
+    fails the test and keeps the decline, which is the point:
+
+        for cs in (suppress(AssertionError), nullcontext()):
+            with cs:
+                assert 1 == 2        # swallowed once, fires once
+
+    Executed, the first shape never fails and the second shape fails on its
+    second iteration, so the first is a disarmed contract and the second is a
+    live one. Declining the first reported it ``enforced``, certifying a
+    contract that can never fail as load-bearing.
+
     The enclosing body is found by looking for the *header* rather than for
     the list the caller is iterating, because a single-statement loop body
     puts the ``with`` directly in ``node.body`` while the caller's list is the
@@ -3080,7 +3195,21 @@ def _loop_target_bindings(function, header, bound=None, raw_values=None):
         raw_values = _raw_store_values(function)
     resolved = {}
     for node in _enclosing_loops(function, header):
-        if _single_loop_element(getattr(node, "iter", None)) is None:
+        if (
+            _single_loop_element(getattr(node, "iter", None)) is None
+            # #413. The multi-element refusal above is a statement about
+            # *which* element the target holds, and it holds only while the
+            # elements disagree. A literal whose every element is a
+            # readable suppressor has no disagreement to preserve: each
+            # iteration binds a value that cannot be entered, so `with cs:`
+            # raises before the body on every iteration and the assert is
+            # unreachable every time. `_unanimous_non_enterable_element`
+            # is the same test the recording walk applies, and asking it
+            # here keeps the two from disagreeing about the same loop --
+            # a loop the table declines to record and this rule declined to
+            # consult would simply keep the old false LIVE.
+            and _unanimous_non_enterable_element(getattr(node, "iter", None), bound) is None
+        ):
             continue
         for name in _store_target_names([node.target]):
             for entry_statement, value in raw_values.get(name, []):
