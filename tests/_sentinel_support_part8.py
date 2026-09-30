@@ -970,3 +970,51 @@ def _store_is_in_an_elif_link(statement, function=None):
             if isinstance(outer, ast.If) and any(child is block for child in outer.orelse):
                 return True
     return False
+
+
+def _store_is_in_a_skipped_else_arm(statement, function=None):
+    """Is this store written in a terminal ``else`` arm of an if/elif chain?
+
+    #452. ``_store_is_in_an_elif_link`` deliberately answers ``False`` for an
+    ``else`` arm, on the reasoning that an ``else`` and its ``if`` body are
+    complementary and so together cover every call -- which is true, and is
+    exactly why an ``else`` store is genuinely decisive about whether *some*
+    path suppresses. But it misses the direction that matters here: an ``else``
+    arm that is skipped still leaves whatever binding the ``if`` *did not*
+    override in force, so the assert can fire on the skipped path without ever
+    entering the suppressor.
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        else:
+            cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert x != 1
+
+    At ``x == 1`` the ``else`` is skipped and ``cs`` is still the plain
+    ``nullcontext``, so the header is live. Recording the arm as a skipped
+    branch lets :func:`_elif_skipped_path_can_fail` prove the filed witness
+    for the terminal ``else`` exactly as it already does for an ``elif``.
+
+    The arm must be *terminal*: the block it lives in is the single trailing
+    ``else`` of some ``if``, not another ``elif`` link. A decided ``if False:``
+    whose ``else`` always runs is left alone here and declined by the witness
+    walk, which is what keeps that case DEFEATED.
+    """
+    if function is None:
+        return False
+    for block in _enclosing_blocks(statement, function):
+        if not isinstance(block, ast.If):
+            continue
+        # A terminal `else` is the trailing `orelse` of a chain, so it is the
+        # arm holding this store and nothing else. An `elif` arm is exactly an
+        # `orelse` whose single element is an `ast.If`, so excluding that one
+        # shape leaves `elif` to `_store_is_in_an_elif_link` while keeping
+        # every real trailing `else`, including a multi-statement one and one
+        # that itself contains a nested `if`.
+        if len(block.orelse) == 1 and isinstance(block.orelse[0], ast.If):
+            continue
+        if _contains_any(block.orelse, statement):
+            return True
+    return False

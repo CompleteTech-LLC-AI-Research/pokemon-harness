@@ -9528,6 +9528,193 @@ def test_an_elif_link_suppressor_is_live_when_the_carried_store_is_not(
     )
 
 
+#: #452. `ELIF_LINK_SUPPRESSOR_SHAPES` above settles the `elif` form of the
+#: question, and #441's repair deliberately stopped there: an `elif` is not a
+#: branch of its own, whereas a terminal `else` is a branch in the ordinary
+#: sense. That distinction is right about *coverage* -- an `if` body and its
+#: `else` together account for every call -- but it is not right about
+#: *liveness*, and reading only the arm that binds loses the call that skips
+#: it:
+#:
+#:     cs = contextlib.nullcontext()
+#:     if x:
+#:         pass
+#:     else:
+#:         cs = contextlib.suppress(AssertionError)
+#:     with cs:
+#:         assert x != 1
+#:
+#: At `x=1` the `else` never runs, `cs` is still the `nullcontext`, and the
+#: assert **fires**. The arm is where the suppressor lives, so reading the
+#: arm alone answers "defeated" -- a false-DEAD on a contract that really
+#: enforces.
+#:
+#: The rows below are executed across the fixture's argument domain by
+#: :func:`_assert_suppression_contract` before the analyzer's verdict is
+#: compared, so CPython -- not the table -- decides each row.
+ELSE_ARM_SUPPRESSOR_SHAPES = (
+    # The filed shape. `cs` is a plain `nullcontext` for every call that takes
+    # the `if` arm, so the failure at `x=1` is swallowed by nothing and fires.
+    (
+        "an else arm binding a suppressor over a plain manager is live",
+        ("    if x:\n        pass\n    else:\n        cs = contextlib.suppress(AssertionError)"),
+        True,
+    ),
+    # The mirror control, and the one that decides whether the repair is
+    # correct or merely cautious. When the binding in force on the call that
+    # *skips* the `else` is a suppressor too, then every call swallows the
+    # assert and the header really is defeated. Answering `live` here would
+    # certify a disarmed contract as load-bearing.
+    (
+        "CONTROL an else arm binding a suppressor over a suppressor is dead",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"  # override preamble
+            "    if x:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # A suppressor that does not name `AssertionError` never disarms the
+    # contract, so no call swallows the failure and the header is live for the
+    # ordinary reason. This is what keeps the new branch from generalising into
+    # "an `else` arm is always undecidable".
+    (
+        "CONTROL an else arm binding suppress(ValueError) stays live",
+        "    if x:\n        pass\n    else:\n        cs = contextlib.suppress(ValueError)",
+        True,
+    ),
+    # A first-link `if` runs or does not, and when it runs it *does* replace
+    # the preamble -- so that call is swallowed and the header is defeated.
+    # This is what master already answers, and it is the row that keeps the
+    # repair scoped to the *trailing* arm.
+    (
+        "CONTROL a first-link if binding a suppressor stays dead",
+        "    if x:\n        cs = contextlib.suppress(AssertionError)",
+        False,
+    ),
+    # An `else` that also binds a plain manager does not restore the carried
+    # one, and the `if` arm does not either, so the suppressor really is in
+    # force on every call that reaches the header. This is the both-arms-bind
+    # control: it is the row a repair that answered "an `else` arm is always
+    # skipped" would break.
+    (
+        "CONTROL both arms binding a suppressor stay dead",
+        (
+            "    if x:\n        cs = contextlib.suppress(AssertionError)\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # `if False:` never takes the `if` arm, so the `else` runs on every call
+    # and the header really is defeated. This is the decided-chain control that
+    # the witness walk must not rescue: the failure value cannot reach an arm
+    # that skips the suppressor, because there is no such call.
+    (
+        "CONTROL a decided if False else arm binding a suppressor stays dead",
+        (
+            "    if False:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # The mirror decided case. `if True:` always takes the `if` arm, so the
+    # `else` never runs, `cs` stays the `nullcontext`, and the assert fires.
+    # The `else` arm is unreachable here rather than skipped, and the header is
+    # live for the ordinary reason -- no suppressor is ever installed at all.
+    (
+        "an unreachable else arm over a plain manager stays live",
+        ("    if True:\n        pass\n    else:\n        cs = contextlib.suppress(AssertionError)"),
+        True,
+    ),
+    # #452. `ELIF_LINK_SUPPRESSOR_SHAPES` has the two-store rows that pin
+    # *latest* rather than *any*; these are the `else`-arm equivalents. The
+    # suppressor is written FIRST and the `nullcontext` second, so on the call
+    # that skips the `else` the name holds the `nullcontext` and the assert
+    # fires.
+    (
+        "an else arm over a nullcontext that supersedes an earlier suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    if x:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The mirror, and the row that stops the fix generalising: the
+    # `nullcontext` is written first and the suppressor second, so the
+    # *latest* prior store is a suppressor and every call that reaches the
+    # header is defeated.
+    (
+        "CONTROL an else arm over a suppressor that supersedes an earlier nullcontext",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    if x:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "chain", "assert_is_live"),
+    ELSE_ARM_SUPPRESSOR_SHAPES,
+    ids=[row[0] for row in ELSE_ARM_SUPPRESSOR_SHAPES],
+)
+def test_an_else_arm_suppressor_is_live_when_the_carried_store_is_not(label, chain, assert_is_live):
+    """A suppressor reached through a trailing `else` does not defeat the assert alone.
+
+    This is #452. `test_an_elif_link_suppressor_is_live_when_the_carried_store_is_not`
+    settled the `elif` form, and #441's repair stopped at it deliberately -- its
+    `_store_is_in_an_elif_link` records in its own docstring that "an `else`
+    arm ... fail[s] it, which is what keeps them on their existing answers",
+    because an `else` and its `if` body are complementary and so together cover
+    every call.
+
+    That reasoning is sound for *coverage* and wrong for *liveness*, and the
+    difference is the whole of this issue. An `else` arm and its `if` body do
+    account for every call, but the calls that reach the `with` through the
+    `if` body never install the suppressor at all: they keep whatever the
+    preamble bound. So "every call is covered by some arm" does not imply
+    "every call is covered by the suppressor", and reading only the arm that
+    binds turns a live contract into a false-DEAD.
+
+    The repair is the same proof #441 uses, aimed at the trailing arm: when the
+    arm's store swallows `AssertionError` and the store in force on the calls
+    that skip it provably does not, the name holds a suppressor on some calls
+    and a plain manager on others, and the header is not defeated. The
+    `CONTROL` rows are what keep it from over-reaching: a decided `if False:`
+    whose `else` always runs, an `if` body that itself binds a suppressor, and
+    a both-arms-bind chain all still report DEFEATED.
+
+    Every row is executed across the fixture's argument domain by
+    :func:`_assert_suppression_contract` before the analyzer's verdict is
+    compared, so a row cannot claim "live" unless CPython agrees, nor "defeated"
+    unless CPython really does swallow on every call.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n" + chain + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. An "
+        f"`else` arm runs only on the calls where every test above it failed, "
+        f"so the binding it supersedes still holds on the rest. The header is "
+        f"defeated only when that earlier binding is a suppressor too."
+    )
+
+
 #: #435. #429 made an `elif` link's *own* literal-true test stop implying an
 #: unconditional store, but it only looked one link deep. A store nested under
 #: a further `if True:` -- or under a third `elif True:` -- is reached through
