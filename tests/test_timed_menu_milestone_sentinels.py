@@ -2705,7 +2705,8 @@ MODULE_CARRIER_SHAPES = (
     ),
 )
 
-#: #376: ``from M import N as cs`` binds an attribute, not a module.
+#: #376, revised by #389: ``from M import N as cs`` binds an attribute, and the
+#: attribute is now *resolved* rather than declined.
 #:
 #: It looks exactly like ``import os as cs`` -- a name carried in a string
 #: field of an import node -- but the two are not the same claim. ``import
@@ -2718,26 +2719,36 @@ MODULE_CARRIER_SHAPES = (
 #:     from decimal import Decimal as cs -> a class
 #:     from mymod import ctx as cs       -> WHATEVER mymod.ctx is
 #:
-#: The last row is the point. ``mymod.ctx`` is a real ``nullcontext()``, so
-#: ``with cs:`` **succeeds** and the assert is live. Recording the shape as a
-#: module would report that live assert as dead and drop a real pinned
-#: contract -- the damaging direction, introduced by the very rule meant to
-#: fix it. So the rule **declines** it, and the analyzer answers ``enforced``.
+#: The last row is why the shape cannot be answered from the *syntax* alone:
+#: ``mymod.ctx`` is a real ``nullcontext()``, so ``with cs:`` **succeeds** and
+#: the assert is live, while ``os.path`` raises ``TypeError`` and the assert is
+#: dead. Recording every ``from ... import ... as`` as a module would report
+#: that live assert as dead and drop a real pinned contract -- the damaging
+#: direction, introduced by the very rule meant to fix it.
 #:
-#: Declining costs the one genuinely dead ``os.path`` row, which is the right
-#: trade: a wrong "dead" is unrecoverable, and a conservative "enforced" is
-#: the same answer master already gave.
+#: The first cut therefore declined the whole shape, which made the analyzer
+#: answer ``enforced`` for all three rows above. Two of those are genuinely
+#: dead, so the decline certified a contract CPython never applies.
+#:
+#: #389 answers the question the decline was standing in for: not "is this an
+#: ``ImportFrom``" but "what does *this* attribute resolve to". The real
+#: interpreter is consulted through ``_from_import_kind``, which returns the
+#: runtime type name only for a value that cannot implement the context
+#: manager protocol, and ``None`` for an enterable one. The live control in
+#: :func:`test_an_import_from_as_can_bind_a_real_context_manager` is what keeps
+#: this honest: it is the same spelling, over a module that exports an actual
+#: context manager, and it must stay ``enforced``.
 UNDECIDABLE_IMPORT_FROM_SHAPES = (
     (
-        "an import-from-as binding a module is declined, not guessed",
+        "an import-from-as binding a module is resolved to its runtime type",
         "from os import path as cs",
     ),
     (
-        "an import-from-as binding a str is declined, not guessed",
+        "an import-from-as binding a str is resolved to its runtime type",
         "from os import sep as cs",
     ),
     (
-        "an import-from-as binding a class is declined, not guessed",
+        "an import-from-as binding a class is resolved to its runtime type",
         "from decimal import Decimal as cs",
     ),
 )
@@ -2748,19 +2759,25 @@ UNDECIDABLE_IMPORT_FROM_SHAPES = (
     UNDECIDABLE_IMPORT_FROM_SHAPES,
     ids=[shape[0] for shape in UNDECIDABLE_IMPORT_FROM_SHAPES],
 )
-def test_an_import_from_as_is_declined_rather_than_read_as_a_module(label, bind):
-    """``from M import N`` must not be answered as "a module".
+def test_an_import_from_as_is_resolved_rather_than_declined(label, bind):
+    """``from M import N as cs`` is answered by what ``N`` resolves to.
 
     Each row is a real ``import from`` whose bound value is genuinely
-    unenterable, so ``defeated`` would be right for all three -- the same
-    answer ``os.path`` alone would give. The rule declines anyway and so
-    answers ``enforced``: wrong for these three, and the price of not being
-    wrong for the fourth.
+    unenterable: ``os.path`` is a module, ``os.sep`` a ``str``, and
+    ``Decimal`` a class. None of them has ``__enter__``, so entering one
+    raises ``TypeError`` on the header, the assert under it is never
+    evaluated, and ``dead`` is the only correct verdict. #389 resolves the
+    attribute through the real interpreter instead of declining the shape.
 
-    This is not a coverage hole because of the control in
+    The earlier cut declined the whole shape, so all three read ``enforced``:
+    three dead contracts certified as load-bearing, the damaging direction.
+
+    This is still not a coverage hole because of the control in
     :func:`test_an_import_from_as_can_bind_a_real_context_manager`: the same
-    spelling, over a module that exports an actual context manager, is live.
-    A rule answering "module" there would drop a real contract.
+    spelling, over a module that exports an actual context manager, is live
+    and must stay ``enforced``. That control is what forces the resolution to
+    be per-attribute rather than per-spelling, and it is the row that breaks
+    under a rule answering "module" for the whole shape.
     """
     source = (
         "import contextlib\n"
@@ -2772,9 +2789,9 @@ def test_an_import_from_as_is_declined_rather_than_read_as_a_module(label, bind)
     function = tree.body[-1]
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     results = [_is_enforced(function, node, tree) for node in asserts]
-    assert results == [True], (
-        f"{label}: expected the rule to DECLINE, i.e. [True], got {results}. "
-        f"The value bound by `from M import N` is not readable off the syntax."
+    assert results == [False], (
+        f"{label}: expected [False] -- the bound value cannot be entered, so "
+        f"the assert is unreachable -- got {results}."
     )
 
 
@@ -4311,6 +4328,150 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
         f"{label}: the fixture returned normally, so the second assert was "
         f"swallowed rather than reachable. Row is stale."
     )
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected"),
+    [
+        (
+            "#390 a lambda rebound over a carried suppressor is not enterable",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    with (cs := contextlib.suppress(AssertionError)):\n"
+                "        pass\n"
+                "    cs = lambda: None\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+        (
+            "#394 a body import shadows a module-level suppressor alias",
+            (
+                "import contextlib as fake\n"
+                "def outer(x, flag, helper):\n"
+                "    import json as fake\n"
+                "    with fake.suppress(AssertionError):\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+        (
+            "#426 a starred unpack in the with header enters a tuple",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    cs = [contextlib.nullcontext(), contextlib.suppress(AssertionError)]\n"
+                "    with (*cs,):\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) and value.startswith("#") else None,
+)
+def test_a_header_that_cannot_be_entered_defeats_the_assert(label, source, expected):
+    """A ``with`` header that raises before the body leaves the assert unreachable.
+
+    Each row binds a value that cannot implement the context manager protocol
+    in the header itself -- a function object, an attribute the module does
+    not have, and a tuple. Entering any of them raises ``TypeError`` or
+    ``AttributeError`` while the header is evaluated, so the assert under it
+    never runs.
+
+    The analyzer answered ``True`` for all three: a disarmed contract
+    certified as load-bearing, which is the damaging direction. The verdicts
+    are checked against the runtime contract rather than against the
+    analyzer's own opinion, so a row cannot pass by the checker and the claim
+    being wrong together.
+    """
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected], f"{label}: expected {[expected]}, got {results}."
+
+    # Hold CPython to the same row, so the expected verdict is measured rather
+    # than asserted about. An unreachable row must raise something that is
+    # *not* an AssertionError.
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, True, None)
+    except AssertionError:
+        if not expected:
+            raise AssertionError(
+                f"{label}: the assert fired, so the header was enterable and "
+                f"the contract is live. The row claims it is dead."
+            ) from None
+    except (TypeError, AttributeError, NameError, UnboundLocalError):
+        if expected:
+            raise AssertionError(
+                f"{label}: the header raised instead of running the body, so "
+                f"the assert is unreachable. The row claims it is live."
+            ) from None
+    else:
+        raise AssertionError(
+            f"{label}: the fixture returned normally, so the assert was "
+            f"swallowed rather than reachable."
+        )
+
+
+def test_a_live_header_is_not_read_as_dead_by_the_unenterable_rules():
+    """The controls that keep #390/#394/#426 from over-correcting.
+
+    Each of the three rules keys off a shape that is also the shape of a
+    genuinely live header:
+
+    * a name bound by ``from M import N as cs`` may be a real context manager;
+    * a ``cs = <call>`` store may return one; and
+    * a name read in a ``with`` header may be perfectly enterable.
+
+    A rule that answered "dead" for the whole family would drop each of these
+    real contracts, so they are pinned here as live.
+    """
+    live_rows = (
+        (
+            "a from-import binding a real context manager stays live",
+            (
+                "def outer(x, flag, helper):\n"
+                "    from tests._import_from_carrier_support import ctx as cs\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+        ),
+        (
+            "a store of a real context manager stays live",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    cs = contextlib.nullcontext()\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+        ),
+        (
+            "a lambda that RETURNS a context manager is not read as one",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    make = lambda: contextlib.nullcontext()\n"
+                "    with make():\n"
+                "        assert x != 1\n"
+            ),
+        ),
+    )
+    for label, source in live_rows:
+        tree = ast.parse(source)
+        function = tree.body[-1]
+        asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert results == [True], (
+            f"{label}: expected [True] -- the header is enterable, so the "
+            f"assert is live -- got {results}. A rule reading this family as "
+            f"dead would drop a real pinned contract."
+        )
 
 
 #: #350. Which nesting forms bind the *enclosing* function's local, and which
@@ -6803,6 +6964,158 @@ LOOP_ELEMENT_LIVE_SHAPES = (
             "        for x in (1,):\n"
             "            cs = contextlib.suppress(AssertionError)\n"
             "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    # #450. A loop over an iterable that provably yields nothing reaches its
+    # body zero times, so the store in that body never ran and the carrier is
+    # still the one in force. These are the three spellings the rule had
+    # declined: two builtin calls and a literal-false `while` test. Each is a
+    # false-DEAD on master -- the live assert was reported defeated.
+    (
+        "a zero-iteration builtin-constructor loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in set():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "a zero-iteration range loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(0):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # A negative one-argument bound is empty for the same reason `range(0)` is:
+    # `range(stop)` counts from 0 upwards by 1, so any `stop <= 0` yields
+    # nothing. The one-argument branch read this as `not stop`, which is
+    # "not empty" for every negative bound, so these two rows were missing and
+    # the defect shipped through a green suite.
+    #
+    # `range(-10**18)` is here to pin the *no-overflow* property: the fold
+    # compares the integers directly, so a bound far outside a machine word
+    # cannot round through a float and flip the answer.
+    (
+        "a negative one-argument range loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(-5):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "a very large negative range bound does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(-10**18):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The control that separates this from "any non-empty-looking number is
+    # empty": `range(-1)` is empty, `range(1)` is not, and both are written
+    # with a leading minus/plus so only the sign decides.
+    (
+        "CONTROL a one-argument range of one is not empty",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(1):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    (
+        "a literal-false while loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    while False:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The controls for the three rows above, one per decision the widening
+    # makes. Without them a rule that answered "empty" for *every* loop, or
+    # that read only the first `range` argument, would pass all three.
+    #
+    # `range(5, 0)` and `range(0, 5, -1)` are empty but do not read as zero in
+    # their leading argument, so they are the rows that separate the fold from
+    # a first-argument test. `range(0, 5)` is the opposite: a leading zero and
+    # a non-empty range, so reading the first argument would defeat a live
+    # header here.
+    (
+        "CONTROL a descending range with an empty span is still empty",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(5, 0):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "CONTROL a non-empty range with a leading zero does count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(0, 5):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    (
+        "CONTROL a range of one element does count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(1):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    # The unreadable-argument control the issue calls for by name: a builtin
+    # name that is not the builtin yields, so its body really does run. This
+    # is the row that keeps the widening from reading `set`/`range` as the
+    # builtins unconditionally.
+    (
+        "CONTROL a shadowed constructor does count as having run",
+        (
+            "    def set():\n"
+            "        return [0]\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in set():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
             '            assert x != 1, "A1"'
         ),
         False,
@@ -12053,14 +12366,321 @@ def test_a_from_import_subject_alias_settles_its_own_selection(label, source):
 
 
 def test_a_from_import_of_an_unexported_name_is_still_a_rebinding():
-    """Widening the canonical-import rule must not cover a name that is absent.
+    """An exported attribute does not establish canonical module identity.
 
-    ``_is_canonical_module_import`` now accepts ``from M import x`` -- but only
-    when ``M`` really exports ``x``. Without that check the widening would make
-    every from-import name look like a trustworthy alias and let a rebound
-    qualified name through the ``builtins.attr`` rule that shares this helper.
+    The shared qualified-builtin gate must reject both from-import spellings;
+    the dedicated literal-subject callee proof handles genuine contextlib
+    members without weakening the shared module check.
     """
     exported = ast.parse("from contextlib import nullcontext\n").body[0]
     missing = ast.parse("from contextlib import not_a_real_attribute\n").body[0]
-    assert _is_canonical_module_import(exported, "nullcontext") is True
+    assert _is_canonical_module_import(exported, "nullcontext") is False
     assert _is_canonical_module_import(missing, "not_a_real_attribute") is False
+
+
+FROM_IMPORT_CARRIER_ROWS = (
+    (
+        "the filed reproduction: from-import, walrus carrier, named subject",
+        (
+            "    from contextlib import suppress, nullcontext\n"
+            "    subject = [nullcontext()]\n"
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        True,
+    ),
+    (
+        "a from-import in the body decides a directly written subject",
+        (
+            "    from contextlib import suppress, nullcontext\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nullcontext()]:\n        case [cs]:\n            pass\n"
+        ),
+        True,
+    ),
+    (
+        "CONTROL a renamed from-import is a rebinding, not a plain import",
+        (
+            "    from contextlib import suppress, nullcontext as nc\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nc()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL an alias that even spells the same name is still a rewrite",
+        (
+            "    from contextlib import nullcontext as nullcontext\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nullcontext()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL a from-import of another module is not a contextlib import",
+        (
+            "    from decimal import Decimal\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [Decimal()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL a callee rebound after the from-import is not decided",
+        (
+            "    from contextlib import suppress, nullcontext\n"
+            "    nullcontext = int\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nullcontext()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    FROM_IMPORT_CARRIER_ROWS,
+    ids=[row[0] for row in FROM_IMPORT_CARRIER_ROWS],
+)
+def test_a_from_import_in_the_body_is_a_plain_import_for_this_walk(label, body, enforced):
+    """#369: a ``from contextlib import`` in the body is a canonical binding.
+
+    The pre-match walk already let ``import contextlib`` through. ``from
+    contextlib import ...`` is a different ``ast`` node, so it fell through to
+    ``return False`` and the capture was never decided -- for the issue's own
+    reproduction, and for every carrier form. This rows it with the qualified
+    spelling on exactly its own terms: the module is ``contextlib`` and nothing
+    is renamed, since an ``as`` alias is a rebinding this walk cannot follow.
+
+    Each ``True`` row is executed before the analyzer is consulted, so it
+    cannot pass on the checker's own opinion. The ``False`` rows are the
+    controls that keep the widened gate from swallowing a genuine rebinding.
+    """
+    source = "import contextlib\ndef outer(x):\n" + body + "    with cs:\n        assert x != 1\n"
+    if enforced:
+        namespace = {}
+        exec(compile(source, "<from-import-carrier>", "exec"), namespace)  # noqa: S102
+        try:
+            namespace["outer"](1)
+        except AssertionError:
+            fired = True
+        else:
+            fired = False
+        assert fired is True, f"{label}: the captured plain manager must leave the assert live"
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is enforced
+
+
+@pytest.mark.parametrize(
+    "imports",
+    (
+        # #369. The `from` spelling is the filed reproduction, and it is the
+        # one the callee-intact rule exists for: `_name_is_rebound_away_from_module`
+        # answers the `builtins.attr` question, so it counted this ordinary
+        # import as a rebinding and declined every subject element.
+        "from contextlib import suppress, nullcontext",
+        "import contextlib",
+    ),
+    ids=("from-import", "qualified"),
+)
+@pytest.mark.parametrize("named", (False, True), ids=("literal-subject", "named-subject"))
+def test_literal_match_supersedes_a_carried_suppressor(imports, named):
+    """#369: a decided capture holds its captured value, not the carried one.
+
+    The carried ``suppress(AssertionError)`` is installed by a plain store and
+    then *superseded* by the capture. When the capture is decided, the header
+    CPython enters is the captured ``nullcontext``, so the carried suppressor
+    is no longer in force and the assert is live. Answering ``False`` here is
+    the damaging direction for #369: a live contract is dropped from the
+    sentinel's view.
+
+    Every row is executed before the analyzer is consulted, so no row can pass
+    by being vacuous.
+    """
+    qualified = imports == "import contextlib"
+    manager = "contextlib.nullcontext()" if qualified else "nullcontext()"
+    preamble = "import contextlib\n" if not qualified else ""
+    setup = "    subject = [" + manager + "]\n" if named else ""
+    source = (
+        preamble
+        + imports
+        + "\ndef outer(x):\n"
+        + "    cs = contextlib.suppress(AssertionError)\n"
+        + setup
+        + "    match "
+        + ("subject" if named else "[" + manager + "]")
+        + ":\n        case [cs]: pass\n    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<literal-supersedes-carried>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        fired = True
+    else:
+        fired = False
+    assert fired is True, "the captured plain manager must leave the assert live"
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    (
+        # The decline must survive a genuine rebind. A parameter of the same
+        # name replaces the import for the whole call, so the subject element
+        # is not `contextlib.nullcontext` and the proof must not be made.
+        "def outer(nullcontext, x):\n    cs = contextlib.suppress(AssertionError)\n",
+        "def outer(x):\n    cs = contextlib.suppress(AssertionError)\n    nullcontext = int\n",
+    ),
+    ids=("parameter", "local-store"),
+)
+def test_literal_match_declines_a_rebound_callee(prefix):
+    """#369: fixing the `from` spelling must not accept a rebound callee.
+
+    These are the shapes the rule is *not* allowed to decide. They are held to
+    the conservative verdict rather than to a runtime outcome, because the
+    capture is left undecidable -- which is the safe direction.
+    """
+    source = (
+        "import contextlib\n"
+        + prefix
+        + "    match [nullcontext()]:\n        case [cs]: pass\n"
+        + "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize("local", (False, True))
+def test_from_import_attribute_is_not_a_canonical_builtin_module(local):
+    import contextlib
+
+    source = (
+        "import contextlib\n"
+        + (
+            ""
+            if local
+            else "from contextlib import nullcontext as builtins\nbuiltins.int = contextlib.nullcontext\n"
+        )
+        + "def outer(x):\n"
+        + (
+            "    from contextlib import nullcontext as builtins\n    builtins.int = contextlib.nullcontext\n"
+            if local
+            else ""
+        )
+        + "    cs = builtins.int()\n    with cs:\n        assert x != 1\n"
+    )
+    had_attribute = hasattr(contextlib.nullcontext, "int")
+    prior = getattr(contextlib.nullcontext, "int", None)
+    try:
+        namespace = {}
+        exec(compile(source, "<from-import-module-identity>", "exec"), namespace)  # noqa: S102
+        with pytest.raises(AssertionError):
+            namespace["outer"](1)
+    finally:
+        if had_attribute:
+            contextlib.nullcontext.int = prior
+        else:
+            del contextlib.nullcontext.int
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    "body,error",
+    (
+        (
+            "    subject = [nullcontext()]\n    from contextlib import nullcontext\n    match subject:\n        case [cs]: pass\n",
+            UnboundLocalError,
+        ),
+        (
+            "    from .contextlib import nullcontext\n    match [nullcontext()]:\n        case [cs]: pass\n",
+            ImportError,
+        ),
+    ),
+)
+def test_literal_subject_callee_import_must_be_absolute_and_precede_call(body, error):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        + body
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {"__name__": "callee_order_fixture", "__package__": ""}
+    exec(compile(source, "<callee-import-order>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize("parameter", (False, True))
+def test_literal_subject_callee_declines_enclosing_shadow(parameter):
+    source = (
+        "import contextlib\nfrom contextlib import nullcontext\n"
+        + (
+            "def parent(nullcontext):\n"
+            if parameter
+            else "def parent():\n    nullcontext = lambda: contextlib.suppress(AssertionError)\n"
+        )
+        + "    def outer(x):\n        cs = contextlib.suppress(AssertionError)\n"
+        + "        match [nullcontext()]:\n            case [cs]: pass\n"
+        + "        with cs:\n            assert x != 1\n    return outer\n"
+    )
+    namespace = {}
+    exec(compile(source, "<enclosing-callee-shadow>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    function = (
+        namespace["parent"](lambda: contextlib.suppress(AssertionError))
+        if parameter
+        else namespace["parent"]()
+    )
+    function(1)
+    tree = ast.parse(source)
+    outer = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(outer) if isinstance(node, ast.Assert))
+    assert _is_enforced(outer, target, tree) is False
+
+
+def test_literal_subject_declines_modified_from_import_manager_class():
+    import contextlib
+
+    source = (
+        "import contextlib\nfrom contextlib import nullcontext\n"
+        "nullcontext.__exit__ = lambda *args: True\n"
+        "def outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        "    match [nullcontext()]:\n        case [cs]: pass\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    original = contextlib.nullcontext.__exit__
+    try:
+        namespace = {}
+        exec(compile(source, "<modified-from-import-manager>", "exec"), namespace)  # noqa: S102
+        namespace["outer"](1)
+    finally:
+        contextlib.nullcontext.__exit__ = original
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False

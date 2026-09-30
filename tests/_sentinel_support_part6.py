@@ -423,6 +423,26 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     call, an attribute, a parameter, or any store the rule cannot read is left
     alone, because a wrong answer here drops a real pinned assert.
     """
+    if isinstance(expression, ast.Tuple) and expression.elts:
+        # #426. `with (*cs,):` enters a **tuple**, whatever `cs` held. A tuple
+        # has no `__enter__`, so the header raises `TypeError` before the body
+        # is reached and the assert under it is never evaluated. The
+        # analyzer certified it as load-bearing, which is the damaging
+        # direction: a disarmed contract called live.
+        #
+        # A starred element is what decides it, and it is decidable from the
+        # header syntax alone. The wrapped value's own kind is irrelevant --
+        # `cs = [nullcontext(), suppress(AssertionError)]` reads as "there is
+        # a suppressor in there", and believing that is what produced the
+        # false-LIVE. (Executed on CPython 3.12.14: `with (*cs,):` raises
+        # `TypeError: 'tuple' object does not support the context manager
+        # protocol`.)
+        #
+        # A *plain* tuple header is declined rather than answered, because
+        # `with (a, b):` on an unenterable pair and a header that is only
+        # sometimes a tuple are not the same question, and guessing would
+        # risk the live side.
+        return all(isinstance(element, ast.Starred) for element in expression.elts)
     if not isinstance(expression, ast.Name):
         return False
     name = expression.id
@@ -603,7 +623,9 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # reach its assert. The future class must not vouch for it.
             kinds.add("NoneType")
             continue
-        if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+        if not isinstance(
+            value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set, ast.Lambda)
+        ):
             # A call is a call: `nullcontext()` returns a real context manager
             # and must not be read as a non-manager here. The *builtin
             # constructors* are the exception, because their result type is
@@ -611,6 +633,14 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # `with cs:` raises before the assert. Reading every call as
             # unreadable left an unconditional `cs = int()` reported live
             # where CPython raises -- a false-live.
+            #
+            # #390 adds `ast.Lambda` to the readable set for the same reason a
+            # builtin constructor is readable: a lambda's runtime type is
+            # fixed by the syntax that built it, exactly as `int()`'s is by
+            # its callee name. It stays a *call-free* literal shape, so the
+            # `lambda: nullcontext()` case -- which really is enterable --
+            # is not what is being read. The kind is produced by
+            # `_literal_runtime_type` below like any other literal.
             constructor = _builtin_constructor_kind(value, function)
             if constructor is None or constructor is _RAISING_CONSTRUCTOR:
                 # A raising constructor never stores, so it does not settle the
@@ -791,12 +821,190 @@ def _literal_runtime_type(value):
         # recorded as an `ast.Starred` inside the target list, so the runtime
         # type of the *name* is the list the unpacking produces.
         return "list"
+    if isinstance(value, ast.Lambda):
+        # #390. `cs = lambda: None` binds a *function object*, and a function
+        # has no `__enter__`. Entering one raises
+        # `TypeError: 'function' object does not support the context manager
+        # protocol` on the header, before the body is reached, so an assert
+        # in that body is unreachable and calling it load-bearing is the
+        # damaging direction.
+        #
+        # This is the same shape `_carrier_runtime_kinds` already records for
+        # a `def cs` statement, reached here because a `Lambda` is bound by an
+        # ordinary `Assign` target and so *does* get a store entry -- it just
+        # had no readable runtime type until now. Reading the value rather
+        # than the target syntax is the point: the store map is what makes
+        # the answer orderable against the `with` header.
+        return "function"
+    if isinstance(value, ast.Attribute):
+        # #394. `with fake.suppress(AssertionError):` where `fake` is a module
+        # that does not export `suppress` raises `AttributeError` while the
+        # header is evaluated, so the assert below never runs.
+        #
+        # The base has to be a *module* that is known not to export the
+        # attribute, which is only decidable for a stdlib module read from
+        # the real interpreter -- so the check is delegated to
+        # `_module_lacks_attribute`, and anything it cannot resolve is
+        # declined here. Returning a kind unconditionally would report every
+        # `mod.attr` header dead, including `with contextlib.suppress(...)`,
+        # which is genuinely live.
+        if not isinstance(value.value, ast.Name):
+            return None
+        kind = _module_lacks_attribute(value.value.id, value.attr)
+        return kind
     if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
         return {ast.List: "list", ast.Tuple: "tuple", ast.Set: "set"}[type(value)]
     if isinstance(value, ast.Dict):
         return "dict"
     if isinstance(value, ast.Constant):
         return type(value.value).__name__
+    return None
+
+
+def _module_lacks_attribute(base, attribute):
+    """Is ``base`` a module that is known *not* to export ``attribute``?
+
+    #394. ``import json as fake`` inside a function body shadows a module-level
+    ``import contextlib as fake``, so ``with fake.suppress(AssertionError):``
+    is an ``AttributeError`` raised while the header is evaluated -- the
+    assert under it never runs, and the analyzer was certifying it as
+    load-bearing. The damaging direction.
+
+    Resolution is by the *real* interpreter, not by a list of module names:
+
+    * only a name already bound to a module counts, and
+    * only an import that is actually in ``sys.modules`` is consulted.
+
+    Anything else returns ``None`` and the caller declines, because an
+    unreadable attribute is not evidence of a missing one. Deciding it the
+    other way -- assuming a module lacks an attribute it may well export --
+    would report a live ``with contextlib.suppress(...)`` header dead, which
+    is the opposite error and the one this rule exists to avoid.
+    """
+    module = sys.modules.get(base)
+    if module is None or not isinstance(module, types.ModuleType):
+        return None
+    if hasattr(module, attribute):
+        return None
+    return "module"
+
+
+def _from_import_kind(module_name, attribute):
+    """The runtime kind of ``from <module_name> import <attribute>``, or ``None``.
+
+    #389. ``from os import path as cs`` then ``with cs:`` enters a **module**,
+    # which has no ``__enter__``. The header raises ``TypeError`` before the
+    # body, so the assert under it is unreachable and the analyzer was
+    # certifying it as load-bearing.
+
+    ``_carrier_runtime_kinds`` declines every ``ImportFrom`` on purpose, and
+    that decline is *not* lifted here. Measured, one spelling produces several
+    runtime types and one of them is genuinely enterable:
+
+        from os import path as cs            -> os.path          (module)
+        from os import sep as cs             -> '/'              (str)
+        from decimal import Decimal as cs    -> a class          (type)
+        from contextlib import nullcontext as cs -> a CM       (enterable)
+
+    So the question is not "is an ``ImportFrom`` a carrier" but "what does
+    *this* attribute resolve to", and that is answered by the real
+    interpreter. An enterable result returns ``None`` -- the header is live
+    and the assert stands -- and only a result that cannot implement the
+    protocol returns its type name. An unresolvable module or attribute
+    returns ``None`` as well, because an unreadable import is not evidence of
+    an unenterable one.
+    """
+    module = sys.modules.get(module_name)
+    if module is None or not isinstance(module, types.ModuleType):
+        return None
+    try:
+        value = getattr(module, attribute)
+    except AttributeError:
+        return None
+    if hasattr(value, "__enter__"):
+        # Enterable, so the header succeeds and the assert is live.
+        return None
+    return type(value).__name__
+
+
+def _header_expression_raises(header, function, module):
+    """Does evaluating this ``with`` header raise before the body is entered?
+
+    #394. ``import contextlib as fake`` at module scope and
+    ``import json as fake`` inside the function body: the inner import
+    shadows the outer, so ``with fake.suppress(AssertionError):`` evaluates
+    ``json.suppress`` -- an attribute that module does not have -- and raises
+    ``AttributeError`` while the *header* is being evaluated. The body is
+    never entered, the assert under it is never evaluated, and the analyzer
+    was certifying it as load-bearing. The damaging direction.
+
+    The check is deliberately narrow and declines in every case it cannot
+    read:
+
+    * the callee must be a plain ``Attribute`` on a ``Name`` -- no nested
+      attribute, no subscript, no computed callee;
+    * the base name must be bound to a module by an ``import`` the analyzer
+      can see, in the function body or at module scope; and
+    * that module must genuinely lack the attribute.
+
+    An attribute the module *does* export is left alone, because then the
+    header evaluates normally and the assert may well be live --
+    ``with contextlib.suppress(AssertionError):`` is exactly that shape, and
+    answering it dead would drop a real pinned contract. The base is
+    resolved from the source's own ``import`` statements rather than from the
+    live interpreter's globals, so a name this module never bound is declined
+    even if something else in the process happens to bind it.
+    """
+    if isinstance(header, ast.AsyncWith):
+        return False
+    for item in header.items:
+        callee = item.context_expr.func if isinstance(item.context_expr, ast.Call) else None
+        if callee is None or not isinstance(callee, ast.Attribute):
+            continue
+        base = callee.value
+        if not isinstance(base, ast.Name):
+            continue
+        resolved = _imported_module_name(base.id, function, module)
+        if resolved is None:
+            continue
+        # The lookup is against the module the *source* binds the name to, not
+        # against the spelling. `import json as fake` binds `json` under the
+        # name `fake`, so asking `sys.modules["fake"]` would miss the shadowing
+        # entirely -- which is what this rule exists to catch.
+        if _module_lacks_attribute(resolved, callee.attr) is not None:
+            return True
+    return False
+
+
+def _imported_module_name(name, function, module):
+    """The module ``name`` is bound to by an ``import``, or ``None``.
+
+    A function-body import shadows a module-level one of the same spelling,
+    so the *last* binding in the innermost scope that mentions the name is
+    the one a header in that scope reads. Only the ``asname`` spelling is
+    followed for a different name; a bare ``import X`` binds ``X`` itself.
+    """
+    # The *statement* lists are used, not `_scope_body_nodes`: that helper
+    # descends into a statement to find nested bindings, so the module-level
+    # `import contextlib as fake` would be read from inside the `with` body
+    # and the function-body `import json as fake` that actually shadows it
+    # would never be reached. Source order inside the real body is what
+    # decides the binding.
+    # Innermost scope first: a function-body import shadows a module-level one
+    # of the same spelling for the whole body, so the module scope is only
+    # consulted when the function itself never binds the name.
+    for scope in (getattr(function, "body", None), getattr(module, "body", None)):
+        if not scope:
+            continue
+        bound = None
+        for statement in scope:
+            if not isinstance(statement, ast.Import):
+                continue
+            for alias in statement.names:
+                if alias.asname == name or (alias.asname is None and alias.name == name):
+                    bound = alias.name
+        if bound is not None:
+            return bound if isinstance(sys.modules.get(bound), types.ModuleType) else None
     return None
 
 
@@ -957,13 +1165,15 @@ def _statement_never_runs(statement, function):
             # `while False:` is the loop spelling of `if False:` -- the body
             # never runs, so it is never the last element either.
             return True
-        if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
-            enclosing.iter
+        if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _loop_iterable_is_provably_empty(
+            enclosing.iter, function
         ):
             return True
     for node in ast.walk(statement):
         if isinstance(node, ast.If) and _condition_is_never_true(node.test, function):
             return True
-        if isinstance(node, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(node.iter):
+        if isinstance(node, (ast.For, ast.AsyncFor)) and _loop_iterable_is_provably_empty(
+            node.iter, function
+        ):
             return True
     return False

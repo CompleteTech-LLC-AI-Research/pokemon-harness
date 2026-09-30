@@ -648,6 +648,111 @@ def _is_zero_argument_empty_container(node, function=None):
     return _builtin_constructor_kind(node, function) in _EMPTY_CONSTRUCTOR_TYPES
 
 
+#: The ``range`` call shapes that are provably empty, keyed by argument count.
+#: Only the shapes whose emptiness follows from the arguments themselves are
+#: listed; a ``range`` whose bounds are not literals is left to the
+#: conservative "a call is a call" rule, because a wrong answer here drops a
+#: live contract from the sentinel's view.
+_EMPTY_RANGE_ARGUMENT_COUNTS = frozenset({1, 2, 3})
+
+
+def _is_empty_range_call(node, function=None):
+    """Is ``node`` a ``range()`` call that provably yields nothing?
+
+    ``for _ in range(0):`` has no iterations, so every statement in its body
+    is unreachable -- the same property ``for _ in []:`` already has, and the
+    reason :func:`_is_empty_literal_iterable` reads container literals. A
+    zero-argument ``range()`` raises ``TypeError`` and a zero ``step`` raises
+    ``ValueError``; both raise *before* the loop body, so the body is still
+    unreachable, but they are not this helper's question and are declined so
+    the raise is not silently answered as "empty".
+
+    Emptiness is decided from the arguments with the ``range`` length rule
+    rather than from a table of spellings, because the three shapes that are
+    empty are not the three that read as zero: ``range(5, 0)`` and
+    ``range(0, 5, -1)`` are both empty while ``range(0, 5)`` is not. Reading
+    only the first argument answers "empty" for ``range(5, 0)`` by accident
+    and for the wrong reason, so the bounds and the step are folded here:
+
+        start = 0 / stop / step = 1        (one-argument form)
+        start / stop                       (two-argument form, step 1)
+        start / stop / step                (three-argument form)
+
+    ``len(range(start, stop, step))`` is zero exactly when the step does not
+    carry ``start`` to ``stop``, which is what the fold below computes. Every
+    argument must be a readable literal integer: ``range(n)`` with a name for
+    ``n`` is not decidable, and ``range(0.0)`` raises rather than yielding
+    nothing, so a non-integer or unreadable argument answers "not provably
+    empty" and leaves the loop's body counted as reached.
+
+    The callee must be the real builtin, decided by
+    :func:`_callee_is_shadowed` from the enclosing scope. A local
+    ``def range(): return [1]`` makes the call a different one, and answering
+    "empty" there retires a store CPython really performs.
+    """
+    if not isinstance(node, ast.Call) or _callee_is_shadowed(node.func, function, node):
+        return False
+    if not isinstance(node.func, ast.Name) or node.func.id != "range" or node.keywords:
+        return False
+    arguments = [_range_bound_is_integer(argument) for argument in node.args]
+    if len(arguments) not in _EMPTY_RANGE_ARGUMENT_COUNTS or None in arguments:
+        return False
+    if len(arguments) == 1:
+        # The one-argument form is `range(stop)`, which starts at 0 and steps
+        # by 1 -- `len(range(stop))` is zero exactly when `stop <= 0`. Reading
+        # it as `not stop` answered "not empty" for every negative bound, so
+        # `for _ in range(-5):` -- which yields nothing, leaving the loop body
+        # unreachable -- retired no store and the assert below was certified
+        # defeated while CPython still evaluated it.
+        #
+        # This is the same fold the two- and three-argument forms already use,
+        # and it has to stay the same *polarity*: `_range_reaches` answers
+        # "does it yield", this helper answers "is it empty", so the result is
+        # negated. Passing it through un-negated would answer "empty" for
+        # `range(5)` and leave `range(0)` -- the row #456 exists to fix --
+        # wrong.
+        return not _range_reaches(0, arguments[0], 1)
+    start, stop = arguments[0], arguments[1]
+    step = arguments[2] if len(arguments) == 3 else 1
+    if step == 0:
+        # `range(0, 0, 0)` raises ValueError before the body, but "raises" is
+        # not "yields nothing", and conflating the two would make this helper
+        # answer a question it was not asked. Declining leaves the caller's
+        # conservative rule in force.
+        return False
+    return not _range_reaches(start, stop, step)
+
+
+def _range_bound_is_integer(node):
+    """The integer value of a literal ``range`` bound, or ``None``.
+
+    ``bool`` is excluded on purpose even though it is an ``int`` subclass:
+    ``range(True)`` is a one-element range, and treating the literal as the
+    integer ``1`` would make the rule answer a question it never documents.
+    A negative bound is written as a ``UnaryOp`` and folded through
+    :func:`_literal_value`, so ``range(0, -1)`` is decided rather than
+    declined.
+    """
+    value = _literal_value(node)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _range_reaches(start, stop, step):
+    """Does ``range(start, stop, step)`` yield at least one value?
+
+    A step pointing up reaches ``stop`` exactly when ``start < stop``, and a
+    step pointing down exactly when ``start > stop``; ``step == 0`` is
+    declined by the caller. The comparison is made on the integers directly
+    rather than through a division, so a very large bound cannot introduce a
+    float rounding error and the answer is exactly the one CPython computes.
+    """
+    if step > 0:
+        return start < stop
+    return start > stop
+
+
 def _is_empty_literal_iterable(node):
     """Is this iterable a literal container that provably yields nothing?
 
@@ -657,11 +762,16 @@ def _is_empty_literal_iterable(node):
     ``(0,)``, ``(False, True)`` and ``''`` all have a decidable value, and the
     emptiness test is then exact.
 
-    A call such as ``range(0)`` or ``dict()`` is deliberately *not* matched
-    even though it too yields nothing. Deciding those means reasoning about
-    builtins rather than reading a literal, and a wrong answer there drops a
-    live contract from the sentinel's view -- the more damaging error. The rule
-    answers only the question a literal settles on its own.
+    A call is deliberately *not* matched here even when it too yields nothing:
+    this function answers only the question a literal settles on its own, and
+    a wrong answer about a builtin drops a live contract from the sentinel's
+    view -- the more damaging error. The empty builtin containers (``set()``,
+    ``dict()``) and the empty ``range`` shapes are decided by their own
+    helpers, which is why :func:`_loop_iterable_is_provably_empty` -- the
+    predicate every loop call site asks -- ORs the four together. A call the
+    module cannot decide, such as ``range(n)`` for an unreadable ``n`` or
+    ``set(items)``, is left to the conservative "a call is a call" rule and
+    keeps the loop's body counted as reached.
 
     A string literal belongs here for the same reason the containers do: ``''``
     is a ``Constant`` whose value ``_literal_value`` already reads exactly, and
@@ -695,6 +805,36 @@ def _is_empty_literal_iterable(node):
     if not isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
         return False
     return not _literal_value(node)
+
+
+def _loop_iterable_is_provably_empty(node, function=None):
+    """Does a loop over ``node`` reach its body exactly zero times?
+
+    One predicate for the whole question, so the ``for`` call sites cannot
+    disagree with each other about which spellings are decidable. Four
+    sources are ORed, and each is narrow on its own terms:
+
+    * :func:`_is_empty_literal_iterable` -- ``[]``, ``()``, ``{}``, ``''``,
+      ``f''`` and the other literals whose value is readable off the syntax;
+    * :func:`_is_empty_literal_string` -- the empty ``str`` literal, which
+      :func:`_is_empty_literal_iterable` also reaches but which is asked
+      separately at some call sites;
+    * :func:`_is_zero_argument_empty_container` -- ``set()``, ``dict()``,
+      ``list()`` and the other bare builtin constructors;
+    * :func:`_is_empty_range_call` -- the ``range`` shapes whose emptiness
+      follows from their own literal bounds.
+
+    Anything else -- ``helper.items()``, ``set(items)``, ``range(n)`` -- may or
+    may not be empty, so this answers ``False`` and the loop's body keeps
+    counting as reached. That is the conservative direction: treating a
+    possibly-empty loop as definitely-empty would report a live assert dead.
+    """
+    return (
+        _is_empty_literal_iterable(node)
+        or _is_empty_literal_string(node)
+        or _is_zero_argument_empty_container(node, function)
+        or _is_empty_range_call(node, function)
+    )
 
 
 def _is_uncalled_nested_def(function, node):

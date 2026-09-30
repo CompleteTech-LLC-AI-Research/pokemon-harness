@@ -334,7 +334,11 @@ def _literal_subject_element_is_safe(element, function):
     if owning is None:
         return False
     bound = _bound_names(owning, function)
-    aliases = {name for name, resolved in bound.items() if resolved == "contextlib"}
+    aliases = {
+        name
+        for name, resolved in bound.items()
+        if resolved in ("contextlib", "contextlib.nullcontext", "contextlib.suppress")
+    }
     changed = True
     while changed:
         before = len(aliases)
@@ -372,13 +376,129 @@ def _literal_subject_element_is_safe(element, function):
     root = element.func
     while isinstance(root, ast.Attribute):
         root = root.value
-    if not isinstance(root, ast.Name) or _name_is_rebound_away_from_module(root, function, element):
+    if not isinstance(root, ast.Name) or not _literal_subject_callee_is_intact(
+        root, function, element
+    ):
         return False
     if _resolves_to(element.func, "contextlib.nullcontext", bound):
         return not element.args
     return _is_readable_suppressor(element, bound) and (
         not element.args or _carried_suppressor_has_unshadowed_arguments(element, function)
     )
+
+
+def _literal_subject_callee_is_intact(name_node, function, call=None):
+    """Is the callee a plain name still naming what its import bound?
+
+    #369. This is the ``from contextlib import nullcontext`` half of the
+    shadowing question. The literal-subject proof needs the callee to *be*
+    ``contextlib.nullcontext`` or ``contextlib.suppress``, and
+    :func:`_name_is_rebound_away_from_module` answers the ``builtins.attr``
+    question, which is a different one: it asks whether the name still names
+    *the module it was imported as*. For a ``from X import name`` binding the
+    name never names the module, so that helper counted the ordinary
+    ``from contextlib import nullcontext`` itself as a rebinding and declined
+    every element. The decidable-capture path was then unreachable whenever
+    the alias was imported that ordinary way, and a header CPython enters
+    was reported defeated -- the damaging direction.
+
+    So the question asked here is the narrower one that actually matters: is
+    this name bound by something *other** than the import that introduced it?
+    Both spellings of a genuine import -- ``from contextlib import
+    nullcontext`` and ``import contextlib`` -- are canonical for their own
+    name, and everything else that rebinds the name (a parameter, a local
+    store, a nested ``def``/``class``, a module-level store) still declines.
+
+    Every decline leaves the capture undecidable, so the caller keeps its
+    conservative "a capture may not run" answer rather than certifying a
+    swallowed assert as enforced.
+    """
+    name = name_node.id
+    if function is None:
+        return False
+    if name in _signature_bound_names(function):
+        return False
+    owning = _module_for_function(function)
+    if owning is None:
+        return False
+    parent = _nonlocal_parent_function(function, owning)
+    while parent is not None:
+        if name in _signature_bound_names(parent) or any(
+            any(_names_bound_by_statement(statement, name))
+            for statement in _own_scope_bindings(parent)
+        ):
+            return False
+        parent = _nonlocal_parent_function(parent, owning)
+    for statement in _own_scope_bindings(function):
+        if statement is name_node:
+            continue
+        if _binding_is_the_callee_import(statement, name):
+            if (
+                call is None
+                or statement not in function.body
+                or (statement.lineno, statement.col_offset) >= (call.lineno, call.col_offset)
+            ):
+                return False
+            continue
+        if any(_names_bound_by_statement(statement, name)):
+            return False
+    return not _module_rebinds_name_for_any_import(function, name, call)
+
+
+def _binding_is_the_callee_import(statement, name):
+    """Is ``statement`` the ordinary import that brought ``name`` in?
+
+    The ``from`` form binds an attribute of a module, so ``name`` does not
+    name the module itself -- that is the whole difference from the
+    ``builtins.attr`` spelling, which is why this predicate exists rather than
+    reusing :func:`_is_canonical_module_import`.
+    """
+    if isinstance(statement, ast.ImportFrom):
+        return (
+            statement.level == 0
+            and statement.module == "contextlib"
+            and any(
+                alias.name == name
+                and alias.asname is None
+                and alias.name in ("nullcontext", "suppress")
+                for alias in statement.names
+            )
+        )
+    return _is_canonical_module_import(statement, name)
+
+
+def _module_rebinds_name_for_any_import(function, name, call=None):
+    """:func:`_module_rebinds_name` with a ``from`` import counted as canonical.
+
+    #369. The shared helper answers the ``builtins.attr`` question, where the
+    only trustworthy binding is ``import builtins`` -- so it treats every
+    ``from`` import as a rebinding. Here the name is a *member* that
+    ``from contextlib import nullcontext`` brings in legitimately, and the
+    same rule would decline the very import it is meant to trust.
+
+    The ordering, the module-scope cut, and the per-node scan are the shared
+    helper's; only the notion of a canonical import differs, and it is
+    supplied by :func:`_binding_is_the_callee_import`.
+    """
+    module = _module_for_function(function)
+    if module is None:
+        return False
+    at_module_scope = _call_runs_at_module_scope(function, call)
+    for statement in getattr(module, "body", []):
+        if at_module_scope and _module_statement_precedes_call(statement, function, call):
+            break
+        if _binding_is_the_callee_import(statement, name):
+            continue
+        if any(_names_bound_by_statement(statement, name)):
+            return True
+        for node in _module_level_bindings(statement):
+            if _binding_is_the_callee_import(node, name):
+                continue
+            if at_module_scope and _node_precedes_call(statement, node, call):
+                continue
+            if any(_names_bound_by_statement(node, name)):
+                return True
+    return False
 
 
 def _literal_match_reaches_header(function, match):
@@ -394,6 +514,37 @@ def _literal_match_reaches_header(function, match):
             continue
         if isinstance(statement, ast.Import) and all(
             alias.name == "contextlib" for alias in statement.names
+        ):
+            continue
+        if (
+            isinstance(statement, ast.ImportFrom)
+            # #369. The filed reproduction imports inside the function body,
+            # and `from contextlib import ...` is a *different node type* from
+            # the `import contextlib` admitted just above. Falling through to
+            # the closing `return False` ended the walk, so the capture was
+            # never decided for the issue's own spelling and a header
+            # CPython enters was reported defeated.
+            #
+            # The gate stays exactly as narrow as the qualified form: the
+            # import must come from `contextlib` and nothing may be renamed,
+            # since an `as` alias is a rebinding this walk cannot follow. The
+            # names it binds are resolved later, by
+            # `_literal_subject_element_is_safe`, which re-checks that the
+            # callee still names what this import gave it.
+            #
+            # The `asname` half is not decoration. An alias whose `asname`
+            # happens to repeat the imported name -- `nullcontext as
+            # nullcontext` -- is a rewrite the walk cannot follow, and the
+            # element check reads the callee as intact, so without this
+            # condition the row is decided `enforced` and the widened gate
+            # would accept a rebinding. Mutation-tested: dropping only the
+            # `asname` clause flips that control from `False` to `True`.
+            and statement.level == 0
+            and statement.module == "contextlib"
+            and all(
+                alias.name in ("nullcontext", "suppress") and alias.asname is None
+                for alias in statement.names
+            )
         ):
             continue
         if isinstance(statement, ast.Assign) and all(
