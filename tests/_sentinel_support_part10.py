@@ -163,6 +163,8 @@ def _is_enforced(function, target, tree=None):
                 return False
             if function is not None and _entered_name_is_dead(ancestor, function, bound, owning):
                 return False
+            if _header_expression_raises(ancestor, function, owning):
+                return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
             and _falsy_literal(ancestor.test, function)
