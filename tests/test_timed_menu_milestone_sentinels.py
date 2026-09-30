@@ -6696,6 +6696,101 @@ def _async_loop_target_is_undecidable(label, source):
 #: ``swallowed`` says whether CPython really swallows it -- asserted here rather
 #: than assumed, so a fixture that stops behaving as described fails loudly
 #: instead of quietly testing nothing.
+#: #378. A `for` over a literal empty iterable has no iterations, so a store in
+#: its body never happens. Counting the loop as a store that "ran" retired the
+#: carried `nullcontext` and reported the live assert below as defeated.
+#:
+#: Measured on `master` `2c81f10`: three of these four positive rows were
+#: certified **dead** while CPython entered the header. Master already had the
+#: *nested* case right via `_is_store_statement`, so the after-loop case was
+#: invisible to a test count -- it had no rows here at all.
+#:
+#: The controls are the point: a loop that *does* iterate, a falsy member, and
+#: a multi-element loop must all keep rebinding. Without them, a fix that simply
+#: declined every loop-body store would pass.
+UNREACHED_LOOP_BODY_ROWS = (
+    (
+        "an empty tuple loop body never rebinds the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "an empty list loop body never rebinds the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in []:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "a header nested in the same block reads the earlier binding too",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for item in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "an empty loop nested in a running loop is still unreachable",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for outer in (1,):\n"
+            "        for item in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "CONTROL a loop that iterates does rebind the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in [1]:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "CONTROL a falsy member still counts as an iteration",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (0,):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "CONTROL a two-element loop rebinds on the last iteration",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1, 2):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+)
+
+
 LOOP_ELEMENT_LIVE_SHAPES = (
     (
         "a multi-element loop with the suppressor first leaves it live",
@@ -6808,6 +6903,63 @@ def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, s
     assert asserts, f"{label}: fixture declared no assert to check"
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live"),
+    UNREACHED_LOOP_BODY_ROWS,
+    ids=[row[0] for row in UNREACHED_LOOP_BODY_ROWS],
+)
+def test_an_unreachable_loop_body_does_not_rebind_the_name(
+    label, body, expected_live
+):
+    """A loop with no iterations performs none of the stores in its body.
+
+    #378. `for item in ():` is a statement that has been *reached*, and the
+    store rules list statements by that question -- "have the block's stores
+    run by the time this header is read" -- so a `for` was counted. But the
+    guarantee a loop offers is per *iteration*: a loop over a literal empty
+    iterable has none, and the body store never happens.
+
+    The consequence was a live contract reported as defeated, because the
+    carried `nullcontext` was retired by a suppressor that was never bound.
+
+    Scoped to a provably empty literal on purpose. `helper.items()` may yield
+    nothing, but it may not, so a store in that body keeps competing and the
+    ordinary conservative handling applies. The controls pin that a loop which
+    does iterate still rebinds, and that a falsy member `(0,)` is an iteration.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1, None)
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    # CPython settles the expectation, so a `defeated` row is only credible
+    # when the assert really is swallowed, and a `live` row only when it
+    # really fires.
+    assert fired is expected_live, (
+        f"{label}: executed on CPython the assert "
+        f"{'fired' if fired else 'did not fire'}, so the row's expectation "
+        f"{expected_live} does not match. Row is stale."
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], (
+        f"{label}: expected {[expected_live]}, got {results}. A loop over an "
+        f"empty literal performs none of its body's stores."
+    )
 
 
 def test_an_except_as_handler_is_decidable_even_after_a_conditional_store():

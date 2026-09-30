@@ -135,6 +135,21 @@ def _assigned_suppressors(function, bound, query=None):
     for index in range(len(function.body)):
         for name, entries in bindings.items():
             seen = [entry for entry in entries if orders[id(entry[0])] <= index]
+            # #378. A store inside a loop body that provably cannot run has
+            # not happened, so it cannot be what the name holds at this
+            # index. Dropping it here keeps both consumers honest -- the
+            # resolution below and `_aliased_suppressions`' bare-name branch
+            # read this table:
+            #
+            #     cs = contextlib.nullcontext()
+            #     for y in ():               # zero iterations
+            #         cs = suppress(...)     # never executes
+            #     with cs:                  # still the nullcontext -> LIVE
+            seen = [
+                entry
+                for entry in seen
+                if not _is_provably_unreached_store(entry, orders, function)
+            ]
             if not seen:
                 continue
             value = _resolve_bindings(seen, bound, orders, index, function)
@@ -456,6 +471,60 @@ def _store_bindings(function, bound, query=None):
     # store and certify a disarmed assert as load-bearing. So each index
     # resolves from the bindings that precede it alone.
     return bindings, raw_values
+
+
+def _is_provably_unreached_store(entry, orders, function):
+    """Is this conditional store inside a loop body that can never run?
+
+    #378. A ``for`` over a literal empty iterable has no iterations, so every
+    statement in its body is unreachable. A store written there is recorded,
+    flagged ``conditional``, and would otherwise compete with the store that
+    really is in force -- retiring a live ``nullcontext`` and letting a
+    swallowed assert be reported as swallowed when it is in fact live.
+
+    The test is deliberately narrow: only a *provably* empty literal iterable
+    answers yes. ``helper.items()`` may yield nothing, but it may not, so a
+    store in that body keeps competing and the ordinary ambiguity handling
+    applies. ``range(0)`` and ``set()`` are excluded for the same reason
+    `_is_empty_literal_iterable` excludes them -- deciding them means
+    reasoning about builtins rather than reading a literal.
+
+    A ``while True:`` loop, or one whose test is merely truthy, is not
+    provably empty and so is not matched.
+
+    This is the same question `_is_store_statement` answers for a header
+    *nested inside* the loop; both are needed because the two answer through
+    different tables. On ``master`` (``2c81f10``) the nested case was already
+    right and the after-loop case still certified three live asserts dead, so
+    neither guard covers the other.
+
+    The port originally also filtered ``_resolve_bindings``' competing set and
+    added an empty-competing fallback there. Mutation showed both **survived**
+    -- reverting either alone leaves the lane green -- because every caller
+    either pre-filters the same table (the `_assigned_suppressors` loop above)
+    or declines before reaching the ambiguity branch (the ``nonlocal``
+    resolver). They were removed rather than left in as untested code.
+    """
+    statement = entry[0]
+    if function is None:
+        return False
+    # `_ancestors` runs outermost-first and ends with ``target`` itself, so
+    # the last element is dropped: the question is which *containers* the
+    # store sits inside.
+    for ancestor in list(_ancestors(function, statement))[:-1]:
+        # `ast.AsyncFor` is included for symmetry with `_is_store_statement`,
+        # but it is deliberately untested here: an `async for` over a *literal*
+        # container cannot execute, because a literal is not an async
+        # iterable, so no fixture can put the analyzer and CPython in the same
+        # room for that shape. Reverting this clause to `ast.For` alone
+        # therefore survives mutation, and that is recorded rather than hidden
+        # behind a row that cannot run. The clause is kept because the
+        # narrowing that survives mutation would be the more surprising change.
+        if isinstance(ancestor, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
+            ancestor.iter
+        ):
+            return True
+    return False
 
 
 def _resolve_bindings(entries, bound, orders, index=None, function=None):
