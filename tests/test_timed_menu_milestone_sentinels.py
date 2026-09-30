@@ -1560,20 +1560,24 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
         namespace["outer"](1, namespace.get("helper"))
     except AssertionError:
         observed_live = True
-    except Exception:  # noqa: BLE001
-        # Two rows deliberately reference a name the fixture never binds (the
-        # zero-argument helper and the bare `with cs:`), so the call raises
-        # before the header is ever evaluated and there is no executed verdict
-        # to compare against -- `TypeError`, `NameError` and `AttributeError`
-        # all land here. Their point is the analyzer's refusal, not CPython's
-        # behaviour, and the `live` column already says what is being claimed.
-        #
-        # A *contract* that raises before the assert runs is not live, which is
-        # the reading used for every other row here.
-        observed_live = live
+    except (TypeError, AttributeError, NameError) as error:
+        expected_errors = {
+            "walrus of a zero-argument helper": AttributeError,
+            "bare name in the header": NameError,
+            "walrus of a non-call value": TypeError,
+        }
+        assert label in expected_errors, f"{label}: unexpected {error!r}"
+        assert type(error) is expected_errors[label]
+        # These two fixtures deliberately lack a runtime binding; their AST
+        # refusal is checked below, independently of the executed exception.
+        if label in ("walrus of a zero-argument helper", "bare name in the header"):
+            assert live is True
+            observed_live = None
+        else:
+            observed_live = False
     else:
         observed_live = False
-    assert observed_live is live, (
+    assert observed_live is None or observed_live is live, (
         f"{label}: CPython produced live={observed_live}, the row claims "
         f"live={live}. The table is stale, not the analyzer."
     )
@@ -7047,6 +7051,54 @@ LOOP_ELEMENT_LIVE_SHAPES = (
         True,
         False,
     ),
+    # A negative one-argument bound is empty for the same reason `range(0)` is:
+    # `range(stop)` counts from 0 upwards by 1, so any `stop <= 0` yields
+    # nothing. The one-argument branch read this as `not stop`, which is
+    # "not empty" for every negative bound, so these two rows were missing and
+    # the defect shipped through a green suite.
+    #
+    # `range(-10**18)` is here to pin the *no-overflow* property: the fold
+    # compares the integers directly, so a bound far outside a machine word
+    # cannot round through a float and flip the answer.
+    (
+        "a negative one-argument range loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(-5):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "a very large negative range bound does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(-10**18):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The control that separates this from "any non-empty-looking number is
+    # empty": `range(-1)` is empty, `range(1)` is not, and both are written
+    # with a leading minus/plus so only the sign decides.
+    (
+        "CONTROL a one-argument range of one is not empty",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(1):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
     (
         "a literal-false while loop does not count as having run",
         (
@@ -12269,3 +12321,39 @@ def test_literal_match_requires_reachable_assertion_failure(prefix, subject, pat
     function = tree.body[1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    ("value", "live"),
+    [
+        ("lambda: None", False),
+        ("1", False),
+        ("[]", False),
+        ("{}", False),
+        ("()", False),
+        ("{1}", False),
+        ("json.live", True),
+    ],
+)
+def test_walrus_literal_entry_declines_shadowed_module_attributes(value, live):
+    source = (
+        "import contextlib\n"
+        "class Holder:\n    live = contextlib.nullcontext()\n"
+        "def outer(x):\n    json = Holder()\n"
+        f"    with (cs := {value}):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-literal-entry>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        observed_live = True
+    except TypeError:
+        observed_live = False
+    else:
+        observed_live = False
+    assert observed_live is live
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live
