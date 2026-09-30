@@ -61,3 +61,47 @@ The #412 + #424 + #419 conflict resolution at `aaf31e5` is lead-validated and
 **unreviewed**, so it is **not merged**. Release remains `PARTIAL`. Details and
 the exact next action are in
 `ledger/LEDGER_20260930_SIMINT_RESOLUTION_VALIDATED.md`.
+
+---
+
+## Second attempt the same day, also dropped
+
+`spawn_agent(task_name="simint_rev_b", fork_turns="none")` with a minimal
+message: the brief path, "execute it completely", and "if you cannot open that
+path, reply MISSING".
+
+Returned: `{"task_name": "/root/simint_rev_b", "nickname": "Pascal the 2nd"}`
+
+No reply, no artifact on disk, and `list_agents` / `wait_agent` continued to
+return `unsupported call`. Checked again after a further ~7 minutes of waiting:
+still nothing in the ledger directory and nothing new in `/tmp`.
+
+Note the difference in failure shape. The first attempt produced a **wrong but
+visible** reply — the child answered the AGENTS.md settings policy, so there was
+positive evidence the text was replaced. This attempt produced **silence**, which
+is the harder failure to detect: a returned task name and no output is
+indistinguishable from a reviewer that is still working. Under the standing
+rule, silence is recorded as no verdict, never as a pending approval.
+
+### What this rules out
+
+- Minimal messages do not help.
+- Naming the path in the first message does not help; the text is not reaching
+  the child either way.
+- The file-pointer fallback is useless, because the pointer itself is not being
+  delivered.
+
+### What remains untried
+
+Everything that does not depend on the `message` argument reaching the child.
+There is no mechanism available to me that guarantees that.
+
+### Consequence
+
+Zero of 18 open PRs has an independent review. Nothing is merged. The #421
+`TypeError` and the #405 false-dead are both filed as blocking comments, so
+those two PRs are correctly parked regardless. But #412, #419, and #424 are
+green and blocked **solely** on the review transport, and that is the honest
+statement of where this run stands.
+
+Release remains `PARTIAL`.
