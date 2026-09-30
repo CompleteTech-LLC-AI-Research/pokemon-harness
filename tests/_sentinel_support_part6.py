@@ -917,8 +917,8 @@ def _from_import_kind(module_name, attribute):
 
         from os import path as cs            -> os.path          (module)
         from os import sep as cs             -> '/'              (str)
-        from decimal import Decimal as cs    -> a class          (type)
-        from contextlib import nullcontext as cs -> a CM       (enterable)
+        from decimal import Decimal as cs    -> a class          (unenterable)
+        from contextlib import nullcontext as cs -> a CM *class* (unenterable)
 
     So the question is not "is an ``ImportFrom`` a carrier" but "what does
     *this* attribute resolve to", and that is answered by the real
@@ -927,6 +927,26 @@ def _from_import_kind(module_name, attribute):
     protocol returns its type name. An unresolvable module or attribute
     returns ``None`` as well, because an unreadable import is not evidence of
     an unenterable one.
+
+    #457. The enterability test is on the *metatype*, not on the value. ``with``
+    performs the special-method lookup on ``type(value)``, so a class is
+    enterable only when its metatype implements the protocol. Measured, the
+    naive ``hasattr(value, "__enter__")`` inverts the verdict for every
+    context-manager *class*:
+
+        contextlib.suppress      hasattr -> True    enterable -> TypeError
+        contextlib.nullcontext   hasattr -> True    enterable -> TypeError
+        contextlib.suppress(...)  hasattr -> True    enterable -> yes
+
+    A class exposes ``__enter__`` as the *unbound function* that its instances
+    will use, which is exactly the attribute the class itself is not entitled
+    to. Entering a class therefore raises ``TypeError: 'ABCMeta' object does
+    not support the context manager protocol``, and it raises during the
+    protocol check -- the metatype is consulted and found wanting, so no
+    ``__enter__`` is ever called. Answering "is this value enterable" by
+    asking the value therefore certified a dead assert as live -- the
+    damaging direction. The fix is to look the dunder up where the interpreter
+    looks it up.
     """
     module = sys.modules.get(module_name)
     if module is None or not isinstance(module, types.ModuleType):
@@ -935,7 +955,35 @@ def _from_import_kind(module_name, attribute):
         value = getattr(module, attribute)
     except AttributeError:
         return None
-    if hasattr(value, "__enter__"):
+    if hasattr(type(value), "__enter__"):
         # Enterable, so the header succeeds and the assert is live.
+        #
+        # #457. The lookup is on the metatype because that is the object the
+        # interpreter searches: `with cs:` evaluates `type(cs).__enter__`. A
+        # context-manager *class* exposes `__enter__` on itself as the unbound
+        # method its instances use, so asking the value would call a CM class
+        # enterable and pin a false LIVE; asking `type(value)` asks the
+        # metatype, which is what actually has to define the protocol, and
+        # keeps a CM *instance* -- whose own type does define it -- enterable.
+        #
+        # Reading the metatype rather than testing `isinstance(value, type)`
+        # is what makes the class case correct in *both* directions. A class
+        # with an enterable metaclass really does support the protocol --
+        # `class Meta(type)` defining `__enter__`/`__exit__` makes
+        # `with CM:` enter and bind the class itself -- so declaring every
+        # class unenterable would pin a false DEAD there. Asking the metatype
+        # answers that case the way the interpreter does.
         return None
+    if isinstance(value, type):
+        # #457. The value is a class and its metatype cannot be entered, so it
+        # is reported as the kind the rest of the module already uses for a
+        # class: `"type"`. The bare `type(value).__name__` would instead
+        # return the *metatype's* name, and for an abstract base such as
+        # `contextlib.suppress` that is `"ABCMeta"` -- a name
+        # `NON_CONTEXT_MANAGER_TYPES` does not list, so the caller would treat
+        # the unenterable header as unreadable and report the assert live
+        # again, the same false LIVE one line above. `_carrier_runtime_kinds`
+        # already records a `ClassDef` as `"type"`, so this keeps the two
+        # producers of that kind in agreement.
+        return "type"
     return type(value).__name__

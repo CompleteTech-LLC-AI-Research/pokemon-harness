@@ -2865,6 +2865,170 @@ def test_an_import_from_as_can_bind_a_real_context_manager():
     )
 
 
+#: A context-manager **class** is not itself a context manager. #457.
+#:
+#: ``from M import N as cs`` is answered by what ``N`` resolves to (#389), and
+#: the first cut of that resolution asked ``hasattr(value, "__enter__")`` of
+#: the *value*. That question is asked in the wrong place. ``with`` performs
+#: its special-method lookup on ``type(value)``, so a class is enterable only
+#: when its *metatype* implements the protocol. A class instead exposes
+#: ``__enter__`` as the unbound function its own instances will use, which is
+#: precisely the attribute the class is not entitled to:
+#:
+#:     >>> from contextlib import suppress
+#:     >>> hasattr(suppress, "__enter__")        # the instances' method
+#:     True
+#:     >>> with suppress:                        # ... on the class itself
+#:     TypeError: 'ABCMeta' object does not support the context manager protocol
+#:
+#: So asking the value reported every context-manager class as enterable and
+#: certified the assert underneath as load-bearing, when the interpreter had
+#: already raised ``TypeError`` on the header. Measured 5/5 on the tree this
+#: repairs, and the direction is the damaging one.
+#:
+#: Both rows below bind an abstract context-manager base through the very
+#: ``import from ... as`` spelling #389 already resolves, so they are decided
+#: by the same rule and isolate the lookup's *subject*.
+CONTEXT_MANAGER_CLASS_SHAPES = (
+    (
+        "an import-from-as binding a context-manager class is unenterable",
+        "from contextlib import suppress as cs",
+    ),
+    (
+        "an import-from-as binding the other context-manager class too",
+        "from contextlib import nullcontext as cs",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "bind"),
+    CONTEXT_MANAGER_CLASS_SHAPES,
+    ids=[shape[0] for shape in CONTEXT_MANAGER_CLASS_SHAPES],
+)
+def test_a_context_manager_class_is_not_itself_enterable(label, bind):
+    """Entering a context-manager *class* raises; entering an instance does not.
+
+    #457. The class exposes ``__enter__`` because its **instances** define
+    one, but ``with cs:`` looks the protocol up on the metatype, which does
+    not define it. The header therefore raises ``TypeError``, the assert under
+    it never runs, and ``dead`` is the only correct verdict.
+
+    This is decided by asking ``type(value)`` rather than ``value`` -- and
+    the control in :func:`test_a_context_manager_instance_stays_enterable` is
+    what forces that choice. A test that merely asserted "no class is
+    enterable" would pass a rule hard-coding that, and would then be wrong
+    about the very next row.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n    " + bind + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, False)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [False], (
+        f"{label}: expected [False] -- a class whose metatype cannot be "
+        f"entered is not a context manager -- got {results}. Asking the "
+        f"value for __enter__ reads the unbound instance method and certifies "
+        f"a dead contract as live."
+    )
+
+
+def test_a_context_manager_instance_stays_enterable():
+    """The control: the *instance* of the same class is genuinely enterable.
+
+    ``contextlib.nullcontext()``'s own type defines ``__enter__``, so the
+    metatype lookup finds it and the header succeeds. Nothing in the source
+    says "class" -- the difference is entirely in what the attribute
+    resolves to, which is the property the fix reasons about.
+
+    This is the row that breaks under either shortcut around the real rule:
+    a hard-coded "every class is dead" (which would drop a contract a class
+    with an enterable metaclass genuinely honours) and a hard-coded "the
+    value has ``__enter__``" (the defect #457 files).
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    from contextlib import nullcontext\n"
+        "    with nullcontext():\n        assert x != 1\n"
+    )
+    _assert_entry_contract("a context-manager instance stays enterable", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True] -- an instance of a context manager is enterable -- got {results}."
+    )
+
+
+def test_a_class_with_an_enterable_metaclass_is_enterable():
+    """The discriminating row a "classes are never enterable" rule gets wrong.
+
+    ``with`` consults the metatype, so a class whose metaclass defines
+    ``__enter__``/``__exit__`` really does support the protocol: entering it
+    runs the body's assert and binds the class itself. The fix therefore
+    looks the dunder up on ``type(value)`` rather than deciding on class
+    identity.
+
+    Executed, so the row cannot pass by the checker and the claim being wrong
+    together: at ``x=1`` the assert must fire.
+    """
+    source = (
+        "class Meta(type):\n"
+        "    def __enter__(cls):\n"
+        "        return cls\n"
+        "    def __exit__(cls, *exc):\n"
+        "        return False\n"
+        "class CM(metaclass=Meta):\n"
+        "    pass\n"
+        "def outer(x, flag, helper):\n"
+        "    from pickle import PickleError as _unused\n"
+        "    cs = CM\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract("a class with an enterable metaclass", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True] -- the metatype implements the protocol, so entering "
+        f"the class succeeds -- got {results}. A rule that answered 'every "
+        f"class is unenterable' would drop a genuinely live contract."
+    )
+
+
+def test_the_unenterable_class_kind_is_the_one_the_module_already_uses():
+    """``_from_import_kind`` reports a class as ``"type"``, not ``"ABCMeta"``.
+
+    The metatype of ``contextlib.suppress`` is ``ABCMeta``, so the naive
+    ``type(value).__name__`` returns a name ``NON_CONTEXT_MANAGER_TYPES`` does
+    not list. The caller would then treat the header as *unreadable* and
+    report the assert live -- the same false LIVE, reintroduced one line
+    below the fix.
+
+    ``_carrier_runtime_kinds`` already records a ``ClassDef`` as ``"type"``,
+    so the two producers of that kind have to agree or the shape is answered
+    by whichever one is wrong.
+    """
+    assert support._from_import_kind("contextlib", "suppress") == "type"
+    assert support._from_import_kind("contextlib", "nullcontext") == "type"
+    # The ordinary unenterable kinds are untouched.
+    assert support._from_import_kind("os", "path") == "module"
+    assert support._from_import_kind("os", "sep") == "str"
+    assert support._from_import_kind("decimal", "Decimal") == "type"
+    # An enterable attribute still answers None, and so does an unresolvable
+    # one -- declining is the safe direction when the value cannot be read.
+    assert support._from_import_kind("contextlib", "suppress_cascade") is None
+    assert support._from_import_kind("no_such_module_at_all", "anything") is None
+
+
 @pytest.mark.parametrize(
     ("label", "bind", "live"),
     CARRIER_ONLY_SHAPES,
