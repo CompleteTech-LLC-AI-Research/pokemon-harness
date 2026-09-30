@@ -3,7 +3,11 @@
 Date: 2026-09-30
 Worktree: `/home/agent/poke-harness/.scratch/fix418`
 Branch: `fix/418-starred-target-list`
-Head: `6a0c68c95bd11638ee31187f3d494d95e3c94442`
+Head: `15f08d10c36eefe0692313c934f361b450ea3f20` (PR head)
+Fix commit under review: `6a0c68c95bd11638ee31187f3d494d95e3c94442`
+  (the two commits above it — `743bac8`, `15f08d1` — add only this brief and
+  change no test or support code; review the head, or diff `6b72bf6..6a0c68c`
+  for the code change alone)
 Base: `6b72bf62b5722e1df2c44c988bbdb14803024032` (`origin/master`, unmodified)
 
 **Not merged. Not pushed. Not reviewed. Release remains `PARTIAL`.**
