@@ -3132,7 +3132,7 @@ def _binds_starred_target(statement, name):
     only the names reached *through* a ``Starred``.
     """
     if not isinstance(statement, ast.Assign):
-        return name in _starred_names_in_loop_target(statement, name)
+        return _starred_names_in_loop_target(statement, name)
     return any(
         isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
         for target in statement.targets
