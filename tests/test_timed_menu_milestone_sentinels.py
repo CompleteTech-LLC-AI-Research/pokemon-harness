@@ -685,10 +685,174 @@ UNREACHABLE_SHAPES = (
         "    if flag:\n        raise ValueError\n    assert x != 1",
         True,
     ),
+    # #402. This row was a *live control* for #400 and pinned `True`, on the
+    # reading that a transfer nested in an earlier statement's body says
+    # nothing about what follows. That reading is right for `break` and
+    # `continue`, which leave the *enclosing* loop and resume after it, and
+    # wrong for a `try` whose body is a bare `return`: there is nowhere for
+    # the `return` to resume, so the statements after the whole `try` are
+    # never reached. Measured on CPython 3.12.14 the assert is never
+    # evaluated, so the correct verdict is `False`, and the row moves from
+    # the control block to the dead block above.
     (
         "return in try then assert",
         "    try:\n        return\n    except Exception:\n        pass\n    assert x != 1",
+        False,
+    ),
+    # The `raise` counterpart is the live control that keeps this rule from
+    # degenerating into "a `try` body that ends in a transfer is dead". A
+    # `raise` in the `try` body is exactly what the handlers exist to catch,
+    # so the no-exception path -- or the handler itself falling through --
+    # resumes after the `try` and the assert is reached.
+    (
+        "raise in try then assert",
+        "    try:\n        raise ValueError\n    except ValueError:\n        pass\n    assert x != 1",
         True,
+    ),
+    # The `else` clause runs on the no-exception path, which is the ordinary
+    # one, so a `return` there leaves the same way a `return` in the `try`
+    # body does. The `try` body and every handler both fall through here, so
+    # the `else` is the only remaining path out.
+    (
+        "return in try else then assert",
+        "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        return\n    assert x != 1",
+        False,
+    ),
+    # A `finally` that returns overrides every path out of the `try`, so the
+    # statements after it are dead even though both the `try` body and the
+    # handler fall through.
+    (
+        "return in try finally then assert",
+        "    try:\n        pass\n    finally:\n        return\n    assert x != 1",
+        False,
+    ),
+    # Two handlers where only one falls through: the falling handler is a real
+    # path out of the `try`, so the assert is reached. This is what makes the
+    # handler test `all` and not `any` -- an `any` reading would call this
+    # dead and drop a live contract.
+    (
+        "one of two handlers falls through",
+        (
+            "    try:\n        pass\n"
+            "    except ValueError:\n        return\n"
+            "    except TypeError:\n        pass\n"
+            "    assert x != 1"
+        ),
+        True,
+    ),
+    # A single handler that re-raises is also live: the re-raise only happens
+    # when an exception occurred, so the no-exception path still reaches the
+    # assert below. `raise` in a handler is not a fall-through.
+    (
+        "handler reraise then assert",
+        "    try:\n        pass\n    except Exception:\n        raise\n    assert x != 1",
+        True,
+    ),
+    # The mirror of the row above, and the one place a bare `raise` in a
+    # handler *is* load-bearing: here the `try` body always raises, so there
+    # is no ordinary path at all and the re-raising handler is the only exit.
+    # The `_block_falls_through` guard is what separates the two rows -- with
+    # it removed, the row above would be answered dead and this one right.
+    (
+        "raise in try reraise handler then assert",
+        "    try:\n        raise ValueError\n    except ValueError:\n        raise\n    assert x != 1",
+        False,
+    ),
+    # #414. A handler that *returns* is only the sole exit when the body
+    # cannot fall through on its own. Here the body is `pass`, so it
+    # completes normally and control reaches the assert; the handler never
+    # runs at all. Deciding from the handlers alone answered `defeated` and
+    # dropped a live contract, while the `raise` rows above are unaffected
+    # because they already require a body that cannot fall through.
+    #
+    # This is the `return` counterpart of "handler reraise then assert":
+    # same ordinary path, opposite reason for the handler not to matter.
+    # The pair pins that the body guard applies to a returning handler too,
+    # not only to a re-raising one.
+    (
+        "handler returns but body falls through then assert",
+        "    try:\n        pass\n    except Exception:\n        return\n    assert x != 1",
+        True,
+    ),
+    # The discriminator against the row above: make the BODY the returning
+    # half as well and the `try` genuinely has no way out, so the assert is
+    # dead. These two rows differ only in the body, which is exactly the term
+    # the fix adds -- with the body guard removed, this row is still right
+    # and the one above is wrong, so neither alone can pass by accident.
+    (
+        "body and handler both return then assert",
+        "    try:\n        return\n    except Exception:\n        return\n    assert x != 1",
+        False,
+    ),
+    # A `try/finally` whose `finally` merely falls through is decided by the
+    # `try` body alone, and a body that may raise leaves the `finally` and
+    # then the statement after it reachable. This is the live control for the
+    # `finally` clause: without it, a rule that treated any `finally` as
+    # terminal would drop this assert.
+    (
+        "try finally falls through then assert",
+        "    try:\n        helper()\n    finally:\n        pass\n    assert x != 1",
+        True,
+    ),
+    # `except*` is the same statement with a different handler type, and the
+    # walk must not skip it by testing for `ast.Try` alone.
+    (
+        "return in try star then assert",
+        "    try:\n        return\n    except* Exception:\n        pass\n    assert x != 1",
+        False,
+    ),
+    # The transfer kills the statements after the `try` *statement*, so
+    # anything nested under a later compound statement is dead too -- the
+    # interpreter never begins evaluating it.
+    (
+        "return in try then with body",
+        "    try:\n        return\n    except Exception:\n        pass\n    with helper():\n        assert x != 1",
+        False,
+    ),
+    # A bare string expression is not a transfer, so it must not decide
+    # whether a block ends in one. `_block_falls_through` skips a trailing
+    # `Expr` constant and keeps looking, because a string literal is a
+    # statement that can neither transfer nor fall out of the block in the way
+    # a `return` or `raise` does.
+    #
+    # These three rows are the only things that exercise that skip, and the
+    # first of them is load-bearing: with the skip disabled,
+    # `_block_falls_through` answers from the trailing string instead of from
+    # the `raise` beneath it, the re-raise clause stops firing, and this row
+    # flips to `True` -- certifying as ENFORCED an assert that CPython never
+    # evaluates. That is the blocking direction of the #308 criterion, so the
+    # skip is a real rule and not decoration.
+    (
+        "trailing string after raise then reraise",
+        (
+            "    try:\n        raise ValueError\n        'dead'\n"
+            "    except ValueError:\n        raise\n    assert x != 1"
+        ),
+        False,
+    ),
+    # The same shape with a body that *completes* rather than raises. Here the
+    # block genuinely can fall out of its bottom -- `helper()` returns, the
+    # string is evaluated, and control leaves after the string -- so the
+    # re-raise handler is not the sole exit and the assert is reached. The
+    # trailing string must not be mistaken for a transfer that stops it.
+    (
+        "trailing string after call then reraise",
+        (
+            "    try:\n        helper()\n        'tail'\n"
+            "    except Exception:\n        raise\n    assert x != 1"
+        ),
+        True,
+    ),
+    # And the filed #402 shape carrying the same trailing string, which keeps
+    # the `return` answer stable when the body is a bare transfer followed by
+    # a non-transfer statement.
+    (
+        "return then trailing string in try",
+        (
+            "    try:\n        return\n        'dead'\n"
+            "    except Exception:\n        pass\n    assert x != 1"
+        ),
+        False,
     ),
     ("plain live assert", "    assert x != 1", True),
 )
@@ -3034,6 +3198,46 @@ CAPTURE_SCOPE_BOUNDARY_ROWS = (
 #: rule wholesale. Two are included below and both must stay ``True``: a plain
 #: assignment of a real context manager, and a class that *does* implement the
 #: protocol. Neither is in the table above, so neither is a duplicate.
+#:
+#: #418 adds the four starred-target rows. These are the same shape as the
+#: carriers -- entering raises ``TypeError`` before the body, so the second
+#: assert is unreachable -- but they are decided by a *value* the module can
+#: read rather than by an unreadable one, which is why they sat in a different
+#: bucket and stayed wrong. The fix keys off the target syntax alone, so the
+#: right-hand side in these rows is deliberately varied: a lone element, a
+#: bind-from-end-after-star tail, a usable context manager, and a plain int all
+#: land on the same list.
+STARRED_TARGET_ENTRY_UNREACHABLE_ROWS = (
+    (
+        "a starred target binds a list even from a lone suppressor",
+        "    *cs, = (contextlib.suppress(AssertionError),)",
+        False,
+    ),
+    (
+        "a bind-from-end-after-star tail binds the list of the rest",
+        "    a, *cs = (contextlib.suppress(AssertionError), 2)",
+        False,
+    ),
+    (
+        "a starred target holding a usable context manager is still a list",
+        "    *cs, = (contextlib.nullcontext(),)",
+        False,
+    ),
+    (
+        "a starred target over a non-manager element binds a list",
+        "    *cs, = (1,)",
+        False,
+    ),
+    # Controls. A plain element binding is NOT decidable from the container's
+    # syntax, so the rule declines and the assert stays live. These keep that
+    # decline intact: a fix that over-corrected every destructuring target
+    # would report these dead and fail.
+    (
+        "CONTROL a non-starred element binding of a real context manager",
+        "    cs, other = (contextlib.nullcontext(), 2)",
+        True,
+    ),
+)
 CARRIER_ENTRY_UNREACHABLE_ROWS = (
     ("import-as binds the module", "    import os as cs", False),
     ("import-from-as binds the module", "    from os import path as cs", False),
@@ -3479,6 +3683,132 @@ def test_a_string_field_carrier_cannot_be_entered_so_the_assert_is_unreachable(
         f"cannot be entered makes the assert under the header *unreachable*, "
         f"so reporting it enforced certifies a dead contract as load-bearing."
     )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "second_assert_live"),
+    STARRED_TARGET_ENTRY_UNREACHABLE_ROWS,
+    ids=[row[0] for row in STARRED_TARGET_ENTRY_UNREACHABLE_ROWS],
+)
+def test_a_starred_target_binds_a_list_so_the_assert_is_unreachable(
+    label, rebind, second_assert_live
+):
+    """A name bound through ``ast.Starred`` holds a list, which cannot be entered.
+
+    This is #418, and it is a real defect on ``origin/master`` (``6b72bf6``)
+    rather than a coverage gap: every row below reported the unreachable
+    assert ``enforced`` before the fix.
+
+    The failure is an ordering error inside ``_entry_is_dead``. The general
+    destructuring branch declines ``cs, other = (a, b)`` because the type of a
+    plain element is not readable from the container's syntax, and declining is
+    the safe answer -- the assert stays live. A starred target was falling into
+    that same decline, but it is decidable: ``*cs, = (...)`` and ``a, *cs =
+    (...)`` collect a run of elements into a **list** regardless of what the
+    right-hand side held. Letting the wrapped element's own kind vouch for the
+    name is what let a usable ``contextlib.suppress`` certify a bare list as an
+    enterable object.
+
+    Measured on CPython 3.12.14, with ``x=1`` so ``assert x != 1`` is false:
+
+    * ``*cs, = (suppress(),)`` binds ``[suppress_object]``
+    * ``a, *cs = (suppress(), 2)`` binds ``[2]``
+    * ``b, *c = (1, suppress())`` binds ``[suppress_object]``
+
+    and ``hasattr(cs, "__enter__")`` is ``False`` in every case, so
+    ``with cs:`` raises ``TypeError`` before the body and the assert is
+    unreachable. Note the third shape: a starred tail that *does* contain a
+    usable context manager is still a list, so the element's own kind is
+    irrelevant to the entry decision.
+
+    The control keeps the sibling decline honest. Its expected value is
+    ``True`` and the interpreter agrees -- ``cs, other = (nullcontext(), 2)``
+    really does enter and really does fire. A fix that keyed on "any
+    destructuring target" instead of "a starred target" would report this dead,
+    and this test would catch it.
+
+    A second control was drafted and then removed rather than shipped: the
+    matching non-starred row with a *suppressor* element
+    (``cs, other = (suppress(), 2)``) is **also** reported ``enforced`` by the
+    analyzer, while CPython swallows it -- the same false-live, on the
+    non-starred path. That is the ``#336`` element-decline family, not this
+    issue, and it is unaffected by the change under test. It was caught here
+    because ``_assert_entry_contract`` executes the fixture rather than
+    trusting the expected column, which is the only reason a row this stale
+    could not have been shipped silently. Measured ground truth for it:
+
+    | store                                     | CPython 3.12.14 | analyzer |
+    |-------------------------------------------|-----------------|----------|
+    | ``cs, other = (nullcontext(), 2)``        | fires (live)    | ``True`` |
+    | ``cs, other = (suppress(), 2)``           | swallowed       | ``True`` |
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A starred target "
+        f"binds a list, and entering a list raises before the body, so the "
+        f"assert under the header is unreachable."
+    )
+
+
+@pytest.mark.parametrize(
+    ("store", "starred", "live"),
+    (
+        ("*cs, cs = (1, contextlib.nullcontext())", False, True),
+        ("(*cs, (cs,)) = (1, (contextlib.nullcontext(),))", False, True),
+        ("*cs, tail = head, cs = (1, contextlib.nullcontext())", False, True),
+        ("head, cs = *cs, tail = (1, contextlib.nullcontext())", True, False),
+        ("cs, *cs = (contextlib.nullcontext(), 1)", True, False),
+        ("(*cs, (cs, *cs)) = (1, (contextlib.nullcontext(), 2))", True, False),
+        ("*(cs, tail), = (contextlib.nullcontext(), 2)", False, True),
+    ),
+)
+def test_starred_target_kind_uses_the_final_store(store, starred, live):
+    """A repeated target name receives its last value, including nested stores.
+
+    Pin the dead-entry predicate directly: an older duplicate-binding
+    limitation elsewhere in `_is_enforced` masks this specific regression.
+    Every expected entry outcome is checked by executing the same fixture.
+    """
+    source = (
+        f"def outer(x, flag, helper):\n    import contextlib\n    {store}\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(store, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    statement = function.body[1]
+    header = function.body[2]
+    assert support._binds_starred_target(statement, "cs") is starred
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
+    )
+
+
+@pytest.mark.parametrize(
+    "store",
+    (
+        "*cs, tail = cs = (1, contextlib.nullcontext())",
+        "(*cs, tail) = (cs, tail) = (1, contextlib.nullcontext())",
+    ),
+)
+def test_later_chained_plain_target_clears_a_starred_binding(store):
+    statement = ast.parse(store).body[0]
+    assert not support._binds_starred_target(statement, "cs")
 
 
 #: AC1's second position. A carrier can sit in two places relative to the
@@ -5093,3 +5423,84 @@ def test_loop_body_header_reads_current_iteration_not_final_element(elements, he
     function = tree.body[1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is live
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    [
+        (
+            "a later terminal try cannot kill an earlier assert",
+            "    assert x != 1\n    try:\n        return\n    except Exception:\n        pass\n",
+            True,
+        ),
+        (
+            "an exception before return can resume through a handler",
+            "    try:\n        helper()\n        return\n    except ValueError:\n        pass\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "a return value can raise before returning",
+            "    try:\n        return helper()\n    except ValueError:\n        pass\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "an exception bypasses a returning else",
+            "    try:\n        helper()\n    except ValueError:\n        pass\n    else:\n        return\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "all exception paths transfer before a returning else",
+            "    try:\n        helper()\n    except ValueError:\n        return\n    else:\n        return\n    assert x != 1\n",
+            False,
+        ),
+        (
+            "a finally return overrides a falling through handler",
+            "    try:\n        helper()\n    except ValueError:\n        pass\n    finally:\n        return\n    assert x != 1\n",
+            False,
+        ),
+        (
+            "a finalizer call preserves a pending return",
+            "    try:\n        return\n    finally:\n        helper()\n    assert x != 1\n",
+            False,
+        ),
+        (
+            "a nested try can catch an exception from a return value",
+            "    try:\n        try:\n            return helper()\n        except ValueError:\n            pass\n    finally:\n        pass\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "a finalizer break resumes after the loop",
+            "    for unused in (1,):\n        try:\n            return\n        finally:\n            break\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "a handler's trailing transfer need not run after an inner catch",
+            "    try:\n        helper()\n    except ValueError:\n        try:\n            return helper()\n        except ValueError:\n            pass\n    assert x != 1\n",
+            True,
+        ),
+    ],
+)
+def test_try_reachability_matches_executed_exception_paths(label, body, enforced):
+    """A possible exception path must not silently drop a live assertion."""
+    source = "def outer(x, helper):\n" + body
+    namespace = {}
+    exec(compile(source, f"<try-path:{label}>", "exec"), namespace)  # noqa: S102 - executed fixture
+
+    def raises():
+        raise ValueError("the exception path")
+
+    reached = []
+    for helper in (lambda: None, raises):
+        try:
+            namespace["outer"](1, helper)
+        except AssertionError:
+            reached.append(True)
+        except ValueError:
+            reached.append(False)
+        else:
+            reached.append(False)
+    assert any(reached) is enforced, f"{label}: the fixture's executed paths disagree"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is enforced, label
