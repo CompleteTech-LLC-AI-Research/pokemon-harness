@@ -106,8 +106,11 @@ Recorded so you know what is already claimed; you must NOT take it as a verdict.
 The primary method is **differential execution against real CPython** — not
 reading the tool's own tables, and not reading the lead's conclusion.
 
-For each fixture, decide ground truth by EXECUTING it under CPython 3.11 and
-observing what actually happens:
+For each fixture, decide ground truth by EXECUTING it under the project venv
+(CPython **3.12.14**) and observing what actually happens. (CORRECTED
+2026-09-30: an earlier revision of this line said 3.11. The venv is 3.12.14;
+`pyproject.toml` declares `requires-python = ">=3.11"`, so 3.12.14 is the
+intended interpreter. Do not go looking for a 3.11 interpreter.)
 
 - `True` from the analyzer means the contract is retained as LIVE.
 - LIVE only when the assert actually FIRES.
