@@ -1409,8 +1409,15 @@ WALRUS_SHAPES = (
         "    with (cs := contextlib.suppress(ValueError)):\n        assert x != 1",
         True,
     ),
-    # A walrus whose value is not even a call cannot be a suppressor.
-    ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", True),
+    # A walrus whose value is not even a call cannot be a suppressor -- but it
+    # still cannot be *entered*. `with (cs := 1):` raises
+    # `TypeError: 'int' object does not support the context manager protocol`
+    # while evaluating the header, so the assert never runs and the contract is
+    # dead. This row previously read `True`, which was the damaging direction:
+    # "not a suppressor" was being read as "live", conflating a live assert with
+    # an unreachable one. #390 makes the entered value's own runtime type the
+    # question, and an `int` is pinned to non-enterable by its syntax.
+    ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", False),
     # A bare name in the header is the already-closed alias case, not a walrus.
     ("bare name in the header", "    with cs:\n        assert x != 1", True),
 )
@@ -1543,6 +1550,37 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
         "    import contextlib\n"
         "    from contextlib import suppress, nullcontext\n"
         "    import pytest\n" + body + "\n"
+    )
+    # Execute the fixture first and require the row to agree with CPython. A
+    # header that raises while it is being evaluated never reaches the assert,
+    # which is a *different* outcome from one that swallows it -- conflating
+    # the two is how "walrus of a non-call value" came to be pinned as live.
+    namespace = {}
+    exec(compile(source, "<walrus-header>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, namespace.get("helper"))
+    except AssertionError:
+        observed_live = True
+    except (TypeError, AttributeError, NameError) as error:
+        expected_errors = {
+            "walrus of a zero-argument helper": AttributeError,
+            "bare name in the header": NameError,
+            "walrus of a non-call value": TypeError,
+        }
+        assert label in expected_errors, f"{label}: unexpected {error!r}"
+        assert type(error) is expected_errors[label]
+        # These two fixtures deliberately lack a runtime binding; their AST
+        # refusal is checked below, independently of the executed exception.
+        if label in ("walrus of a zero-argument helper", "bare name in the header"):
+            assert live is True
+            observed_live = None
+        else:
+            observed_live = False
+    else:
+        observed_live = False
+    assert observed_live is None or observed_live is live, (
+        f"{label}: CPython produced live={observed_live}, the row claims "
+        f"live={live}. The table is stale, not the analyzer."
     )
     tree = ast.parse(source)
     function = tree.body[0]
@@ -4342,6 +4380,22 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
                 "        pass\n"
                 "    cs = lambda: None\n"
                 "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+        (
+            # The same lambda bound *in* the header. #390 filed both rows and
+            # the first repair covered only this one's assignment spelling: a
+            # `NamedExpr` header never becomes a store entry, so the readable
+            # set that admits `ast.Lambda` was never consulted for it, and the
+            # assert was left certified as load-bearing while `with cs:`
+            # raised `TypeError` before the body ran.
+            "#390 a lambda bound in the header itself is not enterable",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    with (cs := lambda: None):\n"
                 "        assert x != 1\n"
             ),
             False,
@@ -12684,3 +12738,39 @@ def test_literal_subject_declines_modified_from_import_manager_class():
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    ("value", "live"),
+    [
+        ("lambda: None", False),
+        ("1", False),
+        ("[]", False),
+        ("{}", False),
+        ("()", False),
+        ("{1}", False),
+        ("json.live", True),
+    ],
+)
+def test_walrus_literal_entry_declines_shadowed_module_attributes(value, live):
+    source = (
+        "import contextlib\n"
+        "class Holder:\n    live = contextlib.nullcontext()\n"
+        "def outer(x):\n    json = Holder()\n"
+        f"    with (cs := {value}):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-literal-entry>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        observed_live = True
+    except TypeError:
+        observed_live = False
+    else:
+        observed_live = False
+    assert observed_live is live
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live
