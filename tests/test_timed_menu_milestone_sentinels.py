@@ -9275,6 +9275,86 @@ ROUND_EIGHT_SOURCES = (
         ),
         False,
     ),
+    (
+        "a store in an elif arm that always runs settles the name",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    pass\n"
+            "elif True:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    (
+        "an elif True store behind a conditional if is not unconditional",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = nullcontext()\n"
+            "    if x:\n"
+            "        pass\n"
+            "    elif True:\n"
+            "        cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "an elif True store behind a second never-true link settles the name",
+        (
+            "from contextlib import nullcontext\n"
+            "def outer(x):\n"
+            "    cs = nullcontext()\n"
+            "    if False:\n"
+            "        pass\n"
+            "    elif False:\n"
+            "        pass\n"
+            "    elif True:\n"
+            "        cs = list()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    (
+        "a store in an else arm that always runs settles the name",
+        (
+            "from contextlib import nullcontext\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    pass\n"
+            "else:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+    (
+        "a store in an elif arm behind a conditional test stays undecided",
+        (
+            "from contextlib import nullcontext\n"
+            "flag = bool(int('1'))\n"
+            "cs = nullcontext()\n"
+            "if False:\n"
+            "    pass\n"
+            "elif flag:\n"
+            "    pass\n"
+            "elif True:\n"
+            "    cs = list()\n"
+            "def outer(x):\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
 )
 
 
@@ -10464,3 +10544,123 @@ def test_nonlocal_scope_and_rebinding_match_executed_calls(label, source, enforc
     )
     assertion = next(node for node in ast.walk(inner) if isinstance(node, ast.Assert))
     assert _is_enforced(inner, assertion, tree) is enforced, label
+
+
+ALWAYS_RUN_ARM_EXECUTED_ROWS = (
+    ("plain decided elif", "if False:\n    pass\nelif True:\n    cs = list()", False),
+    ("plain decided else", "if False:\n    pass\nelse:\n    cs = list()", False),
+    (
+        "decided chain",
+        "if False:\n    pass\nelif False:\n    pass\nelif True:\n    cs = list()",
+        False,
+    ),
+    (
+        "decided chain else",
+        "if False:\n    pass\nelif False:\n    pass\nelse:\n    cs = list()",
+        False,
+    ),
+    ("a true predecessor skips its elif", "if True:\n    pass\nelif True:\n    cs = list()", True),
+    (
+        "a conditional predecessor can skip its elif",
+        "if flag:\n    pass\nelif True:\n    cs = list()",
+        True,
+    ),
+    (
+        "a conditional intermediate link can skip its elif",
+        "if False:\n    pass\nelif flag:\n    pass\nelif True:\n    cs = list()",
+        True,
+    ),
+    (
+        "a conditional parent can skip its else store",
+        "if flag:\n    if False:\n        pass\n    else:\n        cs = list()",
+        True,
+    ),
+    (
+        "a conditional child can skip a store under decided else",
+        "if False:\n    pass\nelse:\n    if flag:\n        cs = list()",
+        True,
+    ),
+    (
+        "a conditional child under decided elif",
+        "if False:\n    pass\nelif True:\n    if flag:\n        cs = list()",
+        True,
+    ),
+    (
+        "a skipped else leaves an assertion active",
+        "if True:\n    pass\nelse:\n    cs = list()",
+        True,
+    ),
+    (
+        "an always-run arm can leave a manager",
+        "if False:\n    pass\nelif True:\n    cs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "an always-run class store is not an instance",
+        "if False:\n    pass\nelse:\n    class cs:\n        pass",
+        False,
+    ),
+    (
+        "an always-run function store is not a manager",
+        "if False:\n    pass\nelif True:\n    def cs():\n        pass",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "branch", "live"),
+    ALWAYS_RUN_ARM_EXECUTED_ROWS,
+    ids=[row[0] for row in ALWAYS_RUN_ARM_EXECUTED_ROWS],
+)
+def test_always_run_arms_follow_every_enclosing_conditional(label, branch, live):
+    source = (
+        "import contextlib\ndef outer(x, flag):\n"
+        "    cs = contextlib.nullcontext()\n"
+        + "\n".join("    " + line for line in branch.splitlines())
+        + "\n    with cs:\n        assert x != 1\n"
+    )
+    runtime = {}
+    exec(compile(source, "<always-run-arm>", "exec"), runtime)  # noqa: S102
+    fired = []
+    for flag in (False, True):
+        try:
+            runtime["outer"](1, flag)
+        except AssertionError:
+            fired.append(True)
+        except TypeError:
+            fired.append(False)
+        else:
+            fired.append(False)
+    assert any(fired) is live, label
+    tree = ast.parse(source)
+    function = tree.body[1]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live, label
+
+
+@pytest.mark.parametrize("inner_arm", ("else", "elif"))
+def test_a_decided_inner_arm_still_depends_on_a_conditional_outer_else(inner_arm):
+    inner = (
+        "        if False:\n            pass\n        "
+        + ("else:" if inner_arm == "else" else "elif True:")
+        + "\n            cs = []\n"
+    )
+    source = (
+        "import contextlib\n"
+        "def outer(flag):\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if flag:\n        pass\n    else:\n" + inner + "    with cs:\n        assert False\n"
+    )
+    namespace = {}
+    exec(compile(source, "<conditional-outer-else>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](True)
+    with pytest.raises(TypeError):
+        namespace["outer"](False)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True

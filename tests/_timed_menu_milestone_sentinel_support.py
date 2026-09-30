@@ -3979,9 +3979,11 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
                 names = _store_target_names_of(store)
                 if isinstance(store, (ast.Import, ast.ImportFrom)):
                     names = [alias.asname or alias.name.split(".")[0] for alias in store.names]
-                elif isinstance(store, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    names = [store.name]
-                elif isinstance(store, ast.ExceptHandler) and store.name is not None:
+                elif (
+                    isinstance(store, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    or isinstance(store, ast.ExceptHandler)
+                    and store.name is not None
+                ):
                     names = [store.name]
                 if name not in names or store is node:
                     continue
@@ -5869,11 +5871,33 @@ def _statement_always_runs(statement, function):
     header reported DEAD where CPython enters it. The same applies to a
     `while False:` body and to an `else` arm, which runs exactly when its `if`
     does *not*.
+
+    #403. The `else`/`elif` case is subtler than the `while False:` one,
+    because an arm that always runs is the *settling* direction rather than the
+    never-runs one, and it was the shape that stayed wrong after the plain
+    `if True:` spelling was fixed:
+
+        if False:
+            pass
+        elif True:
+            cs = list()          # the arm always runs, so this settles `cs`
+
+    `_is_always_true_arm` reads that, and the unreachable-arm check at the end
+    still subtracts the mirror-image shape (`if True: ... else: <store>`,
+    which never runs), so the two directions stay distinct.
     """
     if function is None:
         return False
     blocks = _enclosing_blocks(statement, function)
-    if not any(_is_always_true_branch(block, statement, function) for block in blocks):
+    # #403. An always-true **arm** counts from this side as well as an
+    # always-true body: `if False: ... elif True: <store>` runs the store on
+    # every call, exactly as `if True: <store>` does. Both spellings settle the
+    # name, so both belong with the unconditional stores in `_stores_of`.
+    if not any(
+        _is_always_true_branch(block, statement, function)
+        or _is_always_true_arm(block, statement, function)
+        for block in blocks
+    ):
         # The store is not inside an always-true branch at all, so there is
         # nothing to claim. This is the ordinary case and the cheap exit.
         return False
@@ -5882,8 +5906,18 @@ def _statement_always_runs(statement, function):
     # and an `else` beside a literal-true test are all read by the same
     # never-runs question, which is the safe direction: the store is left
     # conditional, so whatever the enclosing scope really does still decides.
+    # #403. `_is_always_true_arm` counts here for the same reason it counts in
+    # the `any` above: an always-run arm settles the name just as an
+    # always-true body does, so the `if False:` link that makes the arm
+    # reachable must not veto it.
     return all(
-        _block_always_reaches_store(block, statement, function) for block in blocks
+        (
+            _is_always_true_branch(block, statement, function)
+            or _is_always_true_arm(block, statement, function)
+            if isinstance(block, ast.If)
+            else _block_always_reaches_store(block, statement, function)
+        )
+        for block in blocks
     ) and not any(_statement_in_unreachable_arm(block, statement, function) for block in blocks)
 
 
@@ -5946,16 +5980,39 @@ def _block_always_reaches_store(block, statement, function):
 
 
 def _is_always_true_branch(block, statement, function):
-    """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?"""
-    if _elif_link_is_conditional(block, statement, function):
-        # #429. `elif True:` is a later link, so it is reached only when
-        # every test above it failed. Its own literal-true test does not make
-        # the store unconditional.
-        return False
+    """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?
+
+    "Always-true" is about the test alone, which is enough only when the body
+    is reached on every call. That is true of a standalone ``if True:`` and
+    false of an ``elif`` link: an ``elif`` body runs only when every test above
+    it in the chain failed, so its own always-true test says nothing about
+    whether it is ever entered (#416):
+
+        from contextlib import nullcontext
+
+        def outer(x):
+            cs = nullcontext()
+            if x:
+                pass
+            elif True:
+                cs = list()      # reached only when x is FALSE
+            with cs:
+                assert x != 1    # CPython, x=1: fires
+
+    The ``elif True:`` link satisfies the test on its own, so the store was
+    promoted to an unconditional one and the header answered ``defeated`` --
+    a live contract dropped. The store settles the name only when ``x`` is
+    false, so the header is undecidable and must not be settled.
+
+    :func:`_elif_link_is_reached` supplies that missing question, and it is
+    the same reachability the ``_always_true_arm_within`` chain walk already
+    models for the arm case.
+    """
     return (
         isinstance(block, ast.If)
         and _condition_is_always_true(block.test, function)
         and _contains_any(block.body, statement)
+        and _elif_link_is_reached(block, function)
     )
 
 
@@ -9083,3 +9140,181 @@ def _unpacked_keywords(node):
         return
     for key, item in value.items():
         yield (key if isinstance(key, str) else "<unreadable>", item)
+
+
+def _elif_link_is_reached(block, function):
+    """Is this ``if`` link's body entered on every call, or is it an ``elif``?
+
+    Returns ``True`` for a link that is not part of an ``orelse`` chain: a
+    standalone ``if True:`` and the opening link of a chain are both reached
+    whenever their test holds, and here the test does hold.
+
+    For a link reached *through* an ``orelse`` -- the ``elif`` shape -- the
+    body runs only when every test above it failed, so each of those has to be
+    never-true for the link to be entered on every call. One test that can
+    hold ends the walk and this returns ``False``, leaving the store
+    conditional.
+    """
+    return _link_is_always_entered(block, function)
+
+
+def _is_always_true_arm(block, statement, function):
+    """Is ``statement`` in an ``else``/``elif`` arm of ``block`` that always runs?
+
+    #403. :func:`_is_always_true_branch` only recognised the **body** of an
+    always-true ``if``, so the same rule went unread in the arm that runs
+    *because* the test failed:
+
+        from contextlib import nullcontext
+        cs = nullcontext()
+        if False:
+            pass
+        elif True:
+            cs = list()             # this arm always runs
+        def outer(x):
+            with cs:               # CPython: `with list():` raises TypeError
+                assert x != 1     # unreachable
+
+    The store is written as a conditional one, so it settled nothing and the
+    name was left to the ``nullcontext`` above -- reporting a header CPython
+    cannot enter as a live one, the damaging direction. The plain ``else:``
+    spelling of the same thing was wrong for the same reason:
+
+        if False:
+            pass
+        else:
+            cs = list()
+
+    The arm runs exactly when the test is false **and** every earlier test in
+    the chain also failed, so both have to be read: an ``elif`` behind a
+    never-true ``if`` always runs, while the same arm behind an always-true
+    ``if`` never does. That second case is already handled, and handled
+    correctly, by :func:`_statement_in_unreachable_arm` -- which is why this
+    helper is consulted alongside it rather than instead of it, and why
+    :func:`_statement_always_runs` still subtracts the unreachable-arm answer
+    at the end.
+
+    An ``elif`` is an ``else`` whose body is another ``if``, so the chain is
+    walked by following ``orelse`` while it holds a single ``ast.If``. A
+    trailing plain ``else`` settles the same way once the chain is exhausted.
+
+    This says nothing about a store written *directly* in a loop body, which
+    may not run at all; that boundary is #403's AC4 and is preserved by
+    leaving :func:`_block_never_runs` the only loop-side test.
+    """
+    if not isinstance(block, ast.If):
+        return False
+    # An `if False:` / `elif True:` chain runs the `elif` body on every call,
+    # while the `if` link's own body never runs. The *outer* link is claimed
+    # here as well as the arm itself, because the per-block `all(...)` in
+    # :func:`_statement_always_runs` would otherwise see a never-running block
+    # on the path to the store and reject it. That is the right answer for that
+    # question: this arm settles the name on every call.
+    #
+    # The whole rest of the chain still has to be read before claiming it, and
+    # `_always_true_arm_within` is what reads it -- an early return here on the
+    # strength of this link's test alone is the bug that had the conditional
+    # chain below settled on its opening `if False:`.
+    if not _condition_is_never_true(block.test, function):
+        return False
+    return _always_true_arm_within(block, statement, function)
+
+
+def _always_true_arm_within(block, statement, function):
+    """Does an always-run ``orelse`` arm of ``block`` hold ``statement``?
+
+    #403. The chain walk behind :func:`_is_always_true_arm`. ``block``'s own
+    # test is already known to be never-true by the caller, so this starts at
+    its ``orelse`` and follows the chain downwards:
+
+    * an ``elif`` link is reached only when its own test is also never-true,
+      and the claim is made at the first link whose body holds the statement;
+      a link whose test is *always*-true settles the name as surely as an
+      unconditional store, so it is claimed there too;
+    * a trailing plain ``else`` runs when the whole chain above it failed, so
+      it settles the name as well;
+    * a link whose test can hold ends the walk with ``False`` -- the arm beyond
+      it runs on some calls and not others, which is the undecidable case and
+      must leave the store conditional.
+
+    Reading every link is what keeps
+
+        if False:
+            pass
+        elif flag:
+            pass
+        elif True:
+            cs = list()
+
+    from being settled on the strength of the opening ``if False:`` alone. That
+    arm is reached only when ``flag`` is false, so the store settles the name
+    only sometimes and the header is undecidable.
+    """
+    arm = block.orelse
+    while len(arm) == 1 and isinstance(arm[0], ast.If):
+        # An `elif` is reached only when the tests above it failed, so an
+        # always-true test here both runs its body on every call *and* is
+        # itself the settling store. `_is_always_true_branch` is asked first so
+        # the body case is settled by the body rule, keeping the two questions
+        # in one place.
+        test = arm[0].test
+        if _contains_any(arm[0].body, statement):
+            if _condition_is_always_true(test, function):
+                return _is_always_true_branch(arm[0], statement, function)
+            return _condition_is_never_true(test, function)
+        if not _condition_is_never_true(test, function):
+            return False
+        arm = arm[0].orelse
+    # A trailing `else` runs when the whole chain above it failed.
+    return _contains_any(arm, statement)
+
+
+def _link_is_always_entered(block, function):
+    """Is this ``if`` node's body entered on every call?
+
+    Walks the ``orelse`` chain containing ``block`` from the outermost link
+    inward, which is the only direction that can answer the question: a link
+    deeper in the chain is reached only when every test above it failed.
+
+    A node that is not inside any chain is a standalone ``if`` or the opening
+    link of one, and is entered whenever its own test holds -- the caller's
+    question is about the test, so the answer here is ``True`` and the test
+    itself is judged by the caller.
+    """
+    outer_link = _outermost_chain_link(block, function)
+    if outer_link is None:
+        return True
+    link = outer_link
+    while True:
+        if link is block:
+            return True
+        if not isinstance(link, ast.If) or len(link.orelse) != 1:
+            return False
+        nxt = link.orelse[0]
+        if not isinstance(nxt, ast.If):
+            # A trailing plain `else`. `block` is not in this arm, so it is
+            # never reached through this chain.
+            return False
+        # `nxt` is an `elif`: it is entered only when `link`'s test failed, so
+        # `link` must be never-true for the walk to continue inward.
+        if not _condition_is_never_true(link.test, function):
+            return False
+        link = nxt
+
+
+def _outermost_chain_link(block, function):
+    """The opening ``if`` of the ``orelse`` chain containing ``block``.
+
+    ``None`` when ``block`` is not inside such a chain. Only a genuine
+    ``elif`` -- a node that is the single element of some ``if``'s
+    ``orelse`` -- has a parent link, and the search is by identity through
+    the function so an unrelated nested ``if`` cannot be mistaken for one.
+    """
+    if function is None:
+        return None
+    for node in ast.walk(function):
+        if not isinstance(node, ast.If) or len(node.orelse) != 1:
+            continue
+        if node.orelse[0] is block:
+            return node
+    return None
