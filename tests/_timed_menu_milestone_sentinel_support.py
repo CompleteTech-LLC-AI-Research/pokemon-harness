@@ -5293,11 +5293,67 @@ def _statement_always_runs(statement, function):
 
 def _is_always_true_branch(block, statement, function):
     """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?"""
+    if _elif_link_is_conditional(block, statement, function):
+        # #429. `elif True:` is a later link, so it is reached only when
+        # every test above it failed. Its own literal-true test does not make
+        # the store unconditional.
+        return False
     return (
         isinstance(block, ast.If)
         and _condition_is_always_true(block.test, function)
         and _contains_any(block.body, statement)
     )
+
+
+def _elif_link_is_conditional(block, statement, function):
+    """Is ``block`` an ``elif`` link, reached only when every test above failed?
+
+    #429. An ``elif`` is not its own top-level statement: it is an ``ast.If``
+    nested inside the *previous* ``if``'s ``orelse``. So
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        elif True:
+            cs = list()
+
+    hands the store to two enclosing blocks, and the inner one has a
+    literal-true test. :func:`_is_always_true_branch` reads that inner block
+    on its own and answers "yes, the store always runs" -- but the link is
+    entered only when ``if x:`` is *false*, and ``x`` is a parameter. The
+    store therefore settles the name on some calls only, while the rule
+    treated it as settling it on all of them, dropped the earlier
+    ``nullcontext`` from :func:`_stores_of`, and reported the ``with cs:``
+    header DEAD. CPython enters that header: with ``x = 1`` the ``if x:``
+    arm runs, the ``elif`` body never does, ``cs`` is still the
+    ``nullcontext``, and the assert fires.
+
+    A literal-true *first* ``if`` really is unconditional, and must keep being
+    read that way -- that is the ``if True:`` row this rule exists to serve.
+    The distinction is exactly whether the literal-true test is the first link
+    in the chain or a later one.
+    """
+    if function is None or not isinstance(block, ast.If):
+        return False
+    # The store has to sit somewhere inside this link for the question to mean
+    # anything: either its own body, or its `orelse` for the `else` tail.
+    if not _contains_any(block.body, statement) and not _contains_any(block.orelse, statement):
+        return False
+    # An `elif` link is an `ast.If` that is an entry of an enclosing
+    # `If.orelse`. Its own test being literal-true says nothing about whether
+    # the link is *reached*: that is decided by every test above it.
+    for parent in _enclosing_blocks(block, function):
+        if not isinstance(parent, ast.If):
+            continue
+        if not any(child is block for child in parent.orelse):
+            continue
+        # The link runs only when `parent`'s own test is false. A chain whose
+        # FIRST test is `True` has no reachable later link at all, so reaching
+        # one implies some earlier test is false -- and "false" is decided per
+        # call, which is exactly what makes this store conditional.
+        if not _condition_is_always_true(parent.test, function):
+            return True
+    return False
 
 
 def _block_never_runs(block, function):
