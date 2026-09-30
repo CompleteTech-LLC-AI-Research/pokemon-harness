@@ -146,9 +146,7 @@ def _assigned_suppressors(function, bound, query=None):
             #         cs = suppress(...)     # never executes
             #     with cs:                  # still the nullcontext -> LIVE
             seen = [
-                entry
-                for entry in seen
-                if not _is_provably_unreached_store(entry, orders, function)
+                entry for entry in seen if not _is_provably_unreached_store(entry, orders, function)
             ]
             if not seen:
                 continue
@@ -473,88 +471,6 @@ def _store_bindings(function, bound, query=None):
     return bindings, raw_values
 
 
-def _is_provably_unreached_store(entry, orders, function):
-    """Is this conditional store inside a loop body that can never run?
-
-    #378. A ``for`` over a literal empty iterable has no iterations, so every
-    statement in its body is unreachable. A store written there is recorded,
-    flagged ``conditional``, and would otherwise compete with the store that
-    really is in force -- retiring a live ``nullcontext`` and letting a
-    swallowed assert be reported as swallowed when it is in fact live.
-
-    The test is deliberately narrow: only a *provably* empty literal iterable
-    answers yes. ``helper.items()`` may yield nothing, but it may not, so a
-    store in that body keeps competing and the ordinary ambiguity handling
-    applies. ``range(0)`` and ``set()`` are excluded for the same reason
-    `_is_empty_literal_iterable` excludes them -- deciding them means
-    reasoning about builtins rather than reading a literal.
-
-    A ``while True:`` loop, or one whose test is merely truthy, is not
-    provably empty and so is not matched.
-
-    The ``For`` branch is gated on :func:`_in_body`, and that gate is the
-    whole difference between a correct answer and a regression. ``For.body``
-    and ``For.orelse`` are AST **siblings**: both are attributes of the same
-    ``ast.For`` node, and both therefore appear in the ancestor walk, but only
-    one of them is skipped when the loop has no iterations. The ``else``
-    clause is exactly what runs *because* the loop finished without
-    ``break``, so every statement in it executes on every path through a
-    zero-iteration loop:
-
-        for y in ():
-            pass
-        else:
-            cs = contextlib.suppress(AssertionError)   # this runs
-
-    Executed on CPython 3.12.14 the assert under the following ``with cs:`` is
-    swallowed in all of these -- a plain assign, the same over a list and a
-    dict literal, an assign nested in an ``if``, and one nested in a ``with``.
-    Unguarded, this helper answered "unreached" for every one of them and the
-    assert was reported **live**, which is the damaging direction #378 exists
-    to prevent and a regression against ``master`` (``2c81f10``), where all
-    five are already correct. The clause is reused rather than a new
-    containment test written, because it already answers the same question
-    for a ``with`` header: "inside the executed body, not a handler or an
-    ``else``".
-
-    This is the same question `_is_store_statement` answers for a header
-    *nested inside* the loop; both are needed because the two answer through
-    different tables. On ``master`` (``2c81f10``) the nested case was already
-    right and the after-loop case still certified three live asserts dead, so
-    neither guard covers the other.
-
-    The port originally also filtered ``_resolve_bindings``' competing set and
-    added an empty-competing fallback there. Mutation showed both **survived**
-    -- reverting either alone leaves the lane green -- because every caller
-    either pre-filters the same table (the `_assigned_suppressors` loop above)
-    or declines before reaching the ambiguity branch (the ``nonlocal``
-    resolver). They were removed rather than left in as untested code.
-    """
-    statement = entry[0]
-    if function is None:
-        return False
-    # `_ancestors` runs outermost-first and ends with ``target`` itself, so
-    # the last element is dropped: the question is which *containers* the
-    # store sits inside.
-    for ancestor in list(_ancestors(function, statement))[:-1]:
-        # `ast.AsyncFor` is included for symmetry with `_is_store_statement`,
-        # but it is deliberately untested here: an `async for` over a *literal*
-        # container cannot execute, because a literal is not an async
-        # iterable, so no fixture can put the analyzer and CPython in the same
-        # room for that shape. Reverting this clause to `ast.For` alone
-        # therefore survives mutation, and that is recorded rather than hidden
-        # behind a row that cannot run. The clause is kept because the
-        # narrowing that survives mutation would be the more surprising change.
-        if isinstance(ancestor, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
-            ancestor.iter
-        ):
-            # `_in_body` excludes `orelse` -- see the docstring for why that
-            # gate is the whole difference between a correct answer and a
-            # regression.
-            return _in_body(ancestor, statement)
-    return False
-
-
 def _resolve_bindings(entries, bound, orders, index=None, function=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
@@ -622,6 +538,17 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
     if collapsed:
         competing = collapsed_entries
+    # A conditional non-enterable value cannot revive a carried suppressor:
+    # the skipped path still suppresses, and the taken path fails on entry.
+    if len(competing) == 1 and _literal_runtime_type(competing[0][1]) in NON_CONTEXT_MANAGER_TYPES:
+        carried = [entry[1] for entry in unconditional if orders[id(entry[0])] == latest]
+        if (
+            len(carried) == 1
+            and isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _is_readable_suppressor(carried[0], bound)
+            and _carried_suppressor_has_unshadowed_arguments(carried[0], function)
+        ):
+            return carried[0]
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an

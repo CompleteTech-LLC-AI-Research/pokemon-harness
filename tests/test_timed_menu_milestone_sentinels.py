@@ -314,7 +314,7 @@ def test_the_production_entry_point_is_what_actually_reports_a_bypass():
     temporarily pointed at a tree carrying a real bypass: the entry point must
     report it. Combined with the ``== []`` assertion already in
     ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
-    that pins the entry point from both directions — it must fire, and it must
+    that pins the entry point from both directions â€” it must fire, and it must
     not fire spuriously.
     """
     site = next(iter(RETENTION_COUNT_SITES))
@@ -6896,6 +6896,54 @@ UNREACHED_LOOP_BODY_ROWS = (
 )
 
 
+UNREACHED_LOOP_BODY_ROWS += (
+    (
+        "an inner empty body under an outer empty else remains skipped",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for outer in ():\n        pass\n    else:\n"
+            "        for inner in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        True,
+    ),
+    (
+        "an inner empty body cannot retire a suppressor under an outer else",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    for outer in ():\n        pass\n    else:\n"
+            "        for inner in ():\n"
+            "            cs = contextlib.nullcontext()\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "both empty loop else clauses execute",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for outer in ():\n        pass\n    else:\n"
+            "        for inner in ():\n            pass\n        else:\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+    (
+        "a running inner body under an empty outer else executes",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for outer in ():\n        pass\n    else:\n"
+            "        for inner in (1,):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1"
+        ),
+        False,
+    ),
+)
+
+
 LOOP_ELEMENT_LIVE_SHAPES = (
     (
         "a multi-element loop with the suppressor first leaves it live",
@@ -7015,9 +7063,7 @@ def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, s
     UNREACHED_LOOP_BODY_ROWS,
     ids=[row[0] for row in UNREACHED_LOOP_BODY_ROWS],
 )
-def test_an_unreachable_loop_body_does_not_rebind_the_name(
-    label, body, expected_live
-):
+def test_an_unreachable_loop_body_does_not_rebind_the_name(label, body, expected_live):
     """A loop with no iterations performs none of the stores in its body.
 
     #378. `for item in ():` is a statement that has been *reached*, and the
@@ -10921,3 +10967,90 @@ def test_a_decided_inner_arm_still_depends_on_a_conditional_outer_else(inner_arm
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    "initial,conditional,live",
+    (
+        ("contextlib.suppress(AssertionError)", "None", False),
+        ("contextlib.suppress(AssertionError)", "1", False),
+        ("contextlib.suppress(AssertionError)", "[]", False),
+        ("contextlib.suppress(AssertionError)", "{}", False),
+        ("contextlib.suppress(AssertionError)", "()", False),
+        ("contextlib.suppress(AssertionError)", "contextlib.nullcontext()", True),
+        ("contextlib.suppress(AssertionError)", "contextlib.suppress(ValueError)", True),
+        ("contextlib.suppress(ValueError)", "None", True),
+        ("contextlib.nullcontext()", "None", True),
+    ),
+)
+@pytest.mark.parametrize(
+    "ghost", ("contextlib.nullcontext()", "contextlib.suppress(AssertionError)", "None", "1")
+)
+@pytest.mark.parametrize("ghost_before", (False, True))
+def test_empty_loop_filter_keeps_conditional_entry_outcomes(
+    initial, conditional, live, ghost, ghost_before
+):
+    conditional_store = "    if flag:\n        cs = " + conditional + "\n"
+    ghost_store = "    for item in ():\n        cs = " + ghost + "\n"
+    source = (
+        "import contextlib\ndef outer(x, flag):\n    cs = "
+        + initial
+        + "\n"
+        + (ghost_store + conditional_store if ghost_before else conditional_store + ghost_store)
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<conditional-empty-loop>", "exec"), namespace)  # noqa: S102
+    fired = []
+    for flag in (False, True):
+        try:
+            namespace["outer"](1, flag)
+        except AssertionError:
+            fired.append(True)
+        except TypeError:
+            fired.append(False)
+        else:
+            fired.append(False)
+    assert any(fired) is live
+    tree = ast.parse(source)
+    function = tree.body[1]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live
+
+
+@pytest.mark.parametrize("placement", ("module", "parent", "parameter", "local"))
+def test_empty_loop_filter_declines_shadowed_exception_argument(placement):
+    module = "AssertionError = ValueError\n" if placement == "module" else ""
+    setup = "    AssertionError = ValueError\n" if placement == "local" else ""
+    signature = "flag, AssertionError=ValueError" if placement == "parameter" else "flag"
+    body = (
+        "def outer("
+        + signature
+        + "):\n"
+        + setup
+        + "    cs = contextlib.suppress(AssertionError)\n"
+        + "    if flag:\n        cs = None\n"
+        + "    for item in ():\n        cs = contextlib.nullcontext()\n"
+        + "    with cs:\n        assert False\n"
+    )
+    if placement == "parent":
+        body = (
+            "def parent():\n    AssertionError = ValueError\n"
+            + "".join("    " + line for line in body.splitlines(keepends=True))
+            + "    return outer\nouter = parent()\n"
+        )
+    source = "import contextlib\n" + module + body
+    namespace = {}
+    exec(compile(source, "<shadowed-empty-loop>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](False)
+    with pytest.raises(TypeError):
+        namespace["outer"](True)
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is True
