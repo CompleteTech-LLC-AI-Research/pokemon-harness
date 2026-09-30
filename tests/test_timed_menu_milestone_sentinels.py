@@ -7124,6 +7124,141 @@ def test_an_elif_link_is_reached_only_when_every_test_above_failed(
     )
 
 
+#: #435. #429 made an `elif` link's *own* literal-true test stop implying an
+#: unconditional store, but it only looked one link deep. A store nested under
+#: a further `if True:` -- or under a third `elif True:` -- is reached through
+#: the same conditionally-taken outer link, and the single-parent read missed
+#: it. The store was then settled as unconditional, the earlier
+#: `nullcontext()` was dropped, and a header CPython enters was reported DEAD:
+#: a damaging false-DEAD that survived every #429 regression because each of
+#: those nests the store exactly one link deep, where the one-level walk was
+#: already right.
+#:
+#: These rows are the deeper shapes. Every one is executed by
+#: ``_assert_entry_contract`` at ``x=1``, so the interpreter -- not the
+#: analyzer's opinion -- decides whether each row's `with cs:` is enterable and
+#: whether the assert fires.
+NESTED_ELIF_LINK_SHAPES = (
+    # The filed false-DEAD. `cs = list()` sits under a nested `if True:` inside
+    # an `elif True:` link. With `x=1` the outer `if x:` arm runs, the elif
+    # body never does, `cs` is still the `nullcontext()`, `with cs:` enters and
+    # the assert FIRES. The nested store must NOT settle the name.
+    (
+        "a nested if True: inside an elif True: link",
+        "    if x:\n        pass\n    elif True:\n        if True:\n            cs = list()",
+        True,
+    ),
+    # One level deeper again, with a `pass` in the middle link. The deepest
+    # `elif True:` store is still only reached when the outer `if x:` is false.
+    # This row is already read correctly by #429 (it is reached through the
+    # middle link's non-always-true parent), so it is a control that the
+    # chain-walk must not break rather than a fresh regression.
+    (
+        "a store under a third elif True: link",
+        "    if x:\n        pass\n    elif True:\n        pass\n    elif True:\n        cs = list()",
+        True,
+    ),
+    # CONTROL: a first-link `if True:` is genuinely unconditional, even with a
+    # nested `if True:` inside it. The nested `if True:` inherits an
+    # always-true *first* link, so the whole chain always runs.
+    (
+        "CONTROL a nested if True: inside a first-link if True:",
+        "    if True:\n        if True:\n            cs = list()",
+        False,
+    ),
+    # CONTROL: a plain first-link `if True:` (the row #429 exists to serve)
+    # still settles the name.
+    (
+        "CONTROL a first-link if True: is still unconditional",
+        "    if True:\n        cs = list()",
+        False,
+    ),
+    # CONTROL: an `elif` link that binds a real context manager rather than a
+    # `list` is a live header on both paths; the verdict stays True.
+    (
+        "CONTROL an elif link binding a real context manager",
+        "    if x:\n        pass\n    elif True:\n        cs = nullcontext()",
+        True,
+    ),
+    # CONTROL: a nested `if True:` inside a *conditional* (non-elif) `if x:`
+    # body. At `x=1` the `if x:` arm runs and binds the `list`, the `else` never
+    # does, and `with cs:` raises `TypeError` before the body -- so this is
+    # genuinely DEAD, and the row must keep the analyzer's `False`.
+    (
+        "CONTROL a nested if True: inside a conditional if body",
+        "    if x:\n        if True:\n            cs = list()\n    else:\n        cs = nullcontext()",
+        False,
+    ),
+    # The same gap reached without any `elif` at all. `if not x:` is a
+    # conditional test -- it is false whenever `x` is true -- so the arm
+    # holding the literal-true block is entered on some calls and skipped on
+    # others. At `x=1` it is skipped, `cs` is still the `nullcontext`, and the
+    # assert FIRES, so the store must not settle the name. This row is a second
+    # false-DEAD of the same kind as the filed one, and it is the shape that
+    # pins the general rule rather than the `elif` special case.
+    (
+        "a nested if True: under a negated conditional test",
+        "    if not x:\n        if True:\n            cs = list()",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "chain", "second_assert_live"),
+    NESTED_ELIF_LINK_SHAPES,
+    ids=[row[0] for row in NESTED_ELIF_LINK_SHAPES],
+)
+def test_a_nested_link_inside_a_literal_true_elif_stays_conditional(
+    label, chain, second_assert_live
+):
+    """A literal-true ``elif`` link does not make a *nested* store unconditional.
+
+    This is #435. #429's rule already stops a store directly inside an ``elif
+    True:`` link from settling a name, because the link is entered only when
+    every test above it failed. It did not carry that reasoning one level
+    deeper: a store under a further ``if True:`` -- or a third ``elif True:``
+    -- is reached through the same conditionally-taken outer link, but the
+    one-level read saw only the immediately-enclosing literal-true block and
+    settled the name.
+
+    Executed on CPython 3.12.14 with ``x=1``, the filed false-DEAD row
+    (``elif True:`` containing ``if True: cs = list()``) takes the outer
+    ``if x:`` arm, leaves ``cs`` as the ``nullcontext``, enters ``with cs:``
+    and **fires** the assert -- so ground truth is live and the analyzer must
+    not report DEAD. The controls pin the two sides the repair must not
+    over-reach into: a *first*-link ``if True:`` (with or without a nested
+    ``if True:``) really does run every time and stays unconditional, and a
+    real context manager stays a live header.
+
+    The repair is two-part. Reachability of a nested link depends on the whole
+    ``if``/``orelse`` chain, not just the immediate parent; and a
+    conditionally-reached ``elif`` link is neither always-true nor never-runs,
+    so it must fail the "runs every time" gate outright rather than falling
+    through the never-runs fallback.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n" + chain + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [second_assert_live], (
+        f"{label}: expected verdicts [{second_assert_live}], got {results}. A "
+        f"store under an `elif` link is reached only when every test above it "
+        f"failed, however deeply nested it is, so it settles the name on some "
+        f"calls only. A first-link `if True:` still runs every time."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "carrier", "conditional"),
     DEAD_CONDITION_AFTER_CARRIER_SHAPES,

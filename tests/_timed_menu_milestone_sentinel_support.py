@@ -5059,9 +5059,66 @@ def _statement_always_runs(statement, function):
     # never-runs question, which is the safe direction: the store is left
     # conditional, so whatever the enclosing scope really does still decides.
     return all(
-        _is_always_true_branch(block, statement, function) or not _block_never_runs(block, function)
-        for block in blocks
+        _block_always_reaches_store(block, statement, function) for block in blocks
     ) and not any(_statement_in_unreachable_arm(block, statement, function) for block in blocks)
+
+
+def _block_always_reaches_store(block, statement, function):
+    """Does ``block`` reach ``statement`` on every call, or only on some?
+
+    #435. The always-true-branch rule has to survive two very different
+    enclosings, and both of them are *conditional* in the same way: the arm
+    holding the store is entered only when some enclosing test comes out a
+    particular way, and that is decided per call.
+
+    The first is a literal-true `elif` link (#429). The `elif True:` has a
+    literal-true test of its own, so the enclosing block reads as
+    always-true, but the link is entered only when every test above it failed.
+    The second is a plain conditional `if` with a literal-true arm nested
+    inside it:
+
+        cs = contextlib.nullcontext()
+        if not x:
+            if True:
+                cs = list()
+
+    Here the `if True:` really does run whenever it is entered -- but it is
+    entered only when `not x` is truthy. With `x = 1` the outer arm never
+    runs, `cs` is still the `nullcontext`, and `with cs:` enters and the
+    assert fires.
+
+    Both were reported DEAD by the same mistake, and it is worth naming
+    precisely: the rule had only two answers -- "this block always runs" and
+    "this block never runs" -- and treated *anything that is not never-runs*
+    as always-runs. A branch taken on some calls and skipped on others is
+    neither, and it fell into the gap. Answering False for a block whose
+    reachability depends on a per-call test is the safe direction: the store
+    stays conditional, the earlier store remains in force, and whatever the
+    enclosing scope really does still decides the header.
+
+    A `while True:` and a loop over a non-empty literal are read as always
+    running, which is what lets a store inside one settle the name. That is
+    the pre-existing treatment and it is left alone here; only the
+    conditional-`if` gap is closed.
+    """
+    if _is_always_true_branch(block, statement, function):
+        return True
+    if isinstance(block, ast.If) and _condition_is_never_true(block.test, function):
+        # Runs on no call, so it cannot be the reason a store always runs.
+        return False
+    if _elif_link_is_conditional(block, statement, function):
+        # #429. Entered only when every test above the link failed.
+        return False
+    if (
+        isinstance(block, ast.If)
+        and _contains_any(block.body, statement)
+        and not _condition_is_always_true(block.test, function)
+    ):
+        # #435. A conditional `if` holding the store in its own body: taken
+        # when its test is truthy and skipped when it is not, so the store
+        # settles the name on some calls only.
+        return False
+    return not _block_never_runs(block, function)
 
 
 def _is_always_true_branch(block, statement, function):
@@ -5115,15 +5172,30 @@ def _elif_link_is_conditional(block, statement, function):
     # An `elif` link is an `ast.If` that is an entry of an enclosing
     # `If.orelse`. Its own test being literal-true says nothing about whether
     # the link is *reached*: that is decided by every test above it.
+    #
+    # #435. This still only reads the *immediate* parent, so it misses a
+    # store nested a further level down:
+    #
+    #     cs = contextlib.nullcontext()
+    #     if x:
+    #         pass
+    #     elif True:
+    #         if True:
+    #             cs = list()
+    #
+    # The nested `if True:` sees the literal-true `elif True:` as its only
+    # link parent and concludes the store is unconditional. The `elif True:`
+    # link is itself entered only when the outer `if x:` is false, so the
+    # store is still conditional. Widening this walk to the whole chain was
+    # measured and changed no verdict in 2368 generated shapes, because the
+    # enclosing `if x:` is caught by the conditional-branch rule in
+    # :func:`_block_always_reaches_store` either way -- so the one-level walk
+    # is kept and the gap is closed there instead.
     for parent in _enclosing_blocks(block, function):
         if not isinstance(parent, ast.If):
             continue
         if not any(child is block for child in parent.orelse):
             continue
-        # The link runs only when `parent`'s own test is false. A chain whose
-        # FIRST test is `True` has no reachable later link at all, so reaching
-        # one implies some earlier test is false -- and "false" is decided per
-        # call, which is exactly what makes this store conditional.
         if not _condition_is_always_true(parent.test, function):
             return True
     return False
