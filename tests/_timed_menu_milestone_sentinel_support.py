@@ -3479,6 +3479,30 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # stays attached to the real statement it came from.
             kinds.add(value)
             continue
+        if _binds_starred_target(statement, name):
+            # #418. `*cs, = (...)` and `a, *cs = (...)` collect a run of
+            # elements into a **list**, so the *name* is a list whatever the
+            # right-hand side held. `list` has no `__enter__`, so entering it
+            # raises `TypeError` before the body is reached and the assert
+            # never runs: the contract is dead.
+            #
+            # This is deliberately checked *before* the general
+            # destructuring decline below. That decline exists because the
+            # type of a plain element is not readable from the container's
+            # syntax, so it answers "cannot tell" and keeps the assert live --
+            # the safe direction. A starred target is not such a case: the
+            # list-wrapping is decided by the target syntax alone, and it is
+            # decidable. Reading the wrapped element's kind instead let a
+            # usable suppressor vouch for a bare list, certifying a dead
+            # assert as enforced.
+            #
+            # Executed on CPython 3.12.14:
+            #   *cs, = (contextlib.suppress(AssertionError),)  -> cs == [suppress]
+            #   a, *cs = (contextlib.suppress(...), 2)         -> cs == [2]
+            #   b, *c = (1, contextlib.suppress(...))         -> c == [suppress]
+            # and in all three `hasattr(cs, "__enter__")` is False.
+            kinds.add("list")
+            continue
         if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
             # A call is a call: `nullcontext()` returns a real context manager
             # and must not be read as a non-manager here.
@@ -3823,6 +3847,60 @@ def _store_may_bind_enterable(entry, name):
     if kind is None:
         return True
     return kind not in NON_CONTEXT_MANAGER_TYPES
+
+
+# --- #418 (master 5f838c9): the same question, asked of the LAST store ---
+#
+# `_binds_a_starred_name` above walks the target lists and answers "was any
+# target for this name starred?". #418 landed on master after this branch's
+# base was taken, and answers the sharper question: CPython assigns targets
+# left to right, so a LATER plain target can overwrite the collected list.
+# `*cs, cs = (1, contextlib.nullcontext())` leaves `cs` a context manager,
+# and the starred answer alone would have called it a list. Both helpers are
+# kept: this one is the conservative form used when the target lists cannot
+# be ordered into a single final store, and `_binds_starred_target` is the
+# precise one. `_starred_target_names` is master's and is not redefined.
+def _binds_starred_target(statement, name):
+    """Does this store bind ``name`` through an ``ast.Starred`` target?
+
+    ``*cs, = (a,)``, ``a, *cs = (a, b)`` and ``(*cs,) = (a, b)`` all give the
+    name the *list* the unpacking collects, so the answer does not depend on
+    the right-hand side at all.
+
+    ``_store_target_names`` flattens a ``Starred`` into the name inside it, so
+    by the time a name reaches here a starred binding is indistinguishable
+    from a positional one. This walks the same target lists again and keeps
+    only the names reached *through* a ``Starred``.
+    """
+    if not isinstance(statement, ast.Assign):
+        return False
+    return name in _starred_target_names(statement.targets)
+
+
+def _starred_target_names(targets):
+    """Names whose final store in these targets collects a starred list.
+
+    CPython assigns targets and nested elements from left to right. A later
+    plain target can overwrite the list: ``*cs, cs = (1, nullcontext())``
+    leaves ``cs`` a context manager. Track every name store in that order,
+    including the separate targets of a chained assignment.
+    """
+    final_stores = {}
+    pending = list(reversed(targets))
+    while pending:
+        target = pending.pop()
+        if isinstance(target, ast.Name):
+            final_stores[target.id] = False
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(reversed(target.elts))
+        elif isinstance(target, ast.Starred):
+            if isinstance(target.value, ast.Name):
+                final_stores[target.value.id] = True
+            else:
+                # Unpacking the collected list again binds its elements,
+                # rather than assigning the list itself to every nested name.
+                pending.append(target.value)
+    return {name for name, starred in final_stores.items() if starred}
 
 
 def _stores_of(name, by_index, index, function):
@@ -4873,7 +4951,85 @@ def _is_after_control_transfer(function, target):
         for body in _statement_lists_holding(node, holder):
             if _is_terminated_before(body, holder):
                 return True
+            for sibling in body:
+                if sibling is holder:
+                    break
+                if _cannot_fall_through(sibling):
+                    return True
     return False
+
+
+def _cannot_fall_through(node):
+    """Does a try statement have no path to the following statement?
+
+    Normal completion, exception handling, and finally are separate paths.
+    A body ending in return can still raise *before* it returns; an else arm
+    runs only when the body completes normally. A falling-through handler
+    must therefore keep the following assert live on either spelling.
+
+    The effect model deliberately includes exceptions from opaque expressions.
+    It proves absence of normal completion; it does not predict whether a call
+    raises or whether a particular handler matches an exception.
+    """
+    return isinstance(node, (ast.Try, ast.TryStar)) and "normal" not in _statement_exits(node)
+
+
+def _block_exits(body):
+    """Possible exits from a sequential block, including exceptions."""
+    exits = {"normal"}
+    for statement in body:
+        if "normal" not in exits:
+            break
+        exits = (exits - {"normal"}) | _statement_exits(statement)
+    return exits
+
+
+def _statement_exits(node):
+    """A conservative set of normal and control-transfer exits."""
+    if isinstance(node, ast.Return):
+        # Evaluating a return value can raise before the return is committed.
+        return {"return"} if _expression_cannot_raise(node.value) else {"return", "raise"}
+    if isinstance(node, ast.Raise):
+        return {"raise"}
+    if isinstance(node, ast.Break):
+        return {"break"}
+    if isinstance(node, ast.Continue):
+        return {"continue"}
+    if isinstance(node, ast.Pass) or (
+        isinstance(node, ast.Expr) and _expression_cannot_raise(node.value)
+    ):
+        return {"normal"}
+    if isinstance(node, ast.If):
+        exits = _block_exits(node.body) | _block_exits(node.orelse)
+        if not _expression_cannot_raise(node.test):
+            exits.add("raise")
+        return exits
+    if not isinstance(node, (ast.Try, ast.TryStar)):
+        # Calls, assignments, imports, with headers and loops can all complete
+        # or raise. Nested scopes' transfers do not transfer from this block.
+        return {"normal", "raise"}
+
+    body = _block_exits(node.body)
+    exits = body - {"normal", "raise"}
+    if "normal" in body:
+        exits |= _block_exits(node.orelse)
+    if "raise" in body:
+        # Include unhandled exceptions and every possible handler. Matching
+        # exception types is intentionally not guessed from their spelling.
+        exits.add("raise")
+        for handler in node.handlers:
+            exits |= _block_exits(handler.body)
+    if node.finalbody:
+        final = _block_exits(node.finalbody)
+        # A finalizer transfer replaces pending return/raise/break/continue;
+        # falling through preserves the exit which entered the finalizer.
+        exits = (exits if "normal" in final else set()) | (final - {"normal"})
+    return exits
+
+
+def _expression_cannot_raise(node):
+    """Only literal values have a statically guaranteed evaluation here."""
+    return node is None or isinstance(node, ast.Constant)
 
 
 def _statement_lists_holding(node, target):
