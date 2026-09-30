@@ -3073,6 +3073,73 @@ STARRED_TARGET_ENTRY_UNREACHABLE_ROWS = (
         True,
     ),
 )
+
+
+#: #420, the residual of #418: the same list-wrapping reached through loop
+#: machinery. Both shapes below reported the unreachable assert ``enforced``
+#: on #419's head, so the #419 fix did not close the family.
+#:
+#: These are two *different* defects rather than one. A starred store inside a
+#: ``for`` body is declined by ``_store_is_settled_before`` (the header is read
+#: before the enclosing statement's body runs), while a starred ``for`` target
+#: is declined by the loop-target rule (#336). The rows are kept together
+#: because they are the same class and the same answer, but a repair that
+#: closed only one would leave the other as a false-live, so each is pinned
+#: separately.
+#:
+#: The element deliberately carries a *usable* ``contextlib.suppress`` in both
+#: rows. The wrapped element's kind is irrelevant to whether the name is
+#: enterable -- only the starred target is -- so a fix that asked "does the
+#: element suppress?" instead of "is the target starred?" would pass a row
+#: built from a plain element and fail these.
+STARRED_LOOP_ENTRY_UNREACHABLE_ROWS = (
+    (
+        "a starred store inside a for body binds a list",
+        (
+            "    for _ in (1,):\n"
+            "        *cs, = (contextlib.suppress(AssertionError),)\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        False,
+    ),
+    (
+        "a starred loop target binds a list",
+        (
+            "    for *cs, in ((contextlib.suppress(AssertionError),),):\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        False,
+    ),
+    # Controls. Both keep a *narrow* repair honest. A plain loop target binds
+    # the next element, which the rule cannot read without running the loop,
+    # so #336 declines it and the assert stays live -- CPython agrees, the
+    # nullcontext really is entered. A plain store in the same position is
+    # likewise not decidable from syntax alone. A fix that keyed on "any
+    # target inside a loop" rather than "a starred target" would report these
+    # dead, and the interpreter check in `_assert_entry_contract` would catch
+    # it.
+    (
+        "CONTROL a plain loop target over a real context manager",
+        (
+            "    for cs in (contextlib.nullcontext(),):\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "CONTROL a plain store in a for body over a real context manager",
+        (
+            "    for _ in (1,):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        True,
+    ),
+)
 CARRIER_ENTRY_UNREACHABLE_ROWS = (
     ("import-as binds the module", "    import os as cs", False),
     ("import-from-as binds the module", "    from os import path as cs", False),
@@ -3331,6 +3398,59 @@ def test_a_starred_target_binds_a_list_so_the_assert_is_unreachable(
         f"{label}: expected verdicts {expected}, got {results}. A starred target "
         f"binds a list, and entering a list raises before the body, so the "
         f"assert under the header is unreachable."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "block", "second_assert_live"),
+    STARRED_LOOP_ENTRY_UNREACHABLE_ROWS,
+    ids=[row[0] for row in STARRED_LOOP_ENTRY_UNREACHABLE_ROWS],
+)
+def test_a_starred_target_reached_through_a_loop_binds_a_list(label, block, second_assert_live):
+    """#420. The list-wrapping of a starred target survives loop machinery.
+
+    #419 fixed ``*cs, = (...)`` and ``a, *cs = (...)`` where the store is
+    written directly in the function body. The same name read through a loop
+    was still certified ``enforced`` while CPython raised ``TypeError`` before
+    the body, so the assert was unreachable and the contract was dead.
+
+    The two shapes fail for different reasons, and both are pinned:
+
+    * a starred *store* inside a ``for`` body is declined by
+      ``_store_is_settled_before``, which is right in general -- a ``with``
+      header is evaluated before its own statement's body runs -- but
+      collapses "has not run yet" into the same "cannot tell" answer as
+      "undecidable". A starred target is decidable either way, because the
+      list-wrapping comes from the target syntax and is the same whether the
+      store ran, has not run, or never will.
+    * a starred *loop target* is declined by the #336 rule, which is right for
+      a plain loop target (it binds the next element, and
+      ``for cs in (nullcontext(),):`` is genuinely live) and over-broad for the
+      starred sub-case, where the iterable is irrelevant.
+
+    Measured on CPython 3.12.14 with ``x=1``, so ``assert x != 1`` is false:
+    both fixtures raise ``TypeError: 'list' object does not support the context
+    manager protocol`` on entry, and ``hasattr(cs, "__enter__")`` is ``False``
+    in both. The two controls really do enter and really do fire, which is
+    what keeps the repair from generalising to every loop-bound name.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + block
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A starred "
+        f"target binds a list however the loop is reached, and entering a list "
+        f"raises before the body, so the assert under the header is "
+        f"unreachable."
     )
 
 
