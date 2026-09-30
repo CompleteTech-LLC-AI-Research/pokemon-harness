@@ -496,7 +496,7 @@ def _entered_name_is_dead(header, function, bound, module=None):
     return False
 
 
-def _is_suppressing_with(node, bound, function=None, owning=None):
+def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
     if isinstance(node, ast.AsyncWith):
         # `async with` demands an *asynchronous* context manager. Neither
@@ -529,7 +529,7 @@ def _is_suppressing_with(node, bound, function=None, owning=None):
             return True
     if function is None:
         return False
-    for argument in _aliased_suppressions(node, function, bound, owning):
+    for argument in _aliased_suppressions(node, function, bound, owning, target):
         # An ambiguous binding may be *any* suppressor, so the rule cannot claim
         # the exception is harmless and reports the assert as defeated (#308).
         if argument is AMBIGUOUS_SUPPRESSOR:

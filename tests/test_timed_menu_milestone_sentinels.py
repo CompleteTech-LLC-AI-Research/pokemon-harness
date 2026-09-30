@@ -314,7 +314,7 @@ def test_the_production_entry_point_is_what_actually_reports_a_bypass():
     temporarily pointed at a tree carrying a real bypass: the entry point must
     report it. Combined with the ``== []`` assertion already in
     ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
-    that pins the entry point from both directions â€” it must fire, and it must
+    that pins the entry point from both directions — it must fire, and it must
     not fire spuriously.
     """
     site = next(iter(RETENTION_COUNT_SITES))
@@ -6696,254 +6696,6 @@ def _async_loop_target_is_undecidable(label, source):
 #: ``swallowed`` says whether CPython really swallows it -- asserted here rather
 #: than assumed, so a fixture that stops behaving as described fails loudly
 #: instead of quietly testing nothing.
-#: #378. A `for` over a literal empty iterable has no iterations, so a store in
-#: its body never happens. Counting the loop as a store that "ran" retired the
-#: carried `nullcontext` and reported the live assert below as defeated.
-#:
-#: Measured on `master` `2c81f10`: three of these four positive rows were
-#: certified **dead** while CPython entered the header. Master already had the
-#: *nested* case right via `_is_store_statement`, so the after-loop case was
-#: invisible to a test count -- it had no rows here at all.
-#:
-#: The controls are the point: a loop that *does* iterate, a falsy member, and
-#: a multi-element loop must all keep rebinding. Without them, a fix that simply
-#: declined every loop-body store would pass.
-UNREACHED_LOOP_BODY_ROWS = (
-    (
-        "an empty tuple loop body never rebinds the name",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in ():\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        True,
-    ),
-    (
-        "an empty list loop body never rebinds the name",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in []:\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        True,
-    ),
-    (
-        "a header nested in the same block reads the earlier binding too",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    if True:\n"
-            "        for item in ():\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "        with cs:\n"
-            '            assert x != 1, "A1"'
-        ),
-        True,
-    ),
-    (
-        "an empty loop nested in a running loop is still unreachable",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for outer in (1,):\n"
-            "        for item in ():\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        True,
-    ),
-    (
-        "CONTROL a loop that iterates does rebind the name",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in [1]:\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    (
-        "CONTROL a falsy member still counts as an iteration",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in (0,):\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    (
-        "CONTROL a two-element loop rebinds on the last iteration",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in (1, 2):\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    # #378, from the independent review of `3edecda`. The `else` clause of a
-    # loop is what runs *because* the loop finished without `break`, so it
-    # executes on every path through a zero-iteration loop -- the body is
-    # skipped, the `else` is not. `For.body` and `For.orelse` are AST
-    # siblings, so a walk over the ancestors sees both, and treating any
-    # ancestor `For` as "its stores are unreachable" swept these up too.
-    #
-    # Executed on CPython 3.12.14 each of these *swallows* the assert, and
-    # `master` (`2c81f10`) already answered all of them correctly. Reporting
-    # them live was a regression the `3edecda` helper introduced, in the
-    # damaging direction: a defeated contract certified as load-bearing.
-    (
-        "the else clause of a zero-iteration loop still runs",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in ():\n"
-            "        pass\n"
-            "    else:\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    (
-        "an else clause over a list literal still runs",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in []:\n"
-            "        pass\n"
-            "    else:\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    (
-        "an else clause over a dict literal still runs",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in {}:\n"
-            "        pass\n"
-            "    else:\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    (
-        "a store nested in the else clause still runs",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in ():\n"
-            "        pass\n"
-            "    else:\n"
-            "        if True:\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    (
-        "a store inside a with in the else clause still runs",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in ():\n"
-            "        pass\n"
-            "    else:\n"
-            "        with contextlib.suppress(ValueError):\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-    # Control for the rows above. A `for`/`else` `else` clause runs on normal
-    # completion, and a loop that completes normally has run every iteration,
-    # so a non-empty loop's `else` rebinds as well -- it must keep reporting
-    # `False`, or a fix that read *every* `else` as unreachable would pass the
-    # five rows above.
-    #
-    # The `break` case is deliberately not a row here. A `break` really does
-    # skip the `else`, so the assert is live, but the analyzer answers
-    # `defeated` for that shape on `master` (`2c81f10`) exactly as it does on
-    # this branch -- measured on both, CPython fires and both trees report
-    # `False`. That is a pre-existing false-DEAD of its own, unrelated to
-    # #378, and pinning it here would either fail this PR for a defect it did
-    # not introduce or quietly widen its scope. It is left for a separate
-    # issue rather than absorbed.
-    (
-        "CONTROL a completed loop runs its else clause too",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for item in (1,):\n"
-            "        pass\n"
-            "    else:\n"
-            "        cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n"
-            '        assert x != 1, "A1"'
-        ),
-        False,
-    ),
-)
-
-
-UNREACHED_LOOP_BODY_ROWS += (
-    (
-        "an inner empty body under an outer empty else remains skipped",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for outer in ():\n        pass\n    else:\n"
-            "        for inner in ():\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n        assert x != 1"
-        ),
-        True,
-    ),
-    (
-        "an inner empty body cannot retire a suppressor under an outer else",
-        (
-            "    cs = contextlib.suppress(AssertionError)\n"
-            "    for outer in ():\n        pass\n    else:\n"
-            "        for inner in ():\n"
-            "            cs = contextlib.nullcontext()\n"
-            "    with cs:\n        assert x != 1"
-        ),
-        False,
-    ),
-    (
-        "both empty loop else clauses execute",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for outer in ():\n        pass\n    else:\n"
-            "        for inner in ():\n            pass\n        else:\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n        assert x != 1"
-        ),
-        False,
-    ),
-    (
-        "a running inner body under an empty outer else executes",
-        (
-            "    cs = contextlib.nullcontext()\n"
-            "    for outer in ():\n        pass\n    else:\n"
-            "        for inner in (1,):\n"
-            "            cs = contextlib.suppress(AssertionError)\n"
-            "    with cs:\n        assert x != 1"
-        ),
-        False,
-    ),
-)
-
-
 LOOP_ELEMENT_LIVE_SHAPES = (
     (
         "a multi-element loop with the suppressor first leaves it live",
@@ -7056,61 +6808,6 @@ def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, s
     assert asserts, f"{label}: fixture declared no assert to check"
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
-
-
-@pytest.mark.parametrize(
-    ("label", "body", "expected_live"),
-    UNREACHED_LOOP_BODY_ROWS,
-    ids=[row[0] for row in UNREACHED_LOOP_BODY_ROWS],
-)
-def test_an_unreachable_loop_body_does_not_rebind_the_name(label, body, expected_live):
-    """A loop with no iterations performs none of the stores in its body.
-
-    #378. `for item in ():` is a statement that has been *reached*, and the
-    store rules list statements by that question -- "have the block's stores
-    run by the time this header is read" -- so a `for` was counted. But the
-    guarantee a loop offers is per *iteration*: a loop over a literal empty
-    iterable has none, and the body store never happens.
-
-    The consequence was a live contract reported as defeated, because the
-    carried `nullcontext` was retired by a suppressor that was never bound.
-
-    Scoped to a provably empty literal on purpose. `helper.items()` may yield
-    nothing, but it may not, so a store in that body keeps competing and the
-    ordinary conservative handling applies. The controls pin that a loop which
-    does iterate still rebinds, and that a falsy member `(0,)` is an iteration.
-    """
-    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
-    namespace = {}
-    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
-    fired = False
-    try:
-        namespace["outer"](1, None)
-    except AssertionError:
-        fired = True
-    except (NameError, TypeError, UnboundLocalError) as error:
-        raise AssertionError(
-            f"{label}: the fixture raised {type(error).__name__} instead of "
-            f"running the assert. Row is stale."
-        ) from None
-
-    tree = ast.parse(source)
-    function = tree.body[0]
-    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
-    assert asserts, f"{label}: fixture declared no assert to check"
-    # CPython settles the expectation, so a `defeated` row is only credible
-    # when the assert really is swallowed, and a `live` row only when it
-    # really fires.
-    assert fired is expected_live, (
-        f"{label}: executed on CPython the assert "
-        f"{'fired' if fired else 'did not fire'}, so the row's expectation "
-        f"{expected_live} does not match. Row is stale."
-    )
-    results = [_is_enforced(function, node, tree) for node in asserts]
-    assert results == [expected_live], (
-        f"{label}: expected {[expected_live]}, got {results}. A loop over an "
-        f"empty literal performs none of its body's stores."
-    )
 
 
 def test_an_except_as_handler_is_decidable_even_after_a_conditional_store():
@@ -8871,6 +8568,271 @@ def test_an_elif_link_is_reached_only_when_every_test_above_failed(
         f"`elif` arm runs only when every test above it failed, so a store in "
         f"it settles the name on some calls only. A literal-true *first* `if` "
         f"is a different case and stays unconditional."
+    )
+
+
+#: #441. `ELIF_LINK_ARMS_SHAPES` above settles the *entry* question: every row
+#: binds a `list()` or a `nullcontext()`, so what CPython does on entry
+#: distinguishes "the header is enterable" from "the header raises before the
+#: body". #441 needs the other question. Its header is perfectly enterable on
+#: every call -- the damage was that the assert inside it was reported
+#: *swallowed* when one of the two paths really does swallow it and the other
+#: really fires.
+#:
+#: That needs a different oracle, and reusing `_assert_entry_contract` would
+#: have been wrong rather than merely imprecise. It treats "returned normally"
+#: as a *stale row*, on the grounds that a swallowed assert means the row no
+#: longer describes anything. But swallowed is precisely the correct
+#: ground truth for a defeated contract: a live call that raises
+#: `AssertionError` and a swallowed call that returns cleanly are both real
+#: outcomes, and the row's claim is about which of them can happen. So
+#: `_assert_suppression_contract` below runs the fixture across the whole
+#: argument domain and asks whether the assert fires on *any* call.
+#:
+#: The rows are executed, not asserted into the table, and each one is checked
+#: against what CPython does rather than against the analyzer.
+ELIF_LINK_SUPPRESSOR_SHAPES = (
+    # The filed shape. The preamble's `cs = nullcontext()` is the binding in
+    # force on the call that takes the `if` arm; the `elif` arm overwrites it
+    # with a real suppressor, but only on the other call.
+    #
+    #     cs = contextlib.nullcontext()
+    #     if x:
+    #         pass
+    #     elif True:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x=1` the `if` arm runs, `elif` never does, `cs` is still the
+    # `nullcontext`, and the assert **fires**. At `x=0` the `elif` runs and the
+    # failure is swallowed. So the assert is not enforced on every call, and
+    # the header is live.
+    (
+        "an elif link binding a suppressor over a plain manager is live",
+        (
+            "    if x:\n        pass\n    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The mirror control, and the one that decides whether the repair is
+    # correct or merely cautious. When the binding in force on the call that
+    # *skips* the `elif` arm is a suppressor too, then every call swallows the
+    # assert and the header really is defeated. Answering `live` here would
+    # certify a disarmed contract as load-bearing -- a false-LIVE, which stops
+    # the mutation matrix from ever reporting a real defeat.
+    #
+    # This row cannot be written against the shared preamble, which always
+    # binds a `nullcontext`; it rebinds `cs` in the first link instead.
+    (
+        "CONTROL an elif link binding a suppressor over a suppressor is dead",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"  # override preamble
+            "    if x:\n        pass\n"
+            "    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # A suppressor that does not name `AssertionError` never disarms the
+    # contract on either path, so no call swallows the failure and the header
+    # is live for the ordinary reason. This is what keeps the new branch from
+    # generalising into "an `elif` arm is always undecidable".
+    (
+        "CONTROL an elif link binding suppress(ValueError) stays live",
+        ("    if x:\n        pass\n    elif True:\n        cs = contextlib.suppress(ValueError)"),
+        True,
+    ),
+    # The `elif` link is the only shape that gets the new treatment. A
+    # first-link `if` runs or does not, and when it runs it *does* replace the
+    # preamble -- so this call is swallowed and the header is defeated, which
+    # is what master already answers and what this row pins.
+    (
+        "CONTROL a first-link if binding a suppressor stays dead",
+        "    if x:\n        cs = contextlib.suppress(AssertionError)",
+        False,
+    ),
+    # #441. The two rows above and below are what pin *latest*, not *any*.
+    #
+    # Each writes two stores of the same name before the `elif`, one a
+    # suppressor and one not, so "is any superseded store a suppressor?" and
+    # "is the store in force on the skipped call a suppressor?" disagree.
+    # A skipped call runs every store in order and ends on the last one, so the
+    # answer is the last -- and the rows are ordered to make the two readings
+    # give opposite verdicts.
+    #
+    # Here the suppressor is written FIRST and the `nullcontext` second:
+    #
+    #     cs = contextlib.suppress(AssertionError)   # x=0: superseded
+    #     cs = contextlib.nullcontext()              # x=1: THIS is in force
+    #     if x:
+    #         pass
+    #     elif True:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x=1` the `if` arm is taken, the `elif` never runs, and the name holds
+    # the `nullcontext` -- so the assert FIRES and the header is live. Asking
+    # "did any superseded store suppress?" answers yes on the strength of the
+    # first line and reports a disarmed contract, which is the same false-DEAD
+    # #441 fixes, reached by a different route.
+    (
+        "an elif link over a nullcontext that supersedes an earlier suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    if x:\n        pass\n"
+            "    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The mirror, and the row that stops the fix generalising. Identical except
+    # that the `nullcontext` is written first and the suppressor second, so the
+    # *latest* prior store is a suppressor: on the call that skips the `elif`
+    # the assert is swallowed there too, and every call that reaches the header
+    # is defeated. The header really is dead.
+    #
+    # Without this row a repair that simply always answered "live" for an
+    # `elif` arm would pass the row above and certify a disarmed contract as
+    # load-bearing.
+    (
+        "CONTROL an elif link over a suppressor that supersedes an earlier nullcontext",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    if x:\n        pass\n"
+            "    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+)
+
+
+def _assert_suppression_contract(label, source, assert_is_live):
+    """Run the fixture over its whole domain and hold CPython to the row.
+
+    This is the counterpart to :func:`_assert_entry_contract`, and the two ask
+    different questions on purpose.
+
+    ``_assert_entry_contract`` calls the fixture once and reads a single call's
+    outcome, because the rows it guards differ in whether ``with cs:`` raises
+    before the body. A row that returns normally is rejected as stale, which
+    is right for that family: an enterable header that returns cleanly can
+    only be a swallowed assert, and the family has nothing to say about it.
+
+    The ``#441`` family is entirely about swallowed asserts, so that convention
+    is inverted here. A defeat is a *legitimate* answer, and returning cleanly
+    is the ground truth for it.
+
+    So the fixture is swept over every value of its `x` parameter and the row
+    is judged on whether the assert fires anywhere at all:
+
+    * **live** -- some call raises `AssertionError`. The contract really is
+      reachable, so the rule must report it enforced.
+    * **dead** -- no call raises `AssertionError`; each either returns cleanly
+      (swallowed) or raises something else before the body (unreachable
+      entry). Either way the assert is not enforced on any call.
+
+    Sweeping rather than sampling matters for the rows that are defeated: a
+    single call that happens to return cleanly would prove nothing, because
+    the *other* arm might still fire. The live row only needs one firing call,
+    but taking the same measurement for both keeps the two verdicts
+    commensurable and stops a row from passing on an argument value that no
+    longer reaches the assert at all.
+    """
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outer = namespace["outer"]
+    # A bare `except BaseException` is too wide to be worth stating: a
+    # `KeyboardInterrupt` in a fixture would otherwise be recorded as "the row
+    # is defeated" rather than failing the test. The tuple is the same one
+    # `_assert_entry_contract` uses to mean "the header raised before the body".
+    not_enterable = (TypeError, UnboundLocalError, NameError, AttributeError)
+    fired = False
+    outcomes = []
+    for value in (0, 1):
+        try:
+            outer(value, True, None)
+        except AssertionError:
+            fired = True
+            outcomes.append(f"x={value}: AssertionError")
+        except not_enterable as exc:
+            outcomes.append(f"x={value}: {type(exc).__name__}")
+        else:
+            outcomes.append(f"x={value}: returned")
+    assert fired is assert_is_live, (
+        f"{label}: CPython {'fired' if fired else 'never fired'} the assert across "
+        f"the swept domain ({'; '.join(outcomes)}), which is "
+        f"{'live' if assert_is_live else 'dead'}; the row claims the header is "
+        f"{'live' if assert_is_live else 'defeated'}."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "chain", "assert_is_live"),
+    ELIF_LINK_SUPPRESSOR_SHAPES,
+    ids=[row[0] for row in ELIF_LINK_SUPPRESSOR_SHAPES],
+)
+def test_an_elif_link_suppressor_is_live_when_the_carried_store_is_not(
+    label, chain, assert_is_live
+):
+    """A suppressor reached through an `elif` link does not defeat the assert alone.
+
+    This is #441. #429's repair correctly demoted a store in an `elif` arm
+    inside :func:`_stores_of`, but that is the table the *entry* rule reads.
+    The suppression rule takes a different path: `_aliased_suppressions`
+    resolves a ``with`` header against the raw binding table, where the `elif`
+    arm was still recorded as an unconditional store. So the header resolved to
+    the suppressor and the assert came back defeated on every call:
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        elif True:
+            cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert x != 1
+
+    At ``x=1`` the ``if`` arm is taken, the ``elif`` never runs, ``cs`` is still
+    the ``nullcontext``, and the assert **fires**. Reporting that as swallowed
+    is a false-DEAD -- #308 criterion 1's damaging direction, where a contract
+    that really enforces is certified as unreachable.
+
+    The resolution is narrow. An `elif` arm is not a branch of its own: it runs
+    only when *every* test above it failed, so the calls that skip it keep the
+    earlier binding. The header is therefore defeated only when that earlier
+    binding is itself a suppressor. When the arm's store swallows
+    `AssertionError` and the store it supersedes provably does not, the name
+    holds a suppressor on some calls and a plain manager on others, and the
+    assert is not enforced on every call -- so the header stays live.
+
+    Every row is executed across the fixture's argument domain by
+    :func:`_assert_suppression_contract` before the analyzer's verdict is
+    compared, so a row cannot claim "live" unless CPython agrees, nor "defeated"
+    unless CPython really does swallow on every call.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n" + chain + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. An "
+        f"`elif` arm runs only on the calls where every test above it failed, "
+        f"so the binding it supersedes still holds on the rest. The header is "
+        f"defeated only when that earlier binding is a suppressor too."
     )
 
 
@@ -10967,6 +10929,380 @@ def test_a_decided_inner_arm_still_depends_on_a_conditional_outer_else(inner_arm
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    ("setup", "predicate", "expected"),
+    (
+        ("cs = contextlib.nullcontext()", "x", True),
+        ("cs = contextlib.nullcontext()", "x == 1", True),
+        ("cs = contextlib.nullcontext()", "not x", False),
+        ("cs = contextlib.nullcontext()", "x != 1", False),
+        ("", "x", False),
+        ("cs = None", "x", False),
+        ("cs = 1", "x", False),
+        ("cs = contextlib.suppress(AssertionError)", "x", False),
+        ("cs = factory()", "x", False),
+        ("cs = contextlib.nullcontext(1, 2)", "x", False),
+        ("cs = contextlib.suppress(AssertionError)\n    cs = contextlib.nullcontext()", "x", True),
+        ("cs = contextlib.nullcontext()\n    cs = contextlib.suppress(AssertionError)", "x", False),
+    ),
+)
+def test_elif_suppression_resolution_requires_an_enterable_failing_skipped_path(
+    setup, predicate, expected
+):
+    source = (
+        "import contextlib\n"
+        "def factory(): return contextlib.suppress(AssertionError)\n"
+        "def outer(x):\n"
+        + ("    " + setup + "\n" if setup else "")
+        + "    if "
+        + predicate
+        + ":\n        pass\n"
+        "    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-failure-witness>", "exec"), namespace)  # noqa: S102
+    fired = False
+    for value in (0, 1):
+        try:
+            namespace["outer"](value)
+        except AssertionError:
+            fired = True
+        except (TypeError, UnboundLocalError):
+            pass
+    assert fired is expected
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is expected
+
+
+def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_import():
+    source = (
+        "import contextlib\n"
+        "from types import SimpleNamespace\n"
+        "def outer(x):\n"
+        "    contextlib = SimpleNamespace(nullcontext=lambda: real.suppress(AssertionError), suppress=real.suppress)\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if x:\n        pass\n"
+        "    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-import-shadow>", "exec"), namespace)  # noqa: S102
+    namespace["real"] = namespace["contextlib"]
+    for value in (0, 1):
+        namespace["outer"](value)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    (
+        "    if x == 1:\n        return\n",
+        "    if x == 1:\n        raise TypeError\n",
+        "    doomed = factory()\n",
+    ),
+)
+def test_an_elif_failure_witness_cannot_skip_earlier_control_or_opaque_calls(earlier):
+    source = (
+        "import contextlib\n"
+        "def factory(): raise TypeError\n"
+        "def outer(x):\n"
+        "    cs = contextlib.nullcontext()\n"
+        + earlier
+        + "    if x:\n        pass\n    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-unreachable-witness>", "exec"), namespace)  # noqa: S102
+    for value in (0, 1):
+        try:
+            namespace["outer"](value)
+        except TypeError:
+            pass
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_module_import():
+    source = (
+        "import contextlib\n"
+        "from types import SimpleNamespace\n"
+        "real = contextlib\n"
+        "contextlib = SimpleNamespace(nullcontext=lambda: real.suppress(AssertionError), suppress=real.suppress)\n"
+        "def outer(x):\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if x:\n        pass\n"
+        "    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-global-import-shadow>", "exec"), namespace)  # noqa: S102
+    for value in (0, 1):
+        namespace["outer"](value)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+UNREACHED_LOOP_BODY_ROWS = (
+    (
+        "an empty tuple loop body never rebinds the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "an empty list loop body never rebinds the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in []:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "a header nested in the same block reads the earlier binding too",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for item in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "an empty loop nested in a running loop is still unreachable",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for outer in (1,):\n"
+            "        for item in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "CONTROL a loop that iterates does rebind the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in [1]:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "CONTROL a falsy member still counts as an iteration",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (0,):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "CONTROL a two-element loop rebinds on the last iteration",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1, 2):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    # #378, from the independent review of `3edecda`. The `else` clause of a
+    # loop is what runs *because* the loop finished without `break`, so it
+    # executes on every path through a zero-iteration loop -- the body is
+    # skipped, the `else` is not. `For.body` and `For.orelse` are AST
+    # siblings, so a walk over the ancestors sees both, and treating any
+    # ancestor `For` as "its stores are unreachable" swept these up too.
+    #
+    # Executed on CPython 3.12.14 each of these *swallows* the assert, and
+    # `master` (`2c81f10`) already answered all of them correctly. Reporting
+    # them live was a regression the `3edecda` helper introduced, in the
+    # damaging direction: a defeated contract certified as load-bearing.
+    (
+        "the else clause of a zero-iteration loop still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "an else clause over a list literal still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in []:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "an else clause over a dict literal still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in {}:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a store nested in the else clause still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        if True:\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a store inside a with in the else clause still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        with contextlib.suppress(ValueError):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    # Control for the rows above. A `for`/`else` `else` clause runs on normal
+    # completion, and a loop that completes normally has run every iteration,
+    # so a non-empty loop's `else` rebinds as well -- it must keep reporting
+    # `False`, or a fix that read *every* `else` as unreachable would pass the
+    # five rows above.
+    #
+    # The `break` case is deliberately not a row here. A `break` really does
+    # skip the `else`, so the assert is live, but the analyzer answers
+    # `defeated` for that shape on `master` (`2c81f10`) exactly as it does on
+    # this branch -- measured on both, CPython fires and both trees report
+    # `False`. That is a pre-existing false-DEAD of its own, unrelated to
+    # #378, and pinning it here would either fail this PR for a defect it did
+    # not introduce or quietly widen its scope. It is left for a separate
+    # issue rather than absorbed.
+    (
+        "CONTROL a completed loop runs its else clause too",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1,):\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live"),
+    UNREACHED_LOOP_BODY_ROWS,
+    ids=[row[0] for row in UNREACHED_LOOP_BODY_ROWS],
+)
+def test_an_unreachable_loop_body_does_not_rebind_the_name(label, body, expected_live):
+    """A loop with no iterations performs none of the stores in its body.
+
+    #378. `for item in ():` is a statement that has been *reached*, and the
+    store rules list statements by that question -- "have the block's stores
+    run by the time this header is read" -- so a `for` was counted. But the
+    guarantee a loop offers is per *iteration*: a loop over a literal empty
+    iterable has none, and the body store never happens.
+
+    The consequence was a live contract reported as defeated, because the
+    carried `nullcontext` was retired by a suppressor that was never bound.
+
+    Scoped to a provably empty literal on purpose. `helper.items()` may yield
+    nothing, but it may not, so a store in that body keeps competing and the
+    ordinary conservative handling applies. The controls pin that a loop which
+    does iterate still rebinds, and that a falsy member `(0,)` is an iteration.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1, None)
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    # CPython settles the expectation, so a `defeated` row is only credible
+    # when the assert really is swallowed, and a `live` row only when it
+    # really fires.
+    assert fired is expected_live, (
+        f"{label}: executed on CPython the assert "
+        f"{'fired' if fired else 'did not fire'}, so the row's expectation "
+        f"{expected_live} does not match. Row is stale."
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], (
+        f"{label}: expected {[expected_live]}, got {results}. A loop over an "
+        f"empty literal performs none of its body's stores."
+    )
 
 
 @pytest.mark.parametrize(

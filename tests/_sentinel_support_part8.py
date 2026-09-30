@@ -934,3 +934,39 @@ def _starred_target_names(targets):
                 # rather than assigning the list itself to every nested name.
                 pending.append(target.value)
     return {name for name, starred in final_stores.items() if starred}
+
+
+def _store_is_in_an_elif_link(statement, function=None):
+    """Is this store written in an ``elif`` arm rather than a first-link ``if``?
+
+    An ``elif`` is not a branch of its own. It is a continuation of the chain
+    above it and runs only when *every* test before it failed, so a store in an
+    ``elif`` arm cannot be read as the value in force on every call:
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        elif True:
+            cs = contextlib.suppress(AssertionError)
+
+    At ``x == 1`` the first arm is taken and ``cs`` still holds the
+    ``nullcontext``; at ``x == 0`` the ``elif`` runs. Which store a later
+    ``with cs:`` enters therefore depends on the call, and no single verdict
+    about the header is right.
+
+    The test is structural: an enclosing ``ast.If`` whose ``orelse`` contains
+    the store's own block. A first-link ``if``, an ``else`` arm and an
+    ``if True:`` body all fail it, which is what keeps them on their existing
+    answers -- an ``else`` arm genuinely does run whenever its ``if`` does not,
+    so together the two cover every call and the later store really is
+    decisive there.
+    """
+    if function is None:
+        return False
+    for block in _enclosing_blocks(statement, function):
+        if not isinstance(block, ast.If):
+            continue
+        for outer in _enclosing_blocks(block, function):
+            if isinstance(outer, ast.If) and any(child is block for child in outer.orelse):
+                return True
+    return False

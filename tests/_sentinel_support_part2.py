@@ -10,29 +10,6 @@ if __name__ == "tests._sentinel_support_part2":
     )
 
 
-def _entry_may_be_an_unrun_capture(entry):
-    """Is this entry a ``match`` capture that is not guaranteed to have bound?
-
-    The narrow companion to :func:`_store_retires`, asked of a whole
-    ``(statement, value, conditional)`` entry rather than of a statement and a
-    name. It exists because the name is not carried on the entry itself, and
-    the caller that has to decide whether a single competing store is ambiguous
-    only has the entry.
-
-    A ``match`` statement can capture several names, so the name is recovered
-    by asking which of the captures it owns is the one this entry records --
-    a capture that is guaranteed to bind for *some* name is still a capture
-    that may not bind for the name in question, so every owned name is
-    checked and any one of them being undecidable makes the entry so.
-    """
-    statement = entry[0]
-    if not isinstance(statement, ast.Match):
-        return False
-    return not all(
-        _capture_always_binds(statement, name) for name in _match_capture_names_for(statement)
-    )
-
-
 def _match_capture_names_for(statement):
     """The names a single ``ast.Match`` statement captures."""
     names = []
@@ -44,7 +21,7 @@ def _match_capture_names_for(statement):
     return names
 
 
-def _assigned_suppressors(function, bound, query=None):
+def _assigned_suppressors(function, bound, query=None, owning=None):
     """Map each statement index to the suppressor names bound *by* it.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -150,8 +127,40 @@ def _assigned_suppressors(function, bound, query=None):
             ]
             if not seen:
                 continue
-            value = _resolve_bindings(seen, bound, orders, index, function)
-            if value is not None:
+            value = _resolve_bindings(seen, bound, orders, index, function, query, owning)
+            # #441. `_NOT_A_SUPPRESSOR` is a *record* that the name is bound
+            # and what it carries is not a suppressor, not a value to hand
+            # downstream. It has always been dropped here, which was correct
+            # when only `None` reached this point; `_resolve_bindings` can now
+            # return the marker itself to say "bound on two paths, and the one
+            # reached without a suppressor provably does not swallow
+            # `AssertionError`" -- a live header. Recording it would carry the
+            # marker forward, and the two consumers of this table would each
+            # misread it: `_aliased_suppressions` looks names up to append
+            # them to a header's argument list, where a marker is not a
+            # suppression, and `_bindings_before` advances a carried set from
+            # it, where a stale suppressor must not survive. Both already
+            # handle the marker correctly when it is absent -- that is what
+            # #367's `_NOT_A_SUPPRESSOR` is for -- so the value is simply not
+            # recorded, and the name reads as carrying nothing here.
+            #
+            # A mutation dropping this clause was measured and **survives** the
+            # whole suite. The read-site filter in `_aliased_suppressions`
+            # (`live[expression.id] is not _NOT_A_SUPPRESSOR`) already covers
+            # the only shape that reaches this line, so no verdict changes
+            # either way. The clause is kept anyway, and the reason is that
+            # "record the marker" is this module's established idiom for a
+            # bound name that carries no suppressor: `_bindings_before` and
+            # `_loop_target_bindings` both do exactly that rather than
+            # dropping the key, for the same anti-staleness reason #367 gives.
+            # Filtering only at the read site would leave a recorded marker one
+            # refactor away from reaching `_suppression_names`, which is the
+            # exact failure #367's own comment describes ("appending it would
+            # hand `_suppression_names` an object with no `args`"). This is
+            # defence at the producer so the consumer's filter is not the only
+            # thing standing between the marker and a bare `object()` being
+            # read as a suppression.
+            if value is not None and value is not _NOT_A_SUPPRESSOR:
                 assigned.setdefault(index, {})[name] = value
             elif index and name in assigned.get(index - 1, {}):
                 # #367. The name is still bound here, and what it carries is
@@ -221,6 +230,8 @@ def _assigned_suppressors(function, bound, query=None):
                 orders,
                 following,
                 function,
+                query,
+                owning,
             )
             if resolved is None:
                 # Recorded against THIS index, not the next one.
@@ -471,7 +482,7 @@ def _store_bindings(function, bound, query=None):
     return bindings, raw_values
 
 
-def _resolve_bindings(entries, bound, orders, index=None, function=None):
+def _resolve_bindings(entries, bound, orders, index=None, function=None, query=None, owning=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
     ``entries`` are ``(statement, value, conditional)`` triples, already
@@ -549,6 +560,21 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
             and _carried_suppressor_has_unshadowed_arguments(carried[0], function)
         ):
             return carried[0]
+    # #441. Decline an elif suppression only when a proven assertion-failure
+    # value takes an earlier arm and retains an enterable plain manager. The
+    # same manager can suppress every value where the assert would fail, so
+    # merely seeing a non-suppressor on some path is not sufficient.
+    if (
+        len(competing) == 1
+        and not any(_entry_may_be_an_unrun_capture(entry) for entry in competing)
+        and _store_is_in_an_elif_link(competing[0][0], function)
+        and _entry_suppresses_assertion_errors(competing[0], bound)
+        and _elif_skipped_path_can_fail(
+            entries, orders, competing[0], bound, function, query, owning
+        )
+    ):
+        # This witness can fail without entering the competing suppressor.
+        return _NOT_A_SUPPRESSOR
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
@@ -823,47 +849,6 @@ def _latest_write_in_block(tied, orders=None, index=None, function=None):
     ran_latest = max(position(entry[0]) for entry in ran)
     survivors = [entry for entry in ran if position(entry[0]) == ran_latest]
     return survivors[0] if len(survivors) == 1 else None
-
-
-def _readable_store_value(value, bound):
-    """The store's value, if it is a *suppressor candidate* this function owns.
-
-    This resolver answers "is the name in force a readable suppressor?", so it
-    must only ever hand back a value the suppressor machinery can read. That is
-    not every store value, and #367's tie branch is where the difference bites:
-
-    #359 records a carrier (`import ... as cs`, `def cs`, `class cs`) as a
-    plain ``str`` runtime kind -- "module"/"function"/"type" -- deliberately, so
-    the value stays attached to the real statement and containment and
-    ordering stay answerable. A carrier is *not* a suppressor and not a
-    readable right-hand side either, and `_entry_is_dead` is the rule that
-    answers it, by reading the ``str``. Returning one from here would put a
-    bare ``"module"`` in front of the alias machinery as though it were a call.
-
-    The failure that produced is measured. A carrier inside the header's own
-    scope has already run by the time the name is entered:
-
-        with (cs := suppress(AssertionError)):
-            import os as cs
-        with cs:
-            assert x != 1        # TypeError: 'module' object ...
-
-    Both stores sit in one top-level statement, so they share a binding order
-    and this tie branch answers with the conditional one. Returning the raw
-    ``"module"`` skipped the entry for *any* readable suppressor -- the tie had
-    already retired the `suppress` -- and reported the assert `enforced`,
-    certifying an unreachable contract as load-bearing. Base answers `False`
-    here, so the tie branch is what introduced it.
-
-    So: anything that is not a value the suppressor rules can read answers
-    ``None``, which is this function's existing "not a suppressor" answer, and
-    leaves the carrier to ``_entry_is_dead``. An unreadable right-hand side and
-    a carrier are different things that happen to share an answer here, which
-    is the safe one -- neither can be claimed harmless.
-    """
-    if isinstance(value, str):
-        return None
-    return value if _is_readable_suppressor(value, bound) else None
 
 
 def _binding_order(function, statement):
