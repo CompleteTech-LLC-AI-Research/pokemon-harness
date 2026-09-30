@@ -11766,6 +11766,93 @@ def test_literal_match_records_captured_manager(manager, live, named):
 
 
 @pytest.mark.parametrize(
+    "imports",
+    (
+        # #369. The `from` spelling is the filed reproduction, and it is the
+        # one the callee-intact rule exists for: `_name_is_rebound_away_from_module`
+        # answers the `builtins.attr` question, so it counted this ordinary
+        # import as a rebinding and declined every subject element.
+        "from contextlib import suppress, nullcontext",
+        "import contextlib",
+    ),
+    ids=("from-import", "qualified"),
+)
+@pytest.mark.parametrize("named", (False, True), ids=("literal-subject", "named-subject"))
+def test_literal_match_supersedes_a_carried_suppressor(imports, named):
+    """#369: a decided capture holds its captured value, not the carried one.
+
+    The carried ``suppress(AssertionError)`` is installed by a plain store and
+    then *superseded* by the capture. When the capture is decided, the header
+    CPython enters is the captured ``nullcontext``, so the carried suppressor
+    is no longer in force and the assert is live. Answering ``False`` here is
+    the damaging direction for #369: a live contract is dropped from the
+    sentinel's view.
+
+    Every row is executed before the analyzer is consulted, so no row can pass
+    by being vacuous.
+    """
+    qualified = imports == "import contextlib"
+    manager = "contextlib.nullcontext()" if qualified else "nullcontext()"
+    # The carried suppressor is always written qualified, so the `from` row
+    # needs the module bound as well as the two members.
+    preamble = "import contextlib\n" if not qualified else ""
+    setup = "    subject = [" + manager + "]\n" if named else ""
+    source = (
+        preamble
+        + imports
+        + "\ndef outer(x):\n"
+        + "    cs = contextlib.suppress(AssertionError)\n"
+        + setup
+        + "    match "
+        + ("subject" if named else "[" + manager + "]")
+        + ":\n        case [cs]: pass\n    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<literal-supersedes-carried>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        fired = True
+    else:
+        fired = False
+    assert fired is True, "the captured plain manager must leave the assert live"
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    (
+        # The decline must survive a genuine rebind. A parameter of the same
+        # name replaces the import for the whole call, so the subject element
+        # is not `contextlib.nullcontext` and the proof must not be made.
+        "def outer(nullcontext, x):\n    cs = contextlib.suppress(AssertionError)\n",
+        "def outer(x):\n    cs = contextlib.suppress(AssertionError)\n    nullcontext = int\n",
+    ),
+    ids=("parameter", "local-store"),
+)
+def test_literal_match_declines_a_rebound_callee(prefix):
+    """#369: fixing the `from` spelling must not accept a rebound callee.
+
+    These are the shapes the rule is *not* allowed to decide. They are held to
+    the conservative verdict rather than to a runtime outcome, because the
+    capture is left undecidable -- which is the safe direction.
+    """
+    source = (
+        "import contextlib\n"
+        + prefix
+        + "    match [nullcontext()]:\n        case [cs]: pass\n"
+        + "    with cs:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
     "element,error",
     (
         ("missing()", NameError),
