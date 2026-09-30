@@ -7372,6 +7372,50 @@ LITERAL_SUBJECT_ROWS = (
         "live",
         False,
     ),
+    (
+        "a named subject survives an inert statement before the match",
+        (
+            "    subject = [contextlib.nullcontext()]\n"
+            "    with contextlib.nullcontext():\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "live",
+        True,
+    ),
+    (
+        "a named subject survives the carried carrier before the match",
+        (
+            "    subject = [contextlib.nullcontext()]\n"
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "live",
+        True,
+    ),
+    (
+        "CONTROL an intervening statement that rebinds the subject refuses",
+        (
+            "    subject = [contextlib.nullcontext()]\n"
+            "    with contextlib.nullcontext():\n"
+            "        subject = []\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a with target that names the subject refuses",
+        (
+            "    subject = [contextlib.nullcontext()]\n"
+            "    with contextlib.nullcontext() as subject:\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "swallowed",
+        False,
+    ),
 )
 
 

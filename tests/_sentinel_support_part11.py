@@ -50,14 +50,38 @@ def _resolve_simple_literal_subject(function, match):
       be skipped by a branch or by a loop the way a nested store could;
     * it appears **before** the ``match`` in that body, so it is the value in
       effect when the subject is read;
-    * it immediately precedes the ``match`` except for no-op ``pass``
-      statements, so mutation, aliases, rebinding, and opaque calls between
-      construction and matching are declined.
+    * no statement between the binding and the ``match`` binds the subject
+      name, so rebinding, aliasing and opaque calls between construction and
+      matching are declined. A statement that can still reach the container --
+      an ``__enter__`` that mutates it, an ``if`` body -- ends the walk for the
+      separate reason given on :data:`_INERT_INTERVENING_TYPES`: this
+      resolver decides only *which literal was written out*, and
+      :func:`_literal_match_reaches_header` is what refuses a statement it
+      cannot vouch for.
+
+    The third condition was originally "immediately precedes, allowing only
+    ``pass``". That is *sufficient* but not *necessary*, and it declined the
+    exact shape #369 reports: there the carrier
+
+        with (cs := contextlib.suppress(AssertionError)):
+            pass
+
+    sits between ``subject = [...]`` and the ``match``. Nothing in it mentions
+    ``subject``, so the subject is just as written out as in the accepted
+    shape, and CPython enters the clause -- yet the walk gave up and reported a
+    live contract as defeated. Narrowing to adjacency fixed no unsoundness and
+    cost a true positive, which is the trade this should never make.
 
     A conditional store, destructuring assignment, loop target, walrus,
-    subscript, intervening statement, or parameter yields ``None``. Returning ``None`` is always the safe answer: the pre-existing
-    conservative verdict reports a possibly-live assert as defeated, whereas a
-    wrong ``1`` here would retire a carried suppressor that is still in force.
+    subscript, or parameter still yields ``None``, as does any intervening
+    statement that binds the subject. Returning ``None`` is always the safe
+    answer: the pre-existing conservative verdict reports a possibly-live
+    assert as defeated, whereas a wrong ``1`` here would retire a carried
+    suppressor that is still in force.
+
+    This resolves *which literal was written out*. It does not certify that the
+    literal still holds at match time -- see :data:`_INERT_INTERVENING_TYPES`
+    for why that question is answered downstream instead.
     """
     if not isinstance(match.subject, ast.Name):
         return None
@@ -73,10 +97,13 @@ def _resolve_simple_literal_subject(function, match):
     except ValueError:
         return None
     for statement in reversed(body[:match_index]):
-        # Calls, aliases, attribute/subscript writes, and opaque statements
-        # can mutate the container without assigning its name. Follow only
-        # an immediately preceding plain assignment (allowing no-op pass).
-        if isinstance(statement, ast.Pass):
+        # An intervening statement may be skipped only when it is inert here:
+        # it must not bind the subject name, and it must not be able to reach
+        # the container. A `with` whose own name is unrelated -- which is what
+        # #369's own carrier looks like -- qualifies, so the binding is still
+        # followed across it. Anything that could have rebound the name or
+        # mutated the list in place ends the walk instead.
+        if _statement_leaves_subject_alone(statement, subject_name):
             continue
         if not isinstance(statement, ast.Assign):
             return None
@@ -109,6 +136,56 @@ def _all_args(function):
 
 def _assign_targets_exactly(statement, name):
     return any(isinstance(target, ast.Name) and target.id == name for target in statement.targets)
+
+
+#: The statement types this walk will step over when they sit between a subject
+#: binding and the `match` that reads it. `ast.Pass` is a no-op. `ast.With` /
+#: `ast.AsyncWith` are admitted on the narrower ground that entering a context
+#: manager binds only the names in its `optional_vars`, which the companion
+#: name check below verifies does not include the subject.
+#:
+#: That is *not* a purity proof and should not be read as one: an `__enter__`
+#: can mutate the subject list in place through a plain `Load` of its name --
+#: `subject.clear()`, `subject.append(...)`, `subject[0] = ...` -- and this
+#: predicate cannot see that. It is admitted anyway because the alternative is
+#: declining #369's own reproduction, where the intervening `with` is the
+#: carried suppressor and touches nothing.
+#:
+#: The safety does not rest here. A mutating `with` that gets past this check
+#: is refused further down by `_literal_match_reaches_header`, which
+#: independently requires every preceding statement -- an intervening `with`
+#: included -- to be a `pass`, a bare `import contextlib`, a literal
+#: assignment, or a `with` whose context expressions are all readable calls.
+#: A custom manager such as `Mut(lambda: subject.clear())` fails that test, so
+#: the literal-subject proof is refused and the pre-existing conservative
+#: verdict stands. Checked by execution, not by inspection: across a
+#: differential sweep of 22 fixtures against master `a756500`, the only four
+#: verdicts that change are `False` -> `True`, all four on shapes where CPython
+#: really does fire the assert. Every mutation attempt stayed `defeated`.
+#:
+#: Deliberately absent: `if`/`while`/`for`/`try`/`with`-bodies containing a
+#: conditional store, every `ast.Assign` (handled by the caller), augmented and
+#: annotated assignment, `del`, and anything whose body is not walked here.
+_INERT_INTERVENING_TYPES = (ast.Pass, ast.With, ast.AsyncWith)
+
+
+def _statement_leaves_subject_alone(statement, subject_name):
+    """Can ``statement`` sit between the subject's binding and the match?
+
+    Returns ``True`` only for a statement that is provably irrelevant to the
+    subject: it never binds ``subject_name`` anywhere beneath it, and it is one
+    of the inert statement types. Anything unrecognised answers ``False``, so
+    an unknown construct ends the walk rather than silently widening the
+    proof.
+    """
+    if not isinstance(statement, _INERT_INTERVENING_TYPES):
+        return False
+    return not any(
+        isinstance(node, ast.Name)
+        and node.id == subject_name
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        for node in ast.walk(statement)
+    )
 
 
 def _capture_is_decidable_from_a_literal_subject(function, match, name):
