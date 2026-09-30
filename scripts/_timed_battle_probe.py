@@ -13,192 +13,27 @@ import threading
 from collections import deque
 from copy import deepcopy
 
-PROVENANCE = "unknown historical provenance; pristine acquisition unverified"
-READINESS_PHASES = (
-    "party_qualified",
-    "link_menu_colosseum_ready",
-    "colosseum_reached",
-    "battle_menu_ready",
-    "party_inspected",
-    "party_cancelled",
-    "move_ready",
-    "settled_turn",
-    "room_returned",
+from scripts._timed_battle_probe_reads import (
+    _byte,
+    _integer,
+    _location,
+    _party,
+    _read,
+    _rom,
+    _validate_party,
 )
-PHASES = READINESS_PHASES
-SUPPORTED_EFFECTS = frozenset((0, 6, 44))
-# pret data/moves/moves.asm: all Gen-I damage moves in the supported effects.
-MOVE_EFFECTS = dict.fromkeys(
-    (
-        1,
-        2,
-        5,
-        10,
-        11,
-        15,
-        16,
-        17,
-        21,
-        22,
-        25,
-        30,
-        33,
-        55,
-        56,
-        57,
-        64,
-        65,
-        68,
-        70,
-        75,
-        88,
-        89,
-        98,
-        121,
-        127,
-        146,
-        152,
-        157,
-        161,
-        163,
-    ),
-    0,
+from scripts._timed_battle_probe_schemas import (
+    HIDDEN_EVENT_INPUT_LIMIT,
+    MENU_FIELDS,
+    MOVE_EFFECTS,
+    OBSERVATION_SYMBOLS,
+    PHASES,
+    PROVENANCE,
+    READINESS_PHASES,  # noqa: F401 - retained public facade attribute
+    SUPPORTED_EFFECTS,
+    UNSUPPORTED_MOVES,
+    VERIFICATION_SYMBOLS,  # noqa: F401 - retained public facade attribute
 )
-MOVE_EFFECTS.update({9: 6, 84: 6, 85: 6, 87: 6, 24: 44, 155: 44})
-UNSUPPORTED_MOVES = {68: "Counter special return path is not qualified"}
-VERIFICATION_SYMBOLS = (
-    "SelectEnemyMove",
-    "LoadScreenTilesFromBuffer1",
-    "FullyParalyzedText",
-    "PrintText",
-    "CheckPlayerStatusConditions.MonHurtItselfOrFullyParalysed",
-    "CheckEnemyStatusConditions.monHurtItselfOrFullyParalysed",
-)
-OBSERVATION_SYMBOLS = (
-    "SaveGameData",
-    "Serial_SyncAndExchangeNybble",
-    "LinkMenu.waitForInputLoop",
-    "LinkMenu.doneChoosingMenuSelection",
-    "PrepareForSpecialWarp",
-    "CableClubLeftGameboy",
-    "CableClubRightGameboy",
-    "CableClub_DoBattleOrTrade",
-    "MainInBattleLoop",
-    "DisplayBattleMenu",
-    "HandleMenuInput",
-    "HandlePartyMenuInput",
-    "MoveSelectionMenu",
-    "LinkBattleExchangeData",
-    "ExecutePlayerMove",
-    "ExecuteEnemyMove",
-    "PlayerCanExecuteMove",
-    "EnemyCanExecuteMove",
-    "ExecutePlayerMoveDone",
-    "ExecuteEnemyMoveDone",
-    "ApplyDamageToEnemyPokemon",
-    "ApplyDamageToPlayerPokemon",
-    "ApplyAttackToEnemyPokemonDone",
-    "ApplyAttackToPlayerPokemonDone",
-    "DecrementPP",
-    "HandlePlayerMonFainted",
-    "HandleEnemyMonFainted",
-    "EndOfBattle",
-    "ReturnToCableClubRoom",
-)
-MENU_FIELDS = (
-    "wCurMap",
-    "wLinkState",
-    "wIsInBattle",
-    "hSerialConnectionStatus",
-    "wCurrentMenuItem",
-    "wMaxMenuItem",
-    "wMenuWatchedKeys",
-    "wTopMenuItemX",
-    "wTopMenuItemY",
-    "wPartyMenuTypeOrMessageID",
-    "wPlayerMoveListIndex",
-    "wPlayerSelectedMove",
-    "wEnemySelectedMove",
-    "wSerialExchangeNybbleSendData",
-    "wSerialExchangeNybbleReceiveData",
-    "wBattleResult",
-    "hWhoseTurn",
-    "wPlayerDisabledMove",
-    "wMoveMissed",
-    "wDamage",
-    "wXCoord",
-    "wYCoord",
-    "wSpritePlayerStateData1FacingDirection",
-    "wJoyIgnore",
-    "wWalkCounter",
-    "wStatusFlags5",
-)
-HIDDEN_EVENT_INPUT_LIMIT = 6
-
-
-def _integer(value, lo, hi, label):
-    if type(value) is not int or not lo <= value <= hi:
-        raise ValueError(f"invalid {label}: {value!r}")
-    return value
-
-
-def _byte(value):
-    return _integer(value, 0, 255, "memory byte")
-
-
-def _location(session, name):
-    bank, address = session.symbols.bank_addr(name)
-    _integer(bank, 0, 255, f"{name} bank")
-    _integer(
-        address, 0 if bank == 0 else 0x4000, 0x3FFF if bank == 0 else 0x7FFF, f"{name} address"
-    )
-    return bank, address
-
-
-def _read(session, name, size=1):
-    address = session.symbols.addr_of(name)
-    _integer(address, 0x8000, 0x10000 - size, f"{name} RAM address")
-    values = [_byte(session._pyboy.memory[address + i]) for i in range(size)]
-    return values[0] if size == 1 else values
-
-
-def _rom(session, bank, address, size):
-    return bytes(_byte(session._pyboy.memory[bank, address + i]) for i in range(size))
-
-
-def _party(session):
-    count = _integer(_read(session, "wPartyCount"), 1, 6, "party count")
-    base = session.symbols.addr_of("wPartyMons")
-    _integer(base, 0x8000, 0x10000 - count * 44, "party records address")
-    result = {
-        "count": count,
-        "species": _read(session, "wPartySpecies", count + 1),
-        "records": [
-            bytes(_byte(session._pyboy.memory[base + i * 44 + j]) for j in range(44)).hex()
-            for i in range(count)
-        ],
-    }
-    _validate_party(result)
-    return result
-
-
-def _validate_party(party):
-    count = _integer(party["count"], 1, 6, "party count")
-    if len(party["species"]) != count + 1 or party["species"][-1] != 255:
-        raise ValueError("invalid party species terminator")
-    if len(party["records"]) != count:
-        raise ValueError("invalid party record count")
-    living = []
-    for i, raw in enumerate(party["records"]):
-        record = bytes.fromhex(raw)
-        species = _integer(party["species"][i], 1, 190, "party species")
-        if len(record) != 44 or record[0] != species:
-            raise ValueError("invalid party record/species")
-        if int.from_bytes(record[1:3], "big"):
-            living.append(i)
-    if not living:
-        raise ValueError("ordinary battle requires at least one living Pokemon")
-    return living[0]
 
 
 class BattleOwnerDriver:

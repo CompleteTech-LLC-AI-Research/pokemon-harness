@@ -18,7 +18,7 @@ from pokered_harness.state.overworld import OverworldState, parse_overworld
 from pokered_harness.state.party import Party, parse_party
 from pokered_harness.state.progress import ProgressState, parse_progress
 from pokered_harness.state.text import TextState, parse_text
-from pokered_harness.symbols.loader import MemoryLike, SymbolTable
+from pokered_harness.symbols.loader import MemoryLike, SymbolTable, read_wram_u8
 
 
 class StateStatus(str, Enum):
@@ -465,7 +465,7 @@ def _mark_invalid_values(
 def _money_has_invalid_bcd(memory: MemoryLike, symbols: SymbolTable) -> bool:
     base = symbols.addr_of("wPlayerMoney")
     for offset in range(3):
-        raw = int(memory[base + offset]) & 0xFF
+        raw = read_wram_u8(memory, base + offset)
         if (raw >> 4) > 9 or (raw & 0x0F) > 9:
             return True
     return False

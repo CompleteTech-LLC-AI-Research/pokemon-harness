@@ -79,9 +79,7 @@ def test_locked_timeout_is_bounded_and_does_not_enter_the_body() -> None:
     assert entered.wait(timeout=1.0)
 
     started = time.monotonic()
-    with pytest.raises(SessionLockTimeout, match="deadline"), session.locked(
-        timeout_s=0.02
-    ):
+    with pytest.raises(SessionLockTimeout, match="deadline"), session.locked(timeout_s=0.02):
         raise AssertionError("the timed-out operation must not enter")
     assert time.monotonic() - started < 0.5
 

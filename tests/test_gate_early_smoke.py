@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import os
@@ -14,14 +13,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location(
-    "gate_early_smoke_under_test", ROOT / "scripts" / "production_gate.py"
-)
-assert SPEC is not None and SPEC.loader is not None
-gate = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = gate
-SPEC.loader.exec_module(gate)
+from tests._production_gate_support import gate
 
 QUALIFICATION_TIERS = ("unit", "local", "remote", "trade", "battle", "timing")
 TIMED_NODES = frozenset(

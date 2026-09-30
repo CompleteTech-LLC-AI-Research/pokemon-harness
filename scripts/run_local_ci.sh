@@ -132,53 +132,145 @@ PY
 python -m pip install -e ".[dev]"
 
 # Check packaging and gate lint/format
+# Boundary decision: the two main lanes below cover all of `tests/` (passed as
+# the directory itself, so a newly added test file cannot silently escape) plus
+# an explicit list of `scripts/` paths, and the `ruff format --check` lane
+# additionally covers exactly one `src/` file -- the #242 facade entry, added so
+# that new source path is format-checked and not merely checked. The remaining
+# `src/` paths of the runtime/link block stay outside the format boundary on
+# purpose and are named in tests/test_local_ci_policy.py. Measured reason: 7 of
+# that block's 29 paths are not format-clean today (3 of its 17 `src/` files), so
+# format-checking the whole block would fail the gate and belongs in a separate
+# change that fixes those files first. The narrow boundary is pre-existing --
+# 0 of 16 `src/` files were format-checked at 061fa15c. `scripts/` and `src/`
+# stay enumerated rather than globbed because neither tree is lint- or
+# format-clean yet (measured on the #269 content: 5 `scripts/` check errors, 41
+# `scripts/` and 19 `src/` files needing reformat), so globbing them here would
+# fail the gate and is a separate change that fixes those files first. This
+# script stays in lockstep with .github/workflows/release-hygiene.yml, and
+# tests/test_local_ci_policy.py enforces the `tests/` coverage rather than
+# trusting this comment.
 python -m ruff check \
+    scripts/_timed_battle_probe.py \
+    scripts/_timed_battle_probe_reads.py \
+    scripts/_timed_battle_probe_schemas.py \
+    scripts/_coverage_report_build.py \
+    scripts/_coverage_report_catalog.py \
+    scripts/_coverage_report_model.py \
+    scripts/_coverage_report_schema.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
+    scripts/produce_battle_scenario_capture.py \
+    scripts/produce_battle_scenario_catalog.py \
+    scripts/produce_battle_scenario_model.py \
+    scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
+    scripts/gate_capacity.py \
+    scripts/gate_capacity_admission.py \
+    scripts/gate_capacity_policy.py \
+    scripts/gate_capacity_report.py \
+    scripts/qualification_runner.py \
+    scripts/qualification_runner_allocation.py \
+    scripts/qualification_runner_assets.py \
+    scripts/qualification_runner_cgroup.py \
+    scripts/qualification_runner_cli.py \
+    scripts/qualification_runner_command.py \
+    scripts/qualification_runner_declaration.py \
+    scripts/qualification_runner_facts.py \
+    scripts/qualification_runner_host.py \
+    scripts/qualification_runner_model.py \
+    scripts/qualification_runner_report.py \
+    scripts/qualification_runner_reservation.py \
+    scripts/production_gate_assets.py \
+    scripts/production_gate_capacity.py \
+    scripts/production_gate_evidence.py \
+    scripts/production_gate_execution.py \
+    scripts/production_gate_matrix.py \
+    scripts/production_gate_matrix_audit.py \
+    scripts/production_gate_model.py \
+    scripts/production_gate_render.py \
+    scripts/production_gate_runtime.py \
+    scripts/production_gate_runtime_gates.py \
+    scripts/production_gate_text.py \
+    scripts/production_gate_tiers.py \
+    scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
+    scripts/timed_frame_admission.py \
+    scripts/timed_frame_runner.py \
+    scripts/timed_frame_window.py \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
-    tests/_battle_item_evidence.py \
-    tests/_gate_report.py \
-    tests/_rom_assets.py \
-    tests/_tier_config.py \
-    tests/conftest.py \
-    tests/test_battle_coverage.py \
-    tests/test_battle_item_evidence.py \
-    tests/test_battle_scenario_fixtures.py \
-    tests/test_fixture_provenance.py \
-    tests/test_gate_early_smoke.py \
-    tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
-    tests/test_runtime_packaging.py
+    tests
 python -m ruff format --check \
+    src/pokered_harness/_mcp_facade_entry.py \
+    scripts/_timed_battle_probe.py \
+    scripts/_timed_battle_probe_reads.py \
+    scripts/_timed_battle_probe_schemas.py \
+    scripts/_coverage_report_build.py \
+    scripts/_coverage_report_catalog.py \
+    scripts/_coverage_report_model.py \
+    scripts/_coverage_report_schema.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
     scripts/produce_battle_scenario.py \
+    scripts/produce_battle_scenario_capture.py \
+    scripts/produce_battle_scenario_catalog.py \
+    scripts/produce_battle_scenario_model.py \
+    scripts/produce_battle_scenario_runtime.py \
     scripts/production_gate.py \
+    scripts/gate_capacity.py \
+    scripts/gate_capacity_admission.py \
+    scripts/gate_capacity_policy.py \
+    scripts/gate_capacity_report.py \
+    scripts/qualification_runner.py \
+    scripts/qualification_runner_allocation.py \
+    scripts/qualification_runner_assets.py \
+    scripts/qualification_runner_cgroup.py \
+    scripts/qualification_runner_cli.py \
+    scripts/qualification_runner_command.py \
+    scripts/qualification_runner_declaration.py \
+    scripts/qualification_runner_facts.py \
+    scripts/qualification_runner_host.py \
+    scripts/qualification_runner_model.py \
+    scripts/qualification_runner_report.py \
+    scripts/qualification_runner_reservation.py \
+    scripts/production_gate_assets.py \
+    scripts/production_gate_capacity.py \
+    scripts/production_gate_evidence.py \
+    scripts/production_gate_execution.py \
+    scripts/production_gate_matrix.py \
+    scripts/production_gate_matrix_audit.py \
+    scripts/production_gate_model.py \
+    scripts/production_gate_render.py \
+    scripts/production_gate_runtime.py \
+    scripts/production_gate_runtime_gates.py \
+    scripts/production_gate_text.py \
+    scripts/production_gate_tiers.py \
+    scripts/stepping_loop_profile.py \
     scripts/tcp_link_matrix.py \
+    scripts/timed_frame_admission.py \
+    scripts/timed_frame_runner.py \
+    scripts/timed_frame_window.py \
     scripts/validate_battle_scenarios.py \
     scripts/validate_fixture_manifest.py \
-    tests/_battle_item_evidence.py \
-    tests/_gate_report.py \
-    tests/_rom_assets.py \
-    tests/_tier_config.py \
-    tests/conftest.py \
-    tests/test_battle_coverage.py \
-    tests/test_battle_item_evidence.py \
-    tests/test_battle_scenario_fixtures.py \
-    tests/test_fixture_provenance.py \
-    tests/test_gate_early_smoke.py \
-    tests/test_party_record_audit.py \
-    tests/test_production_gate.py \
-    tests/test_runtime_packaging.py
+    tests
 
 # Check runtime and link lane lint
 python -m ruff check \
+    src/pokered_harness/_mcp_facade_entry.py \
+    src/pokered_harness/link/_network_backend_io_mixin.py \
+    src/pokered_harness/link/_network_backend_lifecycle_mixin.py \
+    src/pokered_harness/link/_network_backend_owner_mixin.py \
+    src/pokered_harness/link/_network_backend_protocol_mixin.py \
+    src/pokered_harness/link/_network_backend_support.py \
+    src/pokered_harness/link/_pyboy_link_session_lifecycle_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_network_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_stepping_mixin.py \
+    src/pokered_harness/link/_pyboy_link_session_support.py \
+    src/pokered_harness/link/_serial_link_support.py \
     src/pokered_harness/link/network_backend.py \
     src/pokered_harness/link/pyboy_link_session.py \
     src/pokered_harness/link/pair.py \
@@ -186,7 +278,11 @@ python -m ruff check \
     src/pokered_harness/link/serial_coordinator.py \
     src/pokered_harness/link/serial_link.py \
     scripts/network_concurrency_probe.py \
-    tests/test_network_backend.py \
+    tests/test_network_backend_dispatch.py \
+    tests/test_network_backend_rearm.py \
+    tests/test_network_backend_serial_transcript.py \
+    tests/test_network_backend_transport.py \
+    tests/test_network_backend_wire_idle.py \
     tests/test_fixture_provenance.py \
     tests/test_pyboy_link_session.py \
     tests/test_link_pair.py \
@@ -280,7 +376,7 @@ import pokered_harness
 
 assert pyboy.__version__ == "2.7.0"
 assert pyboy.__pokered_harness_revision__ == (
-    "c565df66c3731fad2856169a90f6bbec99925915"
+    "fd765b1808ac9cb192b42ae971987158ff36ae48"
 )
 assert utils.cython_compiled is False
 serial = Serial(False)

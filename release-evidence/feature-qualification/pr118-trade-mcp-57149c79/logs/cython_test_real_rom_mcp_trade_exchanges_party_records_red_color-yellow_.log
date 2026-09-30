@@ -1,0 +1,21 @@
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-yellow]
+  [worktree]/target/venv-native-head/lib/python3.11/site-packages/sdl2/_internal.py:24: UserWarning: Using SDL2 binaries from pysdl2-dll 2.32.10
+    warnings.warn(msg, warntype)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+______ test_real_rom_mcp_trade_exchanges_party_records[red_color-yellow] _______
+----------------------------- Captured stdout call -----------------------------
+MCP_TRADE_RECORDS link_menu frames=640
+MCP_TRADE_RECORDS trade_center cursor=0 warp=120
+MCP_TRADE_RECORDS walk directions=['right', 'left'] settle_frames=90
+MCP_TRADE_RECORDS trade_copy frames=660 trade_received=[1, 1] milestones=[['239:3:0/2', '239:3:0/3'], ['239:145:0/1', '239:3:0/3'], ['239:19:0/0', '239:3:0/3'], ['239:35:0/0', '239:145:0/1'], ['239:35:0/0', '239:19:0/0'], ['239:35:0/0', '239:35:0/0'], ['239:3:0/1', '239:35:0/0'], ['239:3:0/1', '239:3:0/1']]
+MCP_TRADE_RECORDS trade_completion frames=2990 evolution=[1, 1]
+MCP_TRADE_RECORDS offers primary=0 peer=0 observed={0: 0, 1: 0} submenu_back_outs=0 trade_received=[1, 1]
+MCP_TRADE_RECORDS_CHILD_ORIGINS cython [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so [worktree]/target/venv-native-head/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so
+MCP_TRADE_RECORDS_ROM {"completion_menu_keys": [145, 145], "copy_milestone_observed": true, "copy_peer_map": 239, "copy_primary_map": 239, "distinct_records": true, "evolution_events": [1, 1], "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb", "offered_slots": {"0": 0, "1": 0}, "outgoing_slot": 0, "party_count": 1, "peer_after": ["f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"], "peer_before": ["390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"], "peer_fixture": "cable_club.state", "peer_fixture_sha1": "37df4dbdb512cd3febdc2d536281683476291d3b", "peer_map": 239, "peer_outgoing_slot": 0, "peer_party_count": 1, "peer_version": "yellow", "post_trade_frames": 2990, "primary_after": ["390e8110dd2d9115ac4d1170eb3d8ce07354b49e6dc52b12b4af43d57bc1b334"], "primary_before": ["f9aa9afbb2d73a296ac5f9dbf23bada3b3f3e2370901d5f0082f512e5433c0f2"], "primary_fixture": "cable_club.state", "primary_map": 239, "receiving_slot": 0, "runtime_mode": "cython", "scenario": "ordered_orientation", "step_chunk": 10, "submenu_back_outs": 0, "trade_received": [1, 1], "transport": "local_pair", "version": "red_color", "walk_settle_frames": 90}
+=========================== short test summary info ============================
+PASSED tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-yellow]
+1 passed, 1 warning in 394.30s (0:06:34)

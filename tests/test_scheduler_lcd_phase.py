@@ -34,9 +34,7 @@ class PhaseEndpoint:
             serial=serial,
             cgb_mode=True,
             lcd=SimpleNamespace(frame_done=False, disable_renderer=True),
-            sound=SimpleNamespace(
-                disable_sampling=False, clear_buffer=lambda: None
-            ),
+            sound=SimpleNamespace(disable_sampling=False, clear_buffer=lambda: None),
             breakpoint_singlestep=0,
             breakpoint_singlestep_latch=0,
             tick=self.instruction,
@@ -128,9 +126,7 @@ def test_lcd_reset_marker_does_not_freeze_peer_rearm_or_extend_quantum():
             # peer into the future merely because the public quantum remains.
             master.edge_rearm_results.append(progress_peer())
             if master.edge_rearm_results[0]:
-                master.serial_edge_results.append(
-                    master.mb.serial.backend.on_edge(1, 1)
-                )
+                master.serial_edge_results.append(master.mb.serial.backend.on_edge(1, 1))
 
     master.on_instruction = master_edge_after_peer_reset
     link.step()

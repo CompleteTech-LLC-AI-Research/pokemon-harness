@@ -1,4 +1,5 @@
 """Physical-time selection invariants independent of ROM/controller input."""
+
 import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
@@ -29,16 +30,23 @@ def attach(a, b):
     return link
 
 
-@pytest.mark.parametrize("double_a,double_b,expected", [
-    (False, False, ["a", "b", "a", "b"]),
-    (True, True, ["a", "b", "a", "b"]),
-    (False, True, ["a", "b", "b", "a"]),
-    (True, False, ["a", "b", "a", "a"]),
-])
+@pytest.mark.parametrize(
+    "double_a,double_b,expected",
+    [
+        (False, False, ["a", "b", "a", "b"]),
+        (True, True, ["a", "b", "a", "b"]),
+        (False, True, ["a", "b", "b", "a"]),
+        (True, False, ["a", "b", "a", "a"]),
+    ],
+)
 def test_selection_uses_elapsed_physical_time(double_a, double_b, expected):
     trace = []
-    a = PhysicalEndpoint("a", trace, origin=10000, physical_origin=77, double=double_a, instructions=8)
-    b = PhysicalEndpoint("b", trace, origin=7, physical_origin=99999, double=double_b, instructions=8)
+    a = PhysicalEndpoint(
+        "a", trace, origin=10000, physical_origin=77, double=double_a, instructions=8
+    )
+    b = PhysicalEndpoint(
+        "b", trace, origin=7, physical_origin=99999, double=double_b, instructions=8
+    )
     link = attach(a, b)
     link.step()
     assert [name for name, _ in trace[:4]] == expected
@@ -55,6 +63,7 @@ def test_transition_inside_instruction_uses_runtime_split_accounting(double):
     b = PhysicalEndpoint("b", trace, instructions=8)
     original = a.mb.tick
     switched = False
+
     def transition():
         nonlocal switched
         if not switched:
@@ -69,6 +78,7 @@ def test_transition_inside_instruction_uses_runtime_split_accounting(double):
             switched = True
             return True
         return original()
+
     a.mb.tick = transition
     link = attach(a, b)
     link.step()

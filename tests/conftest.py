@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
+from scripts import coverage_report as coverage
+from tests._gate_capacity_support import runtime_gate_stubs  # noqa: F401
+from tests._mcp_timed_remote_support import failure_snapshots  # noqa: F401
+from tests._probe_timed_rom_pair_support import spawned_probe_args  # noqa: F401
+from tests._timed_link_session_support import (  # noqa: F401
+    game,
+    session_type,
+    source_lifecycle_game,
+)
+from tests._timed_remote_support import remote  # noqa: F401
+from tests._timed_wire_support import kind  # noqa: F401
 
 try:
+    from tests._battle_coverage_support import CATALOG_PATH
     from tests._tier_config import MARKERS, classify_test
 except ModuleNotFoundError:  # pragma: no cover - direct conftest loading
+    from _battle_coverage_support import CATALOG_PATH
     from _tier_config import MARKERS, classify_test
 
 
@@ -44,12 +59,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 class DictMemory:
-    """Sparse dict-backed MemoryLike — defaults to 0 for unset addresses."""
+    """Sparse dict-backed MemoryLike — defaults to 0 for unset addresses.
+
+    Models PyBoy's WRAM read contract for ``0xC000``-``0xDFFF``: the fixed
+    ``0xC000``-``0xCFFF`` half reads back directly, while the
+    ``0xD000``-``0xDFFF`` half is remapped by ``SVBK`` and the bank-indexed
+    form ``memory[bank, addr]`` returns that bank's own byte.  Tests write the
+    plain address (the linker's bank 1 view), so an unqualified read of a
+    banked symbol is a bug rather than a coincidence.
+    """
 
     def __init__(self, initial: dict[int, int] | None = None) -> None:
         self._m: dict[int, int] = dict(initial or {})
 
     def __getitem__(self, key):
+        if isinstance(key, tuple):
+            _bank, address = key
+            return self._m.get(int(address), 0)
         if isinstance(key, slice):
             start, stop, step = key.start, key.stop, key.step or 1
             return [self._m.get(a, 0) for a in range(start, stop, step)]
@@ -116,3 +142,13 @@ def symbols() -> SymbolTable:
 @pytest.fixture
 def mem() -> DictMemory:
     return DictMemory()
+
+
+@pytest.fixture()
+def catalog() -> dict:
+    return coverage.load_catalog(CATALOG_PATH)
+
+
+@pytest.fixture
+def probe():
+    return importlib.import_module("scripts._timed_battle_probe")

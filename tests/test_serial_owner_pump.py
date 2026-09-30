@@ -1,4 +1,5 @@
 """Original synthetic opcodes; no copyrighted ROM or fixture inputs."""
+
 import queue
 import threading
 
@@ -12,10 +13,17 @@ from tests.test_serial_backend_boundary import emulator as emulator  # noqa: PLC
 pytestmark = [pytest.mark.unit, pytest.mark.timing_sensitive]
 
 
-@pytest.mark.parametrize("opcode,length,read", [
-    (0xE0, 2, False), (0xE2, 1, False), (0xEA, 3, False),
-    (0xF0, 2, True), (0xF2, 1, True), (0xFA, 3, True),
-])
+@pytest.mark.parametrize(
+    "opcode,length,read",
+    [
+        (0xE0, 2, False),
+        (0xE2, 1, False),
+        (0xEA, 3, False),
+        (0xF0, 2, True),
+        (0xF2, 1, True),
+        (0xFA, 3, True),
+    ],
+)
 @pytest.mark.parametrize("address", [0xFF01, 0xFF02])
 def test_actual_opcode_stack_pauses_before_commit(emulator, opcode, length, read, address):
     p = emulator
@@ -26,7 +34,7 @@ def test_actual_opcode_stack_pauses_before_commit(emulator, opcode, length, read
     if length == 3:
         program += [address & 255, 255]
     program += [0x04]  # INC B must not execute while paused.
-    p.memory[0, 0x150:0x150 + len(program)] = program
+    p.memory[0, 0x150 : 0x150 + len(program)] = program
     p.register_file.PC = 0x150
     p.register_file.A = 0x2A
     p.register_file.B = 23

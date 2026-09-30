@@ -36,7 +36,9 @@ def _action(before: int, after: int) -> dict:
 
 def _row(*, reverse: bool = False) -> dict:
     # On either peer, local action damages enemy and enemy action damages local.
-    local_before, enemy_before = (_mon(hp=35), _mon(hp=40)) if reverse else (_mon(hp=40), _mon(hp=35))
+    local_before, enemy_before = (
+        (_mon(hp=35), _mon(hp=40)) if reverse else (_mon(hp=40), _mon(hp=35))
+    )
     local_after, enemy_after = (_mon(hp=34), _mon(hp=39)) if reverse else (_mon(hp=39), _mon(hp=34))
     local_action = _action(enemy_before["hp"], enemy_after["hp"])
     enemy_action = _action(local_before["hp"], local_after["hp"])
@@ -123,9 +125,7 @@ def test_matching_applied_turns_pass() -> None:
 
 def test_tcp_diagnostic_wrapper_keeps_complete_settlement_envelope() -> None:
     """The TCP peer nests a complete observer snapshot beside its counters."""
-    assert verify_battle_turns(
-        [{"battle_turn": _row()}, {"battle_turn": _row(reverse=True)}]
-    ) == []
+    assert verify_battle_turns([{"battle_turn": _row()}, {"battle_turn": _row(reverse=True)}]) == []
 
 
 def test_hook_only_or_missing_settlement_fails_closed() -> None:
@@ -171,7 +171,9 @@ def _observer(monkeypatch):
     monkeypatch.setattr(evidence, "_read", lambda session, name: memory[name])
     monkeypatch.setattr(evidence, "_validate_party", lambda party: 0)
     monkeypatch.setattr(evidence, "_combatants", lambda session: deepcopy(_row()["baseline"]))
-    monkeypatch.setattr(evidence, "_move_data", lambda session, move: bytes([move, 0, 40, 100, 35, 0]))
+    monkeypatch.setattr(
+        evidence, "_move_data", lambda session, move: bytes([move, 0, 40, 100, 35, 0])
+    )
     session = SimpleNamespace(symbols=SimpleNamespace(addr_of=lambda name: 0))
     observer = evidence.BattleTurnObserver(session, role="test", version="blue", before_party={})
     observer.baseline = deepcopy(_row()["baseline"])
@@ -203,7 +205,9 @@ def test_invalid_wire_slot_after_exchange_still_fails_closed(monkeypatch) -> Non
 
 def test_missing_selected_local_move_after_exchange_fails_closed(monkeypatch) -> None:
     observer, memory = _observer(monkeypatch)
-    memory.update(wSerialExchangeNybbleSendData=0, wSerialExchangeNybbleReceiveData=0, wPlayerSelectedMove=0)
+    memory.update(
+        wSerialExchangeNybbleSendData=0, wSerialExchangeNybbleReceiveData=0, wPlayerSelectedMove=0
+    )
     observer.observe("post_exchange")
     assert "invalid local move ID: 0" in observer.error
     assert observer.exchange is None
@@ -212,8 +216,12 @@ def test_missing_selected_local_move_after_exchange_fails_closed(monkeypatch) ->
 def test_move_choice_uses_existing_later_supported_slot(monkeypatch) -> None:
     from tests import _battle_turn_evidence as evidence
 
-    rows = {76: [76, 39, 120, 0, 0, 0], 45: [45, 18, 0, 0, 0, 0],
-            73: [73, 84, 0, 0, 0, 0], 22: [22, 0, 35, 0, 0, 0]}
+    rows = {
+        76: [76, 39, 120, 0, 0, 0],
+        45: [45, 18, 0, 0, 0, 0],
+        73: [73, 84, 0, 0, 0, 0],
+        22: [22, 0, 35, 0, 0, 0],
+    }
     monkeypatch.setattr(evidence, "_move_data", lambda session, move: rows[move])
     moves = [(76, 10), (45, 21), (73, 10), (22, 7)]
     before = deepcopy(moves)

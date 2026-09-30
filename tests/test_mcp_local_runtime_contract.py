@@ -61,7 +61,8 @@ def actual_pyboy(tmp_path):
 
 def _break_contract(session, defect):
     serial = SimpleNamespace(
-        backend=object(), apply_external_edge=lambda _bit: False,
+        backend=object(),
+        apply_external_edge=lambda _bit: False,
         peek_out_bit=lambda: 1,
     )
     session._pyboy.mb = SimpleNamespace(serial=serial)
@@ -89,10 +90,18 @@ def _forbid_pair_mutation(monkeypatch, primary, peer):
 
 
 @pytest.mark.parametrize("side", ["primary", "peer"])
-@pytest.mark.parametrize("defect", [
-    "motherboard", "serial", "backend", "apply_external_edge", "peek_out_bit",
-    "noncallable_apply_external_edge", "noncallable_peek_out_bit",
-])
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "motherboard",
+        "serial",
+        "backend",
+        "apply_external_edge",
+        "peek_out_bit",
+        "noncallable_apply_external_edge",
+        "noncallable_peek_out_bit",
+    ],
+)
 def test_implicit_pair_rejects_missing_runtime_without_mutation(monkeypatch, side, defect):
     primary, peer, link = _sessions()
     _break_contract(primary if side == "primary" else peer, defect)
@@ -137,7 +146,10 @@ def test_explicit_injected_fake_pair_remains_supported(monkeypatch):
     peer, _ = _make_session()
     factory = FakeFactory()
     pair = LinkPair(
-        primary, peer, version_primary="red", version_peer="blue",
+        primary,
+        peer,
+        version_primary="red",
+        version_peer="blue",
         bridge_factory=factory,
     )
     link = LinkState(peer_session=peer, peer_version="blue")
@@ -166,7 +178,10 @@ def test_injected_pair_rejects_native_capable_endpoint_before_semantic_mutation(
     target.mb = native_pb.mb
     factory = FakeFactory()
     pair = LinkPair(
-        primary, peer, version_primary="red", version_peer="blue",
+        primary,
+        peer,
+        version_primary="red",
+        version_peer="blue",
         bridge_factory=factory,
     )
     link = LinkState(peer_session=peer, peer_version="blue")
@@ -193,14 +208,15 @@ def test_injected_pair_rejects_real_pyboy_with_stale_serial_contract(
     peer, _ = _make_session()
     # Simulate the old/stale capability probe while retaining an initialized,
     # normally constructed instance of the installed PyBoy type.
-    monkeypatch.setattr(
-        mcp_server, "_supports_bit_accurate_network", lambda _session: False
-    )
+    monkeypatch.setattr(mcp_server, "_supports_bit_accurate_network", lambda _session: False)
     target_session = primary if real_side == "primary" else peer
     target_session._pyboy = actual_pyboy
     factory = FakeFactory()
     pair = LinkPair(
-        primary, peer, version_primary="red", version_peer="blue",
+        primary,
+        peer,
+        version_primary="red",
+        version_peer="blue",
         bridge_factory=factory,
     )
     link = LinkState(peer_session=peer, peer_version="blue")
@@ -225,7 +241,10 @@ def test_injected_pair_rejects_native_endpoint_not_in_dispatch_sessions(monkeypa
     pair_primary_pb.mb = _FakePyBoy(serial=SerialCore()).mb
     factory = FakeFactory()
     pair = LinkPair(
-        pair_primary, pair_peer, version_primary="red", version_peer="blue",
+        pair_primary,
+        pair_peer,
+        version_primary="red",
+        version_peer="blue",
         bridge_factory=factory,
     )
     link = LinkState(peer_session=peer, peer_version="blue")

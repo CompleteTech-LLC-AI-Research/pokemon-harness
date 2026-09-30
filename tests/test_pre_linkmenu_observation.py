@@ -126,6 +126,7 @@ def test_pre_linkmenu_valid_site_and_limit_boundaries():
 
 def test_connection_starter_latch_releases_peer_at_native_clock_store():
     """The startup coordinator observes the ROM instruction; it writes no GB state."""
+
     class Symbols:
         @staticmethod
         def bank_addr(name):
@@ -250,14 +251,22 @@ def synthetic_resolver_fixture(monkeypatch):
     """One complete fake Blue profile, with no ROM or symbol asset involved."""
     rom = bytearray(0x8000)
     npc, call, sync, timeout, connected, menu, close = (
-        0x4100, 0x4100, 0x0200, 0x0180, 0x4145, 0x4300, 0x4180
+        0x4100,
+        0x4100,
+        0x0200,
+        0x0180,
+        0x4145,
+        0x4300,
+        0x4180,
     )
 
     def put(bank, address, data):
         offset = address if bank == 0 else bank * 0x4000 + address - 0x4000
         rom[offset : offset + len(data)] = data
 
-    put(1, call, bytes((0xCD, sync & 0xFF, sync >> 8)) + bytes.fromhex("2147cc2a3c203b7e3c2037060a"))
+    put(
+        1, call, bytes((0xCD, sync & 0xFF, sync >> 8)) + bytes.fromhex("2147cc2a3c203b7e3c2037060a")
+    )
     put(1, connected, bytes.fromhex("af3277"))
     put(0, sync, bytes.fromhex("3effea3ecc"))
     put(0, sync + 0x1C, bytes((0xAF, 0xC3, timeout & 0xFF, timeout >> 8)))
@@ -270,27 +279,49 @@ def synthetic_resolver_fixture(monkeypatch):
     put(1, call + 44, bytes((0xCD, close & 0xFF, close >> 8)))
     put(1, call + 47, bytes((0x21, (close - 10) & 0xFF, (close - 10) >> 8)))
     put(1, menu, bytes.fromhex("afea58"))
-    symbols = "\n".join((
-        "; fake rgblink output", "01 AGATHASROOM_AGATHA", f"01:{npc:04X} CableClubNPC",
-        f"00:{sync:04X} Serial_SyncAndExchangeNybble",
-        f"00:{timeout:04X} SetUnknownCounterToFFFF", f"01:{connected:04X} CableClubNPC.connected",
-        f"01:{menu:04X} LinkMenu", f"01:{close:04X} CloseLinkConnection",
-        f"01:{call + 44:04X} CableClubNPC.choseNo",
-    )).encode("ascii")
-    rom = bytes(rom)
-    monkeypatch.setattr(peer, "_PRE_LINK_MENU_PROFILES", {
-        ("listen", "blue_color"): (
-            hashlib.sha1(rom).hexdigest(), hashlib.sha1(symbols).hexdigest(), npc, call,
-            sync, timeout, connected, 1, menu, close,
+    symbols = "\n".join(
+        (
+            "; fake rgblink output",
+            "01 AGATHASROOM_AGATHA",
+            f"01:{npc:04X} CableClubNPC",
+            f"00:{sync:04X} Serial_SyncAndExchangeNybble",
+            f"00:{timeout:04X} SetUnknownCounterToFFFF",
+            f"01:{connected:04X} CableClubNPC.connected",
+            f"01:{menu:04X} LinkMenu",
+            f"01:{close:04X} CloseLinkConnection",
+            f"01:{call + 44:04X} CableClubNPC.choseNo",
         )
-    })
+    ).encode("ascii")
+    rom = bytes(rom)
+    monkeypatch.setattr(
+        peer,
+        "_PRE_LINK_MENU_PROFILES",
+        {
+            ("listen", "blue_color"): (
+                hashlib.sha1(rom).hexdigest(),
+                hashlib.sha1(symbols).hexdigest(),
+                npc,
+                call,
+                sync,
+                timeout,
+                connected,
+                1,
+                menu,
+                close,
+            )
+        },
+    )
     return rom, symbols
 
 
 def test_pre_linkmenu_resolver_accepts_complete_synthetic_profile(monkeypatch):
     rom, symbols = synthetic_resolver_fixture(monkeypatch)
     snapshot = peer._resolve_pre_link_menu(
-        enabled=True, role="listen", version="blue_color", rom_bytes=rom, symbol_bytes=symbols,
+        enabled=True,
+        role="listen",
+        version="blue_color",
+        rom_bytes=rom,
+        symbol_bytes=symbols,
     ).snapshot()
     assert snapshot["reason"] == "hooks_not_installed"
     assert snapshot["available"] is False
@@ -303,21 +334,32 @@ def test_pre_linkmenu_resolver_accepts_complete_synthetic_profile(monkeypatch):
 def test_pre_linkmenu_resolver_disabled_and_unsupported_do_not_read_assets(monkeypatch):
     rom, symbols = synthetic_resolver_fixture(monkeypatch)
     disabled = peer._resolve_pre_link_menu(
-        enabled=False, role="listen", version="blue_color", rom_bytes=object(), symbol_bytes=object(),
+        enabled=False,
+        role="listen",
+        version="blue_color",
+        rom_bytes=object(),
+        symbol_bytes=object(),
     ).snapshot()
     unsupported = peer._resolve_pre_link_menu(
-        enabled=True, role="connect", version="blue_color", rom_bytes=rom, symbol_bytes=symbols,
+        enabled=True,
+        role="connect",
+        version="blue_color",
+        rom_bytes=rom,
+        symbol_bytes=symbols,
     ).snapshot()
     assert disabled["reason"] == "disabled"
     assert unsupported["reason"] == "unsupported_role_version"
 
 
-@pytest.mark.parametrize("offset,reason", [
-    (0x0200 + 0x4A, "Serial_SyncAndExchangeNybble.publish60"),
-    (0x0200 + 0x5F, "Serial_SyncAndExchangeNybble.receiveCompare"),
-    (0x4100 + 25, "CableClubNPC.inactivityCloseCall"),
-    (0x4100 + 44, "CableClubNPC.choseNoCloseCall"),
-])
+@pytest.mark.parametrize(
+    "offset,reason",
+    [
+        (0x0200 + 0x4A, "Serial_SyncAndExchangeNybble.publish60"),
+        (0x0200 + 0x5F, "Serial_SyncAndExchangeNybble.receiveCompare"),
+        (0x4100 + 25, "CableClubNPC.inactivityCloseCall"),
+        (0x4100 + 44, "CableClubNPC.choseNoCloseCall"),
+    ],
+)
 def test_pre_linkmenu_resolver_rejects_decision_signature_mutation(monkeypatch, offset, reason):
     rom, symbols = synthetic_resolver_fixture(monkeypatch)
     corrupted = bytearray(rom)
@@ -327,7 +369,11 @@ def test_pre_linkmenu_resolver_rejects_decision_signature_mutation(monkeypatch, 
     profile[0] = hashlib.sha1(corrupted).hexdigest()
     monkeypatch.setattr(peer, "_PRE_LINK_MENU_PROFILES", {("listen", "blue_color"): tuple(profile)})
     snapshot = peer._resolve_pre_link_menu(
-        enabled=True, role="listen", version="blue_color", rom_bytes=bytes(corrupted), symbol_bytes=symbols,
+        enabled=True,
+        role="listen",
+        version="blue_color",
+        rom_bytes=bytes(corrupted),
+        symbol_bytes=symbols,
     ).snapshot()
     assert snapshot["reason"] == "signature_mismatch:" + reason
 
@@ -378,7 +424,11 @@ class _FakeSession:
 def _installed_observer(monkeypatch):
     rom, symbols = synthetic_resolver_fixture(monkeypatch)
     observer = peer._resolve_pre_link_menu(
-        enabled=True, role="listen", version="blue_color", rom_bytes=rom, symbol_bytes=symbols,
+        enabled=True,
+        role="listen",
+        version="blue_color",
+        rom_bytes=rom,
+        symbol_bytes=symbols,
     )
     addresses = {
         name: (0, 0xFF80 + offset)
@@ -421,9 +471,15 @@ def test_pre_linkmenu_installs_fifteen_owned_hooks_and_cleans_them(monkeypatch):
 
 def test_pre_linkmenu_owned_registration_failure_rolls_back_without_serial(monkeypatch):
     observer, addresses = _installed_observer(monkeypatch)
-    owned = [site for site in observer.config.sites if site[0] not in (
-        "LinkMenu", "Serial_SyncAndExchangeNybble",
-    )]
+    owned = [
+        site
+        for site in observer.config.sites
+        if site[0]
+        not in (
+            "LinkMenu",
+            "Serial_SyncAndExchangeNybble",
+        )
+    ]
     fail = owned[2]
     session = _FakeSession(addresses, fail_address=fail[2])
 
@@ -434,14 +490,17 @@ def test_pre_linkmenu_owned_registration_failure_rolls_back_without_serial(monke
     assert snapshot["hooks"][fail[0]]["status"] == "registration_failed"
     assert len(session._pyboy.deregistered) == 2
     assert session._pyboy.registered == {}
-    assert all(address != observer.snapshot()["sites"]["Serial_SyncAndExchangeNybble"]["address"]
-               for _bank, address in session._pyboy.deregistered)
+    assert all(
+        address != observer.snapshot()["sites"]["Serial_SyncAndExchangeNybble"]["address"]
+        for _bank, address in session._pyboy.deregistered
+    )
 
 
 def test_linkmenu_serial_callback_fans_out_to_available_pre_observer(monkeypatch):
     observer, addresses = _installed_observer(monkeypatch)
-    serial = next(site for site in observer.config.sites
-                  if site[0] == "Serial_SyncAndExchangeNybble")
+    serial = next(
+        site for site in observer.config.sites if site[0] == "Serial_SyncAndExchangeNybble"
+    )
     addresses["Serial_SyncAndExchangeNybble"] = (serial[1], serial[2])
     session = _FakeSession(addresses)
     for _name, address in addresses.values():

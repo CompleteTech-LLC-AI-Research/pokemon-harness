@@ -244,7 +244,7 @@ def test_raw_step_close_times_out_without_stop_then_retry_and_reject_future_step
     assert entered.wait(2)
     try:
         with pytest.raises(SessionCleanupTimeoutError, match="cleanup deadline"):
-            primary.close(timeout_s=.02)
+            primary.close(timeout_s=0.02)
         assert primary.closed
         assert a.stop_calls == []
     finally:
@@ -384,7 +384,11 @@ def test_owner_registry_does_not_keep_session_or_emulator_alive():
 
     session, emulator, _ = _session()
     owner = owner_for(emulator)
-    owner_ref, session_ref, emulator_ref = weakref.ref(owner), weakref.ref(session), weakref.ref(emulator)
+    owner_ref, session_ref, emulator_ref = (
+        weakref.ref(owner),
+        weakref.ref(session),
+        weakref.ref(emulator),
+    )
     del owner, session, emulator
     gc.collect()
     assert owner_ref() is None
@@ -479,8 +483,10 @@ def test_competing_provider_attachment_has_one_owner_and_detach_releases_claim()
         barrier.wait(timeout=2)
         provider.attach(a)
 
-    workers = [_worker(lambda provider=provider: attach(provider), f"attach-{index}")
-               for index, provider in enumerate(providers)]
+    workers = [
+        _worker(lambda provider=provider: attach(provider), f"attach-{index}")
+        for index, provider in enumerate(providers)
+    ]
     barrier.wait(timeout=2)
     for thread, _ in workers:
         _join(thread)
@@ -543,7 +549,9 @@ def test_rejected_provider_claim_does_not_write_backend_or_stop_transport():
     endpoint.mb.serial = core
     first = _fake_local_provider()
     stopped = []
-    network = SimpleNamespace(start_receiver=lambda **kwargs: None, stop=lambda: stopped.append(True))
+    network = SimpleNamespace(
+        start_receiver=lambda **kwargs: None, stop=lambda: stopped.append(True)
+    )
     second = PyBoyLinkSession(network_backend=network)
     first.attach(endpoint)
     with pytest.raises(EmulatorOwnershipError, match="another provider"):
@@ -644,7 +652,7 @@ def test_raw_network_step_owns_emulator_but_allows_cancellation(operation):
     try:
         if operation == "close":
             with pytest.raises(SessionCleanupTimeoutError):
-                session.close(timeout_s=.02)
+                session.close(timeout_s=0.02)
             assert emulator.stop_calls == []
         elif operation == "read":
             managed, managed_errors = _worker(session.read_game_state, "managed")

@@ -9,243 +9,163 @@ inconsistent requests *before* touching the emulator:
   reported as ``BLOCKED``, never as a passing skip);
 * a ROM or symbol file that is not pinned in ``VERSIONS.md`` is refused;
 * an ``--input-fixture`` whose SHA-1 disagrees with the declared input is refused;
-* an existing ``--output`` is never overwritten;
-* non-finite or non-positive bounds are refused.
+* an existing ``--output`` is never overwritten, and ``--report`` may not alias
+  the output, the ``--catalog`` itself, or any input file;
+* non-finite or non-positive bounds are refused, including the effective bounds
+  a caller supplies directly instead of taking the declared ones.
 
-The actual capture path is deliberately not implemented here: a real capture
-requires a controlled ROM run with legal assets.  It exits non-zero with a clear
-message and never writes a fixture, fabricates bytes, or disables hash
-verification.  Callers capture externally and pin the resulting hashes.
+The capture path itself is bounded and fail-closed:
+
+* it drives the pinned ROM with an explicit, replayable input sequence and no
+  runtime RAM, party, PP, RNG, or serial mutation;
+* it enforces the declared ``max_frames``, ``max_wall_seconds``, and
+  ``max_inputs`` bounds and aborts as soon as any of them would be exceeded,
+  including when a slow step crosses the wall-clock deadline before publication;
+* it asserts the declared ``capture_boundary`` (map, the link-receptionist tile,
+  link state, and any declared party shape) *before* anything is written;
+* it measures the executing runtime and refuses a requested runtime or named
+  interpreter the process does not actually provide — comparing interpreter
+  *environments* rather than resolved binaries, so a second virtual environment
+  whose ``bin/python`` resolves to the same file is still refused;
+* it writes the state file with ``O_EXCL`` so an existing fixture can never be
+  overwritten, retains the published inode identity independently of the staging
+  entry, and therefore removes exactly its own publication if any later step —
+  including the finalization that removes the staging entry and the requested
+  report's own publication — fails, while a competing writer's file (even a
+  symlink aimed at this capture's inode) is never deleted;
+* it carries one absolute deadline through record preparation, staging,
+  publication, and report finalization, so a capture that drifts past
+  ``max_wall_seconds`` in those phases refuses and withdraws its own artifacts
+  instead of recording a shorter duration and publishing anyway;
+* it records a private report with the replayable input history, the measured
+  runtime identity, the producer and declared-producer identities, the
+  asset/output hashes, and the reproduction comparison against the pinned fixture
+  hashes;
+* it refuses incomplete or unverifiable declared metadata — a missing capture
+  boundary or bounds block, a non-integer map, a link-state label with no verified
+  encoding, a non-positive or non-integer verified fixture size, a verified entry
+  whose producer is absent or whose declared producer digest disagrees, or a
+  verified entry with no pinned fixture hashes — before the emulator is opened;
+* it refuses a declared inventory, opponent, prior-action, or per-mon party
+  precondition this bounded drive cannot observe, instead of recording an
+  unchecked capture;
+* it validates the capture record it is about to return and admits only records
+  that carry the producer, asset, boundary, and output identities within the
+  effective bounds;
+* a cleanup failure fails the capture and prevents publication, and an
+  interruption publishes nothing, leaves no staged file, and still closes the
+  emulator session.
+
+Callers still capture real fixtures from legal ROM/SYM inputs; the recorded
+hashes are what consumers pin.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
-import math
+import contextlib  # noqa: F401  (retained facade attribute: producer.contextlib)
+import functools  # noqa: F401  (retained facade attribute: producer.functools)
+import hashlib  # noqa: F401  (retained facade attribute: producer.hashlib)
+import json  # noqa: F401  (retained facade attribute: producer.json)
+import math  # noqa: F401  (retained facade attribute: producer.math)
+import os  # noqa: F401  (retained facade attribute: producer.os)
+import subprocess  # noqa: F401  (retained facade attribute: producer.subprocess)
 import sys
+import time
 from collections.abc import Callable
+from dataclasses import dataclass  # noqa: F401  (retained facade attribute: producer.dataclass)
+from datetime import (  # noqa: F401  (retained facade attributes: producer.UTC, producer.datetime)
+    UTC,
+    datetime,
+)
 from pathlib import Path
 from typing import Any
 
-_REPO = Path(__file__).resolve().parents[1]
-_CATALOG_PATH = _REPO / "release-evidence" / "battle-scenarios.json"
-_CAPTURE_MESSAGE = (
-    "capture requires a controlled ROM run; no fixture bytes were written. "
-    "Run the documented external capture procedure with legal ROM/SYM inputs, "
-    "record the resulting hashes, and pin them in the scenario catalog."
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# Loaded by path (for example ``pokered_battle_scenario``) as well as by package
+# name; register the loaded module under its canonical name first so the support
+# modules' ``import scripts.produce_battle_scenario as _entry`` resolves to this
+# same object instead of a second copy.
+sys.modules.setdefault("scripts.produce_battle_scenario", sys.modules[__name__])
+
+from scripts.produce_battle_scenario_capture import (
+    _assert_boundary,  # noqa: F401  (retained facade attribute: producer._assert_boundary)
+    _assert_supported_conditions,  # noqa: F401  (retained facade attribute: producer._assert_supported_conditions)
+    _CaptureBudget,  # noqa: F401  (retained facade attribute: producer._CaptureBudget)
+    _drive_to_link_reception,  # noqa: F401  (retained facade attribute: producer._drive_to_link_reception)
+    _entry_identity,  # noqa: F401  (retained facade attribute: producer._entry_identity)
+    _InputStep,  # noqa: F401  (retained facade attribute: producer._InputStep)
+    _observe_boundary,  # noqa: F401  (retained facade attribute: producer._observe_boundary)
+    _OwnedPublication,
+    _remove_staged,  # noqa: F401  (retained facade attribute: producer._remove_staged)
+    _symbol_byte,  # noqa: F401  (retained facade attribute: producer._symbol_byte)
+    _withdraw_all,
+    _write_bytes_atomically,  # noqa: F401  (retained facade attribute: producer._write_bytes_atomically)
+    _write_fixture_exclusive,  # noqa: F401  (retained facade attribute: producer._write_fixture_exclusive)
+    capture_battle_scenario,
+    refuse_report_alias,
+    write_report,
 )
-
-
-class ScenarioRefusal(ValueError):
-    """Raised when a declared scenario request is refused before capture."""
-
-
-class ScenarioBlocked(ScenarioRefusal):
-    """Raised when a required scenario is absent; callers must report BLOCKED."""
-
-
-class CaptureNotAvailable(RuntimeError):
-    """Raised by the bounded capture stub because no controlled ROM run is active."""
-
-
-def _require(condition: bool, message: str) -> None:
-    if not condition:
-        raise ScenarioRefusal(message)
-
-
-def load_catalog(path: str | Path) -> dict[str, Any]:
-    """Load a scenario catalog and require a non-empty ``scenarios`` list."""
-    target = Path(path)
-    try:
-        document = json.loads(target.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ScenarioRefusal(f"catalog not found: {target}") from exc
-    except json.JSONDecodeError as exc:
-        raise ScenarioRefusal(f"catalog is not valid JSON: {target}: {exc}") from exc
-
-    _require(isinstance(document, dict), "catalog root must be an object")
-    scenarios = document.get("scenarios")
-    _require(
-        isinstance(scenarios, list) and scenarios, "catalog.scenarios must be a non-empty list"
-    )
-    for index, scenario in enumerate(scenarios):
-        _require(isinstance(scenario, dict), f"catalog.scenarios[{index}] must be an object")
-        scenario_id = scenario.get("scenario_id")
-        _require(
-            isinstance(scenario_id, str) and scenario_id.strip(),
-            f"catalog.scenarios[{index}].scenario_id is required",
-        )
-    return document
-
-
-def scenario_index(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return scenarios keyed by ID, refusing duplicate IDs."""
-    index: dict[str, dict[str, Any]] = {}
-    for scenario in catalog["scenarios"]:
-        scenario_id = scenario["scenario_id"]
-        if scenario_id in index:
-            raise ScenarioRefusal(f"duplicate scenario id: {scenario_id}")
-        index[scenario_id] = scenario
-    return index
-
-
-def find_scenario(catalog: dict[str, Any], scenario_id: str) -> dict[str, Any]:
-    """Return the declared scenario or raise an explicit BLOCKED refusal."""
-    index = scenario_index(catalog)
-    if scenario_id not in index:
-        raise ScenarioBlocked(f"required scenario {scenario_id!r} is not declared in the catalog")
-    return index[scenario_id]
-
-
-def scenario_status(catalog: dict[str, Any], scenario_id: str) -> str:
-    """Return ``READY`` or ``BLOCKED``; ``BLOCKED`` is never a passing result."""
-    try:
-        find_scenario(catalog, scenario_id)
-    except ScenarioBlocked:
-        return "BLOCKED"
-    return "READY"
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        or float(value) <= 0
-        or float(value) != int(value)
-    ):
-        raise ScenarioRefusal(f"{name} must be a finite positive integer")
-    return int(value)
-
-
-def validate_bounds(
-    *,
-    max_frames: Any,
-    max_wall_seconds: Any,
-    max_inputs: Any,
-) -> dict[str, Any]:
-    """Validate finite positive capture bounds and return normalized values."""
-    frames = _positive_int(max_frames, "max_frames")
-    inputs = _positive_int(max_inputs, "max_inputs")
-    if (
-        isinstance(max_wall_seconds, bool)
-        or not isinstance(max_wall_seconds, (int, float))
-        or not math.isfinite(float(max_wall_seconds))
-        or float(max_wall_seconds) <= 0
-    ):
-        raise ScenarioRefusal("max_wall_seconds must be finite and greater than zero")
-    return {
-        "max_frames": frames,
-        "max_wall_seconds": float(max_wall_seconds),
-        "max_inputs": inputs,
-    }
-
-
-def resolve_pins(pins: Any, rom: str | Path, sym: str | Path) -> tuple[str, str]:
-    """Resolve ``rom``/``sym`` against VERSIONS.md, refusing unpinned inputs."""
-    rom_pin = pins.sha1_for_path(rom)
-    if rom_pin is None:
-        raise ScenarioRefusal(f"ROM is not pinned in VERSIONS.md: {rom}")
-    sym_pin = pins.symbol_sha1_for_path(sym)
-    if sym_pin is None:
-        raise ScenarioRefusal(f"symbol file is not pinned in VERSIONS.md: {sym}")
-    return rom_pin, sym_pin
-
-
-def validate_scenario_pins(scenario: dict[str, Any], rom_pin: str, sym_pin: str) -> None:
-    """Refuse when the resolved pins disagree with the declared scenario."""
-    game = scenario["game"]
-    if game["rom_sha1"] != rom_pin:
-        raise ScenarioRefusal(
-            f"resolved ROM pin {rom_pin} disagrees with scenario {game['rom_sha1']}"
-        )
-    if game["sym_sha1"] != sym_pin:
-        raise ScenarioRefusal(
-            f"resolved symbol pin {sym_pin} disagrees with scenario {game['sym_sha1']}"
-        )
-
-
-def verify_pinned_assets(
-    rom: str | Path,
-    sym: str | Path,
-    rom_pin: str,
-    sym_pin: str,
-) -> None:
-    """Refuse when the on-disk ROM/symbol assets disagree with the resolved pins.
-
-    Pin resolution matches a documented path suffix; it does not read the
-    asset. Verify the actual bytes so a missing or substituted file cannot be
-    recorded in the capture plan as if it were the pinned asset.
-    """
-    for path, expected, label in (
-        (rom, rom_pin, "ROM"),
-        (sym, sym_pin, "symbol file"),
-    ):
-        target = Path(path)
-        if not target.is_file():
-            raise ScenarioRefusal(f"{label} not found: {target}")
-        actual = sha1_file(target)
-        if actual != expected:
-            raise ScenarioRefusal(f"{label} SHA-1 mismatch: expected {expected}, got {actual}")
-
-
-def sha1_file(path: str | Path) -> str:
-    """Return the SHA-1 of a file using chunked reads."""
-    digest = hashlib.sha1()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def verify_input_fixture(path: str | Path, expected_sha1: str | None) -> str:
-    """Return the input SHA-1, refusing a mismatch against the declared value."""
-    target = Path(path)
-    if not target.is_file():
-        raise ScenarioRefusal(f"input fixture not found: {target}")
-    actual = sha1_file(target)
-    if expected_sha1 is not None and actual != expected_sha1:
-        raise ScenarioRefusal(
-            f"input fixture SHA-1 mismatch: expected {expected_sha1}, got {actual}"
-        )
-    return actual
-
-
-def ensure_output_available(output: str | Path) -> None:
-    """Refuse to overwrite an existing output path."""
-    if Path(output).exists():
-        raise ScenarioRefusal(f"refusing to overwrite existing output: {output}")
-
-
-def resolve_role(scenario: dict[str, Any], scenario_id: str, role: str | None) -> str:
-    """Resolve and validate the production role for a scenario request."""
-    allowed = scenario["battle"]["roles"]
-    required_role: str | None = None
-    if scenario_id.endswith("__listen"):
-        required_role = "listen"
-    elif scenario_id.endswith("__connect"):
-        required_role = "connect"
-    if role is None:
-        role = required_role or allowed[0]
-    if required_role is not None and role != required_role:
-        raise ScenarioRefusal(f"scenario {scenario_id!r} requires role {required_role!r}")
-    if role not in allowed:
-        raise ScenarioRefusal(f"role {role!r} is not allowed for scenario {scenario_id!r}")
-    return role
-
-
-def write_report(path: str | Path, payload: Any) -> None:
-    """Write a private capture/replay report; never called for the stub path."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def capture_battle_scenario(**_kwargs: Any) -> None:
-    """Bounded capture stub: refuse until a controlled ROM run is available."""
-    raise CaptureNotAvailable(_CAPTURE_MESSAGE)
+from scripts.produce_battle_scenario_catalog import (
+    _is_digest,  # noqa: F401  (retained facade attribute: producer._is_digest)
+    _positive_int,  # noqa: F401  (retained facade attribute: producer._positive_int)
+    _repository_producer_locator,  # noqa: F401  (retained facade attribute: producer._repository_producer_locator)
+    ensure_output_available,
+    find_scenario,
+    load_catalog,
+    resolve_pins,
+    resolve_role,
+    scenario_index,  # noqa: F401  (retained facade attribute: producer.scenario_index)
+    scenario_status,  # noqa: F401  (retained facade attribute: producer.scenario_status)
+    sha1_file,  # noqa: F401  (retained facade attribute: producer.sha1_file)
+    validate_bounds,
+    validate_capture_record,  # noqa: F401  (retained facade attribute: producer.validate_capture_record)
+    validate_scenario_metadata,
+    validate_scenario_pins,
+    verify_declared_producer,
+    verify_input_fixture,
+    verify_pinned_assets,
+)
+from scripts.produce_battle_scenario_model import (
+    _BUTTON_NAMES,  # noqa: F401  (retained facade attribute: producer._BUTTON_NAMES)
+    _CAPTURE_MESSAGE,  # noqa: F401  (retained facade attribute: producer._CAPTURE_MESSAGE)
+    _CAPTURE_PRODUCER,  # noqa: F401  (retained facade attribute: producer._CAPTURE_PRODUCER)
+    _CAPTURE_RECORD_FIELDS,  # noqa: F401  (retained facade attribute: producer._CAPTURE_RECORD_FIELDS)
+    _CATALOG_PATH,
+    _DEFAULT_PRESS_DURATION,  # noqa: F401  (retained facade attribute: producer._DEFAULT_PRESS_DURATION)
+    _DEFAULT_STEP_FRAMES,  # noqa: F401  (retained facade attribute: producer._DEFAULT_STEP_FRAMES)
+    _LINK_RECEPTION_TILE,  # noqa: F401  (retained facade attribute: producer._LINK_RECEPTION_TILE)
+    _LINK_STATE_CODES,  # noqa: F401  (retained facade attribute: producer._LINK_STATE_CODES)
+    _PINNED_FIXTURE_FIELDS,  # noqa: F401  (retained facade attribute: producer._PINNED_FIXTURE_FIELDS)
+    _PRODUCER_KINDS,  # noqa: F401  (retained facade attribute: producer._PRODUCER_KINDS)
+    _PROVENANCE_STATUSES,  # noqa: F401  (retained facade attribute: producer._PROVENANCE_STATUSES)
+    _REPO,
+    _RUNTIME_MEASUREMENTS,  # noqa: F401  (retained facade attribute: producer._RUNTIME_MEASUREMENTS)
+    _RUNTIME_MODES,  # noqa: F401  (retained facade attribute: producer._RUNTIME_MODES)
+    _SUPPORTED_BOUNDARY,  # noqa: F401  (retained facade attribute: producer._SUPPORTED_BOUNDARY)
+    _UNMEASURED_RUNTIME,  # noqa: F401  (retained facade attribute: producer._UNMEASURED_RUNTIME)
+    CaptureBoundsExceeded,
+    CaptureNotAvailable,
+    CapturePreconditionFailed,  # noqa: F401  (retained facade attribute: producer.CapturePreconditionFailed)
+    ScenarioBlocked,
+    ScenarioRefusal,
+    _check_deadline,  # noqa: F401  (retained facade attribute: producer._check_deadline)
+    _deadline_guard,
+    _note,  # noqa: F401  (retained facade attribute: producer._note)
+    _require,  # noqa: F401  (retained facade attribute: producer._require)
+)
+from scripts.produce_battle_scenario_runtime import (
+    _default_session_factory,  # noqa: F401  (retained facade attribute: producer._default_session_factory)
+    _interpreter_environment,  # noqa: F401  (retained facade attribute: producer._interpreter_environment)
+    _producer_revision,  # noqa: F401  (retained facade attribute: producer._producer_revision)
+    _pyboy_cython_flag,  # noqa: F401  (retained facade attribute: producer._pyboy_cython_flag)
+    _pyboy_module_revision,  # noqa: F401  (retained facade attribute: producer._pyboy_module_revision)
+    _pyboy_module_version,  # noqa: F401  (retained facade attribute: producer._pyboy_module_version)
+    measure_runtime_identity,  # noqa: F401  (retained facade attribute: producer.measure_runtime_identity)
+)
 
 
 def run(
@@ -265,10 +185,13 @@ def run(
     runtime: str = "source",
     python: str | Path | None = None,
     pins: Any = None,
+    catalog_path: str | Path | None = None,
     capture: Callable[..., None] = capture_battle_scenario,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Validate a scenario request, then invoke the bounded capture path."""
     scenario = find_scenario(catalog, scenario_id)
+    validate_scenario_metadata(scenario, scenario_id)
     resolved_role = resolve_role(scenario, scenario_id, role)
     declared = scenario["capture_bounds"]
     bounds = validate_bounds(
@@ -278,6 +201,10 @@ def run(
         ),
         max_inputs=declared["max_inputs"] if max_inputs is None else max_inputs,
     )
+    if report is not None:
+        # The catalog is an input as well: a report written over it would replace
+        # the very declarations this capture was validated against.
+        refuse_report_alias(report, catalog_path, output, rom, sym, input_fixture)
     ensure_output_available(output)
     if pins is None:
         from pokered_harness.config import load_versions
@@ -290,6 +217,7 @@ def run(
     declared_input_sha1 = provenance.get("input_fixture_sha1")
     if provenance.get("source_fixture_id") is not None and input_fixture is None:
         raise ScenarioRefusal("scenario declares a source fixture; an input fixture is required")
+    producer_identity = verify_declared_producer(scenario, scenario_id, repo_root)
     input_sha1: str | None = None
     if input_fixture is not None:
         input_sha1 = verify_input_fixture(input_fixture, declared_input_sha1)
@@ -301,10 +229,14 @@ def run(
         "rom_sha1": rom_pin,
         "sym_sha1": sym_pin,
         "input_fixture_sha1": input_sha1,
+        "declared_producer": provenance.get("producer"),
+        "producer_identity": producer_identity,
         "capture_bounds": bounds,
         "output": str(output),
     }
-    capture(
+    deadline = clock() + bounds["max_wall_seconds"]
+    ownership: dict[str, Any] = {}
+    capture_record = capture(
         scenario=scenario,
         rom=rom,
         sym=sym,
@@ -317,9 +249,34 @@ def run(
         runtime=runtime,
         python=python,
         plan=plan,
+        deadline=deadline,
+        ownership=ownership,
+        clock=clock,
     )
+    if isinstance(capture_record, dict):
+        plan = {**plan, "capture": capture_record}
+    fixture_publication: _OwnedPublication | None = ownership.get("publication")
     if report is not None:
-        write_report(report, plan)
+        guard = _deadline_guard(deadline, clock)
+        report_publication: _OwnedPublication | None = None
+        try:
+            guard("report preparation")
+            report_publication = write_report(report, plan)
+            guard("report finalization")
+        except BaseException as exc:
+            # A requested report that could not be written must not leave the
+            # fixture behind as if the capture had been fully recorded, and a
+            # report this capture published must not survive a rolled-back
+            # fixture.  Only entries this capture owns are ever withdrawn.
+            _withdraw_all(exc, report_publication, fixture_publication)
+            raise
+        if clock() >= deadline:
+            refusal = CaptureBoundsExceeded(
+                f"capture exceeded max_wall_seconds ({bounds['max_wall_seconds']}) while "
+                "finalizing the requested report; refusing to admit the pair"
+            )
+            _withdraw_all(refusal, report_publication, fixture_publication)
+            raise refusal
     return plan
 
 
@@ -358,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             max_inputs=args.max_inputs,
             runtime=args.runtime,
             python=args.python,
+            catalog_path=args.catalog,
         )
     except ScenarioBlocked as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)

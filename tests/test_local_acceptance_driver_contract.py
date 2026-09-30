@@ -192,10 +192,7 @@ class _DriverLink:
     def _advance(self, kind: str, frames: int) -> None:
         self.events.append((kind, frames))
         self.owner_frames += frames
-        if (
-            self.save_after_frames is not None
-            and self.owner_frames >= self.save_after_frames
-        ):
+        if self.save_after_frames is not None and self.owner_frames >= self.save_after_frames:
             for bucket in self.save_buckets.values():
                 bucket[0] = 1
                 bucket[1] = 1
@@ -632,6 +629,4 @@ def test_battle_cursor_driver_respects_short_budget(budget_frames: int) -> None:
 
     assert diagnostics["frames_used"] == budget_frames
     assert link.owner_frames == budget_frames
-    assert sum(
-        event[1] for event in events if event[0] == "step_interleaved"
-    ) == budget_frames
+    assert sum(event[1] for event in events if event[0] == "step_interleaved") == budget_frames

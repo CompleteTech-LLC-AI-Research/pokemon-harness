@@ -1,0 +1,200 @@
+# Real-ROM MCP trade matrix - evidence bundle
+
+Status: **TERMINAL**
+
+This directory is a sanitized record of the real-ROM MCP stdio trade matrix that is the
+outstanding acceptance item for PR #118 and for issue #105. It contains no ROM bytes, no
+symbol files, no save states, no traces and no credentials: only SHA-1 digests, sizes,
+labels and per-row outcomes.
+
+## Identity
+
+| field | value |
+|---|---|
+| reviewed head | `57149c79931dde507515f3ae2d639806953e17ea` |
+| worktree head | `57149c79931dde507515f3ae2d639806953e17ea` |
+| worktree tree | `72c99491d9a36db3eac277c55381d7712412970b` |
+| suite | `tests/test_mcp_trade_records_rom.py` |
+
+`worktree_head` must equal `reviewed_head`; if it does not, this bundle does not describe the
+reviewed commit and must not be cited as such.
+
+## Dual identity: these rows also describe the merged commit
+
+Rows execute against the reviewed head, but PR #118 landed as a later commit. That transfer is
+proved here rather than asserted:
+
+- reviewed head: `57149c79931dde507515f3ae2d639806953e17ea`
+- merged commit: `80f2313c2f12dcffaef150dcd69ef2831b07bafd`
+- differing files: 1
+- rows unaffected: **True**
+
+| path | bytes r/m | sha256 r = m | AST r = m | imported by tested modules |
+|---|---|---|---|---|
+| `scripts/produce_battle_scenario.py` | 14253 / 14201 | no | yes | no |
+
+`rows_unaffected` is true only when every differing file is AST-identical between the two
+commits AND is not imported by the modules the rows execute through. If a later commit
+touches the tested surface this recomputes to false, and the rows must be re-run against the
+merged commit instead of transferred.
+
+Rows that reach `rc=0` at the reviewed head therefore also describe the merged commit, but they
+are labelled by the state actually executed, as the acceptance policy requires.
+
+## Runtime provenance (measured, not asserted)
+
+The dual-runtime claim is only meaningful if each tier really is the runtime it declares, so each
+tier was probed directly:
+
+| tier | python | pyboy | fork revision | compiled ext | is declared runtime | revision = vendored pin |
+|---|---|---|---|---|---|---|
+| `source` | 3.11.2 | 2.7.0 | `c565df66c373` | 0 | yes | yes |
+| `cython` | 3.11.2 | 2.7.0 | `c565df66c373` | 58 | yes | yes |
+
+Vendored revision marker: `c565df66c3731fad2856169a90f6bbec99925915`.
+
+- both tiers are their declared runtime: **True**
+- both tiers share the pinned fork revision: **True**
+
+The source tier must import the vendored `.py` package; the cython tier must import compiled
+extensions from outside the vendored tree. Both tiers report the revision the harness exposes as
+`pyboy.__pokered_harness_revision__`, which is what makes these rows dual-runtime evidence rather
+than two runs of the same interpreter.
+
+## Rows
+
+`rows_expected = 48` (24 declared MCP stdio trade rows x {`source`, `cython`} runtimes).
+
+- pass: 48
+- not_pass: 0
+- in_flight: 0
+- outstanding: 0
+- pass by runtime: `{'cython': 24, 'source': 24}`
+
+A row counts as a pass only when all of these hold: its most recent `END` record in `rows.log`
+is `rc=0`, and its JUnit XML exists with `tests>=1, failures=0, errors=0, skipped=0`. Every
+other row is recorded as its honest result and is never counted as a pass. Killed rows
+(`rc=143`) are not evidence and are re-run before being cited.
+
+## How each row was decided (parallel attempt vs low-load re-run)
+
+- rows decided by the parallel run: 38
+- rows decided by the serial discriminator: 10
+- earlier non-passing attempts recorded across those rows: 26
+
+`rows.log` is append-only, so a row can carry more than one `END` record. Whichever comes last
+decides the row, and the serial discriminator marks its record with `SERIAL-DISCRIMINATOR:` so a
+re-run cannot silently replace a failure. Reporting only the final state would hide that a second
+pass happened, which is the shape of retrying until green, so it is disclosed per row in
+`rows_pass_detail[].decided_by` together with `prior_not_pass_attempts`.
+
+Why a re-run is legitimate here rather than a weakened green: the parallel attempt loses a race,
+not an assertion. Those rows terminate in `timeout: no FRAME_DONE from peer within 10s`,
+`serial_backend_error`, or asyncio `CancelledError` - infrastructure and timing errors raised by a
+loaded host (47 unrelated infinite burners on 12 cores at load1 ~90), never a mismatch about
+party-record exchange. The serial pass runs the same commit, same node id, same interpreter and
+the same 10-second peer barrier, one row at a time, in a window whose entrance is gated on
+measured load; nothing about the assertion is relaxed. Load actually observed is recorded in
+`re_run_provenance.serial_rounds`.
+
+## Retained per-row artifacts
+
+`junit/<row>.xml` is the runner's own JUnit XML and `logs/<row>.log` is its pytest log. Both
+go through the same rewrite: every absolute local path is replaced by a placeholder, and
+nothing else is touched. A passing row's XML is a clean `<testcase>` element holding only
+repo-relative node ids, so the rewrite is a no-op there; a failing row's XML embeds the
+traceback and therefore names interpreter and asyncio files, and its log does too. The
+placeholders are bracket-delimited precisely because they are substituted inside XML text:
+an angle-bracketed placeholder would make the document unparseable.
+
+| placeholder | what it stood for |
+|---|---|
+| `[worktree]` | the tested worktree checked out at the reviewed head |
+| `[source-venv]` | the source-tier interpreter's site-packages |
+| `[native-venv]` | a compiled-tier interpreter's site-packages |
+| `[operator-root]` | the operator-supplied private asset root |
+| `[matrix-root]` | this matrix's own bookkeeping directory |
+| `[workspace]` | the local workspace root |
+| `[home]` | the local home directory |
+| `[usr]`, `[tmp]`, `[var]`, … | the corresponding system directory |
+
+The exact list, in the forms emitted (placeholders only, never the roots), is in
+`trade-evidence.json` under `sanitization.placeholders`.
+
+The substitution is applied longest-prefix-first and is asserted to round-trip byte for byte
+before any file is written (`sanitization.round_trip_verified` in `trade-evidence.json`). The
+build aborts rather than emit a record it cannot prove it left otherwise untouched. A
+bundle-wide sweep then re-scans every emitted file for absolute-path substrings and fails the
+build if any survive.
+
+The log is what makes the row's acceptance auditable: each passing row carries
+`MCP_TRADE_RECORDS_ROM {...}` with `primary_before`/`primary_after`/`peer_before`/`peer_after`
+party digests, `offered_slots`, `receiving_slot`, `fixture_sha1`, `peer_fixture_sha1`, the game
+milestones and the runtime mode. Those records are also lifted into
+`trade-evidence.json` under `rows_pass_detail[].rom_record`, so the input hashes survive even if
+the raw logs are dropped (`--omit-logs`).
+
+- JUnit XML files included: 48
+- logs included: 48
+- passing rows carrying an input-hash record: 48 of 48
+
+A TERMINAL bundle is refused when any passing row lacks either artifact or its input-hash
+record, because a pass without its digests is not auditable evidence.
+
+## Operator assets (digests only)
+
+- ROMs: 5
+- symbol tables: 3
+- link-test fixtures: 31
+
+Assets were supplied by the operator from a private root held outside version control. The
+digest list is in `trade-evidence.json` under `assets[]`, each entry carrying `kind`, `label`,
+`size` and `sha1`. No asset bytes are included in this bundle.
+
+## Reproducing
+
+These runs require operator-supplied ROMs, symbol tables and link fixtures that cannot be
+distributed. The repository's own entry point is the tracked test module, so with the operator
+roots exported any single declared row runs directly from a clean checkout at the reviewed head:
+
+```sh
+# ROMs (POKERED_ROM_ROOT), named exactly as tests/_rom_assets.py resolves them:
+#   red/pokemon-red.gb  red/pokemon-red-color.gb  red/pokemon-red.sym
+#   blue/pokemon-blue.gb  blue/pokemon-blue-color.gb  blue/pokemon-blue.sym
+#   yellow/pokemon-yellow.gbc  yellow/pokemon-yellow.sym
+# link fixtures (POKERED_FIXTURE_ROOT): the declared rows resolve exactly six files -
+#   red/cable_club.state, red/cable_club-slots.state, blue/cable_club.state,
+#   blue/cable_club-battle.state, blue/cable_club-slots.state, yellow/cable_club.state.
+#   Blue's battle fixture is loaded because the blue_color-blue_color local and TCP rows
+#   pair Blue's battle party against Blue's ordinary party; the two red/blue multi-member
+#   rows are the only readers of cable_club-slots.state
+# when these are unset the helpers walk up from the worktree looking for rom/ and
+# tests/fixtures/link/, falling back to <worktree>/rom and <worktree>/tests/fixtures/link
+# The row below is that version pair 'red_color-blue_color', so it needs the two colour
+# ROMs above; with only the stock red/blue ROMs present it reports skipped, not passed.
+# A single row is minutes of emulator work, not seconds: this node id is recorded at
+# 1527s in pr105-report.json's rows[] beside its committed JUnit and log.
+export POKERED_ROM_ROOT=/path/to/rom
+export POKERED_FIXTURE_ROOT=/path/to/link-fixtures
+
+# source runtime, one row (the gate's source switch is PYBOY_NO_CYTHON=1):
+PYBOY_NO_CYTHON=1 python -m pytest -q \
+  'tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-blue_color]'
+
+# cython/native runtime, the same row (leave PYBOY_NO_CYTHON unset):
+python -m pytest -q \
+  'tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_exchanges_party_records[red_color-blue_color]'
+```
+
+The 48-row matrix is those node ids across both runtimes, driven in parallel with a low-load
+serial re-run for rows that lose the host-contention race. That driver, the summary script, the
+bundle builder (`build_evidence.py`), the report generator (`make_pr105_report.py`) and the
+verifier (`verify_evidence_bundle.py`) were operator-side orchestration helpers: they are not
+part of this repository and are not distributed with it. This bundle is their output, and it is
+complete enough to audit from the bundle alone - the per-row JUnit XML and captured logs are
+committed here, `pr105-report.json`/`.md` carry the per-row digests and attempt binding, and
+`trade-evidence.json` carries the asset digests, the decision provenance and the merged-commit
+transfer.
+
+Guardrails honoured by this lane: `POKERED_SKIP_SHA1` was never set, and no bound, tolerance,
+skip or xfail was changed to obtain a green row.

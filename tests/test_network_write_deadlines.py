@@ -136,6 +136,7 @@ class _SocketProxy:
 
 def test_partial_interrupted_writes_preserve_complete_frame_order(monkeypatch):
     backend, peer = NetworkBackend.pair()
+
     class PartialSocket(_SocketProxy):
         calls = 0
 

@@ -1,0 +1,15 @@
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_during_setup_exits_cleanly[red_color-blue_color]
+  [source-venv]/lib/python3.11/site-packages/sdl2/_internal.py:24: UserWarning: Using SDL2 binaries from pysdl2-dll 2.32.10
+    warnings.warn(msg, warntype)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+_ test_real_rom_mcp_trade_eof_during_setup_exits_cleanly[red_color-blue_color] _
+----------------------------- Captured stdout call -----------------------------
+MCP_TRADE_RECORDS_CHILD_ORIGINS source [worktree]/vendor/pyboy-src/pyboy/__init__.py [worktree]/vendor/pyboy-src/pyboy/core/serial.py
+MCP_TRADE_RECORDS_ROM {"cleanup": "stdin_eof_bounded_exit_0_no_live_group", "fixture_sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb", "paired": true, "party_count": 1, "peer_fixture": "cable_club.state", "peer_fixture_sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38", "peer_version": "blue_color", "primary_fixture": "cable_club.state", "runtime_mode": "source", "scenario": "eof_during_setup", "transport": "local_pair", "version": "red_color"}
+=========================== short test summary info ============================
+PASSED tests/test_mcp_trade_records_rom.py::test_real_rom_mcp_trade_eof_during_setup_exits_cleanly[red_color-blue_color]
+1 passed, 1 warning in 25.05s

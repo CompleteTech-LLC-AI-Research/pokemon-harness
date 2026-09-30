@@ -26,9 +26,7 @@ def tmp_path(tmp_path):
         return
     for root in (Path("/tmp"), Path("/var/tmp"), Path.home()):
         root = root.resolve()
-        if not root.is_dir() or any(
-            (parent / ".git").exists() for parent in (root, *root.parents)
-        ):
+        if not root.is_dir() or any((parent / ".git").exists() for parent in (root, *root.parents)):
             continue
         try:
             directory = tempfile.TemporaryDirectory(prefix="battle-probe-tests-", dir=root)
@@ -728,7 +726,7 @@ def test_entry_with_real_helper_accepts_synthetic_pair_then_rejects_corrupt_hp(
     # Deliberately do not use the supervisor fixture: its module stub cannot
     # establish compatibility with the separately owned helper's real schema.
     from scripts import _timed_battle_probe as helper
-    from tests.test_timed_battle_probe import paired_snapshots
+    from tests._timed_battle_probe_support import paired_snapshots
 
     snapshots = paired_snapshots(room=checkpoint == "room-return")
     pair = fake_pair(tmp_path)

@@ -24,13 +24,17 @@ the complete native gameplay and matrix contract.
 
 ### Confirmed from the current tracked tree
 
-- `release-evidence/fixture-manifest.json` contains 10 external entries: six
-  `verified` canonical color-Red, color-Blue, and Yellow entries, and four
-  `partial` vanilla entries. No entry is marked `unknown`.
+- `release-evidence/fixture-manifest.json` contains 28 external entries: six
+  `verified` canonical color-Red, color-Blue, and Yellow entries, four
+  `partial` vanilla entries, and eighteen `captured` boundary entries driven
+  from the admitted battle fixtures. No entry is marked `unknown`.
 - Every manifest ROM pin and symbol pin matches the path-keyed record in
-  `VERSIONS.md` (`10/10` ROM references and `10/10` symbol references).
+  `VERSIONS.md` (`28/28` ROM references and `28/28` symbol references).
 - Every manifest producer path exists in the tracked tree, and the ordinary
-  and battle recipe tables align with all 10 manifest entries (`10/10`).
+  and battle recipe tables align with all 10 ordinary/battle manifest entries
+  (`10/10`); the eighteen boundary rows are produced by
+  `scripts/produce_battle_state_fixtures.py` and declared in
+  `release-evidence/battle-scenarios.json`.
 - The vanilla ordinary rows have no retained runtime identity, capture time, or
   verification method. The vanilla battle rows retain derivation metadata but
   remain `partial` because their ordinary inputs remain `partial`.
@@ -84,7 +88,7 @@ The following bounded checks passed in this current documentation audit:
 
 ```text
 git ls-remote <repository> refs/heads/master                  -> published base 8727779f...
-python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 10 entries
+python3 scripts/validate_fixture_manifest.py --schema-only  -> PASS, 28 entries
 uv lock --check                                             -> PASS
 python3 -m compileall <scoped-files>                        -> PASS
 scripts/network_concurrency_probe.py                        -> PASS, 8 probes

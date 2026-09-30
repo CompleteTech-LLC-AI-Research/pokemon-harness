@@ -9,10 +9,20 @@ from pokered_harness.state.party import (
 from pokered_harness.symbols.loader import load_sym_text
 
 
-def _write_slot(mem, base: int, *, species: int, hp: int, max_hp: int,
-                status: int = 0, type1: int = 0, type2: int = 0,
-                level: int = 1,
-                moves=(0, 0, 0, 0), pp=(0, 0, 0, 0)) -> None:
+def _write_slot(
+    mem,
+    base: int,
+    *,
+    species: int,
+    hp: int,
+    max_hp: int,
+    status: int = 0,
+    type1: int = 0,
+    type2: int = 0,
+    level: int = 1,
+    moves=(0, 0, 0, 0),
+    pp=(0, 0, 0, 0),
+) -> None:
     mem[base + 0] = species
     mem[base + 1] = (hp >> 8) & 0xFF  # HP big-endian
     mem[base + 2] = hp & 0xFF
@@ -44,8 +54,14 @@ def test_single_pokemon_at_full_hp(mem, symbols):
     mem[symbols.addr_of("wPartyCount")] = 1
     base = symbols.addr_of("wPartyMons")
     _write_slot(
-        mem, base, species=0x99, hp=25, max_hp=25, level=7,
-        moves=(0x21, 0x0A, 0, 0), pp=(20, 25, 0, 0),
+        mem,
+        base,
+        species=0x99,
+        hp=25,
+        max_hp=25,
+        level=7,
+        moves=(0x21, 0x0A, 0, 0),
+        pp=(20, 25, 0, 0),
     )
     party = parse_party(mem, symbols)
     assert party.count == 1
@@ -67,10 +83,20 @@ def test_multiple_slots_parsed_independently(mem, symbols):
     base = symbols.addr_of("wPartyMons")
     _write_slot(mem, base, species=1, hp=10, max_hp=20, level=5)
     _write_slot(
-        mem, base + PARTY_STRUCT_SIZE, species=2, hp=0, max_hp=30, level=10,
+        mem,
+        base + PARTY_STRUCT_SIZE,
+        species=2,
+        hp=0,
+        max_hp=30,
+        level=10,
     )
     _write_slot(
-        mem, base + 2 * PARTY_STRUCT_SIZE, species=3, hp=50, max_hp=50, level=20,
+        mem,
+        base + 2 * PARTY_STRUCT_SIZE,
+        species=3,
+        hp=50,
+        max_hp=50,
+        level=20,
     )
     party = parse_party(mem, symbols)
     assert party.count == 3
@@ -93,7 +119,12 @@ def test_status_decoded_per_slot(mem, symbols):
     mem[symbols.addr_of("wPartyCount")] = 1
     base = symbols.addr_of("wPartyMons")
     _write_slot(
-        mem, base, species=1, hp=10, max_hp=20, status=1 << 4,  # burned
+        mem,
+        base,
+        species=1,
+        hp=10,
+        max_hp=20,
+        status=1 << 4,  # burned
     )
     party = parse_party(mem, symbols)
     assert party.mons[0].status.burned is True
@@ -175,6 +206,7 @@ def test_party_parser_requires_core_symbols():
     # Without wPartyMons we cannot address slots. Empty party still
     # parseable because count=0 never reads wPartyMons.
     from tests.conftest import DictMemory
+
     mem = DictMemory({0xC001: 0})
     party = parse_party(mem, sym)
     assert party.count == 0

@@ -48,9 +48,7 @@ def _runtime_paths() -> dict[str, str | None]:
     return {
         "python": sys.executable,
         "pyboy_module": str(pyboy.__file__) if pyboy.__file__ else None,
-        "pyboy_serial_module": (
-            str(pyboy_serial.__file__) if pyboy_serial.__file__ else None
-        ),
+        "pyboy_serial_module": (str(pyboy_serial.__file__) if pyboy_serial.__file__ else None),
         "harness_serial_module": (
             str(harness_serial.__file__) if harness_serial.__file__ else None
         ),

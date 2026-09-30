@@ -123,15 +123,9 @@ def test_missing_optional_progress_symbol_is_unknown(mem, missing_symbol, field)
     assert state.badges_raw == 1 << Badge.THUNDER.value
     assert state.trainer_id == (None if field == "trainer_id" else 0x1234)
     assert state.money == (None if field == "money" else 123456)
-    assert state.play_time_hours == (
-        None if field == "play_time_hours" else 7
-    )
-    assert state.play_time_minutes == (
-        None if field == "play_time_minutes" else 42
-    )
-    assert state.play_time_seconds == (
-        None if field == "play_time_seconds" else 58
-    )
+    assert state.play_time_hours == (None if field == "play_time_hours" else 7)
+    assert state.play_time_minutes == (None if field == "play_time_minutes" else 42)
+    assert state.play_time_seconds == (None if field == "play_time_seconds" else 58)
     assert state.play_time_maxed is True
 
 

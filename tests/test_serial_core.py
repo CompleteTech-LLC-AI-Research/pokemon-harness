@@ -312,11 +312,7 @@ def test_cgb_fast_serial_bit_change_preserves_armed_transfer(initial_sc, next_sc
     s.set_SB(0xA5)
     s.set_SC(initial_sc)
 
-    initial_edge_cycles = (
-        CYCLES_PER_EDGE_CGB_FAST
-        if initial_sc & 0x02
-        else CYCLES_PER_EDGE_DMG
-    )
+    initial_edge_cycles = CYCLES_PER_EDGE_CGB_FAST if initial_sc & 0x02 else CYCLES_PER_EDGE_DMG
     s.tick(initial_edge_cycles)
     shift_before = s._shift_register
     bits_before = s._bits_remaining
@@ -326,11 +322,7 @@ def test_cgb_fast_serial_bit_change_preserves_armed_transfer(initial_sc, next_sc
 
     assert s._shift_register == shift_before
     assert s._bits_remaining == bits_before
-    next_edge_cycles = (
-        CYCLES_PER_EDGE_CGB_FAST
-        if next_sc & 0x02
-        else CYCLES_PER_EDGE_DMG
-    )
+    next_edge_cycles = CYCLES_PER_EDGE_CGB_FAST if next_sc & 0x02 else CYCLES_PER_EDGE_DMG
     assert s.clock_target != deadline_before
     assert s.clock_target == s.clock + next_edge_cycles
     assert s.transfer_enabled == 1
@@ -560,8 +552,8 @@ def test_mid_transfer_backend_swap_fills_remaining_with_pullup():
     s.set_SC(0x81)
 
     s.tick(3 * CYCLES_PER_EDGE_DMG)  # 3 edges with peer=0
-    s.backend = NullBackend()         # "disconnect"
-    s.tick(CYCLES_PER_BYTE_DMG)       # finish the remaining 5 edges
+    s.backend = NullBackend()  # "disconnect"
+    s.tick(CYCLES_PER_BYTE_DMG)  # finish the remaining 5 edges
 
     # Shift register received: 0,0,0,1,1,1,1,1 (MSB-first) = 0b00011111 = 0x1F
     assert s.SB == 0x1F
@@ -857,9 +849,7 @@ def test_state_round_trip_restores_cgb_fast_clock_flag():
 @pytest.mark.parametrize("field_count", [8, 10, 12], ids=["legacy", "unmarked", "current"])
 @pytest.mark.parametrize("sc", [0x00, 0x01, 0x80])
 @pytest.mark.parametrize("saved_hint", [0, 23])
-def test_loading_unscheduled_large_clock_state_repairs_hint(
-    cycles, field_count, sc, saved_hint
-):
+def test_loading_unscheduled_large_clock_state_repairs_hint(cycles, field_count, sc, saved_hint):
     original = SerialCore()
     original.tick(cycles)
     original.set_SB(0xA5)
@@ -923,9 +913,7 @@ def test_restored_internal_large_clock_transfer_keeps_cadence(
     restored = SerialCore(cgb_mode=True)
     # CPU speed belongs to the motherboard, not the serial state stream.
     restored.cpu_speed_shift = cpu_speed_shift
-    restored.load_state(
-        stream, SerialCore.STATE_VERSION, legacy_timing=128 if legacy else None
-    )
+    restored.load_state(stream, SerialCore.STATE_VERSION, legacy_timing=128 if legacy else None)
     assert restored.clock == original.clock
     assert restored.last_cycles == original.last_cycles
     assert restored._bits_remaining == 5

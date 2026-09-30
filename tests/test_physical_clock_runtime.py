@@ -1,4 +1,5 @@
 """Actual authored opcodes exercise source/native physical time, without BYO assets."""
+
 import io
 
 import pytest
@@ -29,7 +30,7 @@ def cgb_emulator(tmp_path):
 
 
 def instruction(p, opcodes):
-    p.memory[0, 0x150:0x150 + len(opcodes)] = opcodes
+    p.memory[0, 0x150 : 0x150 + len(opcodes)] = opcodes
     p.register_file.PC = 0x150
     p.mb.breakpoint_singlestep = True
     p.mb.lcd.frame_done = False
@@ -73,10 +74,12 @@ def test_serial_period_stays_512_cpu_tcycles(cgb_emulator, double):
     if double:
         switch(p)
     observed = []
+
     class Backend:
         def on_edge(self, _bit, _role):
             observed.append((p.mb.serial.clock, p.mb.get_physical_clock()[1]))
             return 1
+
     p.mb.serial.backend = Backend()
     p.memory[0xFF01] = 0
     p.memory[0xFF02] = 0x81
@@ -85,7 +88,9 @@ def test_serial_period_stays_512_cpu_tcycles(cgb_emulator, double):
         instruction(p, [0])
     assert len(observed) == 8
     assert [clock - start[0] for clock, _ in observed] == [512 * n for n in range(1, 9)]
-    assert [physical - start[1] for _, physical in observed] == [512 * (1 if double else 2) * n for n in range(1, 9)]
+    assert [physical - start[1] for _, physical in observed] == [
+        512 * (1 if double else 2) * n for n in range(1, 9)
+    ]
     assert not p.mb.serial.transfer_enabled
 
 
@@ -142,7 +147,9 @@ def test_clock_does_not_wrap_at_lcd_frames(cgb_emulator):
     assert first[0] == second[0] == 0 and second[1] > first[1] > 0
 
 
-@pytest.mark.parametrize("double_a,double_b", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "double_a,double_b", [(False, False), (False, True), (True, False), (True, True)]
+)
 def test_actual_mixed_speed_pair_frame_accounting(cgb_emulator, tmp_path, double_a, double_b):
     a = cgb_emulator
     b = PyBoy(str(tmp_path / "original-physical-clock.gb"), window="null", sound_emulated=False)
@@ -185,7 +192,9 @@ def test_actual_stop_transition_during_owned_pair_frame(cgb_emulator, tmp_path, 
         link.step_interleaved(1)
         raw = link._epoch_expected[0] - link._epoch_origins[0]
         physical = link._physical_now[0] - link._physical_origins[0]
-        assert physical == 20 * (1 if initial_double else 2) + (raw - 20) * (2 if initial_double else 1)
+        assert physical == 20 * (1 if initial_double else 2) + (raw - 20) * (
+            2 if initial_double else 1
+        )
         other = link._physical_now[1] - link._physical_origins[1]
         assert abs(physical - other) <= 32
     finally:
@@ -224,9 +233,11 @@ def test_repeated_callback_queries_do_not_double_charge_time(cgb_emulator, doubl
     rate = 1 if double else 2
     epoch, before = p.mb.get_physical_clock()
     observations = []
+
     def pump(_event):
         observations.append(p.mb.get_physical_clock())
         assert p.mb.get_physical_clock() == observations[-1]
+
     p.mb.serial.set_owner_pump(pump)
     try:
         instruction(p, [0xF0, 1])
@@ -236,10 +247,16 @@ def test_repeated_callback_queries_do_not_double_charge_time(cgb_emulator, doubl
     assert p.mb.get_physical_clock() == (epoch, before + 12 * rate)
 
 
-@pytest.mark.parametrize("double_a,double_b", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "double_a,double_b", [(False, False), (False, True), (True, False), (True, True)]
+)
 @pytest.mark.parametrize("internal_side", [0, 1])
 def test_actual_pair_exchanges_byte_and_services_each_irq_once(
-    cgb_emulator, tmp_path, double_a, double_b, internal_side,
+    cgb_emulator,
+    tmp_path,
+    double_a,
+    double_b,
+    internal_side,
 ):
     a = cgb_emulator
     b = PyBoy(str(tmp_path / "original-physical-clock.gb"), window="null", sound_emulated=False)
@@ -254,22 +271,34 @@ def test_actual_pair_exchanges_byte_and_services_each_irq_once(
             # The counter measures executed serial IRQ handlers, not callbacks.
             p.memory[0, 0x58:0x60] = [0xFA, 0, 0xC0, 0x3C, 0xEA, 0, 0xC0, 0xD9]
             program = [
-                0xF3,                    # DI
-                0x31, 0xFE, 0xDF,        # LD SP,$DFFE
-                0xAF,                    # XOR A
-                0xEA, 0, 0xC0,           # LD [$C000],A: initialize IRQ counter
-                0xE0, 0x0F,              # LDH [$FF0F],A: clear pending IRQs
-                0x3E, 8,                 # LD A,8
-                0xEA, 0xFF, 0xFF,        # LD [$FFFF],A: serial IRQ only
-                0xFB,                    # EI
-                0x3E, values[side],       # LD A, outgoing byte
-                0xE0, 1,                 # LDH [$FF01],A: SB
-                0x3E, 0x81 if side == internal_side else 0x80,
-                0xE0, 2,                 # LDH [$FF02],A: SC
+                0xF3,  # DI
+                0x31,
+                0xFE,
+                0xDF,  # LD SP,$DFFE
+                0xAF,  # XOR A
+                0xEA,
+                0,
+                0xC0,  # LD [$C000],A: initialize IRQ counter
+                0xE0,
+                0x0F,  # LDH [$FF0F],A: clear pending IRQs
+                0x3E,
+                8,  # LD A,8
+                0xEA,
+                0xFF,
+                0xFF,  # LD [$FFFF],A: serial IRQ only
+                0xFB,  # EI
+                0x3E,
+                values[side],  # LD A, outgoing byte
+                0xE0,
+                1,  # LDH [$FF01],A: SB
+                0x3E,
+                0x81 if side == internal_side else 0x80,
+                0xE0,
+                2,  # LDH [$FF02],A: SC
             ]
             loop = 0x150 + len(program)
             program += [0xC3, loop & 255, loop >> 8]
-            p.memory[0, 0x150:0x150 + len(program)] = program
+            p.memory[0, 0x150 : 0x150 + len(program)] = program
             p.register_file.PC = 0x150
             link.attach(p)
         link.step(1)

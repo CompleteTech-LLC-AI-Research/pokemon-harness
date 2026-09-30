@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
 
-from pokered_harness.symbols.loader import MemoryLike, SymbolTable
+from pokered_harness.symbols.loader import MemoryLike, SymbolTable, read_wram_u8
 
 
 class Badge(IntEnum):
@@ -144,7 +144,7 @@ def read_event_flag(
         )
     base = symbols.addr_of("wEventFlags")
     byte_offset, bit = divmod(bit_index, 8)
-    value = int(memory[base + byte_offset]) & 0xFF
+    value = read_wram_u8(memory, base + byte_offset)
     return bool((value >> bit) & 1)
 
 
@@ -174,7 +174,7 @@ def _read_bcd3(memory: MemoryLike, addr: int) -> int | None:
     """
     result = 0
     for i in range(3):
-        b = int(memory[addr + i]) & 0xFF
+        b = read_wram_u8(memory, addr + i)
         hi, lo = (b >> 4) & 0xF, b & 0xF
         if hi > 9 or lo > 9:
             return None

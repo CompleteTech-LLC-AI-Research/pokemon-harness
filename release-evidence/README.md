@@ -1,9 +1,23 @@
 # External fixture evidence
 
-[`fixture-manifest.json`](fixture-manifest.json) records the 10 save-state
+[`fixture-manifest.json`](fixture-manifest.json) records the 28 save-state
 files observed in the operator-managed `tests/fixtures/link` root. It records
 file size, SHA-1, SHA-256, the expected ROM/symbol pins, and the provenance
-known at the time of the audit.
+known at the time of the audit: six `verified` canonical rows, four `partial`
+vanilla rows, and eighteen `captured` boundary rows (a forced-replacement
+party menu, the last command boundary before the deciding knockout, and the
+terminal return, each with a peer sibling) driven from the admitted battle
+fixtures.
+
+The 2026-09-24 integration of the battle-state branch relocated that producer's
+entry point (`scripts/produce_battle_state_fixtures.py`) into a thin facade plus
+`scripts/produce_battle_state_fixtures_{model,drive,manifest}.py` to satisfy the
+per-file size bound tracked by #122. The relocation is behavior-preserving
+(identical public attribute surface and identical collected test node IDs), so
+the eighteen `captured` boundary rows keep their recorded fixture bytes. Their
+`runtime_identity` producer SHA-1 was updated from `a59ce9e9...` to the relocated
+entry point's `e2e96765...`. No fixture was re-captured: re-capture needs the
+operator-managed ROM/SYM assets, which are not present in this environment.
 
 [`current-audit-2026-08-31.md`](current-audit-2026-08-31.md) records the
 current isolated-candidate gate counts, runtime identity, explicit-ROM MCP

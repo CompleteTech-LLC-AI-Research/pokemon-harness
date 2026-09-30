@@ -29,7 +29,13 @@ _SCENARIO_ID_PATTERN = r"^[a-z0-9]+(_[a-z0-9]+)*$"
 _SCENARIO_ID_RE = re.compile(_SCENARIO_ID_PATTERN)
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_PROVENANCE_STATUSES = {"verified", "derived", "partial", "unknown"}
+# ``captured`` is the strict status for a real-play drive: the bytes were
+# recorded from an admitted input with a full provenance chain, but no
+# byte-reproduction of an external state is claimed.  It carries the same
+# required fields as ``verified``, plus the input binding of ``derived``.
+_PROVENANCE_STATUSES = {"verified", "captured", "derived", "partial", "unknown"}
+# Statuses that may only ever be backed by a complete provenance chain.
+_STRICT_PROVENANCE_STATUSES = {"verified", "captured"}
 _ROLE_SUFFIXES = ("__listen", "__connect")
 _ROLES = {"listen", "connect"}
 _ROM_VERSIONS = {"red", "blue", "yellow"}
@@ -252,11 +258,11 @@ def _validate_provenance(provenance: Any, field: str) -> None:
             f"{field}.{key} must be null or a non-empty string",
         )
 
-    if status == "verified":
+    if status in _STRICT_PROVENANCE_STATUSES:
         for key in ("runtime_identity", "captured_at_utc", "verification_method"):
             _require(
                 isinstance(provenance.get(key), str) and provenance[key].strip(),
-                f"{field}.{key} is required for verified provenance",
+                f"{field}.{key} is required for {status} provenance",
             )
     if status == "derived":
         _require(
@@ -267,6 +273,23 @@ def _validate_provenance(provenance: Any, field: str) -> None:
             (isinstance(input_sequence, str) and input_sequence.strip())
             or (isinstance(input_sequence, list) and input_sequence),
             f"{field}.input_sequence transformation is required for derived provenance",
+        )
+    if status == "captured":
+        # A captured row claims a real-play drive from a specific admitted
+        # input, so it must name that input by id and pin it by SHA-1; the
+        # cross-reference check below verifies the pin against the manifest.
+        _require(
+            isinstance(source_fixture_id, str) and source_fixture_id.strip(),
+            f"{field}.source_fixture_id is required for captured provenance",
+        )
+        _require(
+            isinstance(input_fixture_sha1, str) and _SHA1_RE.fullmatch(input_fixture_sha1),
+            f"{field}.input_fixture_sha1 is required for captured provenance",
+        )
+        _require(
+            (isinstance(input_sequence, str) and input_sequence.strip())
+            or (isinstance(input_sequence, list) and input_sequence),
+            f"{field}.input_sequence is required for captured provenance",
         )
 
 
@@ -326,13 +349,14 @@ def _manifest_index(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {fixture["id"]: fixture for fixture in fixtures}
 
 
-# The battle catalog models the battle-relevant state kinds (``ordinary`` and
-# ``battle``): each scenario is a one-turn pairing source.  The six-member
-# ``slots`` rows are trade-acceptance fixtures whose party records are pairwise
-# distinct so the sender/receiver slot rows are falsifiable; they are not battle
-# pairing sources, so they are not required to appear in this catalog even
-# though the fixture manifest pins and byte-validates them.
-_BATTLE_CATALOG_KINDS = frozenset({"ordinary", "battle"})
+# The battle catalog models the battle-relevant state kinds (``ordinary``,
+# ``battle``, and the captured ``boundary`` pairs): each scenario is a
+# one-turn pairing source.  The six-member ``slots`` rows are trade-acceptance
+# fixtures whose party records are pairwise distinct so the sender/receiver
+# slot rows are falsifiable; they are not battle pairing sources, so they are
+# not required to appear in this catalog even though the fixture manifest pins
+# and byte-validates them.
+_BATTLE_CATALOG_KINDS = frozenset({"ordinary", "battle", "boundary"})
 
 
 def _validate_cross_references(scenarios: list[dict[str, Any]], manifest: dict[str, Any]) -> None:

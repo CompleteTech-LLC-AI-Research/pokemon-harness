@@ -1,0 +1,54 @@
+real-ROM MCP stdio trade matrix - TERMINAL
+reviewed head : 57149c79931dde507515f3ae2d639806953e17ea
+worktree tree : 72c99491d9a36db3eac277c55381d7712412970b
+rows          : pass=48 not_pass=0 in_flight=0 outstanding=0 of 48
+pass by runtime: {'cython': 24, 'source': 24}
+
+PASS  source_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_  31s  ended 2026-09-21T04:54:47+00:00
+PASS  source_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_  629s  ended 2026-09-21T05:19:28+00:00
+PASS  source_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_  717s  ended 2026-09-21T05:20:56+00:00
+PASS  source_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_  1680s  ended 2026-09-21T06:58:34+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_  1657s  ended 2026-09-21T06:58:11+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_  1500s  ended 2026-09-21T07:23:11+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_  1508s  ended 2026-09-21T07:23:42+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_  1527s  ended 2026-09-21T07:48:38+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_  1146s  ended 2026-09-21T07:42:48+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_  1556s  ended 2026-09-21T08:08:44+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_  1539s  ended 2026-09-21T08:14:17+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_  1619s  ended 2026-09-21T08:35:43+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_  1701s  ended 2026-09-21T08:42:38+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_  1309s  ended 2026-09-21T08:57:32+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_  826s  ended 2026-09-21T08:56:24+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_  283s  ended 2026-09-21T09:01:07+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_  288s  ended 2026-09-21T09:02:20+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_  296s  ended 2026-09-21T09:06:03+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_  226s  ended 2026-09-21T09:06:06+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_  335s  ended 2026-09-21T09:11:38+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_  307s  ended 2026-09-21T09:11:13+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_  206s  ended 2026-09-21T09:17:48+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_  206s  ended 2026-09-21T09:17:48+00:00
+PASS  source_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_  259s  ended 2026-09-21T09:22:07+00:00
+PASS  cython_test_real_rom_mcp_trade_eof_during_setup_exits_cleanly_red_color-blue_color_  2s  ended 2026-09-21T09:17:50+00:00
+PASS  cython_test_real_rom_mcp_trade_eof_during_active_trade_exits_cleanly_red_color-blue_color_  86s  ended 2026-09-21T09:19:16+00:00
+PASS  cython_test_real_rom_mcp_trade_eof_after_commitment_exits_cleanly_red_color-blue_color_  108s  ended 2026-09-21T09:21:04+00:00
+PASS  cython_test_real_rom_mcp_trade_cancel_before_commitment_keeps_records_red_color-blue_color_  434s  ended 2026-09-21T09:28:18+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_red_color-blue_color-out2-peerout0_  328s  ended 2026-09-21T10:52:24+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_multi_member_slot_records_blue_color-red_color-out0-peerout3_  353s  ended 2026-09-21T10:58:17+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-red_color_  328s  ended 2026-09-21T11:03:45+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-blue_color_  320s  ended 2026-09-21T11:09:05+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_red_color-yellow_  395s  ended 2026-09-21T11:15:40+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-red_color_  396s  ended 2026-09-21T11:22:17+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-blue_color_  269s  ended 2026-09-21T11:26:46+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_blue_color-yellow_  1498s  ended 2026-09-21T10:08:51+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-red_color_  200s  ended 2026-09-21T11:30:06+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-blue_color_  1228s  ended 2026-09-21T10:09:35+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_yellow-yellow_  1330s  ended 2026-09-21T10:31:01+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-red_color_  206s  ended 2026-09-21T11:33:32+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-blue_color_  207s  ended 2026-09-21T11:36:59+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_red_color-yellow_  485s  ended 2026-09-21T10:39:06+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-red_color_  171s  ended 2026-09-21T10:35:38+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-blue_color_  267s  ended 2026-09-21T10:40:05+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_blue_color-yellow_  251s  ended 2026-09-21T10:43:17+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-red_color_  44s  ended 2026-09-21T10:40:49+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-blue_color_  44s  ended 2026-09-21T10:41:33+00:00
+PASS  cython_test_real_rom_mcp_trade_exchanges_party_records_over_tcp_yellow-yellow_  241s  ended 2026-09-21T10:45:34+00:00

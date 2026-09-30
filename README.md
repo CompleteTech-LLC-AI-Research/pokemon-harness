@@ -439,8 +439,10 @@ fixture provenance is partial.
 Requirements:
 
 - Python 3.11 or newer.
-- The bundled PyBoy runtime (`2.7.0`, harness revision
-  `c565df66c3731fad2856169a90f6bbec99925915`).
+- The bundled PyBoy runtime (`2.7.0`, harness-local divergence revision
+  `fd765b1808ac9cb192b42ae971987158ff36ae48`; pre-divergence harness fork revision
+  `c565df66c3731fad2856169a90f6bbec99925915`). Earlier recorded runs below name
+  that fork revision because they predate the in-fork divergence.
 - `mcp==1.29.1`, the certified runtime API used by the server.
 - A legally obtained ROM and a matching debug symbol file for any real-ROM
   run.
@@ -502,7 +504,8 @@ it explicitly; the gate then fails if any required PyBoy module resolves to
 vendored source instead of an installed extension:
 
 ```bash
-python scripts/bootstrap_pyboy.py --mode cython
+python scripts/bootstrap_pyboy.py --mode cython \
+  --build-evidence "$EVIDENCE_DIR/native-build-evidence.json"
 python scripts/bootstrap_pyboy.py --mode cython --check
 python scripts/production_gate.py --runtime-mode cython --unit-only \
   --repeat-timing 5 --evidence-dir "$EVIDENCE_DIR"
@@ -511,13 +514,22 @@ python scripts/production_gate.py --runtime-mode cython --unit-only \
 Native bootstrap stages the complete vendored source and resources in a fresh
 directory under ignored `build/`, excluding generated C, objects, and extension
 binaries. It prints a SHA-256 fingerprint of the staged inputs and removes the
-staging directory after installation or failure. Keep that fingerprint and the
-build output with native qualification evidence. A change to a shared `.pxd`
-requires rebuilding all dependent extensions together; copying a single rebuilt
-extension into an older installation can leave incompatible method tables.
-The `--check` command verifies imports, module origins, and the runtime contract;
-it does not prove that manually replaced binaries share a build. Run a complete
-bootstrap after vendor changes or binary replacement.
+staging directory after installation or failure. With `--build-evidence PATH`
+the procedure that performed the build also writes its own record at `PATH`,
+tying the staged input bytes, the completed install, and the resulting
+extension identities together. `--build-evidence` is rejected with `--check`
+and is not written when the build fails, so an absent record means no
+successful build ran. Pin the emitted record with
+`interpreters.native_build_evidence` and
+`interpreters.native_build_evidence_sha256`; the qualification runner
+recomputes the staged-input digest, the extension hashes, and the fingerprint
+from the live runtime, so a hand-written record does not satisfy the check. A
+change to a shared `.pxd` requires rebuilding all dependent extensions
+together; copying a single rebuilt extension into an older installation can
+leave incompatible method tables. The `--check` command verifies imports,
+module origins, and the runtime contract; it does not prove that manually
+replaced binaries share a build. Run a complete bootstrap after vendor changes
+or binary replacement.
 
 To run the dual-runtime gate with independently installed environments, pass
 the source interpreter with `--python` and the native interpreter with
@@ -715,6 +727,98 @@ Oak's Lab map 40, and lab movement. A bounded starter attempt ended at map 40
 establish MCP control and observation plus lifecycle behavior, but not starter
 acquisition or MCP-facing trade/battle; those remain unproven.
 
+### Battle state schema
+
+`pokered://game-state` (and `pokered://peer-game-state` for an in-process
+peer) carries a `battle` object plus an `epoch` object. The schema is
+additive. Every optional field is `null` when its backing symbol is absent
+from the loaded `.sym`; a value is never guessed.
+
+Identity and combatants:
+
+- `battle.kind`, `battle.raw_is_in_battle`, `battle.battle_type`,
+  `battle.engaged_trainer_class`, `battle.engaged_trainer_set`,
+  `battle.player_mon_slot`.
+- `battle.enemy_mon` (species/level/HP/max HP/status/types/moves/PP and slot)
+  and `battle.enemy_mon_valid`: `true`/`false` where a trainer slot can be
+  checked, `null` for a wild battle with no meaningful slot; `null` whenever
+  the `wEnemyMon*` symbols are absent.
+  `false` is reserved for a value the harness actually read and rejected
+  (a party slot outside `0..5`, or a combatant whose own validity check
+  failed); unavailable evidence is always `null`, never `false`.
+- `battle.player_stat_stages` / `battle.enemy_stat_stages`: the six
+  `w*MonStatMods` bytes decoded as Gen-1 stages in `-6..+6` (`raw - 7`,
+  where `7` is neutral), with `valid` `true` when all six are present and in
+  range, `false` when a present byte is outside `1..13` (no engine writer),
+  and `null` when the family is only partially present. These are exposed
+  only while a wild/trainer battle is active; out of battle the bytes are
+  stale and report `null`.
+
+Phase and terminal state:
+
+- `battle.phase` is a candidate derived from several ROM-owned observations;
+  there is no single sub-phase byte. `battle.phase_valid` is `true` only when
+  exactly one surviving signal supports the phase, `false` when evidence is
+  missing, ambiguous, or contradictory, and `battle.phase_evidence` lists the
+  symbols consulted. `intro` is retained for schema compatibility but is
+  never derived.
+- `battle.raw_battle_result` is always the raw `wBattleResult` byte.
+  `battle.terminal_result` is set only for a non-zero outcome byte that
+  survived an observed active-to-inactive battle transition; an ambiguous
+  zero (win, blackout, and escape all leave or clear zero) stays `null`.
+  `battle.escaped_from_battle` is the raw escape byte.
+- `battle.menu_open` / `battle.menu_evidence`: the session-maintained
+  execution-hook state for the battle command/move menu. `wMoveMenuType` is a
+  mode selector, not an open/closed flag, so `command_selection` is reported
+  only when `menu_open` is `true`; the evidence names the hooked ROM labels.
+  `menu_open` is `null` when observation is unavailable and after a
+  `load_state`/`reset_tick` until the next hook event.
+- `battle.resolution_open` / `battle.resolution_evidence`: the
+  session-maintained execution-hook state for ROM move execution
+  (`ExecutePlayerMove`/`ExecuteEnemyMove` entered and their matching `*Done`
+  exit not yet reached). An ordinary FIGHT turn is otherwise unobservable:
+  `ExecutePlayerMoveDone` clears `wActionResultOrTookBattleTurn` to zero on
+  the way out, so a client polling at any interval only ever sees that flag
+  set for the item/switch/run turns that never execute a move.
+  `action_resolution` is reported when the flag is non-zero *or* the hook
+  shows the engine is resolving a move; `resolution_open` is `null` when
+  observation is unavailable and after a `load_state`/`reset_tick` until the
+  next hook event.
+
+Forced replacement is reported from the ROM's own live replacement-menu
+signal: `ChooseNextMon` writes `BATTLE_PARTY_MENU` to
+`wPartyMenuTypeOrMessageID` and `DisplayPartyMenu`'s input loop raises
+`wPartyMenuAnimMonEnabled` to `$40` while it awaits input, clearing it on
+exit. Both must hold, and the party must have a living member
+(`AnyPartyAlive` corroboration). The faint flag
+`wInHandlePlayerMonFainted` is *not* sufficient and not required: it is
+cleared on the enemy-faint path before that path calls `ChooseNextMon` (so a
+genuine replacement can have it at zero), it can read stale after the menu
+closes, and the final-faint path sets it while jumping to blackout or victory
+without ever opening a menu.
+
+Transient mechanics:
+
+- `battle.move_menu_type` (raw `wMoveMenuType`), `battle.player_move_list_index`,
+  `battle.current_menu_item`, `battle.player_selected_move`,
+  `battle.enemy_selected_move`, `battle.action_result_or_took_turn`, and
+  `battle.in_handle_player_mon_fainted`.
+
+Per-mode availability: the primary MCP server enables the menu, move-execution,
+and battle-end observations on its session and its configured peer at startup.
+The menu observation is installed only when `SelectMenuItem`,
+`DisplayBattleMenu.handleBattleMenuInput`, `MainInBattleLoop`, and
+`MainInBattleLoop.selectEnemyMove` all exist in that session's symbol table
+(they do in the pinned Red/Blue/Yellow `.sym` files); otherwise `menu_open` is
+`null` and `command_selection` is never emitted. The move-execution
+observation needs `ExecutePlayerMove`, `ExecuteEnemyMove`,
+`ExecutePlayerMoveDone`, and `ExecuteEnemyMoveDone`; otherwise
+`resolution_open` is `null` and `action_resolution` can only come from a
+non-zero `wActionResultOrTookBattleTurn`. Each
+session observes only its own emulator, so `pokered://peer-game-state`
+reflects the peer's hooks. Timed remote mode has no local peer resource; its
+`pokered://game-state` is read through the timed owner.
+
 ## Link cable modes
 
 The bundled PyBoy fork provides the bit-accurate serial backend required by
@@ -795,12 +899,15 @@ The current evidence boundary is deliberately narrow:
 | Test surface | What it can establish | What it cannot establish |
 |---|---|---|
 | `tests/test_link_protocol.py` | ROM-free Pokémon serial constants and synthetic exchange behavior | Emulator or game compatibility |
-| `tests/test_link_transport.py` and `tests/test_network_backend.py` | In-process queues and TCP edge/response primitives | A real game trade or battle |
+| `tests/test_link_transport.py` and the `tests/test_network_backend_*.py` modules | In-process queues and TCP edge/response primitives | A real game trade or battle |
 | `tests/test_link_symbols_real_roms.py` | Required labels resolve when local symbols are available | A complete gameplay flow |
 | `tests/test_link_integration.py` | Fixture-gated in-process real-ROM milestones | Remote two-process behavior |
-| `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial milestones | A full user-driven remote trade or battle |
-| `tests/test_pyboy_link_session_subprocess.py` | Parameterized two-process LinkMenu smoke plus canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints | A full source release, compiled gameplay parity, or MCP-facing starter/trade/battle gameplay; recorded source strict battle passed 19/19, while source strict trade failed 18/19 |
+| `tests/test_link_integration_remote.py` | Fixture-gated remote transport/serial handshake and link-menu-pass milestones (entry module) | A full user-driven remote trade or battle |
+| `tests/test_link_integration_remote_rpc.py` and `tests/test_link_integration_remote_trade.py` | Fixture-gated remote RPC-flow, menu-vote, trade-center-exchange and agent-sync milestones | A full user-driven remote trade or battle |
+| `tests/test_pyboy_link_session_subprocess.py` | Canonical color Red/Blue/Yellow native-serial trade and battle acceptance entrypoints (two-subprocess TCP) | A full source release, compiled gameplay parity, or MCP-facing starter/trade/battle gameplay; recorded source strict battle passed 19/19, while source strict trade failed 18/19 |
+| `tests/test_pyboy_link_session_subprocess_link_menu_history.py` and `tests/test_pyboy_link_session_subprocess_peer_lifecycle.py` | ROM-free link-menu history recorder plus peer supervision, shutdown, sync-boundary, trace-watchdog and result-validation regressions | Emulator, game, or real-ROM behavior |
 | `tests/test_pyboy_link_session_roms.py` | Diagnostic matrix plus parameterized canonical Red/Blue/Yellow local trade and battle acceptance entrypoints | Stock-variant coverage, or a release result from a skipped, RAM-mutated, or unpinned path |
+| `tests/test_pyboy_link_session_roms_serial.py` and `tests/test_pyboy_link_session_roms_diagnostics.py` | Yellow two-session serial-core and byte-exchange smoke plus link-menu warp (trade center, colosseum) and link-battle-start milestones | A completed trade or battle, or a release result from an unpinned path |
 
 Do not describe a transport milestone as “trade complete.” A full trade or
 battle needs an acceptance result from the actual release runtime, matching

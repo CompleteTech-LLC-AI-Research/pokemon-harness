@@ -76,12 +76,9 @@ def _server_params_for_paths(
 def _server_params() -> StdioServerParameters:
     if not (ROM_PATH and SYM_PATH):
         pytest.skip(
-            "POKERED_ROM_PATH / POKERED_SYM_PATH not set; "
-            "skipping real-ROM MCP integration"
+            "POKERED_ROM_PATH / POKERED_SYM_PATH not set; skipping real-ROM MCP integration"
         )
-    return _server_params_for_paths(
-        Path(ROM_PATH), Path(SYM_PATH), ROM_SHA1
-    )
+    return _server_params_for_paths(Path(ROM_PATH), Path(SYM_PATH), ROM_SHA1)
 
 
 def _pinned_server_params(version: str) -> StdioServerParameters:
@@ -129,8 +126,7 @@ async def test_stdio_list_tools_and_call_step():
 
         tool_list = await session.list_tools()
         tool_names = {t.name for t in tool_list.tools}
-        assert {"step", "press", "save_state", "load_state",
-                "run_until_event"} <= tool_names
+        assert {"step", "press", "save_state", "load_state", "run_until_event"} <= tool_names
         resources = await session.list_resources()
         resource_names = {resource.name for resource in resources.resources}
         assert {"Game State", "Event Log", "Link Status"} <= resource_names
@@ -141,9 +137,7 @@ async def test_stdio_list_tools_and_call_step():
         payload = json.loads(result.content[0].text)
         assert payload["tick"] == 4
 
-        press = await session.call_tool(
-            "press", {"button": "a", "duration": 2}
-        )
+        press = await session.call_tool("press", {"button": "a", "duration": 2})
         assert _payload(press) == {"ok": True}
 
 
@@ -189,9 +183,7 @@ async def test_stdio_save_state_roundtrip_is_deterministic():
 
         # Advance further, then load the saved state back.
         await session.call_tool("step", {"count": 300})
-        load_result = await session.call_tool(
-            "load_state", {"data": blob_b64}
-        )
+        load_result = await session.call_tool("load_state", {"data": blob_b64})
         assert _payload(load_result) == {"ok": True}
         restored = await session.read_resource("pokered://game-state")
         restored_body = json.loads(restored.contents[0].text)  # type: ignore[union-attr]
@@ -248,17 +240,13 @@ async def test_stdio_remote_link_lifecycle_and_explicit_disconnect():
                 )
                 assert connect["remote_mode"] == "connected"
                 assert connect["peer_rom_version"] == "red"
-                connector_status = _payload(
-                    await connector.call_tool("link_status", {})
-                )
+                connector_status = _payload(await connector.call_tool("link_status", {}))
                 assert connector_status["remote_mode"] == "connected"
 
                 # Disconnect the live connector before either stdio client
                 # exits. Both servers must finish TCP/backend cleanup and
                 # publish a clean idle state through the real MCP API.
-                disconnected = _payload(
-                    await connector.call_tool("link_disconnect", {})
-                )
+                disconnected = _payload(await connector.call_tool("link_disconnect", {}))
                 assert disconnected["remote_mode"] == "idle"
                 connector_idle = await _wait_remote_mode(connector, "idle")
                 listener_idle = await _wait_remote_mode(listener, "idle")

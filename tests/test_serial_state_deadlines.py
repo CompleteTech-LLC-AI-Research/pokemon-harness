@@ -102,9 +102,7 @@ def test_old_negative_cached_wait_bytes_repaired(cgb_mode, control):
     # explicitly rather than requiring native serialization of bad state.
     _, valid_encoded = _byte_roundtrip(original)
     encoded = (
-        valid_encoded[:12]
-        + (stale_wait % (1 << 64)).to_bytes(8, "little")
-        + valid_encoded[20:]
+        valid_encoded[:12] + (stale_wait % (1 << 64)).to_bytes(8, "little") + valid_encoded[20:]
     )
     restored = SerialCore(cgb_mode)
     restored.load_state(IntIOWrapper(BytesIO(encoded)), SerialCore.STATE_VERSION)

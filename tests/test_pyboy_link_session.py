@@ -44,9 +44,7 @@ class _FakeMB:
     def tick(self):
         self.owner._cycles += 4
         self.serial.tick(self.owner._cycles)
-        self.lcd.frame_done = (
-            self.owner._cycles - self.owner._frame_start >= CYCLES_PER_BYTE_DMG
-        )
+        self.lcd.frame_done = self.owner._cycles - self.owner._frame_start >= CYCLES_PER_BYTE_DMG
         return True
 
     def breakpoint_reinject(self):
@@ -144,9 +142,7 @@ class _BackendSerialStub:
         self._backend = value
 
 
-def _versioned_backend_pair(
-    local_version: str = "red", peer_version: str = "blue"
-):
+def _versioned_backend_pair(local_version: str = "red", peer_version: str = "blue"):
     """Create a socket pair whose HELLO frames are available to attach()."""
     local_sock, peer_sock = _socket.socketpair()
     return (
@@ -777,9 +773,7 @@ def test_step_requires_both_sides_attached():
         ("step_interleaved", True, TypeError),
     ],
 )
-def test_step_rejects_non_positive_or_boolean_frame_counts(
-    method_name, frames, exception
-):
+def test_step_rejects_non_positive_or_boolean_frame_counts(method_name, frames, exception):
     link = PyBoyLinkSession.local()
     link.attach(_FakePyBoy())
     link.attach(_FakePyBoy())
@@ -943,12 +937,8 @@ def test_interleaved_frame_normalizes_cgb_double_speed_cycles():
     """
     a_start = 1_000_000
     b_start = 2_000_000
-    a = _FrameBoundaryPyBoy(
-        40, start_cycles=a_start, speed_shift=1
-    )
-    b = _FrameBoundaryPyBoy(
-        20, start_cycles=b_start, speed_shift=0
-    )
+    a = _FrameBoundaryPyBoy(40, start_cycles=a_start, speed_shift=1)
+    b = _FrameBoundaryPyBoy(20, start_cycles=b_start, speed_shift=0)
     link = PyBoyLinkSession.local()
     link.PHYSICAL_QUANTUM = 40
     link.attach(a)

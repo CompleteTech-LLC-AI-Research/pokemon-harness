@@ -132,8 +132,7 @@ def test_read_game_state_reads_from_memory():
 
 def test_run_until_event_fires_before_budget():
     s, pb, bus = _session()
-    bus.register(pb, s.symbols, "DisplayTextID", "dialog_open",
-                 tick_source=s.current_tick)
+    bus.register(pb, s.symbols, "DisplayTextID", "dialog_open", tick_source=s.current_tick)
 
     # After the second step chunk, fire the hook — the session polls
     # before the next chunk and returns.
@@ -172,8 +171,7 @@ def test_run_until_event_times_out():
 
 def test_run_until_event_only_counts_events_after_start_tick():
     s, pb, bus = _session()
-    bus.register(pb, s.symbols, "DisplayTextID", "dialog_open",
-                 tick_source=s.current_tick)
+    bus.register(pb, s.symbols, "DisplayTextID", "dialog_open", tick_source=s.current_tick)
 
     # Pre-fire before the call — we should NOT return immediately.
     pb.fire(0x02, 0x4A12)
@@ -186,8 +184,7 @@ def test_run_until_event_only_counts_events_after_start_tick():
 
 def test_run_until_event_accepts_multiple_names():
     s, pb, bus = _session()
-    bus.register(pb, s.symbols, "DisplayTextID", "dialog_open",
-                 tick_source=s.current_tick)
+    bus.register(pb, s.symbols, "DisplayTextID", "dialog_open", tick_source=s.current_tick)
     # Fake a second event by emitting directly.
     bus.emit(tick=100, name="trainer_engaged", bank=0, addr=0)
     result = s.run_until_event(
@@ -611,12 +608,14 @@ def test_step_rolls_back_tick_when_pyboy_fails():
 def test_session_context_manager_closes_on_exit():
     mem = DictMemory()
     pb = FakePyBoy(mem)
-    sym = load_sym_text("00:D35E wCurMap\n00:D361 wYCoord\n00:D362 wXCoord\n"
-                        "00:D46A wWalkCounter\n00:CC26 wCurrentMenuItem\n"
-                        "00:CC28 wMaxMenuItem\n00:D057 wIsInBattle\n"
-                        "00:D163 wPartyCount\n00:D16B wPartyMons\n"
-                        "00:D356 wObtainedBadges\n00:D31D wNumBagItems\n"
-                        "00:D31E wBagItems\n")
+    sym = load_sym_text(
+        "00:D35E wCurMap\n00:D361 wYCoord\n00:D362 wXCoord\n"
+        "00:D46A wWalkCounter\n00:CC26 wCurrentMenuItem\n"
+        "00:CC28 wMaxMenuItem\n00:D057 wIsInBattle\n"
+        "00:D163 wPartyCount\n00:D16B wPartyMons\n"
+        "00:D356 wObtainedBadges\n00:D31D wNumBagItems\n"
+        "00:D31E wBagItems\n"
+    )
     with Session(pyboy=pb, symbols=sym):
         assert pb.stopped is False
     assert pb.stopped is True

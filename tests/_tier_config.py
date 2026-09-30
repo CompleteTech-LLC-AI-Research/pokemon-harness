@@ -14,6 +14,7 @@ unlisted module is intentional: silently classifying a newly added ROM test as
 from __future__ import annotations
 
 import runpy
+from collections.abc import Iterable
 from pathlib import Path
 
 MARKERS = (
@@ -38,12 +39,18 @@ REAL_ROM_MODULES = frozenset(
         "test_rom_boot_matrix.py",
         "test_link_integration.py",
         "test_link_integration_remote.py",
+        "test_link_integration_remote_rpc.py",
+        "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_link_symbols_real_roms.py",
+        "test_mcp_battle_phase_rom.py",
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
+        "test_battle_healing_items_rom.py",
         "test_pyboy_link_session_roms.py",
+        "test_pyboy_link_session_roms_diagnostics.py",
+        "test_pyboy_link_session_roms_serial.py",
         "test_pyboy_link_session_subprocess.py",
         "test_rom_boot.py",
     }
@@ -56,9 +63,26 @@ REAL_ROM_MODULES = frozenset(
 UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
-        "test_battle_coverage.py",
-        "test_battle_item_evidence.py",
-        "test_battle_scenario_fixtures.py",
+        "test_battle_coverage_accounting.py",
+        "test_battle_coverage_catalog.py",
+        "test_battle_coverage_gate_assets.py",
+        "test_battle_coverage_identity.py",
+        "test_battle_coverage_mechanics.py",
+        "test_battle_healing_fixture_producer.py",
+        "test_battle_healing_registration.py",
+        "test_battle_item_evidence_inventory.py",
+        "test_battle_item_evidence_medicine.py",
+        "test_battle_item_evidence_targets.py",
+        "test_battle_item_evidence_timeline.py",
+        "test_battle_medicine_boundary_matrix.py",
+        "test_battle_medicine_oracle.py",
+        "test_battle_scenario_catalog.py",
+        "test_battle_scenario_producer_capture.py",
+        "test_battle_scenario_producer_run.py",
+        "test_battle_scenario_producer_runtime.py",
+        "test_battle_scenario_producer_screening.py",
+        "test_battle_scenario_validator.py",
+        "test_battle_menu_liveness.py",
         "test_battle_turn_evidence.py",
         "test_config.py",
         "test_coordinator_detach_callback.py",
@@ -72,13 +96,21 @@ UNIT_MODULES = frozenset(
         "test_network_provider_locking.py",
         "test_ownership_core.py",
         "test_cpu_instruction_counter.py",
-        "test_emulated_time.py",
+        "test_emulated_time_budget.py",
+        "test_emulated_time_episode.py",
+        "test_emulated_time_failure.py",
         "test_emulated_time_held_delivery.py",
+        "test_emulated_time_lateness.py",
         "test_emulated_time_segments.py",
         "test_events.py",
         "test_execution_adapter.py",
         "test_fixture_provenance.py",
+        "test_frame_bound_guard_behaviour.py",
         "test_game_state.py",
+        "test_gate_capacity_boundaries.py",
+        "test_gate_capacity_interrupts.py",
+        "test_gate_capacity_main.py",
+        "test_gate_capacity_policy.py",
         "test_gate_early_smoke.py",
         "test_gate_failure_retention.py",
         "test_link_orchestrator.py",
@@ -89,6 +121,8 @@ UNIT_MODULES = frozenset(
         "test_local_acceptance_driver_contract.py",
         "test_live_trade_demo_contract.py",
         "test_local_scheduler_candidate.py",
+        "test_mcp_battle_state.py",
+        "test_mcp_battle_state_parse.py",
         "test_mcp_lifecycle_hardening.py",
         "test_mcp_local_locking.py",
         "test_mcp_local_runtime_contract.py",
@@ -97,12 +131,23 @@ UNIT_MODULES = frozenset(
         "test_mcp_remote_runtime_contract.py",
         "test_mcp_runtime_errors.py",
         "test_link_transport.py",
-        "test_mcp_server.py",
-        "test_mcp_timed_remote.py",
+        "test_mcp_server_endpoint.py",
+        "test_mcp_server_endpoint_cleanup.py",
+        "test_mcp_server_handlers.py",
+        "test_mcp_server_import_order.py",
+        "test_mcp_server_link.py",
+        "test_mcp_server_session.py",
+        "test_mcp_timed_remote_cached_failure.py",
+        "test_mcp_timed_remote_cancellation.py",
+        "test_mcp_timed_remote_owner.py",
         "test_mcp_timed_stdio.py",
         "test_native_execution_governor.py",
         "test_native_hook_exceptions.py",
-        "test_network_backend.py",
+        "test_network_backend_dispatch.py",
+        "test_network_backend_rearm.py",
+        "test_network_backend_serial_transcript.py",
+        "test_network_backend_transport.py",
+        "test_network_backend_wire_idle.py",
         "test_network_backend_shutdown.py",
         "test_network_byte_progress.py",
         "test_network_cpu_owner.py",
@@ -113,17 +158,45 @@ UNIT_MODULES = frozenset(
         "test_network_owner_execution.py",
         "test_network_public_backpressure.py",
         "test_network_write_deadlines.py",
+        "test_opcode_layout.py",
+        "test_opcode_layout_integration.py",
         "test_owner_boundary_runtime.py",
         "test_physical_clock_runtime.py",
-        "test_probe_timed_rom_pair.py",
+        "test_probe_timed_rom_pair_assets.py",
+        "test_probe_timed_rom_pair_cli.py",
+        "test_probe_timed_rom_pair_menu.py",
+        "test_probe_timed_rom_pair_process.py",
+        "test_probe_timed_rom_pair_startup.py",
         "test_probe_owner_phases.py",
         "test_probe_timed_battle_pair.py",
-        "test_probe_timed_trade_pair.py",
-        "test_production_gate.py",
+        "test_probe_timed_trade_pair_cli.py",
+        "test_probe_timed_trade_pair_driver.py",
+        "test_probe_timed_trade_pair_evidence.py",
+        "test_probe_timed_trade_pair_proof.py",
+        "test_production_gate_diagnostics.py",
+        "test_production_gate_matrix_manifest.py",
+        "test_production_gate_report_loader.py",
+        "test_production_gate_run_tier_failures.py",
+        "test_production_gate_strict_matrix.py",
         "test_pyboy_link_imports.py",
         "test_pyboy_link_session.py",
+        "test_pyboy_link_session_subprocess_link_menu_history.py",
+        "test_pyboy_link_session_subprocess_peer_lifecycle.py",
+        "test_qualification_runner.py",
+        "test_qualification_runner_allocation.py",
+        "test_qualification_runner_assets.py",
+        "test_qualification_runner_command.py",
+        "test_qualification_runner_containment.py",
+        "test_qualification_runner_lockstate.py",
+        "test_qualification_runner_native.py",
+        "test_qualification_runner_release.py",
         "test_remote_endpoint.py",
-        "test_runtime_packaging.py",
+        "test_runtime_packaging_bootstrap.py",
+        "test_runtime_packaging_build_contract.py",
+        "test_runtime_packaging_dependency_pins.py",
+        "test_runtime_packaging_hygiene.py",
+        "test_vendored_provenance_wording.py",
+        "test_vendored_split_components.py",
         "test_local_ci_policy.py",
         "test_scheduler_lcd_phase.py",
         "test_scheduler_physical_time.py",
@@ -150,58 +223,83 @@ UNIT_MODULES = frozenset(
         "test_state_progress.py",
         "test_state_status.py",
         "test_state_text.py",
+        "test_stepping_loop_profile.py",
         "test_symbol_loader.py",
-        "test_timed_link_session.py",
-        "test_timed_battle_probe.py",
+        "test_timed_link_session_completeness.py",
+        "test_timed_link_session_control.py",
+        "test_timed_link_session_lifecycle.py",
+        "test_timed_link_session_v3.py",
+        "test_timed_battle_probe_contract.py",
+        "test_timed_battle_probe_action_economy.py",
+        "test_timed_battle_probe_admission.py",
+        "test_timed_frame_admission_invariants.py",
+        "test_timed_frame_admission_overrun.py",
+        "test_timed_frame_admission_rows.py",
+        "test_timed_frame_admission_span.py",
+        "test_timed_frame_admission_state_table.py",
+        "test_timed_frame_admission_validator.py",
+        "test_timed_battle_probe_ownership.py",
+        "test_timed_battle_probe_terminal.py",
         "test_timed_input_observation.py",
         "test_timed_menu_probe.py",
         "test_timed_mcp_matrix.py",
+        "test_timed_menu_frame_bound.py",
+        "test_timed_menu_milestone_sentinels.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
-        "test_timed_wire.py",
+        "test_timed_remote_facade.py",
+        "test_timed_wire_admission.py",
+        "test_timed_wire_codec.py",
+        "test_timed_wire_progress.py",
+        "test_timed_wire_transport.py",
+        "test_timed_wire_wirecontrol.py",
         "test_timed_wire_batch.py",
         "test_timed_trade_probe.py",
     }
 )
 
-KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES
+# Reviewed opt-in modules.  These tests need assets the gate environment does
+# not provision - a local pinned upstream checkout, for example - and skip when
+# it is absent.  A required tier fails closed on any skip, so these modules
+# carry no tier marker and are never selected by a tier marker expression; run
+# them explicitly by path, as their module docstrings document.  The manifest
+# entry is still required: an unlisted module keeps failing collection.
+OPT_IN_MODULES = frozenset(
+    {
+        "test_battle_medicine_source_conformance.py",
+    }
+)
+
+KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES | OPT_IN_MODULES
 
 # Reviewed ROM-free exceptions in mixed modules. Only actual test functions
 # belong here; unlisted future functions retain the module's real-ROM tier.
 ROM_FREE_TESTS = frozenset(
     {
-        ("test_pyboy_link_session_subprocess.py", name)
-        for name in (
-            "test_link_menu_history_preserves_first_samples_across_buffer_reuse",
-            "test_link_menu_history_validates_call_and_bank",
-            "test_link_menu_history_rejects_call_to_wrong_target",
-            "test_link_menu_history_additive_result_compatibility",
-            "test_link_menu_history_reports_missing_symbols_and_registration_errors",
-            "test_link_menu_history_bounds_callback_errors_and_keeps_partial_samples",
-            "test_link_menu_history_decisive_directions_ignore_stale_second_bytes",
-            "test_link_menu_history_received_candidate_follows_rom_order",
-            "test_link_menu_history_failure_summary_survives_large_result_tail",
-            "test_link_menu_history_missing_call_symbols_remains_observable",
-            "test_link_menu_history_rejects_post_call_outside_bank",
-            "test_peer_trace_watchdog",
-            "test_setup_handshake_failure_returns_bounded_non_success_sentinels",
-            "test_collect_pair_rejects_missing_or_partial_required_rows",
-            "test_strict_acceptance_rejects_link_menu_only_result",
-            "test_strict_acceptance_rejects_missing_native_edge_req",
-            "test_peer_shutdown_drains_live_serial_work_before_starting_teardown_marker",
-            "test_peer_shutdown_protocol_propagates_backend_errors",
-            "test_peer_shutdown_ready_marker_times_out_without_post_marker_ticks",
-            "test_link_menu_finish_starts_teardown_only_through_draining_helper",
-            "test_hold_at_sync_boundary_does_not_tick_past_ready_marker",
-            "test_hold_at_sync_boundary_ticks_timed_rom_phase",
-            "test_collect_pair_enforces_hard_deadline_without_waiting_for_peers",
-            "test_partial_peer_sentinel_is_fatal_before_gameplay_assertions",
-        )
-    }
-    | {
         (
             "test_mcp_timed_rom.py",
             "test_rom_client_load_state_timeout_redacts_data",
+        ),
+    }
+    | {
+        # This module drives a real ROM for its capture assertions, but its
+        # manifest cross-check, its producer guards, and its turn-timeline
+        # negative control touch no asset and have no skip path, so they belong
+        # in the always-selected unit tier rather than being masked by the
+        # module's `real_rom` classification.  The two asset-consuming tests stay
+        # in `real_rom`: they skip when the operator fixture or the BYO ROM/SYM
+        # is absent, and the unit tier fails closed on any skip.
+        (
+            "test_battle_healing_items_rom.py",
+            "test_release_evidence_names_the_pinned_assets_and_producer",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_producer_refuses_existing_output_and_unpinned_assets",
+        ),
+        (
+            "test_battle_healing_items_rom.py",
+            "test_turn_evidence_is_required_rather_than_supplied",
         ),
     }
 )
@@ -210,13 +308,18 @@ LOCAL_LINK_MODULES = frozenset(
     {
         "test_link_integration.py",
         "test_mcp_trade_records_rom.py",
+        "test_mcp_battle_phase_rom.py",
         "test_pyboy_link_session_roms.py",
+        "test_pyboy_link_session_roms_diagnostics.py",
+        "test_pyboy_link_session_roms_serial.py",
     }
 )
 
 REMOTE_LINK_MODULES = frozenset(
     {
         "test_link_integration_remote.py",
+        "test_link_integration_remote_rpc.py",
+        "test_link_integration_remote_trade.py",
         "test_mcp_real_link.py",
         "test_mcp_timed_rom.py",
         "test_pyboy_link_session_subprocess.py",
@@ -228,6 +331,7 @@ MCP_STDIO_MODULES = frozenset(
         "test_mcp_stdio_integration.py",
         "test_mcp_timed_rom.py",
         "test_mcp_trade_records_rom.py",
+        "test_mcp_battle_phase_rom.py",
     }
 )
 
@@ -237,22 +341,25 @@ MCP_STDIO_MODULES = frozenset(
 TRADE_TESTS = frozenset(
     {
         ("test_link_integration.py", "test_link_trade_roundtrip"),
-        ("test_link_integration_remote.py", "test_remote_trade_reaches_link_menu_via_tcp"),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
+            "test_remote_trade_reaches_link_menu_via_tcp",
+        ),
+        (
+            "test_link_integration_remote_rpc.py",
             "test_remote_rpc_kinds_flow_over_tcp_reaching_link_menu",
         ),
         ("test_link_integration_remote.py", "test_remote_rpc_flow_past_link_menu_over_tcp"),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_rpc.py",
             "test_remote_menu_vote_converges_and_warps_to_trade_center",
         ),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
             "test_remote_exchange_bytes_fires_in_trade_center_blue_blue",
         ),
         (
-            "test_link_integration_remote.py",
+            "test_link_integration_remote_trade.py",
             "test_remote_agent_sync_coordinates_link_menu_vote_blue_blue",
         ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_trade_end_to_end"),
@@ -260,7 +367,10 @@ TRADE_TESTS = frozenset(
             "test_pyboy_link_session_roms.py",
             "test_red_yellow_trade_swaps_real_party_records",
         ),
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_trade_center"),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_warps_to_trade_center",
+        ),
         (
             "test_pyboy_link_session_subprocess.py",
             "test_subprocess_pair_completes_trade_over_tcp",
@@ -298,8 +408,14 @@ TRADE_TESTS = frozenset(
 
 BATTLE_TESTS = frozenset(
     {
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_warps_to_colosseum"),
-        ("test_pyboy_link_session_roms.py", "test_yellow_pair_starts_link_battle"),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_warps_to_colosseum",
+        ),
+        (
+            "test_pyboy_link_session_roms_diagnostics.py",
+            "test_yellow_pair_starts_link_battle",
+        ),
         ("test_pyboy_link_session_roms.py", "test_pair_completes_battle_turn"),
         (
             "test_pyboy_link_session_roms.py",
@@ -461,75 +577,75 @@ TIMING_SENSITIVE_TESTS = frozenset(
             "test_actual_foreign_thread_cannot_observe",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_cached_status_is_immutable_and_available_while_busy",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_queue_bound_and_cancelled_request_never_runs",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_expired_queued_request_never_executes_later",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_queued_cancel_preserves_active_real_epoch",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_owner.py",
             "test_real_partial_progress_active_interrupt_is_terminal",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_owner.py",
             "test_async_cancel_keeps_event_loop_responsive_during_endpoint_cleanup",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_owner.py",
             "test_close_retains_busy_owner_until_retry_and_closes_session_on_owner",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_owner.py",
             "test_mcp_cached_status_tool_and_resource_return_while_owner_blocked",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cancellation.py",
             "test_stored_protocol_error_precedes_active_caller_cancellation",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_cached_failure_survives_cancel_and_cleanup",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_cached_failure_first_per_epoch_and_attributed_across_reconnect",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_cached_failure_mcp_status_never_reads_native_while_blocked",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_cached_failure_first_observed_at_cleanup_before_unbind",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cached_failure.py",
             "test_cached_failure_attach_finally_preserves_setup_exception",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cancellation.py",
             "test_blocked_cancellation_keeps_queue_and_cleanup_deadlines_live",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cancellation.py",
             "test_blocked_cancellation_retains_failed_unbind_until_explicit_retry",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cancellation.py",
             "test_server_outer_deadline_preserves_canonical_protocol_error",
         ),
         (
-            "test_mcp_timed_remote.py",
+            "test_mcp_timed_remote_cancellation.py",
             "test_request_wait_has_independent_deadline_without_supervisor",
         ),
         ("test_session_timed_execution.py", "test_binding_lock_wait_is_bounded"),
@@ -547,124 +663,124 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         # Synthetic owners still exercise real supervisor/thread waits.
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_supervisor_cancels_both_and_owner_detaches_before_stop",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_interrupted_multiframe_call_records_actual_partial_progress",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_detach_failure_never_stops_session_with_live_binding",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_unpublished_factory_failure_cancels_peer_original_event",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_no_progress_return_is_explicit_and_does_not_count_requested_frames",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_first_supervisor_cancel_exception_does_not_skip_second_endpoint",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_live_owners_report_incomplete_cleanup_without_mutating_returned_report",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_cli.py",
             "test_attach_failure_retains_loaded_native_evidence_without_binding",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_partial_normal_public_return_is_not_frame_bound_success",
         ),
         # Spawned owners, cancellation watchers, and pipe drainers use real
         # scheduling and bounded waits even with synthetic or missing assets.
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_missing_assets_reports_both_child_failures",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_failure_cancels_waiting_peer",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_deadline_terminates_unresponsive_owners",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_spawn_rejects_invalid_child_report",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_cancellation_bridge_sets_local_event_before_publication",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_cancellation_bridge_continues_after_endpoint_cancel_error",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_stderr_capture_drains_native_fd_flood_with_bounded_retention",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_process.py",
             "test_process_stdout_capture_drains_native_fd_flood_with_bounded_retention",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_startup.py",
             "test_process_startup_failure_signals_without_shared_event_locks",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_startup.py",
             "test_process_early_startup_failure_forces_termination_without_shared_event_locks",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_startup.py",
             "test_process_partial_report_kill_reaps_reader_without_shared_event_locks",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_menu.py",
             "test_process_spawn_propagates_explicit_menu_profile",
         ),
         (
-            "test_probe_timed_rom_pair.py",
+            "test_probe_timed_rom_pair_menu.py",
             "test_process_report_overflow_is_explicit_bounded_and_not_success",
         ),
-        ("test_network_backend.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
+        ("test_network_backend_transport.py", "test_on_edge_sends_REQ_and_waits_for_RESP"),
         (
-            "test_network_backend.py",
+            "test_network_backend_serial_transcript.py",
             "test_two_serialcores_exchange_byte_via_network_backend",
         ),
-        ("test_network_backend.py", "test_multiple_bytes_exchange"),
+        ("test_network_backend_serial_transcript.py", "test_multiple_bytes_exchange"),
         (
-            "test_network_backend.py",
+            "test_network_backend_rearm.py",
             "test_listen_and_connect_over_loopback_exchange_byte",
         ),
-        ("test_network_backend.py", "test_sync_with_peer_rendezvous"),
+        ("test_network_backend_wire_idle.py", "test_sync_with_peer_rendezvous"),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_control.py",
             "test_real_pair_repeated_public_frames_bounded_wire_volume",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_completeness.py",
             "test_real_v3_complete_progress_equal_watermark_accepts_current_prefix",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_completeness.py",
             "test_real_v3_partial_complete_progress_write_preserves_sent_frontiers",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_v3.py",
             "test_real_v3_external_cancel_interrupts_active_receive",
         ),
         (
-            "test_timed_link_session.py",
+            "test_timed_link_session_v3.py",
             "test_real_v3_poll_returning_after_deadline_never_applies_edge",
         ),
         # Real peer scheduling, fragmented ingress, and bounded owner waits;
@@ -683,40 +799,40 @@ TIMING_SENSITIVE_TESTS = frozenset(
         ),
         ("test_timed_remote.py", "test_accept_wait_is_bounded_and_closes_listener"),
         (
-            "test_timed_remote.py",
+            "test_timed_remote_facade.py",
             "test_authored_runtime_two_owner_factory_attach_passive_sync_and_bilateral_fence",
         ),
         (
-            "test_timed_remote.py",
+            "test_timed_remote_facade.py",
             "test_external_cancel_survives_factory_into_real_endpoint_wait",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_wirecontrol.py",
             "test_wirecontrol_handshake_rejects_caps_and_revision_without_downgrade",
         ),
-        ("test_timed_wire.py", "test_handshake_writer_preserves_terminal_reason"),
+        ("test_timed_wire_codec.py", "test_handshake_writer_preserves_terminal_reason"),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_progress.py",
             "test_bidirectional_concurrent_requests_and_responses",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_admission.py",
             "test_fast_response_before_writer_return_and_before_request_consumption",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_admission.py",
             "test_waiting_writer_admission_is_bounded_and_does_not_skip_sequence",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_transport.py",
             "test_peer_application_waits_for_local_hello_send_publication",
         ),
         (
-            "test_timed_wire.py",
+            "test_timed_wire_transport.py",
             "test_one_absolute_deadline_covers_admission_and_partial_write",
         ),
-        ("test_timed_wire.py", "test_close_wakes_receive"),
-        ("test_timed_wire.py", "test_close_wakes_partial_frame_reader"),
+        ("test_timed_wire_progress.py", "test_close_wakes_receive"),
+        ("test_timed_wire_transport.py", "test_close_wakes_partial_frame_reader"),
     }
 )
 
@@ -732,6 +848,10 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     test_key = (filename, test_name)
     if test_key in ROM_FREE_TESTS:
         return frozenset({"unit"})
+    if filename in OPT_IN_MODULES:
+        # Opt-in audit: no tier marker, so no tier expression can select a
+        # skip that only a fully provisioned checkout could satisfy.
+        return frozenset()
 
     marks: set[str] = set()
 
@@ -772,6 +892,41 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     return frozenset(marks)
 
 
+# The gate selects a tier either through a pytest marker expression or, for
+# capacity accounting, by classifying each collected row.  Keep the
+# classification rule here so the executable marker expression and the row
+# accounting cannot drift: the production gate and its pytest-side capacity
+# plugin both call ``tier_matches``.
+_TIER_MATCHERS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "smoke": (("unit", "mcp_stdio"), ()),
+    "unit": (("unit",), ()),
+    "local": (("real_rom",), ("remote_link", "acceptance")),
+    "remote": (("real_rom", "remote_link"), ("acceptance",)),
+    "trade": (("real_rom", "trade_acceptance"), ()),
+    "battle": (("real_rom", "battle_acceptance"), ()),
+    "timing": (("timing_sensitive",), ()),
+}
+
+
+def tier_matches(name: str, markers: Iterable[str]) -> bool:
+    """Return whether a classified row is dispatched by tier ``name``.
+
+    ``smoke`` is the union of its two marker sets, so its required and
+    required-any sets are handled by checking either marker.
+    """
+
+    marks = set(markers)
+    if name == "smoke":
+        return "unit" in marks or "mcp_stdio" in marks
+    spec = _TIER_MATCHERS.get(name)
+    if spec is None:
+        return False
+    required, excluded = spec
+    return all(marker in marks for marker in required) and not any(
+        marker in marks for marker in excluded
+    )
+
+
 __all__ = [
     "BATTLE_ACCEPTANCE_TESTS",
     "BATTLE_TESTS",
@@ -782,6 +937,7 @@ __all__ = [
     "LOCAL_VERSION_PAIR_NODEIDS",
     "MARKERS",
     "MCP_STDIO_MODULES",
+    "OPT_IN_MODULES",
     "REAL_ROM_MODULES",
     "REMOTE_LINK_MODULES",
     "REMOTE_VERSION_PAIR_NODEIDS",
@@ -794,4 +950,5 @@ __all__ = [
     "TRADE_TESTS",
     "UNIT_MODULES",
     "classify_test",
+    "tier_matches",
 ]

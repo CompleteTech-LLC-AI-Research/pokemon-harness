@@ -1,0 +1,1669 @@
+{
+  "branch": "work/battle-state-88",
+  "cases": {
+    "native-blue_color": {
+      "boundaries": [
+        {
+          "fixture": "blue/cable_club-battle-faint.state",
+          "fixture_sha1": "8d06732843bf070eafcd37531ab6c6e827aedf71",
+          "kind": "forced_replacement",
+          "party_hp": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            152
+          ],
+          "peer": {
+            "in_handle_player_mon_fainted": 0,
+            "menu_open": null,
+            "phase": 6,
+            "phase_valid": false,
+            "player_mon_slot": 5,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "primary": {
+            "in_handle_player_mon_fainted": 1,
+            "menu_open": null,
+            "phase": 4,
+            "phase_valid": true,
+            "player_mon_slot": 4,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        },
+        {
+          "fixture": "blue/cable_club-terminal.state",
+          "fixture_sha1": "4cbc31c960742c362d75ee016a52273889b734b7",
+          "kind": "terminal_loaded",
+          "peer": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "primary": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "raw_results": [
+            1,
+            0
+          ],
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        },
+        {
+          "boundary": [
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            },
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            }
+          ],
+          "boundary_turn": 44,
+          "drive_frames": 1592,
+          "fixture": "blue/cable_club-pre-terminal.state",
+          "fixture_sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+          "follow_up": [
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "injected": {
+            "0": [
+              "a",
+              "a"
+            ],
+            "1": [
+              "a",
+              "a"
+            ]
+          },
+          "kind": "terminal_drive",
+          "plan": [
+            {
+              "move": 76,
+              "policy": "fallback",
+              "slot": 0
+            },
+            {
+              "move": 76,
+              "policy": "fallback",
+              "slot": 0
+            }
+          ],
+          "terminal": [
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": 1
+            },
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "terminal_turn": 44,
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        }
+      ],
+      "game": "blue_color",
+      "passed": true,
+      "runtime": "native",
+      "tests": {
+        "boundary_fail_closed": {
+          "duration_s": 1.817,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        },
+        "terminal_drive": {
+          "duration_s": 98.721,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        }
+      }
+    },
+    "native-red_color": {
+      "boundaries": [
+        {
+          "fixture": "red/cable_club-battle-faint.state",
+          "fixture_sha1": "3e669f36fa63b398b0d0c551ec637599a4fca5b0",
+          "kind": "forced_replacement",
+          "party_hp": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            148
+          ],
+          "peer": {
+            "in_handle_player_mon_fainted": 0,
+            "menu_open": null,
+            "phase": 3,
+            "phase_valid": true,
+            "player_mon_slot": 5,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "primary": {
+            "in_handle_player_mon_fainted": 1,
+            "menu_open": null,
+            "phase": 4,
+            "phase_valid": true,
+            "player_mon_slot": 4,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "transport": "stdio_local_pair",
+          "version": "red_color"
+        },
+        {
+          "fixture": "red/cable_club-terminal.state",
+          "fixture_sha1": "e263470468fd12b83f7d6fa7d8fe5ece4ece440f",
+          "kind": "terminal_loaded",
+          "peer": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "primary": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "raw_results": [
+            0,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "red_color"
+        },
+        {
+          "boundary": [
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            },
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            }
+          ],
+          "boundary_turn": 36,
+          "drive_frames": 1216,
+          "fixture": "red/cable_club-pre-terminal.state",
+          "fixture_sha1": "b6a5d674def9b567a19ff3488b5abdb4de87c29a",
+          "follow_up": [
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "injected": {
+            "0": [
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down"
+            ],
+            "1": [
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "a",
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down"
+            ]
+          },
+          "kind": "terminal_drive",
+          "plan": [
+            {
+              "move": 33,
+              "policy": "supported",
+              "slot": 1
+            },
+            {
+              "move": 33,
+              "policy": "supported",
+              "slot": 1
+            }
+          ],
+          "terminal": [
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": 1
+            }
+          ],
+          "terminal_turn": 36,
+          "transport": "stdio_local_pair",
+          "version": "red_color"
+        }
+      ],
+      "game": "red_color",
+      "passed": true,
+      "runtime": "native",
+      "tests": {
+        "boundary_fail_closed": {
+          "duration_s": 1.663,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        },
+        "terminal_drive": {
+          "duration_s": 60.368,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        }
+      }
+    },
+    "native-yellow": {
+      "boundaries": [
+        {
+          "fixture": "yellow/cable_club-battle-faint.state",
+          "fixture_sha1": "e28a61e83da08fc8d4617a516534019135d8e7aa",
+          "kind": "forced_replacement",
+          "party_hp": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            102
+          ],
+          "peer": {
+            "in_handle_player_mon_fainted": 0,
+            "menu_open": null,
+            "phase": 6,
+            "phase_valid": false,
+            "player_mon_slot": 5,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "primary": {
+            "in_handle_player_mon_fainted": 1,
+            "menu_open": null,
+            "phase": 4,
+            "phase_valid": true,
+            "player_mon_slot": 4,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        },
+        {
+          "fixture": "yellow/cable_club-terminal.state",
+          "fixture_sha1": "a4dfb7afb6684a2a6c95894bbcaca173cca595cd",
+          "kind": "terminal_loaded",
+          "peer": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "primary": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "raw_results": [
+            0,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        },
+        {
+          "boundary": [
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            },
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            }
+          ],
+          "boundary_turn": 20,
+          "drive_frames": 2576,
+          "fixture": "yellow/cable_club-pre-terminal.state",
+          "fixture_sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+          "follow_up": [
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "injected": {
+            "0": [
+              "a",
+              "a",
+              "a",
+              "a",
+              "a",
+              "a"
+            ],
+            "1": [
+              "a",
+              "a",
+              "a",
+              "a",
+              "a",
+              "a"
+            ]
+          },
+          "kind": "terminal_drive",
+          "plan": [
+            {
+              "move": 85,
+              "policy": "supported",
+              "slot": 0
+            },
+            {
+              "move": 85,
+              "policy": "supported",
+              "slot": 0
+            }
+          ],
+          "terminal": [
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": 1
+            }
+          ],
+          "terminal_turn": 20,
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        }
+      ],
+      "game": "yellow",
+      "passed": true,
+      "runtime": "native",
+      "tests": {
+        "boundary_fail_closed": {
+          "duration_s": 2.371,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        },
+        "terminal_drive": {
+          "duration_s": 74.006,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        }
+      }
+    },
+    "source-blue_color": {
+      "boundaries": [
+        {
+          "fixture": "blue/cable_club-battle-faint.state",
+          "fixture_sha1": "8d06732843bf070eafcd37531ab6c6e827aedf71",
+          "kind": "forced_replacement",
+          "party_hp": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            152
+          ],
+          "peer": {
+            "in_handle_player_mon_fainted": 0,
+            "menu_open": null,
+            "phase": 6,
+            "phase_valid": false,
+            "player_mon_slot": 5,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "primary": {
+            "in_handle_player_mon_fainted": 1,
+            "menu_open": null,
+            "phase": 4,
+            "phase_valid": true,
+            "player_mon_slot": 4,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        },
+        {
+          "fixture": "blue/cable_club-terminal.state",
+          "fixture_sha1": "4cbc31c960742c362d75ee016a52273889b734b7",
+          "kind": "terminal_loaded",
+          "peer": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "primary": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "raw_results": [
+            1,
+            0
+          ],
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        },
+        {
+          "boundary": [
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            },
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            }
+          ],
+          "boundary_turn": 44,
+          "drive_frames": 1592,
+          "fixture": "blue/cable_club-pre-terminal.state",
+          "fixture_sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+          "follow_up": [
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "injected": {
+            "0": [
+              "a",
+              "a"
+            ],
+            "1": [
+              "a",
+              "a"
+            ]
+          },
+          "kind": "terminal_drive",
+          "plan": [
+            {
+              "move": 76,
+              "policy": "fallback",
+              "slot": 0
+            },
+            {
+              "move": 76,
+              "policy": "fallback",
+              "slot": 0
+            }
+          ],
+          "terminal": [
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": 1
+            },
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "terminal_turn": 44,
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        }
+      ],
+      "game": "blue_color",
+      "passed": true,
+      "runtime": "source",
+      "tests": {
+        "boundary_fail_closed": {
+          "duration_s": 6.657,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        },
+        "terminal_drive": {
+          "duration_s": 348.185,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        }
+      }
+    },
+    "source-red_color": {
+      "boundaries": [
+        {
+          "fixture": "red/cable_club-battle-faint.state",
+          "fixture_sha1": "3e669f36fa63b398b0d0c551ec637599a4fca5b0",
+          "kind": "forced_replacement",
+          "party_hp": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            148
+          ],
+          "peer": {
+            "in_handle_player_mon_fainted": 0,
+            "menu_open": null,
+            "phase": 3,
+            "phase_valid": true,
+            "player_mon_slot": 5,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "primary": {
+            "in_handle_player_mon_fainted": 1,
+            "menu_open": null,
+            "phase": 4,
+            "phase_valid": true,
+            "player_mon_slot": 4,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "transport": "stdio_local_pair",
+          "version": "red_color"
+        },
+        {
+          "fixture": "red/cable_club-terminal.state",
+          "fixture_sha1": "e263470468fd12b83f7d6fa7d8fe5ece4ece440f",
+          "kind": "terminal_loaded",
+          "peer": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "primary": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "raw_results": [
+            0,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "red_color"
+        },
+        {
+          "boundary": [
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            },
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            }
+          ],
+          "boundary_turn": 36,
+          "drive_frames": 1216,
+          "fixture": "red/cable_club-pre-terminal.state",
+          "fixture_sha1": "b6a5d674def9b567a19ff3488b5abdb4de87c29a",
+          "follow_up": [
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "injected": {
+            "0": [
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down"
+            ],
+            "1": [
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "a",
+              "a",
+              "a",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down",
+              "down"
+            ]
+          },
+          "kind": "terminal_drive",
+          "plan": [
+            {
+              "move": 33,
+              "policy": "supported",
+              "slot": 1
+            },
+            {
+              "move": 33,
+              "policy": "supported",
+              "slot": 1
+            }
+          ],
+          "terminal": [
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": 1
+            }
+          ],
+          "terminal_turn": 36,
+          "transport": "stdio_local_pair",
+          "version": "red_color"
+        }
+      ],
+      "game": "red_color",
+      "passed": true,
+      "runtime": "source",
+      "tests": {
+        "boundary_fail_closed": {
+          "duration_s": 2.427,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        },
+        "terminal_drive": {
+          "duration_s": 330.906,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        }
+      }
+    },
+    "source-yellow": {
+      "boundaries": [
+        {
+          "fixture": "yellow/cable_club-battle-faint.state",
+          "fixture_sha1": "e28a61e83da08fc8d4617a516534019135d8e7aa",
+          "kind": "forced_replacement",
+          "party_hp": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            102
+          ],
+          "peer": {
+            "in_handle_player_mon_fainted": 0,
+            "menu_open": null,
+            "phase": 6,
+            "phase_valid": false,
+            "player_mon_slot": 5,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "primary": {
+            "in_handle_player_mon_fainted": 1,
+            "menu_open": null,
+            "phase": 4,
+            "phase_valid": true,
+            "player_mon_slot": 4,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 2,
+            "terminal_result": null
+          },
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        },
+        {
+          "fixture": "yellow/cable_club-terminal.state",
+          "fixture_sha1": "a4dfb7afb6684a2a6c95894bbcaca173cca595cd",
+          "kind": "terminal_loaded",
+          "peer": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 1,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "primary": {
+            "enemy_mon": null,
+            "menu_open": null,
+            "phase": 0,
+            "phase_valid": true,
+            "raw_battle_result": 0,
+            "raw_is_in_battle": 0,
+            "terminal_result": null
+          },
+          "raw_results": [
+            0,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        },
+        {
+          "boundary": [
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            },
+            {
+              "phase": 6,
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "terminal_result": null
+            }
+          ],
+          "boundary_turn": 20,
+          "drive_frames": 2576,
+          "fixture": "yellow/cable_club-pre-terminal.state",
+          "fixture_sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+          "follow_up": [
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 0,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            }
+          ],
+          "injected": {
+            "0": [
+              "a",
+              "a",
+              "a",
+              "a",
+              "a",
+              "a"
+            ],
+            "1": [
+              "a",
+              "a",
+              "a",
+              "a",
+              "a",
+              "a"
+            ]
+          },
+          "kind": "terminal_drive",
+          "plan": [
+            {
+              "move": 85,
+              "policy": "supported",
+              "slot": 0
+            },
+            {
+              "move": 85,
+              "policy": "supported",
+              "slot": 0
+            }
+          ],
+          "terminal": [
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 0,
+              "terminal_result": null
+            },
+            {
+              "phase": 5,
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 0,
+              "terminal_result": 1
+            }
+          ],
+          "terminal_turn": 20,
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        }
+      ],
+      "game": "yellow",
+      "passed": true,
+      "runtime": "source",
+      "tests": {
+        "boundary_fail_closed": {
+          "duration_s": 2.297,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        },
+        "terminal_drive": {
+          "duration_s": 320.823,
+          "errors": 0,
+          "failures": 0,
+          "passed": true,
+          "skipped": 0,
+          "tests": 1
+        }
+      }
+    }
+  },
+  "commit": "3f0f971fb7a40ee3c92e9dc9ace49551633c0f5c",
+  "runtime_pin": {
+    "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+    "pyboy_version": "2.7.0"
+  },
+  "tag": "3f0f971"
+}

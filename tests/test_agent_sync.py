@@ -98,10 +98,15 @@ def test_rendezvous_labels_dont_collide_with_game_kinds():
 
     # Issue an UNRELATED exchange_bytes call on A — should NOT deliver
     # into the agent_sync queue, so B's rendezvous keeps blocking.
-    _reply = a.exchange(
-        "exchange_bytes/wSerialPlayerDataBlock", b"game data",
-        timeout_ms=150,
-    ) if False else None  # don't actually fire; B would still be blocked
+    _reply = (
+        a.exchange(
+            "exchange_bytes/wSerialPlayerDataBlock",
+            b"game data",
+            timeout_ms=150,
+        )
+        if False
+        else None
+    )  # don't actually fire; B would still be blocked
     # Delay a bit to show B is still blocked, then rendezvous properly.
     time.sleep(0.1)
     assert "b" not in received, "B leaked onto the wrong queue!"

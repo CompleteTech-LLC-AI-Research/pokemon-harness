@@ -1,0 +1,2493 @@
+{
+  "branch": "work/battle-state-88",
+  "cells": [
+    {
+      "cases": [
+        {
+          "detail": "the admitted pre-terminal pair exposes no status move 45: [[22, 33, 76, 0], [22, 33, 76, 0]]",
+          "nodeid": "test_real_rom_mcp_status_move_returns_to_command_selection[red_color]",
+          "seconds": 0.838,
+          "status": "skipped"
+        },
+        {
+          "detail": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames: [{\"kind\": 2, \"raw_is_in_battle\": 2, \"battle_type\": 0, \"engaged_trainer_class\": 115, \"engaged_trainer_set\": 7, \"player_mon_slot\": 5, \"move_menu_type\": 0, \"player_selected_move\": 33, \"enemy_selected_move\": 33, \"action_result_or_took_turn\": 0, \"enemy_mon\": {\"slot\": 5, \"species\": 154, \"level\": 54, \"hp\": 21, \"ma",
+          "nodeid": "test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement[red_color]",
+          "seconds": 2281.086,
+          "status": "skipped"
+        }
+      ],
+      "counts": {
+        "deselected": 4,
+        "skipped": 2
+      },
+      "game": "red_color",
+      "payloads": [],
+      "runtime": "source",
+      "skips": [
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:1920",
+          "observed": [
+            [
+              22,
+              33,
+              76,
+              0
+            ],
+            [
+              22,
+              33,
+              76,
+              0
+            ]
+          ],
+          "reason": "the admitted pre-terminal pair exposes no status move 45"
+        },
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:2021",
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 21,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 154,
+                "moves": [
+                  22,
+                  33,
+                  76,
+                  0
+                ],
+                "party_species": null,
+                "pp": [
+                  2,
+                  32,
+                  7,
+                  0
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 33,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 115,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 33,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 35,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 154,
+                "moves": [
+                  22,
+                  33,
+                  76,
+                  0
+                ],
+                "party_species": null,
+                "pp": [
+                  2,
+                  32,
+                  7,
+                  0
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 33,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 115,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 33,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            }
+          ],
+          "reason": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames"
+        }
+      ]
+    },
+    {
+      "cases": [
+        {
+          "detail": null,
+          "nodeid": "test_real_rom_mcp_status_move_returns_to_command_selection[blue_color]",
+          "seconds": 165.731,
+          "status": "passed"
+        },
+        {
+          "detail": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames: [{\"kind\": 2, \"raw_is_in_battle\": 2, \"battle_type\": 0, \"engaged_trainer_class\": 119, \"engaged_trainer_set\": 7, \"player_mon_slot\": 5, \"move_menu_type\": 0, \"player_selected_move\": 76, \"enemy_selected_move\": 76, \"action_result_or_took_turn\": 0, \"enemy_mon\": {\"slot\": 5, \"species\": 154, \"level\": 54, \"hp\": 3, \"max",
+          "nodeid": "test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement[blue_color]",
+          "seconds": 2293.667,
+          "status": "skipped"
+        }
+      ],
+      "counts": {
+        "deselected": 4,
+        "passed": 1,
+        "skipped": 1
+      },
+      "game": "blue_color",
+      "payloads": [
+        {
+          "drive_frames": 608,
+          "fixture": "blue/cable_club-pre-terminal.state",
+          "fixture_sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+          "kind": "status_move",
+          "move": 45,
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 3,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 9,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            }
+          ],
+          "phases_seen": [
+            2,
+            3
+          ],
+          "slots": [
+            1,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        }
+      ],
+      "runtime": "source",
+      "skips": [
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:2021",
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 3,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 76,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 76,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 9,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 76,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 76,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            }
+          ],
+          "reason": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames"
+        }
+      ]
+    },
+    {
+      "cases": [
+        {
+          "detail": null,
+          "nodeid": "test_real_rom_mcp_status_move_returns_to_command_selection[yellow]",
+          "seconds": 70.227,
+          "status": "passed"
+        },
+        {
+          "detail": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames: [{\"kind\": 2, \"raw_is_in_battle\": 2, \"battle_type\": 0, \"engaged_trainer_class\": 70, \"engaged_trainer_set\": 7, \"player_mon_slot\": 5, \"move_menu_type\": 0, \"player_selected_move\": 85, \"enemy_selected_move\": 85, \"action_result_or_took_turn\": 0, \"enemy_mon\": {\"slot\": 5, \"species\": 84, \"level\": 53, \"hp\": 102, \"max",
+          "nodeid": "test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement[yellow]",
+          "seconds": 1119.141,
+          "status": "skipped"
+        }
+      ],
+      "counts": {
+        "deselected": 4,
+        "passed": 1,
+        "skipped": 1
+      },
+      "game": "yellow",
+      "payloads": [
+        {
+          "drive_frames": 636,
+          "fixture": "yellow/cable_club-pre-terminal.state",
+          "fixture_sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+          "kind": "status_move",
+          "move": 45,
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 102,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 74,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            }
+          ],
+          "phases_seen": [
+            2,
+            3
+          ],
+          "slots": [
+            1,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        }
+      ],
+      "runtime": "source",
+      "skips": [
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:2021",
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 102,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 85,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 85,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 74,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 85,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 85,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            }
+          ],
+          "reason": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames"
+        }
+      ]
+    },
+    {
+      "cases": [
+        {
+          "detail": "the admitted pre-terminal pair exposes no status move 45: [[22, 33, 76, 0], [22, 33, 76, 0]]",
+          "nodeid": "test_real_rom_mcp_status_move_returns_to_command_selection[red_color]",
+          "seconds": 1.953,
+          "status": "skipped"
+        },
+        {
+          "detail": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames: [{\"kind\": 2, \"raw_is_in_battle\": 2, \"battle_type\": 0, \"engaged_trainer_class\": 115, \"engaged_trainer_set\": 7, \"player_mon_slot\": 5, \"move_menu_type\": 0, \"player_selected_move\": 33, \"enemy_selected_move\": 33, \"action_result_or_took_turn\": 0, \"enemy_mon\": {\"slot\": 5, \"species\": 154, \"level\": 54, \"hp\": 21, \"ma",
+          "nodeid": "test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement[red_color]",
+          "seconds": 623.656,
+          "status": "skipped"
+        }
+      ],
+      "counts": {
+        "deselected": 4,
+        "skipped": 2
+      },
+      "game": "red_color",
+      "payloads": [],
+      "runtime": "native",
+      "skips": [
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:1920",
+          "observed": [
+            [
+              22,
+              33,
+              76,
+              0
+            ],
+            [
+              22,
+              33,
+              76,
+              0
+            ]
+          ],
+          "reason": "the admitted pre-terminal pair exposes no status move 45"
+        },
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:2021",
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 21,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 154,
+                "moves": [
+                  22,
+                  33,
+                  76,
+                  0
+                ],
+                "party_species": null,
+                "pp": [
+                  2,
+                  32,
+                  7,
+                  0
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 33,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 115,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 33,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 35,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 154,
+                "moves": [
+                  22,
+                  33,
+                  76,
+                  0
+                ],
+                "party_species": null,
+                "pp": [
+                  2,
+                  32,
+                  7,
+                  0
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 33,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 115,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 33,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            }
+          ],
+          "reason": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames"
+        }
+      ]
+    },
+    {
+      "cases": [
+        {
+          "detail": null,
+          "nodeid": "test_real_rom_mcp_status_move_returns_to_command_selection[blue_color]",
+          "seconds": 40.049,
+          "status": "passed"
+        },
+        {
+          "detail": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames: [{\"kind\": 2, \"raw_is_in_battle\": 2, \"battle_type\": 0, \"engaged_trainer_class\": 119, \"engaged_trainer_set\": 7, \"player_mon_slot\": 5, \"move_menu_type\": 0, \"player_selected_move\": 76, \"enemy_selected_move\": 76, \"action_result_or_took_turn\": 0, \"enemy_mon\": {\"slot\": 5, \"species\": 154, \"level\": 54, \"hp\": 3, \"max",
+          "nodeid": "test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement[blue_color]",
+          "seconds": 578.625,
+          "status": "skipped"
+        }
+      ],
+      "counts": {
+        "deselected": 4,
+        "passed": 1,
+        "skipped": 1
+      },
+      "game": "blue_color",
+      "payloads": [
+        {
+          "drive_frames": 608,
+          "fixture": "blue/cable_club-pre-terminal.state",
+          "fixture_sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
+          "kind": "status_move",
+          "move": 45,
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 3,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 9,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            }
+          ],
+          "phases_seen": [
+            2,
+            3
+          ],
+          "slots": [
+            1,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "blue_color"
+        }
+      ],
+      "runtime": "native",
+      "skips": [
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:2021",
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 3,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 76,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 76,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 9,
+                "hp_valid": true,
+                "level": 54,
+                "max_hp": 152,
+                "moves": [
+                  76,
+                  45,
+                  73,
+                  22
+                ],
+                "party_species": null,
+                "pp": [
+                  10,
+                  21,
+                  10,
+                  7
+                ],
+                "slot": 5,
+                "species": 154,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 22,
+                "type2": 3,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 76,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 119,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 76,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            }
+          ],
+          "reason": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames"
+        }
+      ]
+    },
+    {
+      "cases": [
+        {
+          "detail": null,
+          "nodeid": "test_real_rom_mcp_status_move_returns_to_command_selection[yellow]",
+          "seconds": 23.518,
+          "status": "passed"
+        },
+        {
+          "detail": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames: [{\"kind\": 2, \"raw_is_in_battle\": 2, \"battle_type\": 0, \"engaged_trainer_class\": 70, \"engaged_trainer_set\": 7, \"player_mon_slot\": 5, \"move_menu_type\": 0, \"player_selected_move\": 85, \"enemy_selected_move\": 85, \"action_result_or_took_turn\": 0, \"enemy_mon\": {\"slot\": 5, \"species\": 84, \"level\": 53, \"hp\": 102, \"max",
+          "nodeid": "test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement[yellow]",
+          "seconds": 252.824,
+          "status": "skipped"
+        }
+      ],
+      "counts": {
+        "deselected": 4,
+        "passed": 1,
+        "skipped": 1
+      },
+      "game": "yellow",
+      "payloads": [
+        {
+          "drive_frames": 636,
+          "fixture": "yellow/cable_club-pre-terminal.state",
+          "fixture_sha1": "798d79c8b6e6fba2c807ae77c45ca85a33ec9cbe",
+          "kind": "status_move",
+          "move": 45,
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 102,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 74,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 45,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 6,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": true,
+              "move_menu_type": 0,
+              "phase": 2,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": true,
+              "player_mon_slot": 5,
+              "player_move_list_index": 1,
+              "player_selected_move": 45,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": -1,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": false,
+              "terminal_result": null
+            }
+          ],
+          "phases_seen": [
+            2,
+            3
+          ],
+          "slots": [
+            1,
+            1
+          ],
+          "transport": "stdio_local_pair",
+          "version": "yellow"
+        }
+      ],
+      "runtime": "native",
+      "skips": [
+        {
+          "location": "tests/test_mcp_battle_phase_rom.py:2021",
+          "observed": [
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 102,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 85,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 0,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 85,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 0,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            },
+            {
+              "action_result_or_took_turn": 0,
+              "battle_type": 0,
+              "current_menu_item": 0,
+              "enemy_mon": {
+                "hp": 74,
+                "hp_valid": true,
+                "level": 53,
+                "max_hp": 102,
+                "moves": [
+                  85,
+                  45,
+                  24,
+                  84
+                ],
+                "party_species": null,
+                "pp": [
+                  12,
+                  40,
+                  30,
+                  30
+                ],
+                "slot": 5,
+                "species": 84,
+                "species_valid": true,
+                "status": {
+                  "burned": false,
+                  "frozen": false,
+                  "paralyzed": false,
+                  "poisoned": false,
+                  "raw": 0,
+                  "sleep_turns": 0
+                },
+                "status_valid": true,
+                "type1": 23,
+                "type2": 23,
+                "valid": true
+              },
+              "enemy_mon_valid": true,
+              "enemy_selected_move": 85,
+              "enemy_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "engaged_trainer_class": 70,
+              "engaged_trainer_set": 7,
+              "escaped_from_battle": 0,
+              "in_handle_player_mon_fainted": 1,
+              "kind": 2,
+              "menu_evidence": [
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1"
+              ],
+              "menu_open": null,
+              "move_menu_type": 0,
+              "phase": 6,
+              "phase_evidence": [
+                "wIsInBattle",
+                "wBattleResult",
+                "wInHandlePlayerMonFainted",
+                "wMoveMenuType",
+                "wPlayerMoveListIndex",
+                "wActionResultOrTookBattleTurn",
+                "SelectMenuItem",
+                "DisplayBattleMenu.handleBattleMenuInput",
+                "MainInBattleLoop",
+                "MainInBattleLoop.selectEnemyMove",
+                "LoadScreenTilesFromBuffer1",
+                "wPartyMenuTypeOrMessageID",
+                "wPartyMenuAnimMonEnabled",
+                "wPartyCount",
+                "wPartyMon1HP"
+              ],
+              "phase_valid": false,
+              "player_mon_slot": 5,
+              "player_move_list_index": 0,
+              "player_selected_move": 85,
+              "player_stat_stages": {
+                "accuracy": 0,
+                "attack": 0,
+                "defense": 0,
+                "evasion": 0,
+                "special": 0,
+                "speed": 0,
+                "valid": true
+              },
+              "raw_battle_result": 1,
+              "raw_is_in_battle": 2,
+              "resolution_evidence": [
+                "ExecutePlayerMove",
+                "ExecuteEnemyMove",
+                "ExecutePlayerMoveDone",
+                "ExecuteEnemyMoveDone",
+                "HandlePoisonBurnLeechSeed",
+                "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted",
+                "MainInBattleLoop",
+                "EndOfBattle"
+              ],
+              "resolution_open": null,
+              "terminal_result": null
+            }
+          ],
+          "reason": "the admitted pre-terminal pair opened no live battle party menu within 10000 paired frames"
+        }
+      ]
+    }
+  ],
+  "commit": "a86eb6248cec83af25d6f3519049bf2b0a032f8c",
+  "issue": 88,
+  "pull_request": 113,
+  "review_model": "gpt-6-astra",
+  "runtime_label": "each cell is one interpreter: source = vendored PyBoy (PYBOY_NO_CYTHON=1), native = installed Cython extensions",
+  "runtime_origin_probe": {
+    "command_native": "env -u PYBOY_NO_CYTHON PYTHONPATH=\"$PWD/src:$PWD\" <native-interpreter> -c 'import pyboy, pyboy.core.serial; print(pyboy.__file__); print(pyboy.core.serial.__file__)'",
+    "command_source": "env PYBOY_NO_CYTHON=1 PYTHONPATH=\"$PWD/vendor/pyboy-src:$PWD/src:$PWD\" <source-interpreter> -c 'import pyboy, pyboy.core.serial; print(pyboy.__file__); print(pyboy.core.serial.__file__)'",
+    "native_resolved": [
+      "<native-venv>/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so",
+      "<native-venv>/lib/python3.11/site-packages/pyboy/core/serial.cpython-311-x86_64-linux-gnu.so"
+    ],
+    "note": "Same environment shape as the matrix cells. The native cells therefore import compiled extensions and the source cells the vendored package; the cell wall clock (native 4.6-10.4 min, source 19.8-41.0 min) corroborates two distinct runtimes.",
+    "source_resolved": [
+      "vendor/pyboy-src/pyboy/__init__.py",
+      "vendor/pyboy-src/pyboy/core/serial.py"
+    ]
+  },
+  "tests": [
+    "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_status_move_returns_to_command_selection",
+    "tests/test_mcp_battle_phase_rom.py::test_real_rom_mcp_nonterminal_knockout_keeps_valid_replacement"
+  ]
+}

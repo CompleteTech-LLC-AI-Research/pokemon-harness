@@ -3,7 +3,9 @@
 Walks a Red / Blue / Yellow ROM from a Cerulean-Pokecenter source
 state to the Cable Club link receptionist at tile (11, 3) and writes
 the result as the link-cable fixture used by
-:mod:`tests.test_link_integration_remote`.
+:mod:`tests.test_link_integration_remote` and its split
+:mod:`tests.test_link_integration_remote_rpc` /
+:mod:`tests.test_link_integration_remote_trade` modules.
 
 The source state is expected under a sibling worktree's
 ``walkthrough_to_cerulean*/milestones/cerulean_pc.state`` (produced by

@@ -1,0 +1,212 @@
+{
+  "acceptance_node_id": "tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu",
+  "assets": [
+    {
+      "kind": "game-rom",
+      "label": "rom/yellow/pokemon-yellow.gbc",
+      "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+      "sha256": "8cbaa499397e4f1a679c992ea9382a2dd7942ab398b48c19829c2d9529de47bf",
+      "size_bytes": 1048576
+    },
+    {
+      "kind": "symbol-table",
+      "label": "rom/yellow/pokemon-yellow.sym",
+      "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa",
+      "sha256": "07a2dd76053f7c4684c8614edaad7402bff59deee61c4cc23d86bb5891cdac51",
+      "size_bytes": 842120
+    },
+    {
+      "kind": "driven-fixture",
+      "label": "tests/fixtures/link/yellow/battle_healing.state",
+      "sha1": "348ba9aec5a8f4f72c59efc547a09a5c2ff84ef4",
+      "sha256": "17605698782dfd8c19c8fcbab8a2292af052eb67623d80c99fea5efb923ad911",
+      "size_bytes": 200548
+    }
+  ],
+  "guardrails": {
+    "POKERED_SKIP_SHA1": "never set in either tier",
+    "PYTEST_ADDOPTS": "unset in both tiers",
+    "assertions_weakened": false,
+    "bounds_or_deadlines_changed": false,
+    "runtime_ram_edits": false,
+    "skips_added": false,
+    "xfails_added": false
+  },
+  "issue": 90,
+  "leaf": "90.3",
+  "modules": [
+    "tests/test_state_bag.py",
+    "tests/test_state_party.py",
+    "tests/test_battle_healing_items_rom.py"
+  ],
+  "redactions": {
+    "note": "The captured PyBoy 'Skipping .sym line' warnings each reproduced one byte-exact line of the operator's private symbol table. Those payloads are elided from the committed logs and replaced by one counted marker per log; the unredacted originals are retained outside the repository under the private_original_label named for each tier.",
+    "reason": "committed qualification evidence must not carry symbol-table input",
+    "sanitizer": "operator-side release-log sanitizer retained with the session evidence, not committed",
+    "tiers": {
+      "cython": {
+        "file": "logs/cython-focused.log",
+        "marker": "pyboy.pyboy                    WARNING  Skipping .sym line: <redacted: 953 private symbol payloads; see README \"Redactions\">",
+        "payload_line_range": [
+          11,
+          963
+        ],
+        "payload_lines_elided": 953,
+        "private_original_label": "private-game-states/qualification-originals/issue90-medicine-yellow-2d87676/logs/cython-focused.log",
+        "private_original_sha256": "a5b385efda3eb3e61e43d5bccdcf143083f9fbb51ad24a63263028d8c85f236d",
+        "private_original_size_bytes": 85538,
+        "redacted_sha256": "1025da78275947506832bba560f46abb2733c2b2456abe45fd8fa59600fbccca",
+        "redacted_size_bytes": 3304
+      },
+      "source": {
+        "file": "logs/source-focused.log",
+        "marker": "pyboy.pyboy                    WARNING  Skipping .sym line: <redacted: 953 private symbol payloads; see README \"Redactions\">",
+        "payload_line_range": [
+          11,
+          963
+        ],
+        "payload_lines_elided": 953,
+        "private_original_label": "private-game-states/qualification-originals/issue90-medicine-yellow-2d87676/logs/source-focused.log",
+        "private_original_sha256": "60ec2463684c55aba8a89985f7d10deeadca0cda2cf93c0dd8d08526d0388ca0",
+        "private_original_size_bytes": 85539,
+        "redacted_sha256": "950d1590c6a6258330a479fba132cf2b74fb5ba81a13da40458442ee01000a46",
+        "redacted_size_bytes": 3305
+      }
+    }
+  },
+  "results_by_tier": {
+    "cython": {
+      "errors": 0,
+      "failures": 0,
+      "node_ids": [
+        "tests/test_state_bag.py::test_empty_bag",
+        "tests/test_state_bag.py::test_single_stack",
+        "tests/test_state_bag.py::test_multiple_stacks_preserves_order",
+        "tests/test_state_bag.py::test_duplicate_item_across_stacks_sums_quantity",
+        "tests/test_state_bag.py::test_count_clamped_to_maximum",
+        "tests/test_state_bag.py::test_bag_reads_loaded_symbol_addresses_not_canonical_defaults",
+        "tests/test_state_bag.py::test_zero_count_is_known_empty_without_item_base_symbol",
+        "tests/test_state_bag.py::test_missing_count_symbol_is_an_explicit_unknown_not_empty",
+        "tests/test_state_bag.py::test_nonempty_bag_missing_item_base_symbol_does_not_guess_address",
+        "tests/test_state_party.py::test_empty_party",
+        "tests/test_state_party.py::test_single_pokemon_at_full_hp",
+        "tests/test_state_party.py::test_multiple_slots_parsed_independently",
+        "tests/test_state_party.py::test_all_fainted_detection",
+        "tests/test_state_party.py::test_status_decoded_per_slot",
+        "tests/test_state_party.py::test_hp_is_big_endian_inside_struct",
+        "tests/test_state_party.py::test_party_count_clamped_to_max_slots",
+        "tests/test_state_party.py::test_party_reads_relocated_symbol_addresses_not_canonical_guesses",
+        "tests/test_state_party.py::test_party_sentinel_bytes_are_exposed_without_guessing",
+        "tests/test_state_party.py::test_party_parser_requires_core_symbols",
+        "tests/test_state_party.py::test_nonempty_party_requires_party_mons_symbol",
+        "tests/test_battle_healing_items_rom.py::test_turn_evidence_is_required_rather_than_supplied",
+        "tests/test_battle_healing_items_rom.py::test_release_evidence_names_the_pinned_assets_and_producer",
+        "tests/test_battle_healing_items_rom.py::test_fixture_bytes_match_the_release_evidence",
+        "tests/test_battle_healing_items_rom.py::test_producer_refuses_existing_output_and_unpinned_assets",
+        "tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu"
+      ],
+      "skipped": 0,
+      "summary": "25 passed, 1 warning in 1.24s",
+      "tests": 25,
+      "time_seconds": 1.237
+    },
+    "source": {
+      "errors": 0,
+      "failures": 0,
+      "node_ids": [
+        "tests/test_state_bag.py::test_empty_bag",
+        "tests/test_state_bag.py::test_single_stack",
+        "tests/test_state_bag.py::test_multiple_stacks_preserves_order",
+        "tests/test_state_bag.py::test_duplicate_item_across_stacks_sums_quantity",
+        "tests/test_state_bag.py::test_count_clamped_to_maximum",
+        "tests/test_state_bag.py::test_bag_reads_loaded_symbol_addresses_not_canonical_defaults",
+        "tests/test_state_bag.py::test_zero_count_is_known_empty_without_item_base_symbol",
+        "tests/test_state_bag.py::test_missing_count_symbol_is_an_explicit_unknown_not_empty",
+        "tests/test_state_bag.py::test_nonempty_bag_missing_item_base_symbol_does_not_guess_address",
+        "tests/test_state_party.py::test_empty_party",
+        "tests/test_state_party.py::test_single_pokemon_at_full_hp",
+        "tests/test_state_party.py::test_multiple_slots_parsed_independently",
+        "tests/test_state_party.py::test_all_fainted_detection",
+        "tests/test_state_party.py::test_status_decoded_per_slot",
+        "tests/test_state_party.py::test_hp_is_big_endian_inside_struct",
+        "tests/test_state_party.py::test_party_count_clamped_to_max_slots",
+        "tests/test_state_party.py::test_party_reads_relocated_symbol_addresses_not_canonical_guesses",
+        "tests/test_state_party.py::test_party_sentinel_bytes_are_exposed_without_guessing",
+        "tests/test_state_party.py::test_party_parser_requires_core_symbols",
+        "tests/test_state_party.py::test_nonempty_party_requires_party_mons_symbol",
+        "tests/test_battle_healing_items_rom.py::test_turn_evidence_is_required_rather_than_supplied",
+        "tests/test_battle_healing_items_rom.py::test_release_evidence_names_the_pinned_assets_and_producer",
+        "tests/test_battle_healing_items_rom.py::test_fixture_bytes_match_the_release_evidence",
+        "tests/test_battle_healing_items_rom.py::test_producer_refuses_existing_output_and_unpinned_assets",
+        "tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu"
+      ],
+      "skipped": 0,
+      "summary": "25 passed, 1 warning in 15.65s",
+      "tests": 25,
+      "time_seconds": 15.656
+    }
+  },
+  "schema": "pokered-harness.feature-qualification.medicine-runtime-identity",
+  "scope": "ordinary battle item-menu driving, Yellow, source and cython runtimes, one real-ROM acceptance cell",
+  "tiers": {
+    "cython": {
+      "declared_vendored_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+      "import_errors": {
+        "pyboy.conftest": "ModuleNotFoundError: No module named 'filelock'"
+      },
+      "imported_by_kind": {
+        ".py": 3,
+        ".so": 58
+      },
+      "imported_pyboy_modules": 61,
+      "is_declared_runtime": true,
+      "on_disk_by_kind": {
+        ".py": 61,
+        ".pyc": 61,
+        ".so": 58,
+        "other": 50
+      },
+      "pyboy_file": "[native-venv]/lib/python3.11/site-packages/pyboy/__init__.cpython-311-x86_64-linux-gnu.so",
+      "pyboy_imported_from_vendored_tree": false,
+      "pyboy_no_cython": null,
+      "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+      "pyboy_version": "2.7.0",
+      "python_executable": "[native-venv]/bin/python",
+      "python_version": "3.11.2",
+      "pythonpath": "[worktree]/src:[worktree]",
+      "requested_tier": "cython",
+      "revision_matches_vendored_pin": true
+    },
+    "source": {
+      "declared_vendored_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+      "import_errors": {
+        "pyboy.conftest": "ModuleNotFoundError: No module named 'filelock'"
+      },
+      "imported_by_kind": {
+        ".py": 60
+      },
+      "imported_pyboy_modules": 60,
+      "is_declared_runtime": true,
+      "on_disk_by_kind": {
+        ".py": 61,
+        ".pyc": 61,
+        "other": 50
+      },
+      "pyboy_file": "[worktree]/vendor/pyboy-src/pyboy/__init__.py",
+      "pyboy_imported_from_vendored_tree": true,
+      "pyboy_no_cython": "1",
+      "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+      "pyboy_version": "2.7.0",
+      "python_executable": "[source-venv]/bin/python",
+      "python_version": "3.11.2",
+      "pythonpath": "[worktree]/vendor/pyboy-src:[worktree]/src:[worktree]",
+      "requested_tier": "source",
+      "revision_matches_vendored_pin": true
+    }
+  },
+  "vendored_revision_marker": "c565df66c3731fad2856169a90f6bbec99925915",
+  "version": 1,
+  "worktree_clean_at_run": true,
+  "worktree_head": "2d876763cdcc42e824a883c3c8d93646ceefbcd3",
+  "worktree_tree": "0445ad29d7f6330debfc13413798c04d0ed13997"
+}

@@ -26,9 +26,7 @@ from pokered_harness.state.battle import BattleKind
 
 ROM_PATH = os.environ.get("POKERED_ROM_PATH")
 SYM_PATH = os.environ.get("POKERED_SYM_PATH")
-ROM_SHA1 = os.environ.get(
-    "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
-)
+ROM_SHA1 = os.environ.get("POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a")
 
 pytestmark = pytest.mark.skipif(
     not (ROM_PATH and SYM_PATH),
@@ -90,8 +88,7 @@ def test_checkpoint_reds_bedroom_after_intro(session):
 
     gs = session.read_game_state()
     assert gs.overworld.map_id == MAP_REDS_HOUSE_2F, (
-        f"expected REDS_HOUSE_2F (0x{MAP_REDS_HOUSE_2F:02x}), "
-        f"got 0x{gs.overworld.map_id:02x}"
+        f"expected REDS_HOUSE_2F (0x{MAP_REDS_HOUSE_2F:02x}), got 0x{gs.overworld.map_id:02x}"
     )
     assert gs.progress.money == STARTING_MONEY
     assert gs.party.count == 0, "player hasn't picked starter yet"

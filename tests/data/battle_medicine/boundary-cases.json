@@ -1,0 +1,400 @@
+{
+  "schema": "battle-medicine-boundary-cases/1",
+  "issue": 90,
+  "leaf": "90.2",
+  "scope": "ROM-free half of 90.2: the boundary fixture specification, with each expected outcome hand-derived from the pinned sources.",
+  "declared_for": "the 90.3-90.5 ROM half, which must execute these party/target boundaries for real; nothing in this file is gameplay evidence.",
+  "pinned_sources": {
+    "red_blue": {
+      "repository": "pret/pokered",
+      "revision": "fbcf7d0e19a3a2db505440d3ccd3d40ca996c15c",
+      "path": "engine/items/item_effects.asm",
+      "file_sha256": "76b570b5216bbbcf6d9528c4704d931744a3740cce88afdc4f4f8f700449dda1"
+    },
+    "yellow": {
+      "repository": "pret/pokeyellow",
+      "revision": "bfa7170107eea23b89febb60bfb2ce39173bf2e1",
+      "path": "engine/items/item_effects.asm",
+      "file_sha256": "a6b464fe759683af1e8ff6cf2a040d26975c1cd244550899da2342900cf63b76"
+    }
+  },
+  "required_categories": [
+    "below_cap",
+    "clamped",
+    "hp_above_255",
+    "target_active",
+    "target_benched",
+    "full_hp",
+    "fainted",
+    "same_species_distinct"
+  ],
+  "admitted_items": [
+    "POTION",
+    "SUPER_POTION",
+    "HYPER_POTION",
+    "MAX_POTION",
+    "FULL_RESTORE",
+    "REVIVE",
+    "MAX_REVIVE"
+  ],
+  "active_slot_rule": "Party index 0 is the fixture's battle-active slot and must be a non-fainted member; a benched target is any other party slot.",
+  "execution_requirements": {
+    "games": ["red", "blue", "yellow"],
+    "runtimes": ["source", "native"],
+    "mode": "ordinary"
+  },
+  "cases": [
+    {
+      "id": "below-cap-potion-on-active",
+      "categories": ["below_cap", "target_active"],
+      "item": "POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "CHARMANDER", "level": 12, "hp": 12, "max_hp": 40, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 19, "status": 0},
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "fixed_heal",
+        "members": [
+          {"hp": 32, "status": 0},
+          {"hp": 19, "status": 0},
+          {"hp": 9, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "potion-reaches-cap-and-clamps",
+      "categories": ["clamped", "target_active"],
+      "item": "POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "PIDGEY", "level": 5, "hp": 25, "max_hp": 30, "status": 0},
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "clamped_to_max",
+        "members": [
+          {"hp": 30, "status": 0},
+          {"hp": 9, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "below-cap-super-potion-on-active",
+      "categories": ["below_cap", "target_active"],
+      "item": "SUPER_POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "SQUIRTLE", "level": 10, "hp": 40, "max_hp": 200, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "fixed_heal",
+        "members": [
+          {"hp": 90, "status": 0},
+          {"hp": 19, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "below-cap-hyper-potion-on-active",
+      "categories": ["below_cap", "target_active"],
+      "item": "HYPER_POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "SNORLAX", "level": 30, "hp": 100, "max_hp": 500, "status": 0},
+        {"species": "PIKACHU", "level": 10, "hp": 30, "max_hp": 35, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "fixed_heal",
+        "members": [
+          {"hp": 300, "status": 0},
+          {"hp": 30, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "hyper-potion-clamps-to-max",
+      "categories": ["clamped", "target_active"],
+      "item": "HYPER_POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "SNORLAX", "level": 30, "hp": 350, "max_hp": 500, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "clamped_to_max",
+        "members": [{"hp": 500, "status": 0}]
+      }
+    },
+    {
+      "id": "max-potion-clamps-by-item-id",
+      "categories": ["clamped", "target_active"],
+      "item": "MAX_POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "PIDGEY", "level": 5, "hp": 7, "max_hp": 420, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "clamped_to_max",
+        "members": [{"hp": 420, "status": 0}]
+      }
+    },
+    {
+      "id": "full-restore-below-cap-clamps-and-clears-status",
+      "categories": ["clamped", "target_active"],
+      "item": "FULL_RESTORE",
+      "target_index": 0,
+      "party": [
+        {"species": "BULBASAUR", "level": 9, "hp": 10, "max_hp": 200, "status": 8},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 19, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "clamped_to_max",
+        "members": [
+          {"hp": 200, "status": 0},
+          {"hp": 19, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "full-restore-at-full-hp-clears-status-only",
+      "categories": ["full_hp", "target_active"],
+      "item": "FULL_RESTORE",
+      "target_index": 0,
+      "party": [
+        {"species": "BULBASAUR", "level": 9, "hp": 200, "max_hp": 200, "status": 8},
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "full_restore_status_only",
+        "members": [
+          {"hp": 200, "status": 0},
+          {"hp": 9, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "full-restore-at-full-hp-without-status-is-refused",
+      "categories": ["full_hp", "target_active"],
+      "item": "FULL_RESTORE",
+      "target_index": 0,
+      "party": [
+        {"species": "BULBASAUR", "level": 9, "hp": 200, "max_hp": 200, "status": 0}
+      ],
+      "expected": {
+        "applied": false,
+        "branch": "refused_full_hp",
+        "members": [{"hp": 200, "status": 0}]
+      }
+    },
+    {
+      "id": "potion-at-full-hp-is-refused-and-keeps-status",
+      "categories": ["full_hp", "target_active"],
+      "item": "POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "PIDGEY", "level": 5, "hp": 30, "max_hp": 30, "status": 8},
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": false,
+        "branch": "refused_full_hp",
+        "members": [
+          {"hp": 30, "status": 8},
+          {"hp": 9, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "potion-on-fainted-target-is-refused",
+      "categories": ["fainted", "target_benched"],
+      "item": "POTION",
+      "target_index": 1,
+      "party": [
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 30, "status": 8}
+      ],
+      "expected": {
+        "applied": false,
+        "branch": "refused_fainted",
+        "members": [
+          {"hp": 9, "status": 0},
+          {"hp": 0, "status": 8}
+        ]
+      }
+    },
+    {
+      "id": "full-restore-on-fainted-target-is-refused",
+      "categories": ["fainted", "target_benched"],
+      "item": "FULL_RESTORE",
+      "target_index": 1,
+      "party": [
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 75, "status": 4}
+      ],
+      "expected": {
+        "applied": false,
+        "branch": "refused_fainted",
+        "members": [
+          {"hp": 9, "status": 0},
+          {"hp": 0, "status": 4}
+        ]
+      }
+    },
+    {
+      "id": "revive-fainted-target-to-half-max-floor",
+      "categories": ["fainted", "target_benched"],
+      "item": "REVIVE",
+      "target_index": 1,
+      "party": [
+        {"species": "CHARMANDER", "level": 12, "hp": 33, "max_hp": 40, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 75, "status": 4}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "revive_half_max",
+        "members": [
+          {"hp": 33, "status": 0},
+          {"hp": 37, "status": 4}
+        ]
+      }
+    },
+    {
+      "id": "max-revive-fainted-target-to-full",
+      "categories": ["fainted", "target_benched"],
+      "item": "MAX_REVIVE",
+      "target_index": 2,
+      "party": [
+        {"species": "CHARMANDER", "level": 12, "hp": 33, "max_hp": 40, "status": 0},
+        {"species": "RATTATA", "level": 4, "hp": 9, "max_hp": 21, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 0, "max_hp": 75, "status": 4}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "revive_to_max",
+        "members": [
+          {"hp": 33, "status": 0},
+          {"hp": 9, "status": 0},
+          {"hp": 75, "status": 4}
+        ]
+      }
+    },
+    {
+      "id": "revive-on-a-living-target-is-refused",
+      "categories": ["target_active"],
+      "item": "REVIVE",
+      "target_index": 0,
+      "party": [
+        {"species": "PIDGEY", "level": 5, "hp": 10, "max_hp": 75, "status": 4}
+      ],
+      "expected": {
+        "applied": false,
+        "branch": "refused_revive_on_living",
+        "members": [{"hp": 10, "status": 4}]
+      }
+    },
+    {
+      "id": "potion-on-benched-same-species-target",
+      "categories": ["target_benched", "same_species_distinct", "clamped"],
+      "item": "POTION",
+      "target_index": 2,
+      "party": [
+        {"species": "CHARMANDER", "level": 12, "hp": 5, "max_hp": 40, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 21, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 12, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "clamped_to_max",
+        "members": [
+          {"hp": 5, "status": 0},
+          {"hp": 19, "status": 0},
+          {"hp": 21, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "below-cap-super-potion-on-benched-target",
+      "categories": ["below_cap", "target_benched"],
+      "item": "SUPER_POTION",
+      "target_index": 1,
+      "party": [
+        {"species": "CHARMANDER", "level": 12, "hp": 5, "max_hp": 40, "status": 0},
+        {"species": "SQUIRTLE", "level": 10, "hp": 40, "max_hp": 200, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "fixed_heal",
+        "members": [
+          {"hp": 5, "status": 0},
+          {"hp": 90, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "above-255-hp-potion-adds-with-carry",
+      "categories": ["hp_above_255", "below_cap", "target_active"],
+      "item": "POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "SNORLAX", "level": 40, "hp": 250, "max_hp": 999, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "fixed_heal",
+        "members": [
+          {"hp": 270, "status": 0},
+          {"hp": 19, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "above-255-hp-super-potion-carries-then-clamps",
+      "categories": ["hp_above_255", "clamped", "target_active"],
+      "item": "SUPER_POTION",
+      "target_index": 0,
+      "party": [
+        {"species": "SNORLAX", "level": 40, "hp": 980, "max_hp": 999, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 21, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "clamped_to_max",
+        "members": [
+          {"hp": 999, "status": 0},
+          {"hp": 19, "status": 0}
+        ]
+      }
+    },
+    {
+      "id": "above-255-hp-hyper-potion-on-benched-carry-target",
+      "categories": ["hp_above_255", "below_cap", "target_benched"],
+      "item": "HYPER_POTION",
+      "target_index": 2,
+      "party": [
+        {"species": "CHARMANDER", "level": 12, "hp": 33, "max_hp": 40, "status": 0},
+        {"species": "PIDGEY", "level": 5, "hp": 19, "max_hp": 21, "status": 0},
+        {"species": "SNORLAX", "level": 40, "hp": 320, "max_hp": 999, "status": 0}
+      ],
+      "expected": {
+        "applied": true,
+        "branch": "fixed_heal",
+        "members": [
+          {"hp": 33, "status": 0},
+          {"hp": 19, "status": 0},
+          {"hp": 520, "status": 0}
+        ]
+      }
+    }
+  ]
+}

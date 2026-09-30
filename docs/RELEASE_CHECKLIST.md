@@ -284,8 +284,9 @@ release readiness.
 - [x] Python requirement is `>=3.11`; NumPy is pinned separately for Python
   3.11 and 3.12+. Historical Python 3.12 gate results do not establish a
   complete Python 3.11 release gate.
-- [x] The distribution bundles source PyBoy `2.7.0` at fork revision
-  `c565df66c3731fad2856169a90f6bbec99925915`.
+- [x] The distribution bundles source PyBoy `2.7.0` at the harness-local
+  divergence revision `fd765b1808ac9cb192b42ae971987158ff36ae48` (pre-divergence
+  harness fork revision `c565df66c3731fad2856169a90f6bbec99925915`).
 - [x] `mcp==1.29.1` is pinned in `pyproject.toml`.
 - [x] The asset-free source gate resolves the bundled source runtime and the
   bit-accurate serial contract; the native gate resolves the same contract
@@ -406,15 +407,30 @@ release readiness.
   each of five repetitions.
 - [ ] Serialized emulator access, concurrent calls, shutdown, and cancellation
   invariants pass on the candidate under the declared scope.
+- [ ] The opt-in capacity policy (`--capacity-policy`, issue #86) is exercised
+  on a real declared allocation; its enforcement defaults and end-to-end
+  admission/telemetry evidence remain open, so it does not gate releases yet.
 - [ ] Required native build/runtime coverage and independent release review
   are complete. Unadvertised load and platform extensions are coverage limits,
   not additional blockers; historical Windows checks do not qualify the candidate.
+- [ ] The qualification job was bound to a pinned, immutable allocation
+  descriptor whose host-wide lease lock, allocation cgroup membership, reserved
+  cpuset, or operator-created exclusive marker was re-observed on the host, the
+  holder was the only lock holder, the complete pinned ROM/SYM/fixture input set
+  for the declared scope was present and hash-validated, and retained evidence
+  from the fresh native build procedure tied the pinned inputs and completed
+  build to the installed outputs. A declaration that only matched deployment
+  IDs, a writable descriptor, a job-private lock, a checker-generated marker,
+  competing cgroup members, a missing required input, or a mixed build without
+  retained evidence does not count as a provisioned runner.
 
 ## Fixture provenance and generation
 
-- [x] `release-evidence/fixture-manifest.json` records thirteen external state
+- [x] `release-evidence/fixture-manifest.json` records thirty-one external state
   entries with sizes, SHA-1/SHA-256 values, expected ROM/SYM pins, source-state
-  records, runtime identity, and command templates.
+  records, runtime identity, and command templates: ten ordinary/battle rows
+  plus eighteen `captured` boundary rows driven from the admitted battle
+  fixtures by `scripts/produce_battle_state_fixtures.py`.
 - [ ] Deterministic reproduction of the four vanilla-derived fixture bytes is
   established. Static validation confirms the stock ROM/SYM
   pins and existing vanilla fixture bytes, but vanilla ordinary capture
@@ -424,15 +440,19 @@ release readiness.
 - [x] `scripts/produce_cable_club_fixture.py` validates pins and has bounded
   defaults of 180 seconds and 64 movement steps.
 - [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
-  immutable derived battle fixtures and six-member `slots` fixtures whose party
-  records are pairwise distinct; acceptance does not prepare party state in
+  entries: the immutable derived battle fixtures, the six-member `slots`
+  fixtures whose party records are pairwise distinct, and the eighteen
+  captured boundary fixture rows; acceptance does not prepare party state in
   emulator RAM.
 - [x] Provenance is verified for nine canonical fixture entries.
+- [x] Provenance is captured for the eighteen boundary fixture entries: each
+  row names the admitted battle fixture it was driven from by SHA-1 and
+  carries its runtime identity, capture timestamp, and verification method.
 - [ ] Provenance for the four vanilla-derived entries is verified. Their
   vanilla source states are not proven to match the vanilla ROM; replay against
   the retained source failed at the 64-step bound, and the manifest's ordinary
   producer revision is historical (`25e231c`), so those rows remain `PARTIAL`.
-- [ ] The operator validates all ten manifest entries with
+- [ ] The operator validates all 28 manifest entries with
   `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
   the external fixture root available to the release runner.
 - [ ] A retained evidence bundle includes the exact source-state hashes,

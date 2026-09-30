@@ -78,9 +78,7 @@ def test_mcp_remote_link_attaches_native_serial_backend() -> None:
         deadline = time.monotonic() + 5.0
         listener_status = None
         while time.monotonic() < deadline:
-            listener_status = dispatch_tool(
-                listener_session, "link_status", {}, link=listener_link
-            )
+            listener_status = dispatch_tool(listener_session, "link_status", {}, link=listener_link)
             if listener_status["remote_mode"] == "connected":
                 break
             time.sleep(0.02)
@@ -136,18 +134,15 @@ def test_mcp_local_link_attaches_native_serial_backend() -> None:
         assert paired["paired"] is True
         assert link.local_link_session is not None
         assert link.remote_link is None
-        assert dispatch_tool(primary_session, "link_status", {}, link=link)[
-            "link_backend"
-        ] == "bit_accurate"
-
-        stepped = dispatch_tool(
-            primary_session, "link_step", {"count": 1}, link=link
+        assert (
+            dispatch_tool(primary_session, "link_status", {}, link=link)["link_backend"]
+            == "bit_accurate"
         )
+
+        stepped = dispatch_tool(primary_session, "link_step", {"count": 1}, link=link)
         assert stepped == {"primary_tick": 1, "peer_tick": 1}
 
-        assert dispatch_tool(primary_session, "link_unpair", {}, link=link) == {
-            "paired": False
-        }
+        assert dispatch_tool(primary_session, "link_unpair", {}, link=link) == {"paired": False}
         assert link.local_link_session is None
     finally:
         dispatch_tool(primary_session, "link_disconnect", {}, link=link)

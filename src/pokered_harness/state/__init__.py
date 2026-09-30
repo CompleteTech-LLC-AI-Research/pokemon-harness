@@ -19,8 +19,13 @@ from pokered_harness.state.base import (
 )
 from pokered_harness.state.battle import (
     BattleKind,
+    BattleLifecycle,
+    BattleMenuObservation,
+    BattlePhase,
+    BattleResolutionObservation,
     BattleState,
     BattleType,
+    StatStages,
     parse_battle,
 )
 from pokered_harness.state.game_state import GameState, parse_game_state
@@ -41,6 +46,7 @@ from pokered_harness.state.party import (
     PartyRecord,
     PartyRecords,
     audit_exact_party_exchange,
+    parse_battle_combatant,
     parse_party,
     parse_party_records,
 )
@@ -64,6 +70,10 @@ __all__ = [
     "Bag",
     "BagStack",
     "BattleKind",
+    "BattleLifecycle",
+    "BattleMenuObservation",
+    "BattlePhase",
+    "BattleResolutionObservation",
     "BattleState",
     "BattleType",
     "Direction",
@@ -77,11 +87,13 @@ __all__ = [
     "PartyRecord",
     "PartyRecords",
     "ProgressState",
+    "StatStages",
     "StatusCondition",
     "TextState",
     "audit_exact_party_exchange",
     "parse_bag",
     "parse_battle",
+    "parse_battle_combatant",
     "parse_direction",
     "parse_game_state",
     "parse_menu",

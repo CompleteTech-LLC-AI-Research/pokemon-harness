@@ -1,0 +1,776 @@
+{
+  "allocation_note": "No independently verifiable exclusive allocation exists on this host; the runner's reservation checks fail closed here. These runs therefore demonstrate functional dual-runtime acceptance only and are NOT a capacity-qualified result under an operator-provisioned allocation.",
+  "allocation_status": "BLOCKED",
+  "branch": "work/qualification-runner-85",
+  "capacity_samples": {
+    "after": {
+      "busy_cores": 10.7162,
+      "interval_seconds": 2.001,
+      "loadavg": [
+        17.3115234375,
+        14.8359375,
+        12.5595703125
+      ],
+      "logical_cpus": 12
+    },
+    "before": {
+      "busy_cores": 9.4389,
+      "interval_seconds": 2.0,
+      "loadavg": [
+        13.3828125,
+        12.49072265625,
+        11.4326171875
+      ],
+      "logical_cpus": 12
+    },
+    "during": {
+      "busy_cores": 10.7188,
+      "interval_seconds": 2.0,
+      "loadavg": [
+        17.5712890625,
+        14.18896484375,
+        12.150390625
+      ],
+      "logical_cpus": 12
+    }
+  },
+  "environment": {
+    "affinity_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "cap_eff": 0,
+    "cgroup_mount": "ro,nosuid,nodev,noexec",
+    "cgroup_relative_path": "/",
+    "cgroup_version": "v2",
+    "cpu_quota_cores": null,
+    "logical_cpus": 12,
+    "user_namespaces": "blocked (EPERM)"
+  },
+  "inputs": {
+    "fixture_manifest": {
+      "entries": 0,
+      "sha256": "e3b9406fbf86f91d0f1afa4009ab7f444ced409c89cfcd55c447716615e231fa"
+    },
+    "fixtures": [
+      {
+        "bytes": 200548,
+        "name": "cable_club-battle-faint-peer.state",
+        "role": "blue",
+        "sha1": "334c19861c950d0f2b14d5deb2df4d82337e59f0"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-battle-faint.state",
+        "role": "blue",
+        "sha1": "e790ac1b58cf621855cc4da4e3e18c5f119f82c2"
+      },
+      {
+        "bytes": 192217,
+        "name": "cable_club-battle-vanilla.state",
+        "role": "blue",
+        "sha1": "442c1497c0398f7e54ceade9739ddd1b5b9456fc"
+      },
+      {
+        "bytes": 200546,
+        "name": "cable_club-battle.state",
+        "role": "blue",
+        "sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-pre-terminal-peer.state",
+        "role": "blue",
+        "sha1": "d9501b62141e41c51cba6274b514f24191b39aaf"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-pre-terminal.state",
+        "role": "blue",
+        "sha1": "3eb7d7d4ba80c2be12fd7989c14c02c628369832"
+      },
+      {
+        "bytes": 192217,
+        "name": "cable_club-vanilla.state",
+        "role": "blue",
+        "sha1": "cff5349b55f8fdf47a5af63d674977103aeb44d6"
+      },
+      {
+        "bytes": 200546,
+        "name": "cable_club.state",
+        "role": "blue",
+        "sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-battle-faint-peer.state",
+        "role": "red",
+        "sha1": "10bacfbc7462d7604fc519023df1119689fcf246"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-battle-faint.state",
+        "role": "red",
+        "sha1": "ed9c416e164b7386caab1172641d0886f3143696"
+      },
+      {
+        "bytes": 192217,
+        "name": "cable_club-battle-vanilla.state",
+        "role": "red",
+        "sha1": "63d00b469b07e3969bcd82be1047031265be0b3a"
+      },
+      {
+        "bytes": 200546,
+        "name": "cable_club-battle.state",
+        "role": "red",
+        "sha1": "4343278b018187ed4bf7c4eda3b202097456f048"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-pre-terminal-peer.state",
+        "role": "red",
+        "sha1": "f00c12a4cb249108ba5efc89cfeb79f448cce219"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-pre-terminal.state",
+        "role": "red",
+        "sha1": "0abf8fc4de1693715f9c3b5cfd09f12f203b24a5"
+      },
+      {
+        "bytes": 192217,
+        "name": "cable_club-vanilla.state",
+        "role": "red",
+        "sha1": "affd77c20bf4600b8057ea33683ed58a2ac86157"
+      },
+      {
+        "bytes": 200546,
+        "name": "cable_club.state",
+        "role": "red",
+        "sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-battle-faint-peer.state",
+        "role": "yellow",
+        "sha1": "b308a09653e4293e29f4fdcb7084d5c769aae543"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-battle-faint.state",
+        "role": "yellow",
+        "sha1": "be5563b12470361d766a815e690f2afdad8a98bb"
+      },
+      {
+        "bytes": 200546,
+        "name": "cable_club-battle.state",
+        "role": "yellow",
+        "sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-pre-terminal-peer.state",
+        "role": "yellow",
+        "sha1": "e03a25a2265f35da57b3b1e8fbbd66dbd8f85a47"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-pre-terminal.state",
+        "role": "yellow",
+        "sha1": "cb9e2fbca168fcb0ffab55f77ce84b81a2961729"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-terminal-peer.state",
+        "role": "yellow",
+        "sha1": "70357c8b9a3af72b04f7c1a0a27b220920b1ed8f"
+      },
+      {
+        "bytes": 200548,
+        "name": "cable_club-terminal.state",
+        "role": "yellow",
+        "sha1": "e3c5bc465fb9f900c2dcb9d82b65c92dbbc032d8"
+      },
+      {
+        "bytes": 200546,
+        "name": "cable_club.state",
+        "role": "yellow",
+        "sha1": "37df4dbdb512cd3febdc2d536281683476291d3b"
+      }
+    ],
+    "rom_and_symbols": [
+      {
+        "bytes": 1048576,
+        "kind": "rom",
+        "role": "red",
+        "sha1": "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+      },
+      {
+        "bytes": 1048576,
+        "kind": "rom",
+        "role": "blue",
+        "sha1": "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+      },
+      {
+        "bytes": 1048576,
+        "kind": "rom",
+        "role": "yellow",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      {
+        "bytes": 708615,
+        "kind": "symbols",
+        "role": "red",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      {
+        "bytes": 842120,
+        "kind": "symbols",
+        "role": "yellow",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      }
+    ]
+  },
+  "issue": 85,
+  "pr": 112,
+  "reviewed_head": "409ba11d81707d95f9bfb542fe38b7ca98f40ad1",
+  "runtime": {
+    "cpython": "3.11",
+    "fork_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+    "mcp": "1.29.1",
+    "pyboy": "2.7.0"
+  },
+  "runtimes": {
+    "cython": {
+      "junit_file": "native-focused.xml",
+      "log_file": "native-focused.log",
+      "orientations": [
+        {
+          "completed_frames": 3,
+          "connector_family": "red_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "red_color",
+          "orientation": "red_color-listen-red_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.409,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "blue_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "red_color",
+          "orientation": "red_color-listen-blue_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 8.326,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "yellow",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "red_color",
+          "orientation": "red_color-listen-yellow-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 8.819,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "red_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "blue_color",
+          "orientation": "blue_color-listen-red_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 8.31,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "blue_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "blue_color",
+          "orientation": "blue_color-listen-blue_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 8.333,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "yellow",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "blue_color",
+          "orientation": "blue_color-listen-yellow-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 7.807,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "red_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421344
+          },
+          "final_mode": "connected",
+          "listener_family": "yellow",
+          "orientation": "yellow-listen-red_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.821,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "blue_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421344
+          },
+          "final_mode": "connected",
+          "listener_family": "yellow",
+          "orientation": "yellow-listen-blue_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 10.737,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "yellow",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421344
+          },
+          "final_mode": "connected",
+          "listener_family": "yellow",
+          "orientation": "yellow-listen-yellow-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 6.526,
+          "status": "PASSED"
+        }
+      ],
+      "orientations_passed": 9,
+      "orientations_total": 9,
+      "runtime_mode": "cython",
+      "suite": {
+        "errors": 0,
+        "failures": 0,
+        "skipped": 0,
+        "tests": 143
+      }
+    },
+    "source": {
+      "junit_file": "source-focused.xml",
+      "log_file": "source-focused.log",
+      "orientations": [
+        {
+          "completed_frames": 3,
+          "connector_family": "red_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "red_color",
+          "orientation": "red_color-listen-red_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.232,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "blue_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "red_color",
+          "orientation": "red_color-listen-blue_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.3,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "yellow",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "red_color",
+          "orientation": "red_color-listen-yellow-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 12.064,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "red_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "blue_color",
+          "orientation": "blue_color-listen-red_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 12.13,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "blue_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "blue_color",
+          "orientation": "blue_color-listen-blue_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.245,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "yellow",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421340
+          },
+          "final_mode": "connected",
+          "listener_family": "blue_color",
+          "orientation": "blue_color-listen-yellow-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 10.125,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "red_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421344
+          },
+          "final_mode": "connected",
+          "listener_family": "yellow",
+          "orientation": "yellow-listen-red_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.972,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "blue_color",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421344
+          },
+          "final_mode": "connected",
+          "listener_family": "yellow",
+          "orientation": "yellow-listen-blue_color-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 9.603,
+          "status": "PASSED"
+        },
+        {
+          "completed_frames": 3,
+          "connector_family": "yellow",
+          "final_accounting": {
+            "cancelled": false,
+            "closed": false,
+            "failure": null,
+            "local_half_cycles": 421344
+          },
+          "final_mode": "connected",
+          "listener_family": "yellow",
+          "orientation": "yellow-listen-yellow-connect",
+          "prelink_press_release_restored": true,
+          "process_exit": [
+            {
+              "group_alive": false,
+              "returncode": 0
+            },
+            {
+              "group_alive": false,
+              "returncode": 0
+            }
+          ],
+          "profile": "aligned_diagnostic_4096_1024_4096",
+          "pytest_seconds": 6.102,
+          "status": "PASSED"
+        }
+      ],
+      "orientations_passed": 9,
+      "orientations_total": 9,
+      "runtime_mode": "source",
+      "suite": {
+        "errors": 0,
+        "failures": 0,
+        "skipped": 0,
+        "tests": 143
+      }
+    }
+  },
+  "schema": "pr112-qualification-acceptance/1",
+  "scope": {
+    "runner_tests": "tests/test_qualification_runner.py",
+    "timed_orientations": "tests/test_mcp_timed_rom.py::test_timed_rom_stdio_pair"
+  }
+}

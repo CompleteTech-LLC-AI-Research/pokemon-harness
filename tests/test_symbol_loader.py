@@ -31,12 +31,21 @@ SYNTHETIC_SYM = """\
 
 
 class DictMemory:
-    """Minimal MemoryLike backing store: dict[int, int] supporting slices."""
+    """Minimal MemoryLike backing store: dict[int, int] supporting slices.
+
+    Also models PyBoy's bank-indexed WRAM form ``memory[bank, addr]``, which
+    returns that bank's own byte whatever ``SVBK`` names.  Every typed reader
+    resolves ``0xD000``-``0xDFFF`` through that form, so a fake that only
+    understood the plain address could not represent the ROM's real contract.
+    """
 
     def __init__(self, initial: dict[int, int] | None = None) -> None:
         self._m: dict[int, int] = dict(initial or {})
 
     def __getitem__(self, key):
+        if isinstance(key, tuple):
+            _bank, address = key
+            return self._m.get(int(address), 0)
         if isinstance(key, slice):
             start, stop, step = key.start, key.stop, key.step or 1
             return [self._m.get(a, 0) for a in range(start, stop, step)]
@@ -130,6 +139,74 @@ def test_read_bytes_respects_length():
     t = load_sym_text("00:D000 wBlob\n")
     mem = DictMemory({0xD000: 0xAA, 0xD001: 0xBB, 0xD002: 0xCC, 0xD003: 0xDD})
     assert t.read_bytes(mem, "wBlob", 4) == bytes([0xAA, 0xBB, 0xCC, 0xDD])
+
+
+class BankedMemory:
+    """PyBoy's WRAM read contract with a live ``SVBK`` window.
+
+    ``0xD000``-``0xDFFF`` follows whichever bank ``SVBK`` names, while the
+    bank-indexed form ``memory[bank, addr]`` returns that bank's own byte.
+    The ROM banks its scratch region into the window during a link battle, so
+    this is the state in which the battle symbols must still read correctly.
+    """
+
+    def __init__(self, *, svbk: int) -> None:
+        self.banks: dict[int, dict[int, int]] = {}
+        self.fixed: dict[int, int] = {}
+        self.svbk = svbk
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            bank, address = key
+            return self.banks.get(bank, {}).get(address, 0)
+        if isinstance(key, slice):
+            start, stop, step = key.start, key.stop, key.step or 1
+            return [self[a] for a in range(start, stop, step)]
+        if 0xD000 <= key < 0xE000:
+            return self.banks.get(self.svbk, {}).get(key, 0)
+        return self.fixed.get(key, 0)
+
+    def __setitem__(self, key, value) -> None:
+        if isinstance(key, tuple):
+            bank, address = key
+            self.banks.setdefault(bank, {})[address] = int(value) & 0xFF
+        else:
+            self.fixed[int(key)] = int(value) & 0xFF
+
+
+def test_read_u8_resolves_bank_1_through_a_remapped_window():
+    """A banked symbol must not follow whatever bank ``SVBK`` names.
+
+    ``wIsInBattle`` lives in the linker's WRAM bank 1.  With ``SVBK == 2`` an
+    unqualified ``memory[addr]`` read returns bank 2's byte, so the typed
+    reader has to name the bank explicitly or the parser reports "not in
+    battle" while the ROM is in a forced-replacement exchange.
+    """
+    t = load_sym_text(SYNTHETIC_SYM)
+    mem = BankedMemory(svbk=2)
+    mem[1, 0xD057] = 0x02
+    mem[2, 0xD057] = 0x00
+    assert mem[0xD057] == 0x00  # the window really is showing bank 2
+    assert t.read_u8(mem, "wIsInBattle") == 0x02
+    assert t.read_bit(mem, "wIsInBattle", 1) is True
+
+
+def test_read_bytes_and_words_resolve_bank_1_through_a_remapped_window():
+    t = load_sym_text(SYNTHETIC_SYM)
+    mem = BankedMemory(svbk=3)
+    mem[1, 0xD16C] = 0x01
+    mem[1, 0xD16D] = 0x2C
+    assert t.read_bytes(mem, "wPartyMon1HP", 2) == bytes([0x01, 0x2C])
+    assert t.read_u16_be(mem, "wPartyMon1HP") == 0x012C
+
+
+def test_fixed_wram_bank_0_still_reads_directly():
+    """``0xC000``-``0xCFFF`` has no bank register and must not be remapped."""
+    t = load_sym_text("00:C123 wFixed\n")
+    mem = BankedMemory(svbk=2)
+    mem[0xC123] = 0x5A
+    mem[1, 0xC123] = 0xA5
+    assert t.read_u8(mem, "wFixed") == 0x5A
 
 
 def test_bit_out_of_range_raises():

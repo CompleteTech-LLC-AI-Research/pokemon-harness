@@ -158,11 +158,9 @@ def test_orchestrator_synchronous_nybble_exchange():
         # block on link.exchange and pair up via the InProcessSerialLink
         # queue.
         def _fire_both():
-            t = threading.Thread(
-                target=lambda: pa.fire(0x00, 0x22c3), daemon=True
-            )
+            t = threading.Thread(target=lambda: pa.fire(0x00, 0x22C3), daemon=True)
             t.start()
-            pbb.fire(0x00, 0x22c3)
+            pbb.fire(0x00, 0x22C3)
             t.join(timeout=2.0)
 
         # FakePyBoy.fire is synchronous and runs the callback right

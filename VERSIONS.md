@@ -58,11 +58,15 @@ MCP stdio/link lifecycle checks also passed in that native environment. This
 is clean native packaging and lifecycle evidence, not MCP gameplay or the
 fixture-backed acceptance matrix.
 
-The default packaged runtime is the bundled PyBoy `2.7.0` source fork at
-revision `c565df66c3731fad2856169a90f6bbec99925915`. Source mode is selected
-explicitly by `scripts/bootstrap_pyboy.py --mode source`; Cython is an optional
-separate mode and must be selected and verified explicitly. A standalone stock
-PyBoy wheel is not the documented runtime and must not shadow the package.
+The default packaged runtime is the bundled PyBoy `2.7.0` source fork at the
+harness-local divergence revision `fd765b1808ac9cb192b42ae971987158ff36ae48`
+(the in-fork tree is no longer byte-identical to the pre-divergence harness fork revision
+`c565df66c3731fad2856169a90f6bbec99925915`; see
+`vendor/pyboy-src/POKERED_HARNESS_PYBOY_DIVERGENCE.md`). Source mode is
+selected explicitly by `scripts/bootstrap_pyboy.py --mode source`; Cython is an
+optional separate mode and must be selected and verified explicitly. A
+standalone stock PyBoy wheel is not the documented runtime and must not shadow
+the package.
 
 Remote TCP remains loopback-only, unauthenticated, and unencrypted. The code
 and diagnostics do not establish a current-head completed remote trade or
@@ -303,7 +307,7 @@ reformatted.
 |---|---|---|
 | Python | `>=3.11` | `pyproject.toml` |
 | NumPy | `2.4.6` on Python 3.11; `2.5.2` on Python 3.12+ | `pyproject.toml`, `uv.lock`, and `scripts/bootstrap_pyboy.py` |
-| PyBoy | `2.7.0` + fork `c565df66c3731fad2856169a90f6bbec99925915` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` |
+| PyBoy | `2.7.0` + fork `fd765b1808ac9cb192b42ae971987158ff36ae48` | `vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION` and `vendor/pyboy-src/pyboy/__init__.py` (harness-local divergence revision; pre-divergence harness fork revision `c565df66c3731fad2856169a90f6bbec99925915`) |
 | MCP | `1.29.1` | `pyproject.toml` and `uv.lock` |
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
