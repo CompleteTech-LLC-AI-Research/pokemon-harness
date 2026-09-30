@@ -1037,7 +1037,7 @@ def _match_capture_names_for(statement):
     return names
 
 
-def _assigned_suppressors(function, bound):
+def _assigned_suppressors(function, bound, query=None):
     """Map each statement index to the suppressor names bound *by* it.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -1118,7 +1118,7 @@ def _assigned_suppressors(function, bound):
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
-    bindings, raw_values = _store_bindings(function, bound)
+    bindings, raw_values = _store_bindings(function, bound, query)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in bindings.values()
@@ -1220,7 +1220,7 @@ def _assigned_suppressors(function, bound):
     return assigned, raw_values
 
 
-def _store_bindings(function, bound):
+def _store_bindings(function, bound, query=None):
     """Map every name ``function`` binds to its ``(stmt, value, cond)`` stores.
 
     Returns ``(bindings, raw_values)``. ``raw_values`` is the undereferenced
@@ -1261,7 +1261,7 @@ def _store_bindings(function, bound):
     # written last". A read only sees the stores that precede it, so both
     # resolution sites pass the position they are resolving at and let
     # :func:`_last_store_before` pick the entry that had actually run.
-    raw_values = _raw_store_values(function)
+    raw_values = _raw_store_values(function, query, bound)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in raw_values.values()
@@ -1295,7 +1295,7 @@ def _store_bindings(function, bound):
             # `ast.Name` targets left this invisible and let a stale
             # suppressor outrank the loop's own binding.
             targets = [statement.target]
-            value = _loop_value_source(statement)
+            value = _loop_value_source(statement, query, bound)
         elif isinstance(statement, (ast.With, ast.AsyncWith)):
             # #324: `with ... as cs:` is a store too, and the item expression
             # is what the `with` would evaluate. A walrus carried in from
@@ -2107,7 +2107,7 @@ def _last_store_before(entries, orders, index, exclude=None, function=None):
     return tied[0][1]
 
 
-def _raw_store_values(function):
+def _raw_store_values(function, query=None, bound=None):
     """Every store's right-hand side, keyed by the name it binds.
 
     The point is to have the whole table available *before* any binding is
@@ -2178,7 +2178,7 @@ def _raw_store_values(function):
             # A loop target binds on every path that reaches the loop, so it
             # retires any carried value. The value is the next *element*, not
             # the iterable, and it is readable when the iterable is a literal.
-            targets, value = [statement.target], _loop_value_source(statement)
+            targets, value = [statement.target], _loop_value_source(statement, query, bound)
         elif isinstance(statement, (ast.With, ast.AsyncWith)):
             targets = [
                 item.optional_vars for item in statement.items if item.optional_vars is not None
@@ -2316,55 +2316,31 @@ def _element_for_target(target, elements, name):
     return _NO_MATCH
 
 
-def _loop_value_source(statement):
-    """The element a loop target leaves bound, when it can be read.
+def _loop_value_source(statement, query=None, bound=None):
+    """Read the final element only after a literal loop has completed.
 
-    A ``for`` target binds the next element of the iterable, not the iterable
-    itself, and normally the source cannot say which element that is:
-
-        for cs in helper.items():       # arbitrary
-            with cs:                    # unknowable
-
-    But the common shapes *are* readable, and reading them is what keeps
-    # #336's contract intact. `for cs in (contextlib.nullcontext(),):` really
-    # does leave an enterable value bound, and the shipped rows execute that
-    # and pin the assert **live**. Collapsing every loop target to
-    # :data:`UNREADABLE_VALUE` -- the safe direction for the *suppression*
-    # question -- would answer "defeated" there, which is an over-careful
-    # misreport: it silently drops a live assert from the sentinel's view.
-
-    So the two questions are separated by where each is asked. Whether the
-    name *may be a suppressor* is undecidable here and is answered safely by
-    :data:`UNREADABLE_VALUE`. Whether the name is *enterable at all* is a
-    different question (#336) and it is answered from the literal element,
-    which is exactly the distinction `_entry_is_dead` already documents.
-
-    Only a literal container is read, and only its first element, because
-    that is the only position a bare target can take. A ``Name`` or ``Call``
-    iterable returns :data:`UNREADABLE_VALUE`, which is the conservative
-    choice for the same reason an arbitrary iterable is undecidable.
-
-    #377: element zero is the element bound *during* the body, which is only
-    also the element left behind when the iterable has exactly one element.
-    A loop over more than one leaves the **last** one:
-
-        for cs in (contextlib.nullcontext(),
-                   contextlib.suppress(AssertionError)):
-            pass
-        with cs:
-            assert x != 1        # swallowed -- `cs` is the last element
-
-    and with the order reversed the assert is live. Returning element zero
-    answered the opposite of the truth in *both* orderings, which is worse
-    than a single missed row: a helper that returns a confident wrong answer
-    in the damaging direction and a wrong one in the over-careful direction
-    at the same time. The last element is what survives the loop, so that is
-    what is read; a single-element literal is unchanged by this.
+    A header inside the body can see every iteration's value. A literal with
+    one element is readable there; a mixed multi-element literal has no single
+    representative and must stay unreadable. After-loop reads keep the final
+    element rule; resolving bindings inside an else clause is separate.
     """
     iterable = statement.iter
-    if isinstance(iterable, (ast.Tuple, ast.List)) and iterable.elts:
-        return iterable.elts[-1]
-    return UNREADABLE_VALUE
+    if not isinstance(iterable, (ast.Tuple, ast.List)) or not iterable.elts:
+        return UNREADABLE_VALUE
+    if len(iterable.elts) == 1:
+        return iterable.elts[0]
+    if query is not None and any(_contains(child, query) for child in statement.body):
+        # A representative is sound only when every iteration suppresses the
+        # same failure. Mixed managers can propagate on an earlier iteration.
+        imports = bound if hasattr(bound, "get") else {}
+        if all(
+            _is_readable_suppressor(element, imports)
+            and any(_name_catches_assertion_error(name) for name in _suppression_names(element))
+            for element in iterable.elts
+        ):
+            return iterable.elts[0]
+        return UNREADABLE_VALUE
+    return iterable.elts[-1]
 
 
 def _aliased_suppressions(node, function, bound):
@@ -2413,7 +2389,7 @@ def _aliased_suppressions(node, function, bound):
     report both of those live context managers as defeats. The mutation matrix
     in the sentinel suite pins that difference.
     """
-    by_index, raw_values = _assigned_suppressors(function, bound)
+    by_index, raw_values = _assigned_suppressors(function, bound, node)
     # The raw table is keyed by name, so the statement that owns each entry is
     # what positions it. #348: the header must resolve against the stores that
     # ran before it, not against whichever store of that name is written last
@@ -3796,7 +3772,7 @@ def _entered_name_is_dead(header, function, bound, module=None):
     # which is exactly the information this rule needs discarded: the value
     # `None` here means "not a known suppressor", not "the value is None". So
     # the raw per-name store lists and their orderings are rebuilt instead.
-    bindings, _raw_values = _store_bindings(function, bound)
+    bindings, _raw_values = _store_bindings(function, bound, header)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in bindings.values()

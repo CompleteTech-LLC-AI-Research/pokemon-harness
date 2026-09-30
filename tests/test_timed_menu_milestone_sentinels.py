@@ -5048,3 +5048,48 @@ def test_a_self_alias_excludes_its_own_store_and_not_an_earlier_one():
         "rather than the walrus, so a retired suppressor was adopted and a "
         "live assert was reported as defeated"
     )
+
+
+@pytest.mark.parametrize(
+    ("elements", "header", "live"),
+    [
+        ("contextlib.nullcontext(), contextlib.suppress(AssertionError)", "cs", True),
+        ("contextlib.nullcontext(), 1", "cs", True),
+        ("contextlib.suppress(AssertionError), contextlib.nullcontext()", "cs", True),
+        ("contextlib.nullcontext(), contextlib.suppress(AssertionError)", "(cs := cs)", True),
+        ("contextlib.nullcontext(), contextlib.suppress(AssertionError)", "alias", True),
+        ("contextlib.nullcontext()", "cs", True),
+        ("contextlib.suppress(AssertionError)", "cs", False),
+        (
+            "contextlib.suppress(AssertionError), contextlib.suppress(AssertionError)",
+            "cs",
+            False,
+        ),
+        ("contextlib.nullcontext(), contextlib.nullcontext()", "cs", True),
+        (
+            "contextlib.suppress(AssertionError), contextlib.suppress(ValueError)",
+            "cs",
+            True,
+        ),
+    ],
+)
+def test_loop_body_header_reads_current_iteration_not_final_element(elements, header, live):
+    alias = "        alias = cs\n" if header == "alias" else ""
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        f"    for cs in ({elements},):\n"
+        + alias
+        + f"        with {header}:\n            assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<loop-body-position>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        fired = True
+    assert fired is live
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
