@@ -6997,6 +6997,54 @@ LOOP_ELEMENT_LIVE_SHAPES = (
         True,
         False,
     ),
+    # A negative one-argument bound is empty for the same reason `range(0)` is:
+    # `range(stop)` counts from 0 upwards by 1, so any `stop <= 0` yields
+    # nothing. The one-argument branch read this as `not stop`, which is
+    # "not empty" for every negative bound, so these two rows were missing and
+    # the defect shipped through a green suite.
+    #
+    # `range(-10**18)` is here to pin the *no-overflow* property: the fold
+    # compares the integers directly, so a bound far outside a machine word
+    # cannot round through a float and flip the answer.
+    (
+        "a negative one-argument range loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(-5):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "a very large negative range bound does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(-10**18):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The control that separates this from "any non-empty-looking number is
+    # empty": `range(-1)` is empty, `range(1)` is not, and both are written
+    # with a leading minus/plus so only the sign decides.
+    (
+        "CONTROL a one-argument range of one is not empty",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(1):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
     (
         "a literal-false while loop does not count as having run",
         (
