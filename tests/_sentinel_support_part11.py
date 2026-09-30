@@ -50,10 +50,14 @@ def _resolve_simple_literal_subject(function, match):
       be skipped by a branch or by a loop the way a nested store could;
     * it appears **before** the ``match`` in that body, so it is the value in
       effect when the subject is read;
-    * every statement between the binding and the ``match`` is inert with
-      respect to the subject -- it does not bind the name and cannot reach the
-      container -- so mutation, aliases, rebinding, and opaque calls between
-      construction and matching are still declined.
+    * no statement between the binding and the ``match`` binds the subject
+      name, so rebinding, aliasing and opaque calls between construction and
+      matching are declined. A statement that can still reach the container --
+      an ``__enter__`` that mutates it, an ``if`` body -- ends the walk for the
+      separate reason given on :data:`_INERT_INTERVENING_TYPES`: this
+      resolver decides only *which literal was written out*, and
+      :func:`_literal_match_reaches_header` is what refuses a statement it
+      cannot vouch for.
 
     The third condition was originally "immediately precedes, allowing only
     ``pass``". That is *sufficient* but not *necessary*, and it declined the
@@ -70,10 +74,14 @@ def _resolve_simple_literal_subject(function, match):
 
     A conditional store, destructuring assignment, loop target, walrus,
     subscript, or parameter still yields ``None``, as does any intervening
-    statement that binds the subject or that could reach the container.
-    Returning ``None`` is always the safe answer: the pre-existing
-    conservative verdict reports a possibly-live assert as defeated, whereas a
-    wrong ``1`` here would retire a carried suppressor that is still in force.
+    statement that binds the subject. Returning ``None`` is always the safe
+    answer: the pre-existing conservative verdict reports a possibly-live
+    assert as defeated, whereas a wrong ``1`` here would retire a carried
+    suppressor that is still in force.
+
+    This resolves *which literal was written out*. It does not certify that the
+    literal still holds at match time -- see :data:`_INERT_INTERVENING_TYPES`
+    for why that question is answered downstream instead.
     """
     if not isinstance(match.subject, ast.Name):
         return None
@@ -130,19 +138,31 @@ def _assign_targets_exactly(statement, name):
     return any(isinstance(target, ast.Name) and target.id == name for target in statement.targets)
 
 
-#: The only statements accepted between a subject binding and the `match` that
-#: reads it. Each is a statement that cannot bind a name and cannot reach an
-#: existing object, so the container built a line earlier is provably still the
-#: value in effect when the `match` runs.
-#
-#: `ast.Pass` is a no-op. A `with`/`async with` is admitted because entering a
-#: context manager binds only the names in its `optional_vars`; when that does
-#: not name the subject, the `__enter__` side effects are the caller's problem
-#: and cannot be read from here, so the conservative reading is to admit it.
-#: That is the one genuinely debatable entry, and it is admitted *only* because
-#: the alternative -- declining #369's own reproduction -- reports a live
-#: contract as defeated.
-#
+#: The statement types this walk will step over when they sit between a subject
+#: binding and the `match` that reads it. `ast.Pass` is a no-op. `ast.With` /
+#: `ast.AsyncWith` are admitted on the narrower ground that entering a context
+#: manager binds only the names in its `optional_vars`, which the companion
+#: name check below verifies does not include the subject.
+#:
+#: That is *not* a purity proof and should not be read as one: an `__enter__`
+#: can mutate the subject list in place through a plain `Load` of its name --
+#: `subject.clear()`, `subject.append(...)`, `subject[0] = ...` -- and this
+#: predicate cannot see that. It is admitted anyway because the alternative is
+#: declining #369's own reproduction, where the intervening `with` is the
+#: carried suppressor and touches nothing.
+#:
+#: The safety does not rest here. A mutating `with` that gets past this check
+#: is refused further down by `_literal_match_reaches_header`, which
+#: independently requires every preceding statement -- an intervening `with`
+#: included -- to be a `pass`, a bare `import contextlib`, a literal
+#: assignment, or a `with` whose context expressions are all readable calls.
+#: A custom manager such as `Mut(lambda: subject.clear())` fails that test, so
+#: the literal-subject proof is refused and the pre-existing conservative
+#: verdict stands. Checked by execution, not by inspection: across a
+#: differential sweep of 22 fixtures against master `a756500`, the only four
+#: verdicts that change are `False` -> `True`, all four on shapes where CPython
+#: really does fire the assert. Every mutation attempt stayed `defeated`.
+#:
 #: Deliberately absent: `if`/`while`/`for`/`try`/`with`-bodies containing a
 #: conditional store, every `ast.Assign` (handled by the caller), augmented and
 #: annotated assignment, `del`, and anything whose body is not walked here.
