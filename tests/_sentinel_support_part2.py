@@ -143,6 +143,23 @@ def _assigned_suppressors(function, bound, query=None, owning=None):
             # handle the marker correctly when it is absent -- that is what
             # #367's `_NOT_A_SUPPRESSOR` is for -- so the value is simply not
             # recorded, and the name reads as carrying nothing here.
+            #
+            # A mutation dropping this clause was measured and **survives** the
+            # whole suite. The read-site filter in `_aliased_suppressions`
+            # (`live[expression.id] is not _NOT_A_SUPPRESSOR`) already covers
+            # the only shape that reaches this line, so no verdict changes
+            # either way. The clause is kept anyway, and the reason is that
+            # "record the marker" is this module's established idiom for a
+            # bound name that carries no suppressor: `_bindings_before` and
+            # `_loop_target_bindings` both do exactly that rather than
+            # dropping the key, for the same anti-staleness reason #367 gives.
+            # Filtering only at the read site would leave a recorded marker one
+            # refactor away from reaching `_suppression_names`, which is the
+            # exact failure #367's own comment describes ("appending it would
+            # hand `_suppression_names` an object with no `args`"). This is
+            # defence at the producer so the consumer's filter is not the only
+            # thing standing between the marker and a bare `object()` being
+            # read as a suppression.
             if value is not None and value is not _NOT_A_SUPPRESSOR:
                 assigned.setdefault(index, {})[name] = value
             elif index and name in assigned.get(index - 1, {}):

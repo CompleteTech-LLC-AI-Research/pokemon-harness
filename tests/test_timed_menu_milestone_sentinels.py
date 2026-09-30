@@ -8653,6 +8653,62 @@ ELIF_LINK_SUPPRESSOR_SHAPES = (
         "    if x:\n        cs = contextlib.suppress(AssertionError)",
         False,
     ),
+    # #441. The two rows above and below are what pin *latest*, not *any*.
+    #
+    # Each writes two stores of the same name before the `elif`, one a
+    # suppressor and one not, so "is any superseded store a suppressor?" and
+    # "is the store in force on the skipped call a suppressor?" disagree.
+    # A skipped call runs every store in order and ends on the last one, so the
+    # answer is the last -- and the rows are ordered to make the two readings
+    # give opposite verdicts.
+    #
+    # Here the suppressor is written FIRST and the `nullcontext` second:
+    #
+    #     cs = contextlib.suppress(AssertionError)   # x=0: superseded
+    #     cs = contextlib.nullcontext()              # x=1: THIS is in force
+    #     if x:
+    #         pass
+    #     elif True:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x=1` the `if` arm is taken, the `elif` never runs, and the name holds
+    # the `nullcontext` -- so the assert FIRES and the header is live. Asking
+    # "did any superseded store suppress?" answers yes on the strength of the
+    # first line and reports a disarmed contract, which is the same false-DEAD
+    # #441 fixes, reached by a different route.
+    (
+        "an elif link over a nullcontext that supersedes an earlier suppressor",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    if x:\n        pass\n"
+            "    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The mirror, and the row that stops the fix generalising. Identical except
+    # that the `nullcontext` is written first and the suppressor second, so the
+    # *latest* prior store is a suppressor: on the call that skips the `elif`
+    # the assert is swallowed there too, and every call that reaches the header
+    # is defeated. The header really is dead.
+    #
+    # Without this row a repair that simply always answered "live" for an
+    # `elif` arm would pass the row above and certify a disarmed contract as
+    # load-bearing.
+    (
+        "CONTROL an elif link over a suppressor that supersedes an earlier nullcontext",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    if x:\n        pass\n"
+            "    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
 )
 
 
