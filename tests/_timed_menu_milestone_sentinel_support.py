@@ -4997,6 +4997,20 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
                 kinds.add(pinned)
                 continue
             if isinstance(statement, (ast.For, ast.AsyncFor)):
+                # #420. A *starred* loop target is decidable from the target
+                # syntax alone: `for *cs, in (...):` binds the list the
+                # unpacking collects, so entering it raises `TypeError`
+                # before the body and the assert below never runs. The
+                # decline below is for the *plain* loop target, which binds
+                # the next element and genuinely cannot be read without
+                # running the loop -- `for cs in (nullcontext(),):` is
+                # really live (#336). Recording the starred case as a
+                # `NoneType` here would be wrong for the same reason the
+                # assign path is: the wrapped element's kind is irrelevant
+                # to whether the *name* is enterable.
+                if _starred_names_in_loop_target(statement, name):
+                    kinds.add("list")
+                    continue
                 # A loop target binds the *next element* of the iterable, and
                 # the rule cannot read that element without running the loop.
                 # `#336` measured `for cs in (contextlib.nullcontext(),):` and
@@ -7064,11 +7078,31 @@ def _binds_starred_target(statement, name):
     only the names reached *through* a ``Starred``.
     """
     if not isinstance(statement, ast.Assign):
-        return False
+        return _starred_names_in_loop_target(statement, name)
     return any(
         isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
         for target in statement.targets
     )
+
+
+def _starred_names_in_loop_target(statement, name):
+    """#420. Is ``name`` a starred element of a ``for`` target?
+
+    `for *cs, in (...):` binds ``cs`` the same way `*cs, = (...)` does -- to the
+    *list* the unpacking collects -- so the target syntax alone decides that the
+    name is a list and `with cs:` raises `TypeError` before the body.
+
+    #419 fixed the plain `ast.Assign` spelling. The loop target is reached
+    through a different path: it is recorded with no value, so the rule falls
+    to the loop-target decline, which exists because a *plain* loop target
+    binds the next element and cannot be read without running the loop
+    (`#336`). That decline is right for `for cs in (nullcontext(),):`, which is
+    genuinely live, and over-broad for the starred sub-case, where nothing
+    about the iterable matters.
+    """
+    if not isinstance(statement, (ast.For, ast.AsyncFor)):
+        return False
+    return name in _starred_target_names([statement.target])
 
 
 def _starred_target_names(targets):
@@ -7130,6 +7164,7 @@ def _stores_of(name, by_index, index, function):
         for entry in entries
         if not entry[2]
         or isinstance(entry[0], ast.ExceptHandler)
+        or _starred_store_decides_kind(entry, name, orders, index, function)
         or _store_is_settled_before(entry, orders, index, function)
         or _statement_always_runs(entry[0], function)
     ]
@@ -7233,6 +7268,60 @@ def _stores_of(name, by_index, index, function):
     # from reading the earlier carried suppressor as if it were still in play.
     settled = [entry for entry in tied if _store_is_settled_before(entry, orders, index, function)]
     return settled or tied
+
+
+def _starred_store_decides_kind(entry, name, orders, index, function):
+    """#420. Does a starred store settle the kind *without* having run yet?
+
+    `_store_is_settled_before` deliberately declines a conditional store that
+    sits in the *same* top-level statement as the queried header, because a
+    `with` header is evaluated before that statement's body runs:
+
+        for _ in (1,):
+            *cs, = (contextlib.suppress(AssertionError),)
+            with cs:                 # read before the starred store above runs
+                assert x != 1
+
+    For a *plain* store that conservatism is right -- whether `cs` is bound at
+    all depends on control flow, and reading a value that may not exist would
+    claim a certainty the source does not have. A starred target is the
+    exception: the list-wrapping is decided by the target syntax alone and is
+    identical whether the store has run, has not run, or never will. So the
+    timing question that forces the decline is not the question being asked
+    here, and answering "cannot tell" let a dead assert be certified enforced.
+
+    Narrow on purpose: only a store *syntactically* inside the queried
+    statement's own body qualifies, only when the name is reached through an
+    `ast.Starred`, and only a value-free store is promoted this way -- a
+    starred store that also carries a readable right-hand side is left to
+    `_entry_is_dead`'s ordinary starred branch (#419), which already handles
+    it without this promotion.
+    """
+    statement = entry[0]
+    if not isinstance(statement, ast.Assign):
+        return False
+    if orders[id(statement)] != index:
+        return False
+    if not any(
+        isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
+        for target in statement.targets
+    ):
+        return False
+    top = function.body[index] if 0 <= index < len(function.body) else None
+    return top is not None and _nested_in_body(top, statement)
+
+
+def _nested_in_body(top, statement):
+    """Is ``statement`` written inside ``top``'s body, at any depth?"""
+    for field, value in ast.iter_fields(top):
+        if field in ("body", "orelse", "finalbody"):
+            for node in value if isinstance(value, list) else [value]:
+                if node is statement:
+                    return True
+                for child in ast.walk(node):
+                    if child is statement:
+                        return True
+    return False
 
 
 def _store_is_settled_before(entry, orders, index, function):
