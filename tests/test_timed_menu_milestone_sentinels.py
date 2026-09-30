@@ -312,7 +312,7 @@ def test_the_production_entry_point_is_what_actually_reports_a_bypass():
     temporarily pointed at a tree carrying a real bypass: the entry point must
     report it. Combined with the ``== []`` assertion already in
     ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
-    that pins the entry point from both directions — it must fire, and it must
+    that pins the entry point from both directions â€” it must fire, and it must
     not fire spuriously.
     """
     site = next(iter(RETENTION_COUNT_SITES))
@@ -3451,6 +3451,141 @@ def test_a_starred_target_reached_through_a_loop_binds_a_list(label, block, seco
         f"target binds a list however the loop is reached, and entering a list "
         f"raises before the body, so the assert under the header is "
         f"unreachable."
+    )
+
+
+@pytest.mark.parametrize(
+    ("store", "starred", "live"),
+    (
+        ("*cs, cs = (1, contextlib.nullcontext())", False, True),
+        ("(*cs, (cs,)) = (1, (contextlib.nullcontext(),))", False, True),
+        ("*cs, tail = head, cs = (1, contextlib.nullcontext())", False, True),
+        ("head, cs = *cs, tail = (1, contextlib.nullcontext())", True, False),
+        ("cs, *cs = (contextlib.nullcontext(), 1)", True, False),
+        ("(*cs, (cs, *cs)) = (1, (contextlib.nullcontext(), 2))", True, False),
+        ("*(cs, tail), = (contextlib.nullcontext(), 2)", False, True),
+    ),
+)
+def test_starred_target_kind_uses_the_final_store(store, starred, live):
+    """A repeated target name receives its last value, including nested stores.
+
+    Pin the dead-entry predicate directly: an older duplicate-binding
+    limitation elsewhere in `_is_enforced` masks this specific regression.
+    Every expected entry outcome is checked by executing the same fixture.
+    """
+    source = (
+        f"def outer(x, flag, helper):\n    import contextlib\n    {store}\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(store, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    statement = function.body[1]
+    header = function.body[2]
+    assert support._binds_starred_target(statement, "cs") is starred
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
+    )
+
+
+@pytest.mark.parametrize(
+    "store",
+    (
+        "*cs, tail = cs = (1, contextlib.nullcontext())",
+        "(*cs, tail) = (cs, tail) = (1, contextlib.nullcontext())",
+    ),
+)
+def test_later_chained_plain_target_clears_a_starred_binding(store):
+    statement = ast.parse(store).body[0]
+    assert not support._binds_starred_target(statement, "cs")
+
+
+@pytest.mark.parametrize(
+    ("body", "live"),
+    (
+        ("    for *cs, cs in ((1, contextlib.nullcontext()),):\n", True),
+        ("    for (*cs, (cs,)) in ((1, (contextlib.nullcontext(),)),):\n", True),
+        ("    for cs, *cs in ((contextlib.nullcontext(), 1),):\n", False),
+        (
+            "    for _ in (1,):\n        *cs, cs = (1, contextlib.nullcontext())\n",
+            True,
+        ),
+        (
+            "    for _ in (1,):\n        *cs, = (1,)\n        cs = contextlib.nullcontext()\n",
+            True,
+        ),
+        (
+            "    for *cs, in ((1,),):\n        cs = contextlib.nullcontext()\n",
+            True,
+        ),
+        (
+            "    for _ in (1,):\n        if not flag:\n            *cs, = (1,)\n",
+            True,
+        ),
+        (
+            (
+                "    for _ in (1,):\n"
+                "        *cs, = (1,)\n"
+                "        if flag:\n"
+                "            cs = contextlib.nullcontext()\n"
+            ),
+            True,
+        ),
+    ),
+)
+def test_starred_loop_store_must_remain_in_force_at_entry(body, live):
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n" + body + "        with cs:\n"
+        "            assert x != 1\n"
+    )
+    # The conditional controls execute the path where the name stays usable.
+    _assert_entry_contract(body, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    header = next(node for node in ast.walk(function) if isinstance(node, ast.With))
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
+    )
+
+
+@pytest.mark.parametrize("future_store", (False, True))
+def test_starred_store_after_a_loop_header_does_not_rewrite_its_value(future_store):
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for _ in (1,):\n"
+        "        with cs:\n"
+        "            assert x != 1\n"
+    )
+    if future_store:
+        source += "        *cs, = (1,)\n"
+    _assert_entry_contract("future starred store", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    header = next(node for node in ast.walk(function) if isinstance(node, ast.With))
+    assert not support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree)
+
+
+@pytest.mark.parametrize(("iterable", "live"), (("()", True), ("((1,),)", False)))
+def test_starred_target_after_a_loop_respects_whether_it_ran(iterable, live):
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        f"    for *cs, in {iterable}:\n"
+        "        pass\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract("completed starred loop", source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    header = function.body[-1]
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
     )
 
 

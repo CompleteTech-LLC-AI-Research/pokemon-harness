@@ -2868,7 +2868,14 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
                 # `NoneType` here would be wrong for the same reason the
                 # assign path is: the wrapped element's kind is irrelevant
                 # to whether the *name* is enterable.
-                if _starred_names_in_loop_target(statement, name):
+                if _starred_names_in_loop_target(statement, name) and _starred_store_decides_kind(
+                    (statement, value, _conditional),
+                    name,
+                    by_index["orders"],
+                    index,
+                    function,
+                    by_index.get("header"),
+                ):
                     kinds.add("list")
                     continue
                 # A loop target binds the *next element* of the iterable, and
@@ -3133,10 +3140,7 @@ def _binds_starred_target(statement, name):
     """
     if not isinstance(statement, ast.Assign):
         return _starred_names_in_loop_target(statement, name)
-    return any(
-        isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
-        for target in statement.targets
-    )
+    return name in _starred_target_names(statement.targets)
 
 
 def _starred_names_in_loop_target(statement, name):
@@ -3160,23 +3164,29 @@ def _starred_names_in_loop_target(statement, name):
 
 
 def _starred_target_names(targets):
-    """The names these targets bind *through* an ``ast.Starred``."""
-    names = set()
-    pending = list(targets)
+    """Names whose final store in these targets collects a starred list.
+
+    CPython assigns targets and nested elements from left to right. A later
+    plain target can overwrite the list: ``*cs, cs = (1, nullcontext())``
+    leaves ``cs`` a context manager. Track every name store in that order,
+    including the separate targets of a chained assignment.
+    """
+    final_stores = {}
+    pending = list(reversed(targets))
     while pending:
         target = pending.pop()
         if isinstance(target, ast.Name):
-            continue
-        if isinstance(target, (ast.Tuple, ast.List)):
-            pending.extend(target.elts)
+            final_stores[target.id] = False
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(reversed(target.elts))
         elif isinstance(target, ast.Starred):
             if isinstance(target.value, ast.Name):
-                names.add(target.value.id)
+                final_stores[target.value.id] = True
             else:
-                # `(*(a, b),) = ...` is not valid Python, but a nested target
-                # keeps the walk total rather than silently ignoring a store.
+                # Unpacking the collected list again binds its elements,
+                # rather than assigning the list itself to every nested name.
                 pending.append(target.value)
-    return names
+    return {name for name, starred in final_stores.items() if starred}
 
 
 def _stores_of(name, by_index, index, function):
@@ -3206,7 +3216,7 @@ def _stores_of(name, by_index, index, function):
         for entry in entries
         if not entry[2]
         or isinstance(entry[0], ast.ExceptHandler)
-        or _starred_store_decides_kind(entry, name, orders, index, function)
+        or _starred_store_decides_kind(entry, name, orders, index, function, by_index.get("header"))
         or _store_is_settled_before(entry, orders, index, function)
     ]
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
@@ -3225,58 +3235,67 @@ def _stores_of(name, by_index, index, function):
     return settled or tied
 
 
-def _starred_store_decides_kind(entry, name, orders, index, function):
-    """#420. Does a starred store settle the kind *without* having run yet?
+def _starred_store_decides_kind(entry, name, orders, index, function, header=None):
+    """A starred store must have run before this header and remain in force.
 
-    `_store_is_settled_before` deliberately declines a conditional store that
-    sits in the *same* top-level statement as the queried header, because a
-    `with` header is evaluated before that statement's body runs:
-
-        for _ in (1,):
-            *cs, = (contextlib.suppress(AssertionError),)
-            with cs:                 # read before the starred store above runs
-                assert x != 1
-
-    For a *plain* store that conservatism is right -- whether `cs` is bound at
-    all depends on control flow, and reading a value that may not exist would
-    claim a certainty the source does not have. A starred target is the
-    exception: the list-wrapping is decided by the target syntax alone and is
-    identical whether the store has run, has not run, or never will. So the
-    timing question that forces the decline is not the question being asked
-    here, and answering "cannot tell" let a dead assert be certified enforced.
-
-    Narrow on purpose: only a store *syntactically* inside the queried
-    statement's own body qualifies, only when the name is reached through an
-    `ast.Starred`, and only a value-free store is promoted this way -- a
-    starred store that also carries a readable right-hand side is left to
-    `_entry_is_dead`'s ordinary starred branch (#419), which already handles
-    it without this promotion.
+    A direct earlier sibling on the header's execution path has run whenever
+    the header is reached. A loop target has run when the header is inside
+    that loop's body. Future assignments, skipped branches, and loop targets
+    read after a possibly empty loop provide no such guarantee.
     """
     statement = entry[0]
-    if not isinstance(statement, ast.Assign):
+    if header is None or not _binds_starred_target(statement, name):
         return False
-    if orders[id(statement)] != index:
+    prior = _statements_before_header(function, header)
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        reached = any(header is child for node in statement.body for child in ast.walk(node))
+        if not reached and isinstance(statement, ast.For) and statement in prior:
+            # A completed literal nonempty loop necessarily assigned its
+            # target at least once. An empty or dynamically sized iterable
+            # can leave the previous usable manager untouched.
+            reached = (
+                isinstance(statement.iter, (ast.Tuple, ast.List, ast.Set))
+                and bool(statement.iter.elts)
+                and not any(isinstance(element, ast.Starred) for element in statement.iter.elts)
+            )
+    else:
+        reached = orders[id(statement)] == index and statement in prior
+    if not reached:
         return False
-    if not any(
-        isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
-        for target in statement.targets
-    ):
-        return False
-    top = function.body[index] if 0 <= index < len(function.body) else None
-    return top is not None and _nested_in_body(top, statement)
+    # Even a conditional intervening store can replace the list. Decline it
+    # rather than deciding one path's value for every path to the header.
+    bindings, _ = _store_bindings(function, {})
+    position = lambda node: (node.lineno, node.col_offset)
+    return not any(
+        other is not statement and position(statement) < position(other) < position(header)
+        for other, _, _ in bindings.get(name, ())
+    )
 
 
-def _nested_in_body(top, statement):
-    """Is ``statement`` written inside ``top``'s body, at any depth?"""
-    for field, value in ast.iter_fields(top):
-        if field in ("body", "orelse", "finalbody"):
-            for node in value if isinstance(value, list) else [value]:
-                if node is statement:
-                    return True
-                for child in ast.walk(node):
-                    if child is statement:
-                        return True
-    return False
+def _statements_before_header(function, header):
+    """Direct earlier siblings on the syntactic path to this header."""
+    prior = []
+    node = function
+    while node is not header:
+        found = None
+        for _, value in ast.iter_fields(node):
+            children = value if isinstance(value, list) else [value]
+            previous = []
+            for child in children:
+                if not isinstance(child, ast.AST):
+                    continue
+                if any(descendant is header for descendant in ast.walk(child)):
+                    found = child
+                    prior.extend(previous)
+                    break
+                if isinstance(child, ast.stmt):
+                    previous.append(child)
+            if found is not None:
+                break
+        if found is None:
+            return []
+        node = found
+    return prior
 
 
 def _store_is_settled_before(entry, orders, index, function):
@@ -3542,7 +3561,7 @@ def _entered_name_is_dead(header, function, bound, module=None):
         for entries in bindings.values()
         for statement, _, _ in entries
     }
-    by_index = {"bindings": bindings, "orders": orders}
+    by_index = {"bindings": bindings, "orders": orders, "header": header}
     for index, statement in enumerate(function.body):
         for candidate in ast.walk(statement):
             if candidate is not header:
