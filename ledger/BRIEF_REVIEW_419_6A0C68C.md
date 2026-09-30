@@ -119,3 +119,34 @@ decline is the mechanism under review.
 - No timing or capacity claim is made. Host load was 30 on 4 CPUs
   (CPU PSI `some avg10=90.96`), so timing-sensitive results would be
   inadmissible; the gates above are correctness-only.
+
+---
+
+## Reviewer instructions (added by the lead)
+
+Materialise the **code** head, not this branch tip:
+
+    git fetch origin
+    git worktree add <scratch> --detach 6a0c68c95bd11638ee31187f3d494d95e3c94442
+    git -C <scratch> rev-parse HEAD    # must print 6a0c68c...
+
+`743bac8` is this brief on top of the code head; `git diff 6a0c68c..743bac8 --
+tests/` is empty, so both name the same code.
+
+To be answered:
+
+1. Does `_binds_starred_target` catch every shape CPython binds to a list, and
+   no shape it does not? Try nested targets, `(*cs,) = ...`, mixed positional
+   before and after, and starred names inside a `for`/walrus/exception store.
+2. Is placing the branch *before* the destructuring decline correct, and does
+   it leave the non-starred decline — which #336, #413 and #417 depend on —
+   intact?
+3. Are the 5 new rows genuinely non-vacuous, and do they still fail if
+   `_assert_entry_contract` stops executing the fixture?
+4. Any shape where the candidate is *wrong in the damaging direction* that
+   base got right? (The lead's 21-shape differential found 0, but it was
+   written by the author.)
+5. Is the claim "pre-existing on `6b72bf6`" independently confirmed?
+
+Verdict line to write at the end of your report:
+`VERDICT: APPROVE` / `VERDICT: REJECT` / `VERDICT: INCONCLUSIVE`
