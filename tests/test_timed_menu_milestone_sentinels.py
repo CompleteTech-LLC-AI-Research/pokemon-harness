@@ -6788,6 +6788,111 @@ UNREACHED_LOOP_BODY_ROWS = (
         ),
         False,
     ),
+    # #378, from the independent review of `3edecda`. The `else` clause of a
+    # loop is what runs *because* the loop finished without `break`, so it
+    # executes on every path through a zero-iteration loop -- the body is
+    # skipped, the `else` is not. `For.body` and `For.orelse` are AST
+    # siblings, so a walk over the ancestors sees both, and treating any
+    # ancestor `For` as "its stores are unreachable" swept these up too.
+    #
+    # Executed on CPython 3.12.14 each of these *swallows* the assert, and
+    # `master` (`2c81f10`) already answered all of them correctly. Reporting
+    # them live was a regression the `3edecda` helper introduced, in the
+    # damaging direction: a defeated contract certified as load-bearing.
+    (
+        "the else clause of a zero-iteration loop still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "an else clause over a list literal still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in []:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "an else clause over a dict literal still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in {}:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a store nested in the else clause still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        if True:\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a store inside a with in the else clause still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        with contextlib.suppress(ValueError):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    # Control for the rows above. A `for`/`else` `else` clause runs on normal
+    # completion, and a loop that completes normally has run every iteration,
+    # so a non-empty loop's `else` rebinds as well -- it must keep reporting
+    # `False`, or a fix that read *every* `else` as unreachable would pass the
+    # five rows above.
+    #
+    # The `break` case is deliberately not a row here. A `break` really does
+    # skip the `else`, so the assert is live, but the analyzer answers
+    # `defeated` for that shape on `master` (`2c81f10`) exactly as it does on
+    # this branch -- measured on both, CPython fires and both trees report
+    # `False`. That is a pre-existing false-DEAD of its own, unrelated to
+    # #378, and pinning it here would either fail this PR for a defect it did
+    # not introduce or quietly widen its scope. It is left for a separate
+    # issue rather than absorbed.
+    (
+        "CONTROL a completed loop runs its else clause too",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1,):\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
 )
 
 

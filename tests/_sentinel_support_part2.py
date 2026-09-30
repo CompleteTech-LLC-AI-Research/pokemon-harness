@@ -492,6 +492,31 @@ def _is_provably_unreached_store(entry, orders, function):
     A ``while True:`` loop, or one whose test is merely truthy, is not
     provably empty and so is not matched.
 
+    The ``For`` branch is gated on :func:`_in_body`, and that gate is the
+    whole difference between a correct answer and a regression. ``For.body``
+    and ``For.orelse`` are AST **siblings**: both are attributes of the same
+    ``ast.For`` node, and both therefore appear in the ancestor walk, but only
+    one of them is skipped when the loop has no iterations. The ``else``
+    clause is exactly what runs *because* the loop finished without
+    ``break``, so every statement in it executes on every path through a
+    zero-iteration loop:
+
+        for y in ():
+            pass
+        else:
+            cs = contextlib.suppress(AssertionError)   # this runs
+
+    Executed on CPython 3.12.14 the assert under the following ``with cs:`` is
+    swallowed in all of these -- a plain assign, the same over a list and a
+    dict literal, an assign nested in an ``if``, and one nested in a ``with``.
+    Unguarded, this helper answered "unreached" for every one of them and the
+    assert was reported **live**, which is the damaging direction #378 exists
+    to prevent and a regression against ``master`` (``2c81f10``), where all
+    five are already correct. The clause is reused rather than a new
+    containment test written, because it already answers the same question
+    for a ``with`` header: "inside the executed body, not a handler or an
+    ``else``".
+
     This is the same question `_is_store_statement` answers for a header
     *nested inside* the loop; both are needed because the two answer through
     different tables. On ``master`` (``2c81f10``) the nested case was already
@@ -523,7 +548,10 @@ def _is_provably_unreached_store(entry, orders, function):
         if isinstance(ancestor, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
             ancestor.iter
         ):
-            return True
+            # `_in_body` excludes `orelse` -- see the docstring for why that
+            # gate is the whole difference between a correct answer and a
+            # regression.
+            return _in_body(ancestor, statement)
     return False
 
 
