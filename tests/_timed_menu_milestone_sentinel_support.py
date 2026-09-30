@@ -4098,6 +4098,15 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     kinds = set()
     for statement, value, _conditional in stores:
         if _binds_starred_target(statement, name):
+            if isinstance(statement, (ast.For, ast.AsyncFor)) and not _starred_store_decides_kind(
+                (statement, value, _conditional),
+                name,
+                by_index["orders"],
+                index,
+                function,
+                by_index.get("header"),
+            ):
+                return False
             # #418. `*cs, = (...)` and `a, *cs = (...)` collect a run of
             # elements into a **list**, so the *name* is a list whatever the
             # right-hand side held. `list` has no `__enter__`, so entering it
@@ -4157,6 +4166,27 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
                 kinds.add(pinned)
                 continue
             if isinstance(statement, (ast.For, ast.AsyncFor)):
+                # #420. A *starred* loop target is decidable from the target
+                # syntax alone: `for *cs, in (...):` binds the list the
+                # unpacking collects, so entering it raises `TypeError`
+                # before the body and the assert below never runs. The
+                # decline below is for the *plain* loop target, which binds
+                # the next element and genuinely cannot be read without
+                # running the loop -- `for cs in (nullcontext(),):` is
+                # really live (#336). Recording the starred case as a
+                # `NoneType` here would be wrong for the same reason the
+                # assign path is: the wrapped element's kind is irrelevant
+                # to whether the *name* is enterable.
+                if _starred_names_in_loop_target(statement, name) and _starred_store_decides_kind(
+                    (statement, value, _conditional),
+                    name,
+                    by_index["orders"],
+                    index,
+                    function,
+                    by_index.get("header"),
+                ):
+                    kinds.add("list")
+                    continue
                 # A loop target binds the *next element* of the iterable, and
                 # the rule cannot read that element without running the loop.
                 # `#336` measured `for cs in (contextlib.nullcontext(),):` and
@@ -4664,7 +4694,7 @@ def _statement_always_runs(statement, function):
     return all(
         _is_always_true_branch(block, statement, function)
         or _is_always_true_arm(block, statement, function)
-        or not _block_never_runs(block, function)
+        or (not isinstance(block, ast.If) and not _block_never_runs(block, function))
         for block in blocks
     ) and not any(_statement_in_unreachable_arm(block, statement, function) for block in blocks)
 
@@ -6406,8 +6436,28 @@ def _binds_starred_target(statement, name):
     only the names reached *through* a ``Starred``.
     """
     if not isinstance(statement, ast.Assign):
-        return False
+        return _starred_names_in_loop_target(statement, name)
     return name in _starred_target_names(statement.targets)
+
+
+def _starred_names_in_loop_target(statement, name):
+    """#420. Is ``name`` a starred element of a ``for`` target?
+
+    `for *cs, in (...):` binds ``cs`` the same way `*cs, = (...)` does -- to the
+    *list* the unpacking collects -- so the target syntax alone decides that the
+    name is a list and `with cs:` raises `TypeError` before the body.
+
+    #419 fixed the plain `ast.Assign` spelling. The loop target is reached
+    through a different path: it is recorded with no value, so the rule falls
+    to the loop-target decline, which exists because a *plain* loop target
+    binds the next element and cannot be read without running the loop
+    (`#336`). That decline is right for `for cs in (nullcontext(),):`, which is
+    genuinely live, and over-broad for the starred sub-case, where nothing
+    about the iterable matters.
+    """
+    if not isinstance(statement, (ast.For, ast.AsyncFor)):
+        return False
+    return name in _starred_target_names([statement.target])
 
 
 def _starred_target_names(targets):
@@ -6475,6 +6525,7 @@ def _stores_of(name, by_index, index, function):
         for entry in entries
         if not entry[2]
         or isinstance(entry[0], ast.ExceptHandler)
+        or _starred_store_decides_kind(entry, name, orders, index, function, by_index.get("header"))
         or _store_is_settled_before(entry, orders, index, function)
         or _statement_always_runs(entry[0], function)
     ]
@@ -6578,6 +6629,69 @@ def _stores_of(name, by_index, index, function):
     # from reading the earlier carried suppressor as if it were still in play.
     settled = [entry for entry in tied if _store_is_settled_before(entry, orders, index, function)]
     return settled or tied
+
+
+def _starred_store_decides_kind(entry, name, orders, index, function, header=None):
+    """A starred store must have run before this header and remain in force.
+
+    A direct earlier sibling on the header's execution path has run whenever
+    the header is reached. A loop target has run when the header is inside
+    that loop's body. Future assignments, skipped branches, and loop targets
+    read after a possibly empty loop provide no such guarantee.
+    """
+    statement = entry[0]
+    if header is None or not _binds_starred_target(statement, name):
+        return False
+    prior = _statements_before_header(function, header)
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        reached = any(header is child for node in statement.body for child in ast.walk(node))
+        if not reached and isinstance(statement, ast.For) and statement in prior:
+            # A completed literal nonempty loop necessarily assigned its
+            # target at least once. An empty or dynamically sized iterable
+            # can leave the previous usable manager untouched.
+            reached = (
+                isinstance(statement.iter, (ast.Tuple, ast.List, ast.Set))
+                and bool(statement.iter.elts)
+                and not any(isinstance(element, ast.Starred) for element in statement.iter.elts)
+            )
+    else:
+        reached = orders[id(statement)] == index and statement in prior
+    if not reached:
+        return False
+    # Even a conditional intervening store can replace the list. Decline it
+    # rather than deciding one path's value for every path to the header.
+    bindings, _ = _store_bindings(function, {})
+    position = lambda node: (node.lineno, node.col_offset)
+    return not any(
+        other is not statement and position(statement) < position(other) < position(header)
+        for other, _, _ in bindings.get(name, ())
+    )
+
+
+def _statements_before_header(function, header):
+    """Direct earlier siblings on the syntactic path to this header."""
+    prior = []
+    node = function
+    while node is not header:
+        found = None
+        for _, value in ast.iter_fields(node):
+            children = value if isinstance(value, list) else [value]
+            previous = []
+            for child in children:
+                if not isinstance(child, ast.AST):
+                    continue
+                if any(descendant is header for descendant in ast.walk(child)):
+                    found = child
+                    prior.extend(previous)
+                    break
+                if isinstance(child, ast.stmt):
+                    previous.append(child)
+            if found is not None:
+                break
+        if found is None:
+            return []
+        node = found
+    return prior
 
 
 def _store_is_settled_before(entry, orders, index, function):
@@ -6843,7 +6957,7 @@ def _entered_name_is_dead(header, function, bound, module=None):
         for entries in bindings.values()
         for statement, _, _ in entries
     }
-    by_index = {"bindings": bindings, "orders": orders}
+    by_index = {"bindings": bindings, "orders": orders, "header": header}
     for index, statement in enumerate(function.body):
         for candidate in ast.walk(statement):
             if candidate is not header:

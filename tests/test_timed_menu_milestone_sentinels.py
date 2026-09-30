@@ -314,7 +314,7 @@ def test_the_production_entry_point_is_what_actually_reports_a_bypass():
     temporarily pointed at a tree carrying a real bypass: the entry point must
     report it. Combined with the ``== []`` assertion already in
     ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
-    that pins the entry point from both directions — it must fire, and it must
+    that pins the entry point from both directions â€” it must fire, and it must
     not fire spuriously.
     """
     site = next(iter(RETENTION_COUNT_SITES))
@@ -4178,6 +4178,113 @@ CAPTURE_SCOPE_BOUNDARY_ROWS = (
 #: rule wholesale. Two are included below and both must stay ``True``: a plain
 #: assignment of a real context manager, and a class that *does* implement the
 #: protocol. Neither is in the table above, so neither is a duplicate.
+#:
+#: #418 adds the four starred-target rows. These are the same shape as the
+#: carriers -- entering raises ``TypeError`` before the body, so the second
+#: assert is unreachable -- but they are decided by a *value* the module can
+#: read rather than by an unreadable one, which is why they sat in a different
+#: bucket and stayed wrong. The fix keys off the target syntax alone, so the
+#: right-hand side in these rows is deliberately varied: a lone element, a
+#: bind-from-end-after-star tail, a usable context manager, and a plain int all
+#: land on the same list.
+STARRED_TARGET_ENTRY_UNREACHABLE_ROWS = (
+    (
+        "a starred target binds a list even from a lone suppressor",
+        "    *cs, = (contextlib.suppress(AssertionError),)",
+        False,
+    ),
+    (
+        "a bind-from-end-after-star tail binds the list of the rest",
+        "    a, *cs = (contextlib.suppress(AssertionError), 2)",
+        False,
+    ),
+    (
+        "a starred target holding a usable context manager is still a list",
+        "    *cs, = (contextlib.nullcontext(),)",
+        False,
+    ),
+    (
+        "a starred target over a non-manager element binds a list",
+        "    *cs, = (1,)",
+        False,
+    ),
+    # Controls. A plain element binding is NOT decidable from the container's
+    # syntax, so the rule declines and the assert stays live. These keep that
+    # decline intact: a fix that over-corrected every destructuring target
+    # would report these dead and fail.
+    (
+        "CONTROL a non-starred element binding of a real context manager",
+        "    cs, other = (contextlib.nullcontext(), 2)",
+        True,
+    ),
+)
+
+
+#: #420, the residual of #418: the same list-wrapping reached through loop
+#: machinery. Both shapes below reported the unreachable assert ``enforced``
+#: on #419's head, so the #419 fix did not close the family.
+#:
+#: These are two *different* defects rather than one. A starred store inside a
+#: ``for`` body is declined by ``_store_is_settled_before`` (the header is read
+#: before the enclosing statement's body runs), while a starred ``for`` target
+#: is declined by the loop-target rule (#336). The rows are kept together
+#: because they are the same class and the same answer, but a repair that
+#: closed only one would leave the other as a false-live, so each is pinned
+#: separately.
+#:
+#: The element deliberately carries a *usable* ``contextlib.suppress`` in both
+#: rows. The wrapped element's kind is irrelevant to whether the name is
+#: enterable -- only the starred target is -- so a fix that asked "does the
+#: element suppress?" instead of "is the target starred?" would pass a row
+#: built from a plain element and fail these.
+STARRED_LOOP_ENTRY_UNREACHABLE_ROWS = (
+    (
+        "a starred store inside a for body binds a list",
+        (
+            "    for _ in (1,):\n"
+            "        *cs, = (contextlib.suppress(AssertionError),)\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        False,
+    ),
+    (
+        "a starred loop target binds a list",
+        (
+            "    for *cs, in ((contextlib.suppress(AssertionError),),):\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        False,
+    ),
+    # Controls. Both keep a *narrow* repair honest. A plain loop target binds
+    # the next element, which the rule cannot read without running the loop,
+    # so #336 declines it and the assert stays live -- CPython agrees, the
+    # nullcontext really is entered. A plain store in the same position is
+    # likewise not decidable from syntax alone. A fix that keyed on "any
+    # target inside a loop" rather than "a starred target" would report these
+    # dead, and the interpreter check in `_assert_entry_contract` would catch
+    # it.
+    (
+        "CONTROL a plain loop target over a real context manager",
+        (
+            "    for cs in (contextlib.nullcontext(),):\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "CONTROL a plain store in a for body over a real context manager",
+        (
+            "    for _ in (1,):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+        ),
+        True,
+    ),
+)
 CARRIER_ENTRY_UNREACHABLE_ROWS = (
     ("import-as binds the module", "    import os as cs", False),
     ("import-from-as binds the module", "    from os import path as cs", False),
@@ -4356,6 +4463,274 @@ def test_a_string_field_carrier_cannot_be_entered_so_the_assert_is_unreachable(
         f"{label}: expected verdicts {expected}, got {results}. A carrier that "
         f"cannot be entered makes the assert under the header *unreachable*, "
         f"so reporting it enforced certifies a dead contract as load-bearing."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "second_assert_live"),
+    STARRED_TARGET_ENTRY_UNREACHABLE_ROWS,
+    ids=[row[0] for row in STARRED_TARGET_ENTRY_UNREACHABLE_ROWS],
+)
+def test_a_starred_target_binds_a_list_so_the_assert_is_unreachable(
+    label, rebind, second_assert_live
+):
+    """A name bound through ``ast.Starred`` holds a list, which cannot be entered.
+
+    This is #418, and it is a real defect on ``origin/master`` (``6b72bf6``)
+    rather than a coverage gap: every row below reported the unreachable
+    assert ``enforced`` before the fix.
+
+    The failure is an ordering error inside ``_entry_is_dead``. The general
+    destructuring branch declines ``cs, other = (a, b)`` because the type of a
+    plain element is not readable from the container's syntax, and declining is
+    the safe answer -- the assert stays live. A starred target was falling into
+    that same decline, but it is decidable: ``*cs, = (...)`` and ``a, *cs =
+    (...)`` collect a run of elements into a **list** regardless of what the
+    right-hand side held. Letting the wrapped element's own kind vouch for the
+    name is what let a usable ``contextlib.suppress`` certify a bare list as an
+    enterable object.
+
+    Measured on CPython 3.12.14, with ``x=1`` so ``assert x != 1`` is false:
+
+    * ``*cs, = (suppress(),)`` binds ``[suppress_object]``
+    * ``a, *cs = (suppress(), 2)`` binds ``[2]``
+    * ``b, *c = (1, suppress())`` binds ``[suppress_object]``
+
+    and ``hasattr(cs, "__enter__")`` is ``False`` in every case, so
+    ``with cs:`` raises ``TypeError`` before the body and the assert is
+    unreachable. Note the third shape: a starred tail that *does* contain a
+    usable context manager is still a list, so the element's own kind is
+    irrelevant to the entry decision.
+
+    The control keeps the sibling decline honest. Its expected value is
+    ``True`` and the interpreter agrees -- ``cs, other = (nullcontext(), 2)``
+    really does enter and really does fire. A fix that keyed on "any
+    destructuring target" instead of "a starred target" would report this dead,
+    and this test would catch it.
+
+    A second control was drafted and then removed rather than shipped: the
+    matching non-starred row with a *suppressor* element
+    (``cs, other = (suppress(), 2)``) is **also** reported ``enforced`` by the
+    analyzer, while CPython swallows it -- the same false-live, on the
+    non-starred path. That is the ``#336`` element-decline family, not this
+    issue, and it is unaffected by the change under test. It was caught here
+    because ``_assert_entry_contract`` executes the fixture rather than
+    trusting the expected column, which is the only reason a row this stale
+    could not have been shipped silently. Measured ground truth for it:
+
+    | store                                     | CPython 3.12.14 | analyzer |
+    |-------------------------------------------|-----------------|----------|
+    | ``cs, other = (nullcontext(), 2)``        | fires (live)    | ``True`` |
+    | ``cs, other = (suppress(), 2)``           | swallowed       | ``True`` |
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A starred target "
+        f"binds a list, and entering a list raises before the body, so the "
+        f"assert under the header is unreachable."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "block", "second_assert_live"),
+    STARRED_LOOP_ENTRY_UNREACHABLE_ROWS,
+    ids=[row[0] for row in STARRED_LOOP_ENTRY_UNREACHABLE_ROWS],
+)
+def test_a_starred_target_reached_through_a_loop_binds_a_list(label, block, second_assert_live):
+    """#420. The list-wrapping of a starred target survives loop machinery.
+
+    #419 fixed ``*cs, = (...)`` and ``a, *cs = (...)`` where the store is
+    written directly in the function body. The same name read through a loop
+    was still certified ``enforced`` while CPython raised ``TypeError`` before
+    the body, so the assert was unreachable and the contract was dead.
+
+    The two shapes fail for different reasons, and both are pinned:
+
+    * a starred *store* inside a ``for`` body is declined by
+      ``_store_is_settled_before``, which is right in general -- a ``with``
+      header is evaluated before its own statement's body runs -- but
+      collapses "has not run yet" into the same "cannot tell" answer as
+      "undecidable". A starred target is decidable either way, because the
+      list-wrapping comes from the target syntax and is the same whether the
+      store ran, has not run, or never will.
+    * a starred *loop target* is declined by the #336 rule, which is right for
+      a plain loop target (it binds the next element, and
+      ``for cs in (nullcontext(),):`` is genuinely live) and over-broad for the
+      starred sub-case, where the iterable is irrelevant.
+
+    Measured on CPython 3.12.14 with ``x=1``, so ``assert x != 1`` is false:
+    both fixtures raise ``TypeError: 'list' object does not support the context
+    manager protocol`` on entry, and ``hasattr(cs, "__enter__")`` is ``False``
+    in both. The two controls really do enter and really do fire, which is
+    what keeps the repair from generalising to every loop-bound name.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n" + block
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A starred "
+        f"target binds a list however the loop is reached, and entering a list "
+        f"raises before the body, so the assert under the header is "
+        f"unreachable."
+    )
+
+
+@pytest.mark.parametrize(
+    ("store", "starred", "live"),
+    (
+        ("*cs, cs = (1, contextlib.nullcontext())", False, True),
+        ("(*cs, (cs,)) = (1, (contextlib.nullcontext(),))", False, True),
+        ("*cs, tail = head, cs = (1, contextlib.nullcontext())", False, True),
+        ("head, cs = *cs, tail = (1, contextlib.nullcontext())", True, False),
+        ("cs, *cs = (contextlib.nullcontext(), 1)", True, False),
+        ("(*cs, (cs, *cs)) = (1, (contextlib.nullcontext(), 2))", True, False),
+        ("*(cs, tail), = (contextlib.nullcontext(), 2)", False, True),
+    ),
+)
+def test_starred_target_kind_uses_the_final_store(store, starred, live):
+    """A repeated target name receives its last value, including nested stores.
+
+    Pin the dead-entry predicate directly: an older duplicate-binding
+    limitation elsewhere in `_is_enforced` masks this specific regression.
+    Every expected entry outcome is checked by executing the same fixture.
+    """
+    source = (
+        f"def outer(x, flag, helper):\n    import contextlib\n    {store}\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(store, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    statement = function.body[1]
+    header = function.body[2]
+    assert support._binds_starred_target(statement, "cs") is starred
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
+    )
+
+
+@pytest.mark.parametrize(
+    "store",
+    (
+        "*cs, tail = cs = (1, contextlib.nullcontext())",
+        "(*cs, tail) = (cs, tail) = (1, contextlib.nullcontext())",
+    ),
+)
+def test_later_chained_plain_target_clears_a_starred_binding(store):
+    statement = ast.parse(store).body[0]
+    assert not support._binds_starred_target(statement, "cs")
+
+
+@pytest.mark.parametrize(
+    ("body", "live"),
+    (
+        ("    for *cs, cs in ((1, contextlib.nullcontext()),):\n", True),
+        ("    for (*cs, (cs,)) in ((1, (contextlib.nullcontext(),)),):\n", True),
+        ("    for cs, *cs in ((contextlib.nullcontext(), 1),):\n", False),
+        (
+            "    for _ in (1,):\n        *cs, cs = (1, contextlib.nullcontext())\n",
+            True,
+        ),
+        (
+            "    for _ in (1,):\n        *cs, = (1,)\n        cs = contextlib.nullcontext()\n",
+            True,
+        ),
+        (
+            "    for *cs, in ((1,),):\n        cs = contextlib.nullcontext()\n",
+            True,
+        ),
+        (
+            "    for _ in (1,):\n        if not flag:\n            *cs, = (1,)\n",
+            True,
+        ),
+        (
+            (
+                "    for _ in (1,):\n"
+                "        *cs, = (1,)\n"
+                "        if flag:\n"
+                "            cs = contextlib.nullcontext()\n"
+            ),
+            True,
+        ),
+    ),
+)
+def test_starred_loop_store_must_remain_in_force_at_entry(body, live):
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n" + body + "        with cs:\n"
+        "            assert x != 1\n"
+    )
+    # The conditional controls execute the path where the name stays usable.
+    _assert_entry_contract(body, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    header = next(node for node in ast.walk(function) if isinstance(node, ast.With))
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
+    )
+
+
+@pytest.mark.parametrize("future_store", (False, True))
+def test_starred_store_after_a_loop_header_does_not_rewrite_its_value(future_store):
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for _ in (1,):\n"
+        "        with cs:\n"
+        "            assert x != 1\n"
+    )
+    if future_store:
+        source += "        *cs, = (1,)\n"
+    _assert_entry_contract("future starred store", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    header = next(node for node in ast.walk(function) if isinstance(node, ast.With))
+    assert not support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree)
+
+
+@pytest.mark.parametrize(("iterable", "live"), (("()", True), ("((1,),)", False)))
+def test_starred_target_after_a_loop_respects_whether_it_ran(iterable, live):
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        f"    for *cs, in {iterable}:\n"
+        "        pass\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract("completed starred loop", source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    header = function.body[-1]
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
     )
 
 
@@ -7398,132 +7773,6 @@ BINDING_FORM_SHAPES = (
 
 
 @pytest.mark.parametrize(
-    ("label", "rebind", "second_assert_live"),
-    STARRED_TARGET_ENTRY_UNREACHABLE_ROWS,
-    ids=[row[0] for row in STARRED_TARGET_ENTRY_UNREACHABLE_ROWS],
-)
-def test_a_starred_target_binds_a_list_so_the_assert_is_unreachable(
-    label, rebind, second_assert_live
-):
-    """A name bound through ``ast.Starred`` holds a list, which cannot be entered.
-
-    This is #418, and it is a real defect on ``origin/master`` (``6b72bf6``)
-    rather than a coverage gap: every row below reported the unreachable
-    assert ``enforced`` before the fix.
-
-    The failure is an ordering error inside ``_entry_is_dead``. The general
-    destructuring branch declines ``cs, other = (a, b)`` because the type of a
-    plain element is not readable from the container's syntax, and declining is
-    the safe answer -- the assert stays live. A starred target was falling into
-    that same decline, but it is decidable: ``*cs, = (...)`` and ``a, *cs =
-    (...)`` collect a run of elements into a **list** regardless of what the
-    right-hand side held. Letting the wrapped element's own kind vouch for the
-    name is what let a usable ``contextlib.suppress`` certify a bare list as an
-    enterable object.
-
-    Measured on CPython 3.12.14, with ``x=1`` so ``assert x != 1`` is false:
-
-    * ``*cs, = (suppress(),)`` binds ``[suppress_object]``
-    * ``a, *cs = (suppress(), 2)`` binds ``[2]``
-    * ``b, *c = (1, suppress())`` binds ``[suppress_object]``
-
-    and ``hasattr(cs, "__enter__")`` is ``False`` in every case, so
-    ``with cs:`` raises ``TypeError`` before the body and the assert is
-    unreachable. Note the third shape: a starred tail that *does* contain a
-    usable context manager is still a list, so the element's own kind is
-    irrelevant to the entry decision.
-
-    The control keeps the sibling decline honest. Its expected value is
-    ``True`` and the interpreter agrees -- ``cs, other = (nullcontext(), 2)``
-    really does enter and really does fire. A fix that keyed on "any
-    destructuring target" instead of "a starred target" would report this dead,
-    and this test would catch it.
-
-    A second control was drafted and then removed rather than shipped: the
-    matching non-starred row with a *suppressor* element
-    (``cs, other = (suppress(), 2)``) is **also** reported ``enforced`` by the
-    analyzer, while CPython swallows it -- the same false-live, on the
-    non-starred path. That is the ``#336`` element-decline family, not this
-    issue, and it is unaffected by the change under test. It was caught here
-    because ``_assert_entry_contract`` executes the fixture rather than
-    trusting the expected column, which is the only reason a row this stale
-    could not have been shipped silently. Measured ground truth for it:
-
-    | store                                     | CPython 3.12.14 | analyzer |
-    |-------------------------------------------|-----------------|----------|
-    | ``cs, other = (nullcontext(), 2)``        | fires (live)    | ``True`` |
-    | ``cs, other = (suppress(), 2)``           | swallowed       | ``True`` |
-    """
-    source = (
-        "def outer(x, flag, helper):\n"
-        "    import contextlib\n"
-        "    from contextlib import suppress, nullcontext\n"
-        "    with (cs := contextlib.suppress(AssertionError)):\n"
-        "        assert x != 1\n" + rebind + "\n"
-        "    with cs:\n"
-        "        assert x != 1\n"
-    )
-    _assert_entry_contract(label, source, False, second_assert_live)
-    tree = ast.parse(source)
-    function = tree.body[0]
-    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
-    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
-    results = [_is_enforced(function, node, tree) for node in asserts]
-    expected = [False, second_assert_live]
-    assert results == expected, (
-        f"{label}: expected verdicts {expected}, got {results}. A starred target "
-        f"binds a list, and entering a list raises before the body, so the "
-        f"assert under the header is unreachable."
-    )
-
-
-@pytest.mark.parametrize(
-    ("store", "starred", "live"),
-    (
-        ("*cs, cs = (1, contextlib.nullcontext())", False, True),
-        ("(*cs, (cs,)) = (1, (contextlib.nullcontext(),))", False, True),
-        ("*cs, tail = head, cs = (1, contextlib.nullcontext())", False, True),
-        ("head, cs = *cs, tail = (1, contextlib.nullcontext())", True, False),
-        ("cs, *cs = (contextlib.nullcontext(), 1)", True, False),
-        ("(*cs, (cs, *cs)) = (1, (contextlib.nullcontext(), 2))", True, False),
-        ("*(cs, tail), = (contextlib.nullcontext(), 2)", False, True),
-    ),
-)
-def test_starred_target_kind_uses_the_final_store(store, starred, live):
-    """A repeated target name receives its last value, including nested stores.
-
-    Pin the dead-entry predicate directly: an older duplicate-binding
-    limitation elsewhere in `_is_enforced` masks this specific regression.
-    Every expected entry outcome is checked by executing the same fixture.
-    """
-    source = (
-        f"def outer(x, flag, helper):\n    import contextlib\n    {store}\n"
-        "    with cs:\n        assert x != 1\n"
-    )
-    _assert_entry_contract(store, source, False, live)
-    tree = ast.parse(source)
-    function = tree.body[0]
-    statement = function.body[1]
-    header = function.body[2]
-    assert support._binds_starred_target(statement, "cs") is starred
-    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
-        not live
-    )
-
-
-@pytest.mark.parametrize(
-    "store",
-    (
-        "*cs, tail = cs = (1, contextlib.nullcontext())",
-        "(*cs, tail) = (cs, tail) = (1, contextlib.nullcontext())",
-    ),
-)
-def test_later_chained_plain_target_clears_a_starred_binding(store):
-    statement = ast.parse(store).body[0]
-    assert not support._binds_starred_target(statement, "cs")
-
-
-@pytest.mark.parametrize(
     ("label", "body", "expected_live", "control_element"),
     BINDING_FORM_SHAPES,
     ids=[row[0] for row in BINDING_FORM_SHAPES],
@@ -7886,3 +8135,96 @@ def test_try_reachability_matches_executed_exception_paths(label, body, enforced
     function = tree.body[0]
     assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, assertion, tree) is enforced, label
+
+
+ALWAYS_RUN_ARM_EXECUTED_ROWS = (
+    ("plain decided elif", "if False:\n    pass\nelif True:\n    cs = list()", False),
+    ("plain decided else", "if False:\n    pass\nelse:\n    cs = list()", False),
+    (
+        "decided chain",
+        "if False:\n    pass\nelif False:\n    pass\nelif True:\n    cs = list()",
+        False,
+    ),
+    (
+        "decided chain else",
+        "if False:\n    pass\nelif False:\n    pass\nelse:\n    cs = list()",
+        False,
+    ),
+    ("a true predecessor skips its elif", "if True:\n    pass\nelif True:\n    cs = list()", True),
+    (
+        "a conditional predecessor can skip its elif",
+        "if flag:\n    pass\nelif True:\n    cs = list()",
+        True,
+    ),
+    (
+        "a conditional intermediate link can skip its elif",
+        "if False:\n    pass\nelif flag:\n    pass\nelif True:\n    cs = list()",
+        True,
+    ),
+    (
+        "a conditional parent can skip its else store",
+        "if flag:\n    if False:\n        pass\n    else:\n        cs = list()",
+        True,
+    ),
+    (
+        "a conditional child can skip a store under decided else",
+        "if False:\n    pass\nelse:\n    if flag:\n        cs = list()",
+        True,
+    ),
+    (
+        "a conditional child under decided elif",
+        "if False:\n    pass\nelif True:\n    if flag:\n        cs = list()",
+        True,
+    ),
+    (
+        "a skipped else leaves an assertion active",
+        "if True:\n    pass\nelse:\n    cs = list()",
+        True,
+    ),
+    (
+        "an always-run arm can leave a manager",
+        "if False:\n    pass\nelif True:\n    cs = contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "an always-run class store is not an instance",
+        "if False:\n    pass\nelse:\n    class cs:\n        pass",
+        False,
+    ),
+    (
+        "an always-run function store is not a manager",
+        "if False:\n    pass\nelif True:\n    def cs():\n        pass",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "branch", "live"),
+    ALWAYS_RUN_ARM_EXECUTED_ROWS,
+    ids=[row[0] for row in ALWAYS_RUN_ARM_EXECUTED_ROWS],
+)
+def test_always_run_arms_follow_every_enclosing_conditional(label, branch, live):
+    source = (
+        "import contextlib\ndef outer(x, flag):\n"
+        "    cs = contextlib.nullcontext()\n"
+        + "\n".join("    " + line for line in branch.splitlines())
+        + "\n    with cs:\n        assert x != 1\n"
+    )
+    runtime = {}
+    exec(compile(source, "<always-run-arm>", "exec"), runtime)  # noqa: S102
+    fired = []
+    for flag in (False, True):
+        try:
+            runtime["outer"](1, flag)
+        except AssertionError:
+            fired.append(True)
+        except TypeError:
+            fired.append(False)
+        else:
+            fired.append(False)
+    assert any(fired) is live, label
+    tree = ast.parse(source)
+    function = tree.body[1]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live, label
