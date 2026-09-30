@@ -698,7 +698,20 @@ def _is_empty_range_call(node, function=None):
     if len(arguments) not in _EMPTY_RANGE_ARGUMENT_COUNTS or None in arguments:
         return False
     if len(arguments) == 1:
-        return not arguments[0]
+        # The one-argument form is `range(stop)`, which starts at 0 and steps
+        # by 1 -- `len(range(stop))` is zero exactly when `stop <= 0`. Reading
+        # it as `not stop` answered "not empty" for every negative bound, so
+        # `for _ in range(-5):` -- which yields nothing, leaving the loop body
+        # unreachable -- retired no store and the assert below was certified
+        # defeated while CPython still evaluated it.
+        #
+        # This is the same fold the two- and three-argument forms already use,
+        # and it has to stay the same *polarity*: `_range_reaches` answers
+        # "does it yield", this helper answers "is it empty", so the result is
+        # negated. Passing it through un-negated would answer "empty" for
+        # `range(5)` and leave `range(0)` -- the row #456 exists to fix --
+        # wrong.
+        return not _range_reaches(0, arguments[0], 1)
     start, stop = arguments[0], arguments[1]
     step = arguments[2] if len(arguments) == 3 else 1
     if step == 0:
