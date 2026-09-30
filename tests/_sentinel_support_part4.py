@@ -10,7 +10,7 @@ if __name__ == "tests._sentinel_support_part4":
     )
 
 
-def _aliased_suppressions(node, function, bound, owning=None):
+def _aliased_suppressions(node, function, bound, owning=None, target=None):
     """Suppressors reached through a bare ``Name`` in a ``with`` header.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -59,7 +59,9 @@ def _aliased_suppressions(node, function, bound, owning=None):
     report both of those live context managers as defeats. The mutation matrix
     in the sentinel suite pins that difference.
     """
-    by_index, raw_values = _assigned_suppressors(function, bound, node)
+    by_index, raw_values = _assigned_suppressors(
+        function, bound, target if target is not None else node
+    )
     # The raw table is keyed by name, so the statement that owns each entry is
     # what positions it. #348: the header must resolve against the stores that
     # ran before it, not against whichever store of that name is written last

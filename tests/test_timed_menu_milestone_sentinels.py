@@ -10873,3 +10873,77 @@ def test_a_decided_inner_arm_still_depends_on_a_conditional_outer_else(inner_arm
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    ("setup", "predicate", "expected"),
+    (
+        ("cs = contextlib.nullcontext()", "x", True),
+        ("cs = contextlib.nullcontext()", "x == 1", True),
+        ("cs = contextlib.nullcontext()", "not x", False),
+        ("cs = contextlib.nullcontext()", "x != 1", False),
+        ("", "x", False),
+        ("cs = None", "x", False),
+        ("cs = 1", "x", False),
+        ("cs = contextlib.suppress(AssertionError)", "x", False),
+        ("cs = factory()", "x", False),
+        ("cs = contextlib.nullcontext(1, 2)", "x", False),
+        ("cs = contextlib.suppress(AssertionError)\n    cs = contextlib.nullcontext()", "x", True),
+        ("cs = contextlib.nullcontext()\n    cs = contextlib.suppress(AssertionError)", "x", False),
+    ),
+)
+def test_elif_suppression_resolution_requires_an_enterable_failing_skipped_path(
+    setup, predicate, expected
+):
+    source = (
+        "import contextlib\n"
+        "def factory(): return contextlib.suppress(AssertionError)\n"
+        "def outer(x):\n"
+        + ("    " + setup + "\n" if setup else "")
+        + "    if "
+        + predicate
+        + ":\n        pass\n"
+        "    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-failure-witness>", "exec"), namespace)  # noqa: S102
+    fired = False
+    for value in (0, 1):
+        try:
+            namespace["outer"](value)
+        except AssertionError:
+            fired = True
+        except (TypeError, UnboundLocalError):
+            pass
+    assert fired is expected
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is expected
+
+
+def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_import():
+    source = (
+        "import contextlib\n"
+        "from types import SimpleNamespace\n"
+        "def outer(x):\n"
+        "    contextlib = SimpleNamespace(nullcontext=lambda: real.suppress(AssertionError), suppress=real.suppress)\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if x:\n        pass\n"
+        "    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-import-shadow>", "exec"), namespace)  # noqa: S102
+    namespace["real"] = namespace["contextlib"]
+    for value in (0, 1):
+        namespace["outer"](value)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
