@@ -5008,3 +5008,43 @@ def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
         "a module-scope lookup descended into an unrelated function body and "
         "adopted its binding; a live assert was reported as defeated"
     )
+
+
+def test_a_self_alias_excludes_its_own_store_and_not_an_earlier_one():
+    """The self-alias tie is broken by excluding the *walrus*, not any store.
+
+    A self-alias shares a binding order with the loop target it follows, so
+    every position-based test ties and #367's tie branch declines it. Excluding
+    the entry whose statement is the store being resolved breaks that tie in
+    favour of the loop element -- which is what the interpreter reads.
+
+    The row is here to pin *which* entry gets excluded. The other self-alias
+    tests in this file all start from a loop whose element is the first
+    binding of the name, so excluding "the first entry with a value" and
+    excluding "the self-alias store" are indistinguishable there: the loop
+    element is the same entry either way. That mutant survives all 446 tests
+    in this module.
+
+    Giving the name a prior store separates them. The loop element retires the
+    suppressor, so the assert is live and must stay ``enforced``; the mutant
+    excludes the loop element instead, the retired suppressor is adopted, and
+    the live assert is reported as defeated -- the damaging direction.
+    """
+    source = (
+        "def probe(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.suppress(AssertionError)\n"
+        "    for cs in (contextlib.nullcontext(),):\n"
+        "        with (cs := cs):\n"
+        '            assert x != 1, "A1"\n'
+    )
+    tree = ast.parse(source)
+    probe = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "probe"
+    )
+    target = next(node for node in ast.walk(probe) if isinstance(node, ast.Assert))
+    assert _is_enforced(probe, target, tree), (
+        "the self-alias tie was broken by excluding the loop's own element "
+        "rather than the walrus, so a retired suppressor was adopted and a "
+        "live assert was reported as defeated"
+    )
