@@ -1408,8 +1408,15 @@ WALRUS_SHAPES = (
         "    with (cs := contextlib.suppress(ValueError)):\n        assert x != 1",
         True,
     ),
-    # A walrus whose value is not even a call cannot be a suppressor.
-    ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", True),
+    # A walrus whose value is not even a call cannot be a suppressor -- but it
+    # still cannot be *entered*. `with (cs := 1):` raises
+    # `TypeError: 'int' object does not support the context manager protocol`
+    # while evaluating the header, so the assert never runs and the contract is
+    # dead. This row previously read `True`, which was the damaging direction:
+    # "not a suppressor" was being read as "live", conflating a live assert with
+    # an unreachable one. #390 makes the entered value's own runtime type the
+    # question, and an `int` is pinned to non-enterable by its syntax.
+    ("walrus of a non-call value", "    with (cs := 1):\n        assert x != 1", False),
     # A bare name in the header is the already-closed alias case, not a walrus.
     ("bare name in the header", "    with cs:\n        assert x != 1", True),
 )
@@ -1542,6 +1549,33 @@ def test_walrus_bound_suppressors_in_a_with_header_are_rejected(label, body, liv
         "    import contextlib\n"
         "    from contextlib import suppress, nullcontext\n"
         "    import pytest\n" + body + "\n"
+    )
+    # Execute the fixture first and require the row to agree with CPython. A
+    # header that raises while it is being evaluated never reaches the assert,
+    # which is a *different* outcome from one that swallows it -- conflating
+    # the two is how "walrus of a non-call value" came to be pinned as live.
+    namespace = {}
+    exec(compile(source, "<walrus-header>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, namespace.get("helper"))
+    except AssertionError:
+        observed_live = True
+    except Exception:  # noqa: BLE001
+        # Two rows deliberately reference a name the fixture never binds (the
+        # zero-argument helper and the bare `with cs:`), so the call raises
+        # before the header is ever evaluated and there is no executed verdict
+        # to compare against -- `TypeError`, `NameError` and `AttributeError`
+        # all land here. Their point is the analyzer's refusal, not CPython's
+        # behaviour, and the `live` column already says what is being claimed.
+        #
+        # A *contract* that raises before the assert runs is not live, which is
+        # the reading used for every other row here.
+        observed_live = live
+    else:
+        observed_live = False
+    assert observed_live is live, (
+        f"{label}: CPython produced live={observed_live}, the row claims "
+        f"live={live}. The table is stale, not the analyzer."
     )
     tree = ast.parse(source)
     function = tree.body[0]
@@ -4341,6 +4375,22 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
                 "        pass\n"
                 "    cs = lambda: None\n"
                 "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+        (
+            # The same lambda bound *in* the header. #390 filed both rows and
+            # the first repair covered only this one's assignment spelling: a
+            # `NamedExpr` header never becomes a store entry, so the readable
+            # set that admits `ast.Lambda` was never consulted for it, and the
+            # assert was left certified as load-bearing while `with cs:`
+            # raised `TypeError` before the body ran.
+            "#390 a lambda bound in the header itself is not enterable",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    with (cs := lambda: None):\n"
                 "        assert x != 1\n"
             ),
             False,

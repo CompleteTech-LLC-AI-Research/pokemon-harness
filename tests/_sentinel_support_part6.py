@@ -443,6 +443,20 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         # sometimes a tuple are not the same question, and guessing would
         # risk the live side.
         return all(isinstance(element, ast.Starred) for element in expression.elts)
+    if isinstance(expression, ast.NamedExpr) and isinstance(expression.target, ast.Name):
+        # #390. `with (cs := lambda: None):` binds the walrus value directly as
+        # the entered object, so the question is the same one the store rules
+        # ask about `cs = lambda: None` -- and it has the same answer. Without
+        # this the lambda never reached the readable-literal set below (that
+        # set is consulted for values reached through an *assignment target*),
+        # and a header that raises `TypeError` on entry left the assert under
+        # it certified as load-bearing.
+        #
+        # The name the walrus binds is deliberately not followed afterwards.
+        # The value is what is entered here and now; what `cs` holds on a
+        # later line is a different store's question, answered by
+        # `_stores_of` when that `with` is reached.
+        return _literal_entry_is_dead(expression.value)
     if not isinstance(expression, ast.Name):
         return False
     name = expression.id
@@ -810,6 +824,63 @@ def _module_stores(name, module):
     by_index = {"bindings": bindings, "orders": orders}
     index = max(orders.values(), default=-1) + 1
     return _stores_of(name, by_index, index, module)
+
+
+def _literal_entry_is_dead(value):
+    """Is this *directly entered* literal unenterable? (``#390``)
+
+    A ``with`` header can bind its value without going through a store at all:
+
+        with (cs := lambda: None):
+
+    Here the entered object is the lambda itself, not whatever ``cs`` held
+    before. ``_literal_runtime_type`` reads its runtime type from the syntax,
+    and a ``lambda`` is a function, which has no ``__enter__``.
+
+    Scoped to the literal shapes whose type the syntax already fixes -- the
+    same set the store rules read -- so a header the rule cannot read keeps
+    the assert live rather than dropping a real contract. This is the mild
+    direction, the same trade :func:`_entry_is_dead` makes for its own shapes.
+    """
+    kind = _literal_runtime_type(value)
+    if kind is None:
+        # Not a literal this rule can read: decline, and keep the assert live.
+        return False
+    return not _runtime_kind_can_enter(kind)
+
+
+def _runtime_kind_can_enter(kind):
+    """Does a value of this runtime kind implement the context manager protocol?
+
+    Asked of the real interpreter rather than of a list of type names. A
+    hand-maintained set of "these are fine" would have to be right about every
+    stdlib type that can appear here, and a miss either way is a wrong verdict
+    about a real contract. A kind the interpreter cannot produce is refused,
+    which keeps the answer on the decline side.
+    """
+    probe = _PROBE_FOR_RUNTIME_KIND.get(kind)
+    if probe is None:
+        return False
+    return hasattr(probe, "__enter__")
+
+
+#: One real value per runtime kind :func:`_literal_runtime_type` can report, so
+#: the enterability question is answered by the interpreter rather than by a
+#: maintained list of type names. `function` is the #390 case: a lambda object
+#: has no `__enter__`.
+_PROBE_FOR_RUNTIME_KIND = {
+    "function": lambda: None,
+    "module": types.ModuleType("probe"),
+    "list": [],
+    "tuple": (),
+    "set": set(),
+    "dict": {},
+    "int": 0,
+    "str": "",
+    "float": 0.0,
+    "bytes": b"",
+    "NoneType": None,
+}
 
 
 def _literal_runtime_type(value):
