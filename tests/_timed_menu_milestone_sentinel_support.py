@@ -1141,6 +1141,23 @@ def _assigned_suppressors(function, bound):
             seen = [entry for entry in entries if orders[id(entry[0])] <= index]
             if not seen:
                 continue
+            # #378. A store inside a loop body that provably cannot run has
+            # not happened, so it cannot be what the name holds at this
+            # index. Dropping it here keeps both consumers honest -- the
+            # resolution below and `_aliased_suppressions`' bare-name branch
+            # read this table:
+            #
+            #     cs = contextlib.nullcontext()
+            #     for y in ():               # zero iterations
+            #         cs = suppress(...)     # never executes
+            #     with cs:                  # still the nullcontext -> LIVE
+            seen = [
+                entry
+                for entry in seen
+                if not _is_provably_unreached_store(entry, orders, function)
+            ]
+            if not seen:
+                continue
             value = _resolve_bindings(seen, bound, orders, index, function)
             if value is not None:
                 assigned.setdefault(index, {})[name] = value
@@ -1414,6 +1431,39 @@ def _store_bindings(function, bound):
     return bindings, raw_values
 
 
+def _is_provably_unreached_store(entry, orders, function):
+    """Is this conditional store inside a loop body that can never run?
+
+    #378. A ``for`` over a literal empty iterable has no iterations, so every
+    statement in its body is unreachable. A store written there is recorded,
+    flagged ``conditional``, and would otherwise compete with the store that
+    really is in force -- retiring a live ``nullcontext`` and letting a
+    swallowed assert be reported as swallowed when it is in fact live.
+
+    The test is deliberately narrow: only a *provably* empty literal iterable
+    answers yes. ``helper.items()`` may yield nothing, but it may not, so a
+    store in that body keeps competing and the ordinary ambiguity handling
+    applies. ``range(0)`` and ``set()`` are excluded for the same reason
+    `_is_empty_literal_iterable` excludes them -- deciding them means
+    reasoning about builtins rather than reading a literal.
+
+    A ``while True:`` loop, or one whose test is merely truthy, is not
+    provably empty and so is not matched.
+    """
+    statement = entry[0]
+    if function is None:
+        return False
+    # `_ancestors` runs outermost-first and ends with ``target`` itself, so
+    # the last element is dropped: the question is which *containers* the
+    # store sits inside.
+    for ancestor in list(_ancestors(function, statement))[:-1]:
+        if isinstance(ancestor, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
+            ancestor.iter
+        ):
+            return True
+    return False
+
+
 def _resolve_bindings(entries, bound, orders, index=None, function=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
@@ -1444,6 +1494,33 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     competing = [
         entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
     ]
+    # A conditional store that provably cannot run does not compete at all
+    # (#378). A loop over a literal empty iterable never enters its body, so
+    # the store written there never happens and the name still holds whatever
+    # an earlier unconditional store bound:
+    #
+    #     cs = contextlib.nullcontext()
+    #     for y in ():               # zero iterations
+    #         cs = suppress(...)     # never executes
+    #     with cs:                  # still the nullcontext -> LIVE
+    #
+    # Counting it as a competitor retires the `nullcontext`, answers "the
+    # suppressor is in force", and reports a live contract as swallowed. The
+    # check is scoped to a *provably* empty literal: an unreadable iterable
+    # might yield nothing, but might not, so it keeps competing.
+    competing = [
+        entry
+        for entry in competing
+        if not _is_provably_unreached_store(entry, orders, function)
+    ]
+    if not competing:
+        # With nothing able to compete, the value in force is whatever the
+        # last store that *ran* put there. This is the same tail the ordinary
+        # single-store path below reaches, so it is shared rather than
+        # duplicated: the `nullcontext` is returned unreadable-as-suppressor,
+        # which is what makes the assert below it live.
+        last = _last_store_before(entries, orders, index, None, function)
+        return last if _is_readable_suppressor(last, bound) else None
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
@@ -2792,6 +2869,14 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
                     scoped.update({n: own[n] for n in loop_target if n in own})
                     return scoped
                 return bound_so_far
+            # `_is_store_statement` declines a provably empty loop (#378), so
+            # a `for y in ():` does not set `seen_store` and the header still
+            # reads the bindings carried in from earlier statements:
+            #
+            #     cs = contextlib.nullcontext()
+            #     for y in ():            # zero iterations
+            #         cs = suppress(...)  # never executes
+            #     with cs:               # still the nullcontext -> LIVE
             if _is_store_statement(node):
                 seen_store = True
     return bound_so_far
@@ -2824,7 +2909,26 @@ def _is_store_statement(node):
 
     ``NamedExpr`` is deliberately still absent: it never appears as a direct
     statement, so it cannot be the ``node`` walked here.
+
+    A ``for`` target's guarantee is conditional on the loop running at least
+    once, and a literal empty iterable proves it does not (#378):
+
+        cs = contextlib.nullcontext()
+        if True:
+            for x in ():
+                cs = contextlib.suppress(AssertionError)   # never executes
+            with cs:
+                assert x != 1        # FIRES: `cs` is still the nullcontext
+
+    Counting the ``for`` unconditionally admitted the unexecuted body's store
+    and reported that live assert as defeated. Only a loop whose iterability
+    is *unreadable* may be assumed to iterate: ``helper.items()`` might yield
+    nothing, but a literal ``()`` certainly does not.
     """
+    if isinstance(node, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
+        node.iter
+    ):
+        return False
     return isinstance(node, (ast.Assign, ast.For, ast.AsyncFor)) or (
         isinstance(node, ast.AnnAssign) and node.value is not None
     )
