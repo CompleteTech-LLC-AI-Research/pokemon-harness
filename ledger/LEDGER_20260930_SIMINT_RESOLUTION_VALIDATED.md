@@ -313,3 +313,74 @@ not a pending approval.
 
 Zero of 18 open PRs has an independent review. **Nothing merged. No PR marked
 ready. No issue closed.** Release remains `PARTIAL`.
+
+---
+
+# Final state, end of run
+
+## Board
+
+- **18 open PRs. 88 open issues.** (Issues rose 81 → 88 during the run, mostly
+  filed by other agents on this board.)
+- **Zero of 18 PRs has any review.** `reviews` is empty on every one.
+- #392 and #379 remain `CONFLICTING/DIRTY`; the other 16 `MERGEABLE/CLEAN`.
+
+## What was accomplished
+
+1. **Finished the interrupted #412→#424→#419 simulation merge** that the prior
+   turn left half-resolved and mislabelled. The inherited hand-resolution had
+   dropped #419's starred block from `_entry_is_dead` entirely, so all four
+   #418 rows still reported `enforced`. Restored, positioned correctly, and
+   proven: **706 tests, 0 failures, 0 errors, 0 skipped**.
+2. **Stacked #421** on top — clean auto-merge, **710 tests, 0 failures, 0
+   errors, 0 skipped** after a one-line repair.
+3. **Found and filed three blocking defects**, none of which any CI had
+   caught:
+   - **#421** — `TypeError` on every non-`ast.Assign` store. 130 failures on
+     the combined tree; green on its own head.
+   - **#405** — introduces a **false-DEAD**, so #425 must not be closed by
+     merging it.
+   - **#412/#424** — a **false-DEAD regression** at `b90f985`, bisected
+     exactly, inside a commit whose own message says it was fixing
+     false-deads. Filed as **new issue #429**.
+4. **Re-measured four open issues** independently rather than trusting their
+   reported numbers: #423 and #425 confirmed open with CPython ground truth,
+   #417 reproduced exactly, **#416 found stale** (its PR's current head is
+   correct).
+
+## What was not accomplished, and why
+
+**Nothing was merged.** The single blocker is that no independent review is
+obtainable: four `spawn_agent` calls this session, one child visibly answered
+the wrong task and two produced silence, while `list_agents`, `wait_agent`, and
+`spawn_agent` themselves began returning `unsupported call`.
+
+Separately, and independently of that: **#412 is not mergeable even with a
+reviewer**, because of the `b90f985` false-dead now filed as #429. That is a
+substantive finding, not a process excuse.
+
+## Honest assessment of the merge queue
+
+The stack I prepared is four PRs deep and fully green, and I had a concrete,
+measured, well-evidenced path to merging it. That path is closed by the
+review transport, and the stack's own prerequisite (#412) is closed by #429.
+Those are two different blockers and both are real.
+
+The most valuable thing this run produced is probably not the simulation but
+the four defects: two of them (#429, #405) are in the **damaging** direction,
+and one of those sat inside a commit explicitly written to fix that direction,
+surviving six review rounds and every subsequent CI run.
+
+## Cleanup
+
+Removed 13 bisection worktrees created during this run
+(`bs_*`, `iso405b`, `iso406b`). Retained: `simint` (the simulation),
+`fix413_loopelem`, `audit412`. Pre-existing worktrees untouched.
+
+Protected checkout verified intact at the end: branch
+`lead/259-widen-lint-lanes`, HEAD `bd2c167cb1364550da9520e7a596704e28ed0894`,
+exactly the three staged files, `stash@{0}` preserved.
+
+`origin/master` unmoved at `6b72bf62b5722e1df2c44c988bbdb14803024032`.
+
+**Release remains `PARTIAL`.**
