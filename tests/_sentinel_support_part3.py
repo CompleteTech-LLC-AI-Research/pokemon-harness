@@ -904,29 +904,6 @@ def _loop_value_source(statement, query=None, bound=None):
     return iterable.elts[-1]
 
 
-def _entry_may_be_an_unrun_capture(entry):
-    """Is this entry a ``match`` capture that is not guaranteed to have bound?
-
-    The narrow companion to :func:`_store_retires`, asked of a whole
-    ``(statement, value, conditional)`` entry rather than of a statement and a
-    name. It exists because the name is not carried on the entry itself, and
-    the caller that has to decide whether a single competing store is ambiguous
-    only has the entry.
-
-    A ``match`` statement can capture several names, so the name is recovered
-    by asking which of the captures it owns is the one this entry records --
-    a capture that is guaranteed to bind for *some* name is still a capture
-    that may not bind for the name in question, so every owned name is
-    checked and any one of them being undecidable makes the entry so.
-    """
-    statement = entry[0]
-    if not isinstance(statement, ast.Match):
-        return False
-    return not all(
-        _capture_always_binds(statement, name) for name in _match_capture_names_for(statement)
-    )
-
-
 def _readable_store_value(value, bound):
     """The store's value, if it is a *suppressor candidate* this function owns.
 

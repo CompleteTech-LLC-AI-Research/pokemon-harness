@@ -7261,6 +7261,239 @@ def test_a_selected_capture_binds_a_value_that_cannot_be_entered(label, capture)
     )
 
 
+#: #364 / #369. A ``match`` subject that is *written out* settles on its own
+#: whether a sequence clause is selected, exactly as ``for _ in []:`` settles
+#: its own emptiness. Before the repair, ``_capture_always_binds`` answered
+#: "may not have run" for every refutable sequence capture, so the carried
+#: walrus suppressor survived into a ``with cs:`` that CPython happily
+#: entered -- a live assert reported **defeated**.
+#:
+#: Two spellings are covered, because they are two different sources. #364
+#: writes the container in the subject position; #369 binds it to a name a
+#: statement earlier and matches on the name.
+#:
+#: ``runtime`` is measured, not declared. ``_execute_literal_subject`` reports
+#: what became of the assert when the fixture is executed, so a row cannot
+#: claim "live" without the interpreter agreeing -- which is the check the
+#: older capture tables above lacked.
+LITERAL_SUBJECT_ROWS = (
+    (
+        "a written-out one-element subject selects a one-element pattern",
+        "    match [contextlib.nullcontext()]:\n        case [cs]:\n            pass\n",
+        "live",
+        True,
+    ),
+    (
+        "a named one-element list subject selects a one-element pattern",
+        (
+            "    subject = [contextlib.nullcontext()]\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "live",
+        True,
+    ),
+    (
+        "a named one-element tuple subject selects a one-element pattern",
+        (
+            "    subject = (contextlib.nullcontext(),)\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "live",
+        True,
+    ),
+    # The matching is decided per element, not on length alone: a constant
+    # value pattern beside the capture still selects.
+    (
+        "a constant sibling pattern is compared, not just counted",
+        "    match [1, contextlib.nullcontext()]:\n        case [1, cs]:\n            pass\n",
+        "live",
+        True,
+    ),
+    # --- Controls. Each fails for its own distinct reason, so a rule widened
+    # past the written-out case is caught rather than shipped.
+    (
+        "CONTROL an empty subject cannot match a one-element pattern",
+        "    match []:\n        case [cs]:\n            pass\n",
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a two-element subject cannot match a one-element pattern",
+        "    match [contextlib.nullcontext(), 2]:\n        case [cs]:\n            pass\n",
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a one-element subject cannot match a two-element pattern",
+        "    match [contextlib.nullcontext()]:\n        case [cs, other]:\n            pass\n",
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a starred element leaves the length undecidable",
+        "    match [*contextlib.nullcontext()]:\n        case [cs]:\n            pass\n",
+        "unreachable:TypeError",
+        False,
+    ),
+    (
+        "CONTROL an opaque subject is still undecidable",
+        "    match helper():\n        case [cs]:\n            pass\n",
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a name bound to a non-literal is still undecidable",
+        "    subject = helper()\n    match subject:\n        case [cs]:\n            pass\n",
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a later rebinding of the name wins the subject",
+        (
+            "    subject = [contextlib.nullcontext()]\n"
+            "    subject = helper()\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a constant sibling that does not match leaves the suppressor",
+        "    match [2, contextlib.nullcontext()]:\n        case [1, cs]:\n            pass\n",
+        "swallowed",
+        False,
+    ),
+    (
+        "CONTROL a value pattern needing an unreadable value refuses",
+        (
+            "    match [one, contextlib.nullcontext()]:\n"
+            "        case [target.one, cs]:\n            pass\n"
+        ),
+        "live",
+        False,
+    ),
+)
+
+
+def _literal_subject_source(body):
+    return (
+        "import contextlib\n"
+        "one = 1\n"
+        "class target:\n"
+        "    one = 1\n"
+        "def helper():\n"
+        "    return 1\n"
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + body + "    with cs:\n        assert x != 1\n"
+    )
+
+
+def _execute_literal_subject(source):
+    """Run a literal-subject fixture and report what became of the assert."""
+    namespace = {}
+    exec(compile(source, "<literal-subject>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, True, namespace["helper"])
+    except AssertionError:
+        return "live"
+    except TypeError as error:
+        return f"unreachable:{type(error).__name__}"
+    return "swallowed"
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "runtime", "verdict"),
+    LITERAL_SUBJECT_ROWS,
+    ids=[row[0] for row in LITERAL_SUBJECT_ROWS],
+)
+def test_a_written_out_match_subject_decides_its_own_selection(label, body, runtime, verdict):
+    """A ``match`` on a written-out container is decidable on its own. (#364, #369)
+
+    The refutable-capture rule answers a question about a *runtime* subject, so
+    it declines every sequence capture. That is right for ``match helper():``
+    and wrong for ``match [contextlib.nullcontext()]:``: in the second the
+    subject is written out, its length is known, and the clause is selected
+    for certain. Executed, the assert below the capture is **live**; before
+    the repair the analyzer called it defeated, which is the damaging
+    false-DEAD direction.
+
+    Every row is executed first and the analyzer is checked against that, so a
+    row cannot claim "live" on the strength of the checker's own opinion. The
+    controls pin the refusal directions: a length that is not written down (a
+    starred element), a subject that is not a container literal, a name rebound
+    before the match, and a sibling pattern whose value the rule cannot read
+    must all keep reporting defeated.
+    """
+    source = _literal_subject_source(body)
+    observed = _execute_literal_subject(source)
+    assert observed == runtime, (
+        f"{label}: CPython produced {observed!r}, the row claims {runtime!r}. "
+        f"The table is stale, not the analyzer."
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, asserts[-1], tree)]
+    assert results == [verdict], (
+        f"{label}: analyzer says {results}, expected {[verdict]}. CPython produced {observed!r}."
+    )
+
+
+#: #378 / #364 adjacency. A zero-iteration loop makes its body's stores
+#: unreachable, which is a *different* question from whether a ``match`` clause
+#: is selected. Both repairs live in the same neighbourhood of the walk, so
+#: this row pins that neither answers for the other: a capture inside a loop
+#: that cannot run must not be treated as a decided capture.
+MATCH_IN_UNREACHABLE_LOOP_ROWS = (
+    (
+        "a decided capture is not reached through a zero-iteration loop",
+        (
+            "    for _ in []:\n"
+            "        match [contextlib.nullcontext()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+        ),
+        "swallowed",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "runtime", "verdict"),
+    MATCH_IN_UNREACHABLE_LOOP_ROWS,
+    ids=[row[0] for row in MATCH_IN_UNREACHABLE_LOOP_ROWS],
+)
+def test_a_capture_inside_a_zero_iteration_loop_is_not_decided(label, body, runtime, verdict):
+    """A capture that cannot run is not a capture that always binds.
+
+    The literal-subject rule in #364/#369 answers whether a *selected* clause
+    binds its name. It says nothing about whether control ever reaches the
+    ``match`` at all, and a ``for _ in []:`` body never does. The carried
+    suppressor therefore survives, and executed at ``x=1`` the assert is
+    swallowed -- so the verdict must stay defeated.
+    """
+    source = _literal_subject_source(body)
+    observed = _execute_literal_subject(source)
+    assert observed == runtime, (
+        f"{label}: CPython produced {observed!r}, the row claims {runtime!r}."
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, asserts[-1], tree)]
+    assert results == [verdict], (
+        f"{label}: analyzer says {results}, expected {[verdict]}. A capture in "
+        f"a body that cannot run binds nothing."
+    )
+
+
 #: Two over-fix guards. The capture rules must not retire a binding they did
 #: not make, in either direction -- the first is a *missed* retirement and the
 #: second is a *spurious* one, and both were live bugs while this was written.
@@ -11437,3 +11670,243 @@ def test_empty_loop_filter_declines_shadowed_exception_argument(placement):
     )
     assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, assertion, tree) is True
+
+
+@pytest.mark.parametrize(
+    "body,live",
+    (
+        ("    match [contextlib.nullcontext(), True]:\n        case [cs, False]: pass\n", False),
+        ("    match [contextlib.nullcontext(), False]:\n        case [cs, True]: pass\n", False),
+        ("    match [contextlib.nullcontext(), 0]:\n        case [cs, None]: pass\n", False),
+        ("    match [contextlib.nullcontext(), True]:\n        case [cs, True]: pass\n", True),
+        ("    match [contextlib.nullcontext(), False]:\n        case [cs, False]: pass\n", True),
+        ("    match [contextlib.nullcontext(), None]:\n        case [cs, None]: pass\n", True),
+        (
+            "    subject = [contextlib.nullcontext()]\n    subject.clear()\n    match subject:\n        case [cs]: pass\n",
+            False,
+        ),
+        (
+            "    subject = [contextlib.nullcontext()]\n    subject, other = [], 1\n    match subject:\n        case [cs]: pass\n",
+            False,
+        ),
+        (
+            "    subject = [contextlib.nullcontext()]\n    alias = subject\n    alias.clear()\n    match subject:\n        case [cs]: pass\n",
+            False,
+        ),
+        (
+            "    subject = [contextlib.nullcontext()]\n    subject[:] = []\n    match subject:\n        case [cs]: pass\n",
+            False,
+        ),
+        (
+            "    subject = [contextlib.nullcontext()]\n    match subject:\n        case [cs]: pass\n",
+            True,
+        ),
+        (
+            "    subject = [contextlib.nullcontext()]\n    pass\n    match subject:\n        case [cs]: pass\n",
+            True,
+        ),
+        ("    match [contextlib.nullcontext(), True]:\n        case [cs, 1]: pass\n", True),
+        ("    match [contextlib.nullcontext(), 1.0]:\n        case [cs, 1]: pass\n", True),
+    ),
+)
+def test_literal_match_selection_preserves_runtime_truth(body, live):
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        "    cs = contextlib.suppress(AssertionError)\n"
+        + body
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<literal-match-selection>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        fired = True
+    else:
+        fired = False
+    assert fired is live
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
+
+
+@pytest.mark.parametrize(
+    "manager,live",
+    (
+        ("contextlib.suppress(AssertionError)", False),
+        ("contextlib.nullcontext()", True),
+        ("contextlib.suppress(ValueError)", True),
+    ),
+)
+@pytest.mark.parametrize("named", (False, True))
+def test_literal_match_records_captured_manager(manager, live, named):
+    subject = "[" + manager + "]"
+    setup = "    subject = " + subject + "\n" if named else ""
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        + setup
+        + "    match "
+        + ("subject" if named else subject)
+        + ":\n        case [cs]: pass\n    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<literal-captured-manager>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        fired = True
+    else:
+        fired = False
+    assert fired is live
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
+
+
+@pytest.mark.parametrize(
+    "element,error",
+    (
+        ("missing()", NameError),
+        ("1 / 0", ZeroDivisionError),
+        ("contextlib.nullcontext(1, 2)", TypeError),
+    ),
+)
+def test_literal_match_declines_subject_construction_failure(element, error):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        + "    match [contextlib.nullcontext(), "
+        + element
+        + "]:\n        case [cs, _]: pass\n    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<failing-literal-subject>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    "clause,error",
+    (
+        ("        case [cs] if missing(): pass\n", NameError),
+        ("        case [cs] if 1 / 0: pass\n", ZeroDivisionError),
+        ("        case [cs]: cs = contextlib.suppress(AssertionError)\n", None),
+        ("        case [cs]: return\n", None),
+        ("        case [cs]: raise ValueError\n", ValueError),
+        ("        case [cs] if False: pass\n        case _: raise ValueError\n", ValueError),
+    ),
+)
+def test_literal_match_declines_guard_or_body_effects(clause, error):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        "    match [contextlib.nullcontext()]:\n" + clause + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<effectful-literal-case>", "exec"), namespace)  # noqa: S102
+    if error is None:
+        namespace["outer"](1)
+    else:
+        with pytest.raises(error):
+            namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    "prefix,suffix,error",
+    (
+        ("    if x == 1: return\n", "", None),
+        ("    missing()\n", "", NameError),
+        ("", "    if x == 1: return\n", None),
+        ("", "    missing()\n", NameError),
+    ),
+)
+def test_literal_match_declines_unreachable_assertion_witness(prefix, suffix, error):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        + prefix
+        + "    match [contextlib.nullcontext()]:\n        case [cs]: pass\n"
+        + suffix
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<unreachable-match-witness>", "exec"), namespace)  # noqa: S102
+    if error is None:
+        namespace["outer"](1)
+    else:
+        with pytest.raises(error):
+            namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize("module_patch", (False, True, "alias"))
+def test_literal_match_declines_contextlib_member_monkeypatch(module_patch):
+    patch = "contextlib.nullcontext = lambda: contextlib.suppress(AssertionError)\n"
+    if module_patch == "alias":
+        patch = (
+            "alias = contextlib\nalias.nullcontext = lambda: contextlib.suppress(AssertionError)\n"
+        )
+    source = (
+        "import contextlib\n"
+        + (patch if module_patch else "")
+        + "def outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        + ("    " + patch if not module_patch else "")
+        + "    match [contextlib.nullcontext()]:\n        case [cs]: pass\n"
+        + "    with cs:\n        assert x != 1\n"
+    )
+    import contextlib
+
+    original = contextlib.nullcontext
+    try:
+        namespace = {}
+        exec(compile(source, "<patched-literal-manager>", "exec"), namespace)  # noqa: S102
+        namespace["outer"](1)
+    finally:
+        contextlib.nullcontext = original
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    "prefix,subject,pattern,assertion",
+    (
+        ("    x = 0\n", "[contextlib.nullcontext()]", "[cs]", "x != 1"),
+        ("    import contextlib as x\n", "[contextlib.nullcontext()]", "[cs]", "x != 1"),
+        ("    y = 0\n", "[contextlib.nullcontext()]", "[cs]", "y != 1"),
+        ("", "[contextlib.nullcontext(), 0]", "[cs, x]", "x != 1"),
+        ("", "[contextlib.nullcontext()]", "[cs]", "True"),
+    ),
+)
+def test_literal_match_requires_reachable_assertion_failure(prefix, subject, pattern, assertion):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.suppress(AssertionError)\n"
+        + prefix
+        + "    match "
+        + subject
+        + ":\n        case "
+        + pattern
+        + ": pass\n"
+        + "    with cs:\n        assert "
+        + assertion
+        + "\n"
+    )
+    namespace = {}
+    exec(compile(source, "<match-failure-witness>", "exec"), namespace)  # noqa: S102
+    for value in (0, 1, 2):
+        namespace["outer"](value)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False

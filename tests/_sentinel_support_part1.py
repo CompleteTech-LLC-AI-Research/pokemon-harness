@@ -946,7 +946,7 @@ def _capture_always_binds(match, name):
     return _pattern_is_irrefutable(last.pattern) and _pattern_binds(last.pattern, name)
 
 
-def _store_retires(statement, name):
+def _store_retires(statement, name, function=None):
     """Does this store settle ``name``, or may it simply not have run?
 
     Every store form the walk collects binds its name whenever control reaches
@@ -957,5 +957,28 @@ def _store_retires(statement, name):
     a path where the capture never happened, so the stale suppressor reaches
     the next ``with`` -- and the assert under it is really swallowed, while
     the analyzer calls it enforced.
+
+    ``function`` is the scope the statement was written in. It is only needed
+    for the #369 subject resolution, which has to look at a preceding
+    assignment in the same block, and is optional so the callers that only
+    have a statement keep working unchanged.
+
+    There is a second, independent condition and it is not about the clause at
+    all: the ``match`` has to be *reached*. A ``match`` written in the body of
+    ``for _ in []:`` never runs, so however certainly its clause would bind,
+    the binding does not happen. That is #378's question rather than #342's,
+    and it is easy to leave out precisely because a refutable clause already
+    answers "may not have run" for the ordinary shapes -- the gap only opens
+    once some rule starts answering "always binds" for a refutable clause.
+    Answered here rather than at one call site so the two callers cannot
+    disagree, which is what would let a settled capture still be counted as a
+    competing one and the name read as ambiguous.
     """
-    return not isinstance(statement, ast.Match) or _capture_always_binds(statement, name)
+    if not isinstance(statement, ast.Match):
+        return True
+    if function is not None and statement not in function.body:
+        # Nested in a block, so it runs on some paths only.
+        return False
+    if _capture_always_binds(statement, name):
+        return True
+    return bool(_capture_is_decidable_from_a_literal_subject(function, statement, name))
