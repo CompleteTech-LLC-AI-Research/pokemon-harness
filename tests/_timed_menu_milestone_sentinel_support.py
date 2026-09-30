@@ -4751,6 +4751,30 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
                 return False
             kinds.add(constructor)
             continue
+        if _binds_starred_target(statement, name):
+            # #418. `*cs, = (...)` and `a, *cs = (...)` collect a run of
+            # elements into a **list**, so the *name* is a list whatever the
+            # right-hand side held. `list` has no `__enter__`, so entering it
+            # raises `TypeError` before the body is reached and the assert
+            # never runs: the contract is dead.
+            #
+            # This is deliberately checked *before* the general
+            # destructuring decline below. That decline exists because the
+            # type of a plain element is not readable from the container's
+            # syntax, so it answers "cannot tell" and keeps the assert live --
+            # the safe direction. A starred target is not such a case: the
+            # list-wrapping is decided by the target syntax alone, and it is
+            # decidable. Reading the wrapped element's kind instead let a
+            # usable suppressor vouch for a bare list, certifying a dead
+            # assert as enforced.
+            #
+            # Executed on CPython 3.12.14:
+            #   *cs, = (contextlib.suppress(AssertionError),)  -> cs == [suppress]
+            #   a, *cs = (contextlib.suppress(...), 2)         -> cs == [2]
+            #   b, *c = (1, contextlib.suppress(...))         -> c == [suppress]
+            # and in all three `hasattr(cs, "__enter__")` is False.
+            kinds.add("list")
+            continue
         if _binds_element_of(statement, name):
             # `cs, other = (contextlib.nullcontext(), 2)` binds `cs` to the
             # tuple's *first element*, not to the tuple. Reading the right-hand
@@ -4917,6 +4941,46 @@ def _binds_element_of(statement, name):
         isinstance(target, (ast.Tuple, ast.List)) and name in _store_target_names([target])
         for target in statement.targets
     )
+
+
+def _binds_starred_target(statement, name):
+    """Does this store bind ``name`` through an ``ast.Starred`` target?
+
+    ``*cs, = (a,)``, ``a, *cs = (a, b)`` and ``(*cs,) = (a, b)`` all give the
+    name the *list* the unpacking collects, so the answer does not depend on
+    the right-hand side at all.
+
+    ``_store_target_names`` flattens a ``Starred`` into the name inside it, so
+    by the time a name reaches here a starred binding is indistinguishable
+    from a positional one. This walks the same target lists again and keeps
+    only the names reached *through* a ``Starred``.
+    """
+    if not isinstance(statement, ast.Assign):
+        return False
+    return any(
+        isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
+        for target in statement.targets
+    )
+
+
+def _starred_target_names(targets):
+    """The names these targets bind *through* an ``ast.Starred``."""
+    names = set()
+    pending = list(targets)
+    while pending:
+        target = pending.pop()
+        if isinstance(target, ast.Name):
+            continue
+        if isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(target.elts)
+        elif isinstance(target, ast.Starred):
+            if isinstance(target.value, ast.Name):
+                names.add(target.value.id)
+            else:
+                # `(*(a, b),) = ...` is not valid Python, but a nested target
+                # keeps the walk total rather than silently ignoring a store.
+                pending.append(target.value)
+    return names
 
 
 def _target_is_bare_name(statement, name):
@@ -5558,7 +5622,9 @@ def _store_may_bind_enterable(entry, name, function=None, starred_asked=False):
             # would decline a header CPython settles on the carrier.
             return False
         return constructor not in NON_CONTEXT_MANAGER_TYPES
-    if not starred_asked and _binds_a_starred_name(statement, name):
+    if not starred_asked and (
+        _binds_starred_target(statement, name) or _binds_a_starred_name(statement, name)
+    ):
         # A starred target pins the name to a **list** whatever the elements
         # are, so the right-hand side does not have to be readable at all:
         # `*cs, = (helper,)`, `*cs, = helper` and `first, *cs = pair` all leave
@@ -5571,6 +5637,14 @@ def _store_may_bind_enterable(entry, name, function=None, starred_asked=False):
         # made the caller decline -- four more false-live regressions against a
         # master that answers them correctly. The type is a property of the
         # target, not of the value.
+        #
+        # #418 added the stricter `_binds_starred_target`, which matches only
+        # names reached *through* an `ast.Starred`; the `_binds_a_starred_name`
+        # above is the older, looser walk. Both are asked because they disagree
+        # on `*cs, = (suppress,)`, where the looser walk answers False and lets
+        # the wrapped element's kind vouch for a bare list. Asking the stricter
+        # one first is what lets #412's constructor analysis and #418 compose
+        # instead of shadowing each other.
         return False
     if value is None:
         # `with ... as cs:`, `del cs`, `except E as cs:` and a loop target.
