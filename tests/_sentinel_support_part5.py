@@ -941,3 +941,37 @@ def _module_binds_name(function, name, call=None):
             if any(_names_bound_by_statement(node, name)):
                 return True
     return False
+
+
+def _entry_suppresses_assertion_errors(entry, bound=None):
+    """Does this store's recorded value provably swallow ``AssertionError``?
+
+    The ambiguity rule treats a name bound on two paths as a possible
+    suppressor, because it cannot tell which one the call took. That is only
+    the safe reading when *every* candidate actually suppresses: if any of
+    them holds a plain context manager, there is a call on which the assert
+    fires, and reporting the header defeated would be a false-DEAD.
+
+    So this asks the narrow question the ambiguity rule needs: is this value a
+    *readable* suppression call that names ``AssertionError``? The
+    ``_is_readable_suppressor`` gate is load-bearing rather than a re-test,
+    because :func:`_suppression_names` deliberately answers ``["BaseException"]``
+    for any call it cannot read -- and ``BaseException`` does catch
+    ``AssertionError``, so dropping the gate would classify ``nullcontext()``
+    as swallowing. A zero-argument manager, an unreadable call, or a name with
+    no recorded value all answer False, which is the direction that keeps the
+    assert load-bearing.
+    """
+    value = entry[1] if isinstance(entry, tuple) else None
+    if value is None or not isinstance(value, ast.Call):
+        return False
+    if bound is None:
+        # Without the scope's bindings the call cannot be resolved, so it is
+        # not a *readable* suppressor. Answering False keeps the assert live,
+        # which is the direction #441 needs when the reader cannot prove the
+        # contract is disarmed.
+        return False
+    if not _is_readable_suppressor(value, bound):
+        return False
+    names = _suppression_names(value)
+    return bool(names) and any(_name_catches_assertion_error(name) for name in names)

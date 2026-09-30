@@ -60,7 +60,7 @@ def _aliased_suppressions(node, function, bound, owning=None, target=None):
     in the sentinel suite pins that difference.
     """
     by_index, raw_values = _assigned_suppressors(
-        function, bound, target if target is not None else node
+        function, bound, target if target is not None else node, owning
     )
     # The raw table is keyed by name, so the statement that owns each entry is
     # what positions it. #348: the header must resolve against the stores that
@@ -955,3 +955,30 @@ def _is_store_statement(node):
     return isinstance(node, ast.Assign) or (
         isinstance(node, ast.AnnAssign) and node.value is not None
     )
+
+
+def _elif_failure_predicate(test, values):
+    """Evaluate only a literal/name predicate at the proven assertion failure."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    if isinstance(test, ast.Name) and test.id in values:
+        return bool(values[test.id])
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        value = _elif_failure_predicate(test.operand, values)
+        return None if value is None else not value
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        operands = [test.left, test.comparators[0]]
+        resolved = []
+        for operand in operands:
+            if isinstance(operand, ast.Constant):
+                resolved.append(operand.value)
+            elif isinstance(operand, ast.Name) and operand.id in values:
+                resolved.append(values[operand.id])
+            else:
+                return None
+        left, right = resolved
+        if isinstance(test.ops[0], ast.Eq):
+            return left == right
+        if isinstance(test.ops[0], ast.NotEq):
+            return left != right
+    return None

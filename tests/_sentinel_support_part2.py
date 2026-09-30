@@ -21,7 +21,7 @@ def _match_capture_names_for(statement):
     return names
 
 
-def _assigned_suppressors(function, bound, query=None):
+def _assigned_suppressors(function, bound, query=None, owning=None):
     """Map each statement index to the suppressor names bound *by* it.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -114,7 +114,7 @@ def _assigned_suppressors(function, bound, query=None):
             seen = [entry for entry in entries if orders[id(entry[0])] <= index]
             if not seen:
                 continue
-            value = _resolve_bindings(seen, bound, orders, index, function, query)
+            value = _resolve_bindings(seen, bound, orders, index, function, query, owning)
             # #441. `_NOT_A_SUPPRESSOR` is a *record* that the name is bound
             # and what it carries is not a suppressor, not a value to hand
             # downstream. It has always been dropped here, which was correct
@@ -201,6 +201,7 @@ def _assigned_suppressors(function, bound, query=None):
                 following,
                 function,
                 query,
+                owning,
             )
             if resolved is None:
                 # Recorded against THIS index, not the next one.
@@ -451,7 +452,7 @@ def _store_bindings(function, bound, query=None):
     return bindings, raw_values
 
 
-def _resolve_bindings(entries, bound, orders, index=None, function=None, query=None):
+def _resolve_bindings(entries, bound, orders, index=None, function=None, query=None, owning=None):
     """Resolve one name from the bindings in effect at a single ``with``.
 
     ``entries`` are ``(statement, value, conditional)`` triples, already
@@ -527,7 +528,9 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
         and not any(_entry_may_be_an_unrun_capture(entry) for entry in competing)
         and _store_is_in_an_elif_link(competing[0][0], function)
         and _entry_suppresses_assertion_errors(competing[0], bound)
-        and _elif_skipped_path_can_fail(entries, orders, competing[0], bound, function, query)
+        and _elif_skipped_path_can_fail(
+            entries, orders, competing[0], bound, function, query, owning
+        )
     ):
         # This witness can fail without entering the competing suppressor.
         return _NOT_A_SUPPRESSOR

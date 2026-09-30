@@ -713,77 +713,7 @@ def _outermost_chain_link(block, function):
     return None
 
 
-def _store_is_in_an_elif_link(statement, function=None):
-    """Is this store written in an ``elif`` arm rather than a first-link ``if``?
-
-    An ``elif`` is not a branch of its own. It is a continuation of the chain
-    above it and runs only when *every* test before it failed, so a store in an
-    ``elif`` arm cannot be read as the value in force on every call:
-
-        cs = contextlib.nullcontext()
-        if x:
-            pass
-        elif True:
-            cs = contextlib.suppress(AssertionError)
-
-    At ``x == 1`` the first arm is taken and ``cs`` still holds the
-    ``nullcontext``; at ``x == 0`` the ``elif`` runs. Which store a later
-    ``with cs:`` enters therefore depends on the call, and no single verdict
-    about the header is right.
-
-    The test is structural: an enclosing ``ast.If`` whose ``orelse`` contains
-    the store's own block. A first-link ``if``, an ``else`` arm and an
-    ``if True:`` body all fail it, which is what keeps them on their existing
-    answers -- an ``else`` arm genuinely does run whenever its ``if`` does not,
-    so together the two cover every call and the later store really is
-    decisive there.
-    """
-    if function is None:
-        return False
-    for block in _enclosing_blocks(statement, function):
-        if not isinstance(block, ast.If):
-            continue
-        for outer in _enclosing_blocks(block, function):
-            if isinstance(outer, ast.If) and any(child is block for child in outer.orelse):
-                return True
-    return False
-
-
-def _entry_suppresses_assertion_errors(entry, bound=None):
-    """Does this store's recorded value provably swallow ``AssertionError``?
-
-    The ambiguity rule treats a name bound on two paths as a possible
-    suppressor, because it cannot tell which one the call took. That is only
-    the safe reading when *every* candidate actually suppresses: if any of
-    them holds a plain context manager, there is a call on which the assert
-    fires, and reporting the header defeated would be a false-DEAD.
-
-    So this asks the narrow question the ambiguity rule needs: is this value a
-    *readable* suppression call that names ``AssertionError``? The
-    ``_is_readable_suppressor`` gate is load-bearing rather than a re-test,
-    because :func:`_suppression_names` deliberately answers ``["BaseException"]``
-    for any call it cannot read -- and ``BaseException`` does catch
-    ``AssertionError``, so dropping the gate would classify ``nullcontext()``
-    as swallowing. A zero-argument manager, an unreadable call, or a name with
-    no recorded value all answer False, which is the direction that keeps the
-    assert load-bearing.
-    """
-    value = entry[1] if isinstance(entry, tuple) else None
-    if value is None or not isinstance(value, ast.Call):
-        return False
-    if bound is None:
-        # Without the scope's bindings the call cannot be resolved, so it is
-        # not a *readable* suppressor. Answering False keeps the assert live,
-        # which is the direction #441 needs when the reader cannot prove the
-        # contract is disarmed.
-        return False
-    if not _is_readable_suppressor(value, bound):
-        return False
-    names = _suppression_names(value)
-    return bool(names) and any(_name_catches_assertion_error(name) for name in names)
-
-
-def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, query):
+def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, query, owning=None):
     """Prove the filed literal-comparison failure reaches a skipped elif arm.
 
     A non-suppressor is not necessarily enterable. A live classification also
@@ -824,6 +754,31 @@ def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, qu
         for statement in _scope_body_nodes(function)
     ):
         return False
+    if not isinstance(owning, ast.Module):
+        return False
+    own_imports = _bound_names(ast.Module(body=[], type_ignores=[]), function)
+    if root_name.id not in own_imports:
+        for statement in _scope_body_nodes(owning):
+            names = _store_target_names_of(statement)
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [statement.name]
+            if root_name.id in names:
+                return False
+            if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                if any(
+                    isinstance(target, (ast.Attribute, ast.Subscript))
+                    and any(
+                        isinstance(child, ast.Name) and child.id == root_name.id
+                        for child in ast.walk(target)
+                    )
+                    for target in targets
+                ):
+                    return False
+            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                return False
     failure = query.test
     values = None
     if (
@@ -862,7 +817,7 @@ def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, qu
         ),
         None,
     )
-    if chain is None:
+    if chain is None or not _elif_witness_reaches_header(function, chain, query, bound):
         return False
     while isinstance(chain, ast.If):
         if _contains_any(chain.body, competitor[0]):
@@ -882,28 +837,57 @@ def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, qu
     return False
 
 
-def _elif_failure_predicate(test, values):
-    """Evaluate only a literal/name predicate at the proven assertion failure."""
-    if isinstance(test, ast.Constant):
-        return bool(test.value)
-    if isinstance(test, ast.Name) and test.id in values:
-        return bool(values[test.id])
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        value = _elif_failure_predicate(test.operand, values)
-        return None if value is None else not value
-    if isinstance(test, ast.Compare) and len(test.ops) == 1:
-        operands = [test.left, test.comparators[0]]
-        resolved = []
-        for operand in operands:
-            if isinstance(operand, ast.Constant):
-                resolved.append(operand.value)
-            elif isinstance(operand, ast.Name) and operand.id in values:
-                resolved.append(values[operand.id])
-            else:
-                return None
-        left, right = resolved
-        if isinstance(test.ops[0], ast.Eq):
-            return left == right
-        if isinstance(test.ops[0], ast.NotEq):
-            return left != right
-    return None
+def _elif_witness_reaches_header(function, chain, query, bound):
+    """Keep the small witness proof free of earlier exits or opaque effects."""
+    header = next(
+        (node for node in function.body if isinstance(node, ast.With) and query in node.body), None
+    )
+    if (
+        header is None
+        or len(header.items) != 1
+        or not isinstance(header.items[0].context_expr, ast.Name)
+    ):
+        return False
+    chain_index, header_index = function.body.index(chain), function.body.index(header)
+    if chain_index >= header_index:
+        return False
+    if any(
+        not isinstance(node, ast.Pass) for node in function.body[chain_index + 1 : header_index]
+    ):
+        return False
+    if any(not isinstance(node, ast.Pass) for node in header.body[: header.body.index(query)]):
+        return False
+    for node in function.body[:chain_index]:
+        if isinstance(node, ast.Pass):
+            continue
+        if not isinstance(node, ast.Assign) or not all(
+            isinstance(target, ast.Name) for target in node.targets
+        ):
+            return False
+        value = node.value
+        if isinstance(value, ast.Constant):
+            continue
+        if not isinstance(value, ast.Call) or value.keywords:
+            return False
+        if _resolves_to(value.func, "contextlib.nullcontext", bound) and not value.args:
+            continue
+        if not _is_readable_suppressor(value, bound):
+            return False
+        if not all(
+            isinstance(argument, ast.Name)
+            and argument.id in ("AssertionError", "Exception", "BaseException", "ValueError")
+            for argument in value.args
+        ):
+            return False
+        argument_names = {argument.id for argument in value.args}
+        parameter_names = {
+            argument.arg for argument in ast.walk(function.args) if isinstance(argument, ast.arg)
+        }
+        if argument_names & parameter_names:
+            return False
+        if any(
+            argument_names & set(_store_target_names_of(store))
+            for store in _scope_body_nodes(function)
+        ):
+            return False
+    return True

@@ -10947,3 +10947,60 @@ def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_import():
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    (
+        "    if x == 1:\n        return\n",
+        "    if x == 1:\n        raise TypeError\n",
+        "    doomed = factory()\n",
+    ),
+)
+def test_an_elif_failure_witness_cannot_skip_earlier_control_or_opaque_calls(earlier):
+    source = (
+        "import contextlib\n"
+        "def factory(): raise TypeError\n"
+        "def outer(x):\n"
+        "    cs = contextlib.nullcontext()\n"
+        + earlier
+        + "    if x:\n        pass\n    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-unreachable-witness>", "exec"), namespace)  # noqa: S102
+    for value in (0, 1):
+        try:
+            namespace["outer"](value)
+        except TypeError:
+            pass
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_module_import():
+    source = (
+        "import contextlib\n"
+        "from types import SimpleNamespace\n"
+        "real = contextlib\n"
+        "contextlib = SimpleNamespace(nullcontext=lambda: real.suppress(AssertionError), suppress=real.suppress)\n"
+        "def outer(x):\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    if x:\n        pass\n"
+        "    elif True:\n        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<elif-global-import-shadow>", "exec"), namespace)  # noqa: S102
+    for value in (0, 1):
+        namespace["outer"](value)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
