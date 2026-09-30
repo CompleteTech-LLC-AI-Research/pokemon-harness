@@ -1,35 +1,50 @@
-"""Sentinel support, part 2 of 5 (#122 split).
-
-Functions: _assigned_suppressors, _store_bindings, _resolve_bindings, _latest_write_in_block, _readable_store_value, _binding_order, _walrus_is_conditional, _walrus_skipped_by_a_branch, _is_readable_suppressor, _deref_alias
-"""
-
+# Shared-namespace fragment generated from the merged monolith.
 # ruff: noqa: F821
-#
-# This file is a *fragment* of
-# tests/_timed_menu_milestone_sentinel_support, not a module of its own. The
-# support module reads its source with `exec` into one shared dict, so that every
-# helper stays a bare global -- which is required twice over: the sentinel suite
-# asserts one helper *calls* another by parsing the caller's source and matching
-# `ast.Name` (`_sentinel_uses`), and callers rebind names on the support module
-# itself (`support._module_tree = ...`), which only reaches the caller if there
-# is a single globals dict rather than one private copy per file.
-#
-# A cross-fragment reference is therefore resolved at exec time, not import
-# time, and static analysis cannot see it: the names below are defined by
-# another fragment. Importing them explicitly would not help -- it would
-# reintroduce a second namespace, which is the exact failure this split has to
-# avoid -- so the undefined-name rule is disabled for these fragments.
-
-# Constants and shared imports come from the support namespace this file
-# is executed into: `tests._timed_menu_milestone_sentinel_support` execs
-# the base and then every part, all against one dict, so `ast`, `inspect`,
-# `milestones` and the module constants are already globals by the time
-# anything below runs. Re-importing them here would only rebind the same
-# objects, and importing this file as a module of its own would create a
-# second, private namespace -- so these fragments are not importable alone.
 
 
-def _assigned_suppressors(function, bound):
+# GENERATED_FRAGMENT_IMPORT_GUARD
+if __name__ == "tests._sentinel_support_part2":
+    raise ImportError(
+        "tests._sentinel_support_part2 is a fragment; import "
+        "tests._timed_menu_milestone_sentinel_support instead."
+    )
+
+
+def _entry_may_be_an_unrun_capture(entry):
+    """Is this entry a ``match`` capture that is not guaranteed to have bound?
+
+    The narrow companion to :func:`_store_retires`, asked of a whole
+    ``(statement, value, conditional)`` entry rather than of a statement and a
+    name. It exists because the name is not carried on the entry itself, and
+    the caller that has to decide whether a single competing store is ambiguous
+    only has the entry.
+
+    A ``match`` statement can capture several names, so the name is recovered
+    by asking which of the captures it owns is the one this entry records --
+    a capture that is guaranteed to bind for *some* name is still a capture
+    that may not bind for the name in question, so every owned name is
+    checked and any one of them being undecidable makes the entry so.
+    """
+    statement = entry[0]
+    if not isinstance(statement, ast.Match):
+        return False
+    return not all(
+        _capture_always_binds(statement, name) for name in _match_capture_names_for(statement)
+    )
+
+
+def _match_capture_names_for(statement):
+    """The names a single ``ast.Match`` statement captures."""
+    names = []
+    for node in ast.walk(statement):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+            names.append(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            names.append(node.rest)
+    return names
+
+
+def _assigned_suppressors(function, bound, query=None):
     """Map each statement index to the suppressor names bound *by* it.
 
     ``contextlib.suppress(AssertionError)`` is an expression, and an expression
@@ -110,7 +125,7 @@ def _assigned_suppressors(function, bound):
     """
     # Every binding of every name, tagged with whether that store can compete
     # with another, so that supersession and ambiguity stay told apart.
-    bindings, raw_values = _store_bindings(function, bound)
+    bindings, raw_values = _store_bindings(function, bound, query)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in bindings.values()
@@ -212,7 +227,7 @@ def _assigned_suppressors(function, bound):
     return assigned, raw_values
 
 
-def _store_bindings(function, bound):
+def _store_bindings(function, bound, query=None):
     """Map every name ``function`` binds to its ``(stmt, value, cond)`` stores.
 
     Returns ``(bindings, raw_values)``. ``raw_values`` is the undereferenced
@@ -253,7 +268,7 @@ def _store_bindings(function, bound):
     # written last". A read only sees the stores that precede it, so both
     # resolution sites pass the position they are resolving at and let
     # :func:`_last_store_before` pick the entry that had actually run.
-    raw_values = _raw_store_values(function)
+    raw_values = _raw_store_values(function, query, bound)
     orders = {
         id(statement): _binding_order(function, statement)
         for entries in raw_values.values()
@@ -287,7 +302,7 @@ def _store_bindings(function, bound):
             # `ast.Name` targets left this invisible and let a stale
             # suppressor outrank the loop's own binding.
             targets = [statement.target]
-            value = None
+            value = _loop_value_source(statement, query, bound)
         elif isinstance(statement, (ast.With, ast.AsyncWith)):
             # #324: `with ... as cs:` is a store too, and the item expression
             # is what the `with` would evaluate. A walrus carried in from
@@ -324,17 +339,65 @@ def _store_bindings(function, bound):
         else:
             conditional = statement not in function.body
         for name in _store_target_names(targets):
-            bindings.setdefault(name, []).append(
-                (
-                    statement,
-                    _deref_alias(
-                        value,
+            # Order is load-bearing, and it is three steps, not two. The value a
+            # destructuring target receives can be reached through a name at
+            # either level, and each level needs its own deref:
+            #
+            #     t = (contextlib.suppress(AssertionError),)
+            #     cs, = t                 # the RHS is a Name bound to a container
+            #     with cs:
+            #         assert x != 1      # swallowed
+            #
+            #     a, b = b, a             # the *element* is itself a Name
+            #     with a:
+            #         assert x != 1      # swallowed, after the swap
+            #
+            # Deref-first alone fixes the first shape and breaks the second: on
+            # `(b, a)` the deref is a no-op (a tuple is not a name), so the
+            # element `b` is selected but left as a bare `Name`, which is not a
+            # readable suppressor and reports the assert live (#381/#382).
+            # Select-first alone fixes the second and breaks the first, because
+            # the RHS reads as a bare `Name` and no container is ever found
+            # (#374). So the right-hand side is dereferenced first, the element
+            # is picked out of that resolved container, and the element is
+            # dereferenced in turn when it is itself a name.
+            resolved = _deref_alias(
+                value,
+                raw_values,
+                orders,
+                _binding_order(function, statement),
+                name,
+            )
+            element = _value_bound_by(targets, resolved, name)
+            if isinstance(element, ast.Name):
+                # The selected element is a name, so it stands for whatever it
+                # was bound to rather than for itself. Resolving it here is what
+                # keeps a swapped pair -- where both names already hold
+                # suppressors -- from reading as a non-suppressor element.
+                element = _deref_alias(
+                    element,
+                    raw_values,
+                    orders,
+                    _binding_order(function, statement),
+                    name,
+                )
+                if isinstance(element, ast.Name):
+                    # The selected element is a name, so it stands for whatever
+                    # it was bound to rather than for itself. Resolving it here
+                    # is what keeps a swapped pair -- where both names already
+                    # hold suppressors -- from reading as a non-suppressor
+                    # element.
+                    element = _deref_alias(
+                        element,
                         raw_values,
                         orders,
                         _binding_order(function, statement),
                         name,
-                        function,
-                    ),
+                    )
+            bindings.setdefault(name, []).append(
+                (
+                    statement,
+                    element,
                     conditional,
                 )
             )
@@ -401,8 +464,10 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     ``entries`` are ``(statement, value, conditional)`` triples, already
     filtered to the stores that run at or before the ``with`` in question.
     ``index`` is the position of that ``with`` among the function's top-level
-    statements and ``function`` the scope it sits in; together they are what
-    tell a *settled* store from one still waiting on a branch.
+    statements and ``function`` the scope it sits in. ``index`` and
+    ``function`` together are what tell a *settled* store from one still
+    waiting on a branch; ``function`` is also what tells a real builtin from
+    a name the function rebinds.
     """
     # An unconditional store runs on *every* path, so the last one of those is
     # the value in force unless some conditional store comes after it. Only the
@@ -425,6 +490,41 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     competing = [
         entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
     ]
+    # A `for cs in ...:` target and an assignment to `cs` in that loop's own
+    # body are not two competing bindings. The body runs *after* the target on
+    # every pass, so whichever it stores is the value left behind and the
+    # target's element is gone. Counting both made
+    #
+    #     import os as cs
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = nullcontext()
+    #
+    # ambiguous and reported a live header dead: the name really is a context
+    # manager whenever the loop runs. The target is dropped from the competing
+    # set when its own body rebinds the name, leaving the body's store as the
+    # single conditional binding -- which supersedes the carried carrier.
+    #
+    # The collapse is only sound while the body's own store is what actually
+    # answers the header, and that store is not always readable. Dropping the
+    # target while the body binds `contextlib.suppress(AssertionError)` and
+    # then answering from the *target* retired a suppressor that is really in
+    # force on the path where the loop runs:
+    #
+    #     cs = None
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = contextlib.suppress(AssertionError)
+    #
+    # Once the target is out of the competing set, the body's store is the one
+    # answer, so the collapse is kept only when the body's last rebind is a
+    # store this can read. An unreadable one leaves the target in place, and
+    # the two competing bindings are then reported ambiguous -- which is the
+    # safe direction, because the name is genuinely a suppressor on the path
+    # where the loop runs.
+    collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
+    if collapsed:
+        competing = collapsed_entries
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
@@ -487,8 +587,32 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     # every enumerated shape (630 order/conditional combinations, zero
     # reachable) and has been removed rather than left as a branch no mutation
     # can kill.
-    latest = max(orders[id(entry[0])] for entry in entries)
-    tied = [entry for entry in entries if orders[id(entry[0])] == latest]
+    # The tie-break below runs over the *surviving* candidates, not over every
+    # entry. A loop target that its own body rebinds shares the body's order --
+    # both are ordered by the top-level `for` that contains them -- so reading
+    # `entries` here reinstated the very binding `_collapse_loop_targets_into_bodies`
+    # had just retired, and the #367 tie-break then declined a name the collapse
+    # had made decidable:
+    #
+    #     def outer(x, flag):
+    #         import os as cs
+    #         if flag:
+    #             for cs in (None,):
+    #                 cs = nullcontext()
+    #         with cs:
+    #             assert x != 1
+    #
+    # The collapse reduces the two conditional stores to the body's alone, but
+    # the maximal order over *all* entries is still 1 with both the `for`
+    # target and the body store tied at it. `_latest_write_in_block` cannot
+    # separate stores inside one loop (neither has run in a way that settles
+    # the other), so it returns `None` and the resolution became
+    # `AMBIGUOUS` -- read downstream as a *possible suppressor*, which retired
+    # a header CPython really enters. The maximum is therefore taken over the
+    # same set the collapse produced, matching the no-tie branch below.
+    candidates = competing if competing else entries
+    latest = max(orders[id(entry[0])] for entry in candidates)
+    tied = [entry for entry in candidates if orders[id(entry[0])] == latest]
     if len(tied) > 1:
         # Mixed tie: an unconditional store and a conditional one share the
         # order. `_binding_order` cannot separate them -- it keys a store by the
@@ -535,8 +659,28 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
         if latest_write is None:
             return AMBIGUOUS_SUPPRESSOR
         return _readable_store_value(latest_write[1], bound)
-    last = tied[0][1]
-    return last if _is_readable_suppressor(last, bound) else None
+    else:
+        # No tie, so the single highest-ordered candidate is the value in
+        # force.
+        #
+        # The sort runs over `candidates`, the *surviving* set the collapse
+        # above produced -- for the same reason the tie-break does. A loop
+        # target that its own body rebinds shares the body's source order, so
+        # taking the maximum over every entry let the retired target win a tie
+        # it should not have been in, and the suppressor stored by the body was
+        # dropped in favour of the element the target yielded:
+        #
+        #     cs = None
+        #     if flag:
+        #         for cs in (None,):
+        #             cs = contextlib.suppress(AssertionError)
+        #
+        # The collapse above is what makes the body's store the only
+        # candidate, so the candidate set has to be the same one the collapse
+        # produced. Reading `entries` here reinstated the very binding that
+        # was just retired.
+        last = max(candidates, key=lambda entry: orders[id(entry[0])])[1]
+        return last if _is_readable_suppressor(last, bound) else None
 
 
 def _latest_write_in_block(tied, orders=None, index=None, function=None):
@@ -769,126 +913,58 @@ def _is_readable_suppressor(value, bound):
     return isinstance(value, ast.Call) and _is_suppression_call(value, bound)
 
 
-def _deref_alias(value, raw_values, orders=None, index=None, target=None, function=None):
-    """The value an assignment expression's right-hand side stands for.
+def _exclude_for_alias_walk(entries, origin, current, target, revisiting):
+    """The store this pass of the alias walk must not resolve to.
 
-    A binding can take its value from another name rather than from a call:
+    #371. A *self-alias* -- a store whose right-hand side names the very name
+    it binds -- is resolved by excluding that store, so the chain falls through
+    to the binding that preceded it:
 
-        base = contextlib.suppress(AssertionError)
-        y = (cs := base)         # `cs` is the same suppressor as `base`
-        with cs:
-            assert 1 == 2        # swallowed, because `cs` *is* `base`
+        for cs in (contextlib.nullcontext(),):
+            with (cs := cs):        # `cs` still holds the loop's element
+                assert x != 1
 
-    Recording the bare ``base`` node leaves the binding unreadable, because
-    :func:`_is_readable_suppressor` accepts only an ``ast.Call``. The header
-    then reported a swallowed assert as *enforced* -- the damaging direction,
-    a disarmed contract certified as load-bearing (#333).
+    The loop target and the walrus sit in one top-level statement, so they
+    share a binding order by construction and every position-based test ties.
+    The exclusion is what breaks that tie, and it has to name the *entry*, not
+    a flag.
 
-    Resolution is bounded so the walk is total. An alias with no recorded
-    binding resolves to itself and stays unreadable; a cycle (``a = b; b = a``)
-    is cut by the bound instead of recursing; and a name that resolves to a
-    non-suppressor keeps that value, so the store still supersedes whatever it
-    replaced. Only a chain that ends at a readable suppressor is reported as
-    one.
+    It could not do that before. `origin` is only filled in *after* a pass
+    returns, so on the first pass -- which is the only pass a self-alias needs
+    -- it is still `None`, and passing it straight through excluded nothing.
+    `_last_store_before` then saw a genuine tie, and #367's tie branch, which
+    exists to decline a `for`/`else` tie it cannot resolve, declined it:
 
-    A name can be bound more than once, and the *last* binding is the one a
-    later read sees:
+        >>> _last_store_before(entries, orders, index, exclude=<the walrus>)
+        ast.Call                       # the loop's nullcontext()
+        >>> _last_store_before(entries, orders, index, exclude=None)
+        AMBIGUOUS_SUPPRESSOR           # tie -> declined
 
-        a = helper.make()
-        a = contextlib.suppress(AssertionError)
-        with (cs := a):          # `a` is the suppressor, not the first store
+    The tie is decidable here, so declining it was wrong. `AMBIGUOUS_SUPPRESSOR`
+    then reached `_is_suppressing_with`, which reads the marker as "may be any
+    suppressor", and a `nullcontext()` loop target was reported defeated. The
+    suppressor spelling of the same row was unaffected -- `False` is the
+    expected answer there too -- so only the control row could see it.
 
-    Taking the first binding would resolve that to the ordinary call, leave the
-    header unreadable, and report a swallowed assert as live. A name bound
-    twice is a plain supersession this module already models, so the chain has
-    to follow it the same way.
-
-    The table is whole-function rather than position-filtered, which is what
-    lets a two-hop chain resolve at the binding that performs it. Most of the
-    shapes that over-approximates fail loudly rather than silently: binding an
-    alias *after* the header that reads it raises ``NameError`` on entry, and
-    a binding overwritten with a non-context manager raises ``TypeError``.
-    Neither is a swallowed assert, so neither is the damage this direction
-    causes.
-
-    "Most" is doing real work, and the exception is ``del``. A ``del`` is a
-    value-less store, so :func:`_raw_store_values` records nothing for it and
-    this walk never sees it -- but the name's *earlier* store is still in the
-    table, so a name that was a suppressor before its ``del`` is still
-    resolved to that suppressor. #336's :func:`_entered_name_is_dead` reads
-    the ``del`` and reports the same entry unreachable, so both rules fire and
-    the surviving verdict depends on whether a later store exists. The
-    answers are correct either way, but the route differs, and nothing here
-    says which rule decided. Filed as #344; it predates this change and is not
-    fixed by it.
+    So the entry is located directly: it is the one whose statement is the
+    store being resolved. `current.id == target` identifies that walk, and
+    `revisiting` keeps the existing behaviour of excluding the entry that
+    supplied the value on a later pass.
     """
-    seen = set()
-    # A store whose right-hand side names the name it binds is a *self-alias*:
-    #
-    #     cs = contextlib.suppress(AssertionError)
-    #     with (cs := cs):       # `cs` still holds the suppressor
-    #         assert x != 1     # swallowed
-    #
-    # Following the name from here lands on the very store being resolved, so
-    # the walk would hand back the same name and the header would read as
-    # unreadable. The binding in force *before* this statement is the answer,
-    # which is the same resolution with the store being resolved excluded.
-    # That exclusion is what `origin` carries below.
-    current = value
-    origin = None
-    for _ in range(_ALIAS_CHAIN_LIMIT):
-        if not isinstance(current, ast.Name):
-            return current
-        entries = raw_values.get(current.id)
-        if not entries:
-            return current
-        # When the walk is standing on the very store it is resolving, that
-        # store is excluded so the chain falls through to the binding that
-        # preceded it. Otherwise the entry that supplied the current value is
-        # remembered, so a later return to this name excludes the right one.
-        revisiting = current.id in seen
-        if not revisiting:
-            seen.add(current.id)
-        chosen = _last_store_before(
-            entries,
-            orders,
-            index,
-            origin if current.id == target or revisiting else None,
-            function,
+    if origin is not None and (current.id == target or revisiting):
+        return origin
+    if current.id == target:
+        return next(
+            (
+                entry
+                for entry in entries
+                if entry[1] is not None and _is_the_store_being_resolved(entry, target)
+            ),
+            None,
         )
-        if origin is None:
-            origin = next((e for e in entries if e[1] is chosen), None)
-        current = chosen
-        if revisiting:
-            return current
-    return current
+    return origin if revisiting else None
 
-# ---------------------------------------------------------------------------
-# Fragment guard. This file is not an importable module: it is one piece of
-# tests/_timed_menu_milestone_sentinel_support, which `exec`s it, together with
-# the other fragments, into a single shared namespace.
-#
-# That sharing is what makes the sentinels work, and it cannot survive being
-# bypassed. Executed through the entry point, `__name__` is the support module's
-# name and this guard is inert. Executed under its OWN name -- which is what
-# `import tests._sentinel_support_part2` does, and what the import system does by itself -- the
-# file would bind only the names it defines itself: a cross-fragment call would
-# raise NameError, and a name imported from here would be a different object
-# from the one the support module exports. Worse, that breakage is
-# order-dependent and silent, which is a poor property for a module whose entire
-# purpose is catching silent structural faults.
-#
-# Fail loudly instead, and name the supported import.
-# ---------------------------------------------------------------------------
-if __name__ == "tests._sentinel_support_part2":
-    raise ImportError(
-        "tests._sentinel_support_part2 is a fragment of "
-        "tests._timed_menu_milestone_sentinel_support, not an importable "
-        "module. Import the support module instead:\n"
-        "    from tests import _timed_menu_milestone_sentinel_support as "
-        "support\n"
-        "Importing this fragment directly gives it a private copy of the shared "
-        "namespace: cross-fragment calls raise NameError, and rebinding a name "
-        "on the support module would not reach this code."
-    )
 
+def _is_the_store_being_resolved(entry, target):
+    """Is ``entry`` the self-alias store named by ``target``?"""
+    return isinstance(entry[1], ast.Name) and entry[1].id == target

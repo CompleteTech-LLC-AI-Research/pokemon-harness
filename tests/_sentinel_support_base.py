@@ -1,34 +1,131 @@
-"""Shared imports and constants for the sentinel support package.
+# Shared-namespace fragment generated from the merged monolith.
+# ruff: noqa: F401
 
-Fragment 0 of 6, split from _timed_menu_milestone_sentinel_support.py by #122.
-This one holds the imports and the module-level constants; the five parts that
-follow hold the functions. None of the six is importable on its own --
-tests/_timed_menu_milestone_sentinel_support.py execs them, in order, into one
-shared dict and is the only entry point.
+"""Structural sentinels that keep #261/#270 assertions load-bearing (#270).
+
+``tests/test_timed_menu_milestones.py`` carries the frame-bound retention
+contract, but two of its assertions can be deleted or relaxed without any
+behavioural test noticing:
+
+* ``assert_not_deadline_truncated(record)`` is the #261 guard. It is *correct*
+  and it does fire when the wall clock wins, but nothing checks that the call
+  is still wired into ``run_owner``. Rewriting ``if clock_step == 0.0:`` to
+  ``if False:`` leaves the whole file green (see #270 Finding 1).
+* Four sites assert an exact call count (``== 300`` / ``== 271``). Relaxing any
+  of them to ``>=`` turns the retention contract into "at least one call"
+  without failing (see #270 Finding 2).
+
+Neither gap is observable from the *return value* of a passing run, so a
+behavioural assertion cannot catch it -- the same reasoning that made #271 pin
+the clock read by inspecting source. These helpers therefore parse the test
+module's AST and assert on structure. They are the backstop for structure; the
+behavioural assertions remain the load-bearing contract.
+
+The structural checks ask whether a pinned assertion is *enforced*, not merely
+*present*. Presence alone is satisfiable by an assertion wrapped in
+``try/except AssertionError: pass``, which leaves the node in the AST, leaves
+the comparison in place, and leaves the owning test unable to fail (#280).
+``_is_enforced`` is the shared answer to that question and is used by both the
+teeth check and the count check.
 """
 
-# `ast` is re-exported: callers reach `support.ast`. `inspect` and `milestones`
-# are used by the function fragments that are exec'd after this one into the
-# same shared dict, so they are imports-for-others rather than dead code here.
+# GENERATED_FRAGMENT_IMPORT_GUARD
+if __name__ == "tests._sentinel_support_base":
+    raise ImportError(
+        "tests._sentinel_support_base is a fragment; import "
+        "tests._timed_menu_milestone_sentinel_support instead."
+    )
+
+
 import ast
+import copy
 import inspect
 
 import tests.test_timed_menu_milestones as milestones
 
-# These three are this module's contribution to the shared namespace, not code it
-# runs itself: `ast` and `inspect` back `_module_tree()`, and `milestones` is the
-# module those helpers parse. The `assert` is not decoration -- without a use in
-# this file, `ruff check --fix` deletes exactly these imports, and the breakage
-# only surfaces at exec time as a NameError raised from inside an analyzer.
-assert ast and inspect and milestones
-
+#: Dotted paths whose call is a suppression context. Matched by *resolved*
+#: name rather than by spelling, so the qualified, from-import and both alias
+#: forms all collapse to the same value before the comparison. Matching one
+#: concrete spelling and leaving the family open is what #288 did with
+#: ``except*``.
 SUPPRESSING_CONTEXTS = ("contextlib.suppress", "asyncio.suppress")
+
+#: The *last component* of each suppressing path -- ``suppress`` for both
+#: entries in ``SUPPRESSING_CONTEXTS``. This is the set of bare names that can
+#: stand in for a suppressor whose binding the enclosing function cannot see
+#: (see ``_unreadable_suppressor``).
+#:
+#: Taking every component of the dotted path would also admit ``contextlib``
+#: and ``asyncio``. Those are module names, not suppressors -- ``with
+#: contextlib:`` suppresses nothing -- so including them would report live
+#: asserts as dead on any code that uses a module object as a context manager.
+#: The suppressing callable is always the final component, so that component is
+#: the only spelling that can stand in for one.
 SUPPRESSOR_SPELLINGS = frozenset(dotted.rsplit(".", 1)[-1] for dotted in SUPPRESSING_CONTEXTS)
+
+#: Sentinel recorded for a name bound to *more than one* readable suppressor, so
+#: that which one applies depends on the runtime path taken.
+#:
+#: #308 criterion 1 requires such a name to be treated as unreadable and
+#: reported as a defeat, rather than resolved by source order. It is a distinct
+#: object rather than a boolean so that the ambiguity can be told apart from a
+#: known alias when the exception names are inspected -- an ambiguous binding
+#: suppresses *any* exception, because the rule cannot know which target was
+#: applied.
 AMBIGUOUS_SUPPRESSOR = object()
+
+#: Sentinel recording that a name *is* bound at this position and deliberately
+#: carries something that is not a suppressor.
+#:
+#: #367. `_assigned_suppressors` records a name only when it resolves to a
+#: suppressor, so "carries a `nullcontext`" and "is not bound here" both fall
+#: out as a missing key. Those are different answers: the second inherits the
+#: previous position's binding, which resurrects a superseded suppressor. The
+#: marker separates them.
 _NOT_A_SUPPRESSOR = object()
+
+#: Sentinel for a suppressor reached through ``name.__enter__()``. The dunder
+#: is ``pass`` on every suppressor, so the entry raises ``TypeError`` before the
+#: body runs whatever exception list it was built with. The argument is
+#: therefore irrelevant and cannot be read off the binding, so the shape gets
+#: its own marker instead of being classified from the suppressor's arguments.
 LOUD_DUNDER = object()
+
+#: How many links of alias chain :func:`_deref_alias` will follow before it
+#: gives up and reports the value unreadable. A chain that resolves to a
+#: suppressor is short in practice, so the bound is generous; it exists so a
+#: cycle (``a = b; b = a``) terminates instead of recursing.
 _ALIAS_CHAIN_LIMIT = 32
+
+#: A store that binds a name without a right-hand side this module can read
+#: (#359). It is a distinct marker rather than ``None`` because ``None`` means
+#: "resolved, and the value is not a suppressor" -- a store that *supersedes* a
+#: carried one and retires it. Collapsing the two is what made a `for` target
+#: invisible and left a swallowed assert reported as live.
+UNREADABLE_VALUE = object()
+
+#: Internal "this target does not bind `name`" signal, distinct from a value.
+_NO_MATCH = object()
+
+#: Dotted paths whose call turns a caught exception into a *pass*. This is a
+#: different mechanism from ``SUPPRESSING_CONTEXTS`` and the distinction is
+#: load-bearing, so the two sets stay separate rather than being merged:
+#:
+#: * ``suppress`` swallows the failure silently -- the test still passes and
+#:   nothing is recorded.
+#: * ``raises`` *asserts* the failure happened. ``with
+#:   pytest.raises(AssertionError): assert 1 == 2`` therefore raises the
+#:   AssertionError, ``pytest.raises`` catches it, finds the expected type, and
+#:   the block ends normally. The test goes green on a failing assert, which is
+#:   the same present-but-dead contract as the other shapes in this family.
+#:
+#: Measured on the pinned file, ``pytest.raises`` wraps asserts 5 times and
+#: never once for ``AssertionError``: the arguments there are ``RuntimeError``,
+#: ``BaseExceptionGroup``, and tuples of ``TypeError``/``ValueError``/
+#: ``KeyError``/``RuntimeError``, none of which catch an ``assert``. Adding this
+#: set therefore drops 0 of the 143 real asserts.
 ASSERTION_CAPTURING_CONTEXTS = ("pytest.raises",)
+
 _OPERATORS = {
     ast.Eq: "==",
     ast.NotEq: "!=",
@@ -41,106 +138,3 @@ _OPERATORS = {
     ast.In: "in",
     ast.NotIn: "not in",
 }
-PINNED_COUNT_COMPARISONS = (
-    ("_authored_cartridge_check", "==", 1),
-    ("bounded_child", "<=", 32768),
-    ("test_authored_cartridge_actual_helper_is_non_mutating", "==", 1),
-    ("test_cap_failure_preserves_unspooled_call_and_incomplete_artifact", "<=", 1200),
-    ("test_counter_saturation_fails_explicitly_instead_of_silently_losing_hits", "==", 1),
-    ("test_default_retention_keeps_full_calls_and_installs_no_hooks", "==", 300),
-    ("test_disabled_touches_no_dependencies_and_still_checks_owner", "==", 1),
-    ("test_late_noncompleted_calls_have_exact_counts_and_full_evidence", "==", 271),
-    ("test_overflow_is_sticky_counts_continue_without_context_access", "==", 1),
-    (
-        "test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context",
-        "==",
-        300,
-    ),
-    ("test_unknown_actual_progress_is_counted_and_retained_as_interruption", "==", 271),
-)
-RETENTION_COUNT_SITES = {
-    "test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context": (300, "=="),
-    "test_default_retention_keeps_full_calls_and_installs_no_hooks": (300, "=="),
-    "test_late_noncompleted_calls_have_exact_counts_and_full_evidence": (271, "=="),
-    "test_unknown_actual_progress_is_counted_and_retained_as_interruption": (271, "=="),
-}
-RETENTION_SUBSCRIPT_COUNT_SITES = {
-    "test_late_noncompleted_calls_have_exact_counts_and_full_evidence": (
-        (("call_log", "record_count"), 271, "=="),
-        (("call_counts", "requested_frames"), 271, "=="),
-        (("call_counts", "total"), 271, "=="),
-    ),
-}
-GUARD_MODULE = "tests._timed_menu_frame_bound_support"
-GUARD_FUNCTION = "assert_not_deadline_truncated"
-DEADLINE_TERMINATION = "cancelled_or_deadline"
-_MILESTONES_TREE = None
-_EXIT_EXCEPTION_PARAMS = frozenset({"exc", "exc_type", "et", "e", "err", "exc_info"})
-NON_CONTEXT_MANAGER_TYPES = frozenset(
-    {
-        "NoneType",
-        "bool",
-        "int",
-        "float",
-        "complex",
-        "str",
-        "bytes",
-        "list",
-        "tuple",
-        "set",
-        "dict",
-        # #359. A name bound by a string field of a node that is not a target
-        # at all holds an object that cannot be entered: a module, a class or
-        # a function. Entering one raises `TypeError` *before* the assert under
-        # the `with` is evaluated, so the assert is defeated -- and the
-        # analyzer, with no store entry to read, was certifying it as
-        # load-bearing. The damaging direction.
-        "module",
-        "type",
-        "function",
-    }
-)
-_DECIDING_OPERANDS = (
-    ast.Name,
-    ast.Attribute,
-    ast.Call,
-    ast.Subscript,
-    ast.Constant,
-    ast.List,
-    ast.Dict,
-    ast.Set,
-    ast.Tuple,
-    ast.JoinedStr,
-    ast.Await,
-)
-_NOT_LITERAL = object()
-_LITERAL_OPERATORS = {
-    ast.Add: lambda a, b: a + b,
-    ast.Sub: lambda a, b: a - b,
-    ast.Mult: lambda a, b: a * b,
-    ast.Div: lambda a, b: a / b,
-    ast.FloorDiv: lambda a, b: a // b,
-    ast.Mod: lambda a, b: a % b,
-    ast.Pow: lambda a, b: a**b,
-    ast.BitOr: lambda a, b: a | b,
-    ast.BitAnd: lambda a, b: a & b,
-    ast.BitXor: lambda a, b: a ^ b,
-    ast.LShift: lambda a, b: a << b,
-    ast.RShift: lambda a, b: a >> b,
-}
-_LITERAL_COMPARISONS = {
-    ast.Eq: lambda a, b: a == b,
-    ast.NotEq: lambda a, b: a != b,
-    ast.Lt: lambda a, b: a < b,
-    ast.LtE: lambda a, b: a <= b,
-    ast.Gt: lambda a, b: a > b,
-    ast.GtE: lambda a, b: a >= b,
-    ast.In: lambda a, b: a in b,
-    ast.NotIn: lambda a, b: a not in b,
-    ast.Is: lambda a, b: a is b,
-    ast.IsNot: lambda a, b: a is not b,
-}
-_CONTROL_TRANSFERS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
-_BLOCK_FIELDS = frozenset({"body", "orelse", "finalbody"})
-GUARDED_CLOCK_STEP = 0.0
-RUN_OWNER = "run_owner"

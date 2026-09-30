@@ -1,32 +1,13 @@
-"""Sentinel support, part 1 of 5 (#122 split).
-
-Functions: _module_tree, _is_zero_float_compare, guard_is_wired_on_the_fast_clock_path, count_comparisons, _comparisons_in, _count_comparison, _enclosing_function, _enclosing_function_node, observed_count_comparisons, _subscript_path, subscript_count_comparisons, retention_subscript_sites_observed, retention_sites_observed, _guard_source_tree, _is_termination_key, _swallows_assertion_error, milestones_tree, _owning_module, _bound_names, _own_imports, _resolved_dotted, _resolves_to, _name_catches_assertion_error, _suppression_names, _suppressed_by_dunder, _store_target_names, _scope_body_nodes, _match_capture_names, _carrier_runtime_kinds, _pattern_is_irrefutable, _pattern_binds, _capture_always_binds, _store_retires, _entry_may_be_an_unrun_capture, _match_capture_names_for
-"""
-
+# Shared-namespace fragment generated from the merged monolith.
 # ruff: noqa: F821
-#
-# This file is a *fragment* of
-# tests/_timed_menu_milestone_sentinel_support, not a module of its own. The
-# support module reads its source with `exec` into one shared dict, so that every
-# helper stays a bare global -- which is required twice over: the sentinel suite
-# asserts one helper *calls* another by parsing the caller's source and matching
-# `ast.Name` (`_sentinel_uses`), and callers rebind names on the support module
-# itself (`support._module_tree = ...`), which only reaches the caller if there
-# is a single globals dict rather than one private copy per file.
-#
-# A cross-fragment reference is therefore resolved at exec time, not import
-# time, and static analysis cannot see it: the names below are defined by
-# another fragment. Importing them explicitly would not help -- it would
-# reintroduce a second namespace, which is the exact failure this split has to
-# avoid -- so the undefined-name rule is disabled for these fragments.
 
-# Constants and shared imports come from the support namespace this file
-# is executed into: `tests._timed_menu_milestone_sentinel_support` execs
-# the base and then every part, all against one dict, so `ast`, `inspect`,
-# `milestones` and the module constants are already globals by the time
-# anything below runs. Re-importing them here would only rebind the same
-# objects, and importing this file as a module of its own would create a
-# second, private namespace -- so these fragments are not importable alone.
+
+# GENERATED_FRAGMENT_IMPORT_GUARD
+if __name__ == "tests._sentinel_support_part1":
+    raise ImportError(
+        "tests._sentinel_support_part1 is a fragment; import "
+        "tests._timed_menu_milestone_sentinel_support instead."
+    )
 
 
 def _module_tree():
@@ -131,6 +112,17 @@ def _count_comparison(tree, node, comparison):
 
 
 def _enclosing_function(tree, target):
+    """The *name* of the function that owns ``target`` in ``tree``.
+
+    Name is load-bearing here: :func:`count_comparisons` keys its triples by
+    it, and :func:`retention_sites_observed` filters on membership of
+    ``RETENTION_COUNT_SITES``. A redefinition of this name with a different
+    signature silently returns ``None`` for every lookup and empties the
+    observed set, which fails the retention-count pins as "observed []" with
+    no other symptom. The #355 work needs an enclosing-function *node* for a
+    different purpose and lives in :func:`_nonlocal_parent_function`; do not
+    fold the two together.
+    """
     for func in tree.body:
         if isinstance(func, ast.FunctionDef) and any(child is target for child in ast.walk(func)):
             return func.name
@@ -148,6 +140,87 @@ def _enclosing_function_node(tree, target):
 def observed_count_comparisons():
     """Sorted ``(function, operator, literal)`` triples actually present."""
     return sorted(count_comparisons())
+
+
+#: Every ``len(...) == <int>`` exact-count assertion in the milestones module,
+#: written out rather than recomputed.
+#:
+#: The four ``RETENTION_COUNT_SITES`` are hardcoded for the same reason, but
+#: they only cover the #261 retention contract. ``observed_count_comparisons()``
+#: is the *whole* set, and it was the wider set that went missing: when #294
+#: began applying its bypass rule to ``and`` as well as ``or``, the live
+#: contract ``assert len(errors) == 1 and isinstance(errors[0], RuntimeError)``
+#: was reported as bypassed and silently dropped from this set -- 11 sites on
+#: ``c896da7``, 10 on ``4415452``, with the whole sentinel file green.
+#:
+#: A backstop that recomputes its expectation from the same code it polices
+#: cannot notice its own expectation shrinking, so this list is a literal. A
+#: site that is deleted, relaxed, duplicated or neutralised changes the observed
+#: set and fails.
+#:
+#: The literal was first written by dumping the observed set on the *broken*
+#: tree, which reproduced the defect exactly: the list then held 10 entries and
+#: deleting a pinned site kept the suite green. It is transcribed from the
+#: pre-#294 baseline ``c896da7`` instead, and the ``== 1`` site from
+#: ``test_disabled_touches_no_dependencies_and_still_checks_owner`` is the one
+#: that had gone missing.
+PINNED_COUNT_COMPARISONS = (
+    ("_authored_cartridge_check", "==", 1),
+    ("bounded_child", "<=", 32768),
+    ("test_authored_cartridge_actual_helper_is_non_mutating", "==", 1),
+    ("test_cap_failure_preserves_unspooled_call_and_incomplete_artifact", "<=", 1200),
+    ("test_counter_saturation_fails_explicitly_instead_of_silently_losing_hits", "==", 1),
+    ("test_default_retention_keeps_full_calls_and_installs_no_hooks", "==", 300),
+    ("test_disabled_touches_no_dependencies_and_still_checks_owner", "==", 1),
+    ("test_late_noncompleted_calls_have_exact_counts_and_full_evidence", "==", 271),
+    ("test_overflow_is_sticky_counts_continue_without_context_access", "==", 1),
+    (
+        "test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context",
+        "==",
+        300,
+    ),
+    ("test_unknown_actual_progress_is_counted_and_retained_as_interruption", "==", 271),
+)
+
+
+# The four frame-bound retention counts #270 names. Keyed by the test function
+# that owns them; the value is the operator the assertion must keep using.
+# ``test_late_noncompleted_calls_*`` is parametrised and so covers the ``== 271``
+# site once per status. The 300s are the inline- and stream-retention paths.
+RETENTION_COUNT_SITES = {
+    "test_stream_over_240_calls_keeps_every_record_hash_and_milestone_context": (300, "=="),
+    "test_default_retention_keeps_full_calls_and_installs_no_hooks": (300, "=="),
+    "test_late_noncompleted_calls_have_exact_counts_and_full_evidence": (271, "=="),
+    "test_unknown_actual_progress_is_counted_and_retained_as_interruption": (271, "=="),
+}
+
+
+# --- #270 Finding 2, remaining half: the *subscript* 271 counts ---
+#
+# ``RETENTION_COUNT_SITES`` is enforced by ``count_comparisons()``, which only
+# yields comparisons whose left side is a ``len(...)`` call. The same test also
+# pins its counts through record subscripts, which that mechanism never sees:
+#
+#     assert record["call_log"]["record_count"] == 271
+#     assert record["call_counts"]["requested_frames"] == 271
+#     assert record["call_counts"]["total"] == 271
+#
+# Relaxing any of those to ``>= 1`` leaves all four retention sentinels green,
+# so the "at least one call was retained" contract could be restored while every
+# backstop reported the site intact. These are recorded as (path, operator,
+# literal) triples and compared as a set, for the same reason the ``len(...)``
+# sites are: relaxing, deleting, duplicating or neutralising a site all change
+# the observed set.
+
+#: The record subscripts whose value is a retained-call count, keyed by the test
+#: function that owns them. Each entry is ``(key path, literal, operator)``.
+RETENTION_SUBSCRIPT_COUNT_SITES = {
+    "test_late_noncompleted_calls_have_exact_counts_and_full_evidence": (
+        (("call_log", "record_count"), 271, "=="),
+        (("call_counts", "requested_frames"), 271, "=="),
+        (("call_counts", "total"), 271, "=="),
+    ),
+}
 
 
 def _subscript_path(node):
@@ -223,6 +296,14 @@ def retention_sites_observed():
     return sorted(triple for triple in count_comparisons() if triple[0] in RETENTION_COUNT_SITES)
 
 
+# --- #270 criterion 1, second half: the guard must have teeth, not just be called ---
+
+#: The module that defines the #261 guard, and the terminal state it exists to reject.
+GUARD_MODULE = "tests._timed_menu_frame_bound_support"
+GUARD_FUNCTION = "assert_not_deadline_truncated"
+DEADLINE_TERMINATION = "cancelled_or_deadline"
+
+
 def _guard_source_tree():
     """Return the parsed AST of the module that defines the #261 guard."""
     import importlib
@@ -269,6 +350,74 @@ def _swallows_assertion_error(handler):
         elif isinstance(node, ast.Tuple):
             names.extend(element.id for element in node.elts if isinstance(element, ast.Name))
     return bool({"AssertionError", "Exception", "BaseException"} & set(names))
+
+
+_MILESTONES_TREE = None
+
+#: ``id(function) -> module tree or None``. Memoises the module a function was
+#: defined in, which :func:`_module_binds_name` needs per condition and which
+#: costs a full tree walk to answer. Keyed by node identity because the AST is
+#: built once per parsed file and outlives the call.
+_MODULE_FOR_FUNCTION = {}
+
+#: Statements that open a *block* without opening a new name scope. A binding
+#: inside one of these still runs in the module scope, so the module walk has
+#: to descend through them; every other child is either a binding itself or the
+#: body of a nested scope, and neither is descended into.
+_MODULE_LEVEL_BLOCKS = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+    ast.Match,
+)
+
+
+def _block_body(statement):
+    """The statements a block statement runs, in source order.
+
+    ``Try`` and ``Match`` run several bodies, so every one of them is included;
+    a binding in any of them is a module binding on the path that runs. A
+    ``match`` clause is flattened to its statements rather than returned as a
+    ``Case`` node, because ``Case`` is not one of the block types this walk
+    knows how to open -- a ``def`` inside a case is still a module binding on
+    the path that matches, and reading past it reported a header DEAD that
+    CPython enters.
+
+    An ``except`` handler is a body too, and it is a body that has plainly run
+    by the time anything below the ``try`` is evaluated:
+
+        try:
+            raise ValueError
+        except ValueError:
+            def list(): return nullcontext()
+        cs = list()          # the handler's `list`, not the builtin
+
+    Leaving handler bodies out of the walk skipped the binding entirely and
+    reported that ``cs`` as the builtin ``list`` -- a ``TypeError``-raising
+    header as LIVE. A handler's ``name`` (``except E as exc``) is a binding too,
+    but that one is *deleted* when the handler exits, so the handler body is
+    what is walked and the bound name is read from it like any other.
+    """
+    if isinstance(statement, ast.Try):
+        return [
+            *statement.body,
+            *statement.orelse,
+            *statement.finalbody,
+            *(nested for handler in statement.handlers for nested in handler.body),
+        ]
+    if isinstance(statement, ast.Match):
+        return [nested for case in statement.cases for nested in case.body]
+    if isinstance(statement, (ast.If, ast.While)):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return list(statement.body)
+    return []
 
 
 def milestones_tree():
@@ -810,67 +959,3 @@ def _store_retires(statement, name):
     the analyzer calls it enforced.
     """
     return not isinstance(statement, ast.Match) or _capture_always_binds(statement, name)
-
-
-def _entry_may_be_an_unrun_capture(entry):
-    """Is this entry a ``match`` capture that is not guaranteed to have bound?
-
-    The narrow companion to :func:`_store_retires`, asked of a whole
-    ``(statement, value, conditional)`` entry rather than of a statement and a
-    name. It exists because the name is not carried on the entry itself, and
-    the caller that has to decide whether a single competing store is ambiguous
-    only has the entry.
-
-    A ``match`` statement can capture several names, so the name is recovered
-    by asking which of the captures it owns is the one this entry records --
-    a capture that is guaranteed to bind for *some* name is still a capture
-    that may not bind for the name in question, so every owned name is
-    checked and any one of them being undecidable makes the entry so.
-    """
-    statement = entry[0]
-    if not isinstance(statement, ast.Match):
-        return False
-    return not all(
-        _capture_always_binds(statement, name) for name in _match_capture_names_for(statement)
-    )
-
-
-def _match_capture_names_for(statement):
-    """The names a single ``ast.Match`` statement captures."""
-    names = []
-    for node in ast.walk(statement):
-        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
-            names.append(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
-            names.append(node.rest)
-    return names
-
-# ---------------------------------------------------------------------------
-# Fragment guard. This file is not an importable module: it is one piece of
-# tests/_timed_menu_milestone_sentinel_support, which `exec`s it, together with
-# the other fragments, into a single shared namespace.
-#
-# That sharing is what makes the sentinels work, and it cannot survive being
-# bypassed. Executed through the entry point, `__name__` is the support module's
-# name and this guard is inert. Executed under its OWN name -- which is what
-# `import tests._sentinel_support_part1` does, and what the import system does by itself -- the
-# file would bind only the names it defines itself: a cross-fragment call would
-# raise NameError, and a name imported from here would be a different object
-# from the one the support module exports. Worse, that breakage is
-# order-dependent and silent, which is a poor property for a module whose entire
-# purpose is catching silent structural faults.
-#
-# Fail loudly instead, and name the supported import.
-# ---------------------------------------------------------------------------
-if __name__ == "tests._sentinel_support_part1":
-    raise ImportError(
-        "tests._sentinel_support_part1 is a fragment of "
-        "tests._timed_menu_milestone_sentinel_support, not an importable "
-        "module. Import the support module instead:\n"
-        "    from tests import _timed_menu_milestone_sentinel_support as "
-        "support\n"
-        "Importing this fragment directly gives it a private copy of the shared "
-        "namespace: cross-fragment calls raise NameError, and rebinding a name "
-        "on the support module would not reach this code."
-    )
-

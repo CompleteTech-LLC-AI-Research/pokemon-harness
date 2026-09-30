@@ -1,6 +1,6 @@
 """Dead-code sentinel support for the timed-menu milestone tests.
 
-Split into a base (imports + constants) and 5 parts by #122. This module
+Split into a base (imports + constants) and 10 parts by #122. This module
 remains the single public entry point, and every name it exported before the
 split is still exported here, so existing
 
@@ -54,6 +54,11 @@ _FRAGMENT_FILES = (
     "_sentinel_support_part3",
     "_sentinel_support_part4",
     "_sentinel_support_part5",
+    "_sentinel_support_part6",
+    "_sentinel_support_part7",
+    "_sentinel_support_part8",
+    "_sentinel_support_part9",
+    "_sentinel_support_part10",
 )
 
 # Each fragment is executed against *this* module's dict, so `globals()` inside any
@@ -74,12 +79,12 @@ _FRAGMENT_FILES = (
 # imports a fragment directly, so the suite is unaffected -- but a latent,
 # order-dependent trap in a module whose whole job is catching latent traps is
 # not acceptable. Each fragment therefore refuses to be imported on its own, and
-# says where to import from instead. See the guard at the foot of each part.
+# says where to import from instead. See the early guard in each fragment.
 _SUPPORT_GLOBALS = globals()
 
 for _part_file in _FRAGMENT_FILES:
     _module_name = f"tests.{_part_file}"
-    # Read the fragment and exec it against this dict. Each fragment ends with a
+    # Read the fragment and exec it against this dict. Each fragment starts with a
     # guard that raises if it is executed under its OWN dotted name, which is
     # exactly the case where the import system ran it and this entry point was
     # bypassed; under this entry point the exec reuses the support `__name__`,
