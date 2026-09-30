@@ -3210,6 +3210,30 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         return False
     kinds = set()
     for statement, value, _conditional in stores:
+        if _binds_starred_target(statement, name):
+            # #418. `*cs, = (...)` and `a, *cs = (...)` collect a run of
+            # elements into a **list**, so the *name* is a list whatever the
+            # right-hand side held. `list` has no `__enter__`, so entering it
+            # raises `TypeError` before the body is reached and the assert
+            # never runs: the contract is dead.
+            #
+            # This is deliberately checked *before* the general
+            # destructuring decline below. That decline exists because the
+            # type of a plain element is not readable from the container's
+            # syntax, so it answers "cannot tell" and keeps the assert live --
+            # the safe direction. A starred target is not such a case: the
+            # list-wrapping is decided by the target syntax alone, and it is
+            # decidable. Reading the wrapped element's kind instead let a
+            # usable suppressor vouch for a bare list, certifying a dead
+            # assert as enforced.
+            #
+            # Executed on CPython 3.12.14:
+            #   *cs, = (contextlib.suppress(AssertionError),)  -> cs == [suppress]
+            #   a, *cs = (contextlib.suppress(...), 2)         -> cs == [2]
+            #   b, *c = (1, contextlib.suppress(...))         -> c == [suppress]
+            # and in all three `hasattr(cs, "__enter__")` is False.
+            kinds.add("list")
+            continue
         if value is None:
             # A store with no readable right-hand side. Which store it is
             # decides the answer, and each of these cannot leave a usable
@@ -3273,30 +3297,6 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # A call is a call: `nullcontext()` returns a real context manager
             # and must not be read as a non-manager here.
             return False
-        if _binds_starred_target(statement, name):
-            # #418. `*cs, = (...)` and `a, *cs = (...)` collect a run of
-            # elements into a **list**, so the *name* is a list whatever the
-            # right-hand side held. `list` has no `__enter__`, so entering it
-            # raises `TypeError` before the body is reached and the assert
-            # never runs: the contract is dead.
-            #
-            # This is deliberately checked *before* the general
-            # destructuring decline below. That decline exists because the
-            # type of a plain element is not readable from the container's
-            # syntax, so it answers "cannot tell" and keeps the assert live --
-            # the safe direction. A starred target is not such a case: the
-            # list-wrapping is decided by the target syntax alone, and it is
-            # decidable. Reading the wrapped element's kind instead let a
-            # usable suppressor vouch for a bare list, certifying a dead
-            # assert as enforced.
-            #
-            # Executed on CPython 3.12.14:
-            #   *cs, = (contextlib.suppress(AssertionError),)  -> cs == [suppress]
-            #   a, *cs = (contextlib.suppress(...), 2)         -> cs == [2]
-            #   b, *c = (1, contextlib.suppress(...))         -> c == [suppress]
-            # and in all three `hasattr(cs, "__enter__")` is False.
-            kinds.add("list")
-            continue
         if _binds_element_of(statement, name):
             # `cs, other = (contextlib.nullcontext(), 2)` binds `cs` to the
             # tuple's *first element*, not to the tuple. Reading the right-hand
