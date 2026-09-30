@@ -1169,6 +1169,39 @@ RESIDUAL_DEFEAT_SHAPES = (
     ("for over empty tuple", "    for _ in ():\n        assert x != 1", False),
     ("for over empty dict", "    for _ in {}:\n        assert x != 1", False),
     ("for unpack over empty list", "    for _, v in []:\n        assert x != 1", False),
+    # #439: an empty *string* is the one literal sequence the rule above was
+    # missing. `''` is a `Constant` whose value `_literal_value` already reads
+    # exactly, and it iterates zero times just as `[]` does -- so leaving it
+    # out reported the assert live, a false-live in the same damaging
+    # direction as the defeat, and inconsistent with its three siblings.
+    ("for over empty string", "    for _ in '':\n        assert x != 1", False),
+    ("for over empty double-quoted string", '    for _ in "":\n        assert x != 1', False),
+    # `bytes` is admitted by the same `isinstance` test rather than a separate
+    # rule: it is the other literal sequence type with a readable length, and
+    # an empty one also yields nothing.
+    ("for over empty bytes", "    for _ in b'':\n        assert x != 1", False),
+    ("for unpack over empty string", "    for c in '':\n        assert x != 1", False),
+    # A non-empty string *does* iterate, so the assert runs and must stay
+    # enforced. Without this the rule could be satisfied by matching any
+    # string at all, which would report a real contract as defeated.
+    ("CONTROL for over one-char string", "    for _ in 'a':\n        assert x != 1", True),
+    ("CONTROL for over multi-char string", "    for _ in 'abc':\n        assert x != 1", True),
+    (
+        "CONTROL for over single empty-char iteration",
+        "    for _ in '':\n        pass\n    assert x != 1",
+        True,
+    ),
+    # The sibling case the type test exists for. A *number* and `None` are
+    # also readable `Constant`s, but iterating one is a `TypeError` rather
+    # than zero iterations, so it is emphatically not an empty iterable.
+    # These rows are what stop the new branch from degenerating into "any
+    # constant is empty": that mutant calls `for _ in 0:` and `for _ in
+    # None:` provably empty and drops the assert from the sentinel's view,
+    # and it survives every string row above on its own.
+    ("CONTROL for over an int is not empty", "    for _ in 0:\n        assert x != 1", True),
+    ("CONTROL for over a float is not empty", "    for _ in 1.5:\n        assert x != 1", True),
+    ("CONTROL for over None is not empty", "    for _ in None:\n        assert x != 1", True),
+    ("CONTROL for over False is not empty", "    for _ in False:\n        assert x != 1", True),
     # A tuple with one falsy member still iterates once, so the assert runs.
     ("for over single falsy member", "    for _ in (0,):\n        assert x != 1", True),
     # --- controls: every one of these must stay enforced ---
