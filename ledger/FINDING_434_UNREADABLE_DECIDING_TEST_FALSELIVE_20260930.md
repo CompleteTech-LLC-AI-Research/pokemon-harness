@@ -1,9 +1,12 @@
-# Finding — an arm that always runs is read as per-call conditional (false-LIVE)
+# Finding 434 — an arm that always runs is read as per-call conditional (false-LIVE)
 
 Date: 2026-09-30
 Found by: lead integrator, adversarial enumeration with executed ground truth
 Severity: **non-blocking for #433**. False-LIVE = the safe direction.
-Status: filed as a new issue. Not fixed by this PR, and not a regression from it.
+Status: filed as issue #434. Not fixed by this PR, and not a regression from it.
+
+(An earlier draft of this file was named FINDING_430_... ; the live board shows
+#430 is a different, unrelated starred-loop-target defect. Renamed to match.)
 
 ## The defect
 
