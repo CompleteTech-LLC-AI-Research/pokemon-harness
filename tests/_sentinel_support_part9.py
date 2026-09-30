@@ -654,7 +654,7 @@ def _is_empty_literal_iterable(node):
     ``for _ in []:`` keeps the assert in the AST and never runs it, which is the
     loop spelling of the ``if False:`` defeat already closed above. The literal
     must be *readable* rather than merely a literal: ``[]``, ``()``, ``{}``,
-    ``(0,)`` and ``(False, True)`` all have a decidable value, and the
+    ``(0,)``, ``(False, True)`` and ``''`` all have a decidable value, and the
     emptiness test is then exact.
 
     A call such as ``range(0)`` or ``dict()`` is deliberately *not* matched
@@ -662,7 +662,36 @@ def _is_empty_literal_iterable(node):
     builtins rather than reading a literal, and a wrong answer there drops a
     live contract from the sentinel's view -- the more damaging error. The rule
     answers only the question a literal settles on its own.
+
+    A string literal belongs here for the same reason the containers do: ``''``
+    is a ``Constant`` whose value ``_literal_value`` already reads exactly, and
+    it iterates zero times just as ``[]`` does. Excluding it left ``for _ in
+    '':`` as the one spelling where a loop whose body provably cannot run still
+    reported its assert live (#439) -- a false-live, the same damaging
+    direction as the defeat above, and inconsistent with the three sibling
+    containers already handled here.
+
+    ``bytes`` is admitted by the same test rather than by a separate rule: an
+    empty ``bytes`` literal also yields nothing, and one test keeps the branch
+    about "a literal sequence with a readable length" instead of about a
+    specific type.
+
+    An f-string with no replacement fields is the same empty string reached
+    through a different node: ``f''`` parses to a ``JoinedStr`` with an empty
+    ``values`` list rather than to a ``Constant``, so the branch above cannot
+    see it (#449). It is still a *literal* with a decidable value, which is the
+    boundary this function draws -- ``range(0)`` is out of scope because
+    deciding it means reasoning about a builtin, not because it is a call.
+
+    The guard is emptiness, not mere presence: only the no-``values`` form is
+    decided. An f-string carrying replacement fields is left alone, since
+    deciding it means reasoning about the expressions substituted into it --
+    the ``range(0)`` problem again.
     """
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return not node.value
+    if isinstance(node, ast.JoinedStr) and not node.values:
+        return True
     if not isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
         return False
     return not _literal_value(node)
