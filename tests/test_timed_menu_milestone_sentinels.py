@@ -4691,3 +4691,84 @@ def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
         "a module-scope lookup descended into an unrelated function body and "
         "adopted its binding; a live assert was reported as defeated"
     )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    [
+        (
+            "a later terminal try cannot kill an earlier assert",
+            "    assert x != 1\n    try:\n        return\n    except Exception:\n        pass\n",
+            True,
+        ),
+        (
+            "an exception before return can resume through a handler",
+            "    try:\n        helper()\n        return\n    except ValueError:\n        pass\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "a return value can raise before returning",
+            "    try:\n        return helper()\n    except ValueError:\n        pass\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "an exception bypasses a returning else",
+            "    try:\n        helper()\n    except ValueError:\n        pass\n    else:\n        return\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "all exception paths transfer before a returning else",
+            "    try:\n        helper()\n    except ValueError:\n        return\n    else:\n        return\n    assert x != 1\n",
+            False,
+        ),
+        (
+            "a finally return overrides a falling through handler",
+            "    try:\n        helper()\n    except ValueError:\n        pass\n    finally:\n        return\n    assert x != 1\n",
+            False,
+        ),
+        (
+            "a finalizer call preserves a pending return",
+            "    try:\n        return\n    finally:\n        helper()\n    assert x != 1\n",
+            False,
+        ),
+        (
+            "a nested try can catch an exception from a return value",
+            "    try:\n        try:\n            return helper()\n        except ValueError:\n            pass\n    finally:\n        pass\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "a finalizer break resumes after the loop",
+            "    for unused in (1,):\n        try:\n            return\n        finally:\n            break\n    assert x != 1\n",
+            True,
+        ),
+        (
+            "a handler's trailing transfer need not run after an inner catch",
+            "    try:\n        helper()\n    except ValueError:\n        try:\n            return helper()\n        except ValueError:\n            pass\n    assert x != 1\n",
+            True,
+        ),
+    ],
+)
+def test_try_reachability_matches_executed_exception_paths(label, body, enforced):
+    """A possible exception path must not silently drop a live assertion."""
+    source = "def outer(x, helper):\n" + body
+    namespace = {}
+    exec(compile(source, f"<try-path:{label}>", "exec"), namespace)  # noqa: S102 - executed fixture
+
+    def raises():
+        raise ValueError("the exception path")
+
+    reached = []
+    for helper in (lambda: None, raises):
+        try:
+            namespace["outer"](1, helper)
+        except AssertionError:
+            reached.append(True)
+        except ValueError:
+            reached.append(False)
+        else:
+            reached.append(False)
+    assert any(reached) is enforced, f"{label}: the fixture's executed paths disagree"
+    tree = ast.parse(source)
+    function = tree.body[0]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is enforced, label
