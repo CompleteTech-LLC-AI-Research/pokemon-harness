@@ -1,6 +1,6 @@
 """Dead-code sentinel support for the timed-menu milestone tests.
 
-Split into a base (imports + constants) and 10 parts by #122. This module
+Split into a base (imports + constants) and numbered fragments by #122. This module
 remains the single public entry point, and every name it exported before the
 split is still exported here, so existing
 
@@ -60,6 +60,7 @@ _FRAGMENT_FILES = (
     "_sentinel_support_part9",
     "_sentinel_support_part10",
     "_sentinel_support_part11",
+    "_sentinel_support_part13",
 )
 
 # Each fragment is executed against *this* module's dict, so `globals()` inside any
