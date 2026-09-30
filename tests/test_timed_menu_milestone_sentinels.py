@@ -3033,6 +3033,46 @@ CAPTURE_SCOPE_BOUNDARY_ROWS = (
 #: rule wholesale. Two are included below and both must stay ``True``: a plain
 #: assignment of a real context manager, and a class that *does* implement the
 #: protocol. Neither is in the table above, so neither is a duplicate.
+#:
+#: #418 adds the four starred-target rows. These are the same shape as the
+#: carriers -- entering raises ``TypeError`` before the body, so the second
+#: assert is unreachable -- but they are decided by a *value* the module can
+#: read rather than by an unreadable one, which is why they sat in a different
+#: bucket and stayed wrong. The fix keys off the target syntax alone, so the
+#: right-hand side in these rows is deliberately varied: a lone element, a
+#: bind-from-end-after-star tail, a usable context manager, and a plain int all
+#: land on the same list.
+STARRED_TARGET_ENTRY_UNREACHABLE_ROWS = (
+    (
+        "a starred target binds a list even from a lone suppressor",
+        "    *cs, = (contextlib.suppress(AssertionError),)",
+        False,
+    ),
+    (
+        "a bind-from-end-after-star tail binds the list of the rest",
+        "    a, *cs = (contextlib.suppress(AssertionError), 2)",
+        False,
+    ),
+    (
+        "a starred target holding a usable context manager is still a list",
+        "    *cs, = (contextlib.nullcontext(),)",
+        False,
+    ),
+    (
+        "a starred target over a non-manager element binds a list",
+        "    *cs, = (1,)",
+        False,
+    ),
+    # Controls. A plain element binding is NOT decidable from the container's
+    # syntax, so the rule declines and the assert stays live. These keep that
+    # decline intact: a fix that over-corrected every destructuring target
+    # would report these dead and fail.
+    (
+        "CONTROL a non-starred element binding of a real context manager",
+        "    cs, other = (contextlib.nullcontext(), 2)",
+        True,
+    ),
+)
 CARRIER_ENTRY_UNREACHABLE_ROWS = (
     ("import-as binds the module", "    import os as cs", False),
     ("import-from-as binds the module", "    from os import path as cs", False),
@@ -3211,6 +3251,86 @@ def test_a_string_field_carrier_cannot_be_entered_so_the_assert_is_unreachable(
         f"{label}: expected verdicts {expected}, got {results}. A carrier that "
         f"cannot be entered makes the assert under the header *unreachable*, "
         f"so reporting it enforced certifies a dead contract as load-bearing."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "rebind", "second_assert_live"),
+    STARRED_TARGET_ENTRY_UNREACHABLE_ROWS,
+    ids=[row[0] for row in STARRED_TARGET_ENTRY_UNREACHABLE_ROWS],
+)
+def test_a_starred_target_binds_a_list_so_the_assert_is_unreachable(
+    label, rebind, second_assert_live
+):
+    """A name bound through ``ast.Starred`` holds a list, which cannot be entered.
+
+    This is #418, and it is a real defect on ``origin/master`` (``6b72bf6``)
+    rather than a coverage gap: every row below reported the unreachable
+    assert ``enforced`` before the fix.
+
+    The failure is an ordering error inside ``_entry_is_dead``. The general
+    destructuring branch declines ``cs, other = (a, b)`` because the type of a
+    plain element is not readable from the container's syntax, and declining is
+    the safe answer -- the assert stays live. A starred target was falling into
+    that same decline, but it is decidable: ``*cs, = (...)`` and ``a, *cs =
+    (...)`` collect a run of elements into a **list** regardless of what the
+    right-hand side held. Letting the wrapped element's own kind vouch for the
+    name is what let a usable ``contextlib.suppress`` certify a bare list as an
+    enterable object.
+
+    Measured on CPython 3.12.14, with ``x=1`` so ``assert x != 1`` is false:
+
+    * ``*cs, = (suppress(),)`` binds ``[suppress_object]``
+    * ``a, *cs = (suppress(), 2)`` binds ``[2]``
+    * ``b, *c = (1, suppress())`` binds ``[suppress_object]``
+
+    and ``hasattr(cs, "__enter__")`` is ``False`` in every case, so
+    ``with cs:`` raises ``TypeError`` before the body and the assert is
+    unreachable. Note the third shape: a starred tail that *does* contain a
+    usable context manager is still a list, so the element's own kind is
+    irrelevant to the entry decision.
+
+    The control keeps the sibling decline honest. Its expected value is
+    ``True`` and the interpreter agrees -- ``cs, other = (nullcontext(), 2)``
+    really does enter and really does fire. A fix that keyed on "any
+    destructuring target" instead of "a starred target" would report this dead,
+    and this test would catch it.
+
+    A second control was drafted and then removed rather than shipped: the
+    matching non-starred row with a *suppressor* element
+    (``cs, other = (suppress(), 2)``) is **also** reported ``enforced`` by the
+    analyzer, while CPython swallows it -- the same false-live, on the
+    non-starred path. That is the ``#336`` element-decline family, not this
+    issue, and it is unaffected by the change under test. It was caught here
+    because ``_assert_entry_contract`` executes the fixture rather than
+    trusting the expected column, which is the only reason a row this stale
+    could not have been shipped silently. Measured ground truth for it:
+
+    | store                                     | CPython 3.12.14 | analyzer |
+    |-------------------------------------------|-----------------|----------|
+    | ``cs, other = (nullcontext(), 2)``        | fires (live)    | ``True`` |
+    | ``cs, other = (suppress(), 2)``           | swallowed       | ``True`` |
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        assert x != 1\n" + rebind + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 2, f"{label}: fixture declared {len(asserts)} asserts, expected 2"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    expected = [False, second_assert_live]
+    assert results == expected, (
+        f"{label}: expected verdicts {expected}, got {results}. A starred target "
+        f"binds a list, and entering a list raises before the body, so the "
+        f"assert under the header is unreachable."
     )
 
 
