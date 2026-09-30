@@ -6884,6 +6884,165 @@ def test_a_user_exit_that_swallows_assertion_error_is_a_defeat(label, exit_body,
     )
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "unrelated function class",
+        "nearest local class",
+        "last local definition propagates",
+        "last local definition swallows",
+        "existing swallowing instance",
+        "existing propagating instance",
+        "future loop store",
+        "unrelated nested store",
+        "nested nearest class",
+        "module instance before redefinition",
+        "module instance before local definition",
+    ),
+)
+def test_user_exit_class_resolution_respects_scope_and_construction_position(scenario):
+    def manager(exit_value, indent=""):
+        lines = (
+            "class Manager:",
+            "    def __enter__(self): return self",
+            f"    def __exit__(self, *exc): return {exit_value}",
+        )
+        return "".join(indent + line + "\n" for line in lines)
+
+    source = "import contextlib\n"
+    function_name = "outer"
+    live = True
+    if scenario == "module instance before local definition":
+        source += manager(False) + "cs = Manager()\n"
+        source += "def outer(x):\n    with cs:\n        assert x != 1\n"
+        source += manager(True, "    ")
+    elif scenario == "module instance before redefinition":
+        source += manager(True) + "cs = Manager()\n" + manager(False)
+        source += "def outer(x):\n    with cs:\n        assert x != 1\n"
+        live = False
+    elif scenario == "nested nearest class":
+        source += "def outer(x):\n" + manager(True, "    ")
+        source += "    def inner(x):\n" + manager(False, "        ")
+        source += "        cs = Manager()\n        with cs:\n            assert x != 1\n"
+        source += "    inner(x)\n"
+        function_name = "inner"
+    else:
+        if scenario == "unrelated function class":
+            source += "def unused():\n" + manager(True, "    ")
+        elif scenario in ("nearest local class", "future loop store", "unrelated nested store"):
+            source += manager(True)
+        source += "def outer(x):\n"
+        if scenario in ("unrelated function class", "nearest local class"):
+            source += manager(False, "    ") + "    cs = Manager()\n"
+        elif scenario.startswith("last local definition"):
+            live = scenario.endswith("propagates")
+            source += manager(live, "    ") + manager(not live, "    ")
+            source += "    cs = Manager()\n"
+        elif scenario.startswith("existing"):
+            live = scenario == "existing propagating instance"
+            source += manager(not live, "    ") + "    cs = Manager()\n"
+            source += manager(live, "    ")
+        else:
+            if scenario == "unrelated nested store":
+                source += "    def unused():\n        cs = Manager()\n"
+            source += "    cs = contextlib.nullcontext()\n"
+        source += "    with cs:\n        assert x != 1\n"
+        if scenario == "future loop store":
+            source += "    for cs in (Manager(),):\n        pass\n"
+    namespace = {}
+    exec(compile(source, f"<{scenario}>", "exec"), namespace)  # noqa: S102
+    if live:
+        with pytest.raises(AssertionError):
+            namespace["outer"](1)
+    else:
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live, scenario
+
+
+@pytest.mark.parametrize("parameter_bound", (False, True))
+def test_a_future_local_class_definition_cannot_supply_the_current_constructor(parameter_bound):
+    arguments = "x, Manager" if parameter_bound else "x"
+    source = (
+        f"def outer({arguments}):\n"
+        "    cs = Manager()\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+        "    class Manager:\n"
+        "        def __enter__(self): return self\n"
+        "        def __exit__(self, *exc): return True\n"
+    )
+    namespace = {}
+    exec(compile(source, "<future local class>", "exec"), namespace)  # noqa: S102
+    if parameter_bound:
+        import contextlib
+
+        with pytest.raises(AssertionError):
+            namespace["outer"](1, contextlib.nullcontext)
+    else:
+        with pytest.raises(UnboundLocalError):
+            namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is parameter_bound
+
+
+@pytest.mark.parametrize(
+    ("ordering", "outcome"),
+    (
+        ("definition before invocation", "swallowed"),
+        ("definition after invocation", "unbound"),
+        ("redefinition before invocation", "live"),
+        ("redefinition after invocation", "swallowed"),
+    ),
+)
+def test_a_captured_class_is_resolved_at_the_nested_function_invocation(ordering, outcome):
+    def manager(exit_value):
+        return (
+            "    class Manager:\n"
+            "        def __enter__(self): return self\n"
+            f"        def __exit__(self, *exc): return {exit_value}\n"
+        )
+
+    source = (
+        "def outer(x):\n"
+        "    def inner(x):\n"
+        "        cs = Manager()\n"
+        "        with cs:\n"
+        "            assert x != 1\n"
+    )
+    if ordering != "definition after invocation":
+        source += manager(True)
+    if ordering == "redefinition before invocation":
+        source += manager(False)
+    source += "    inner(x)\n"
+    if ordering == "definition after invocation":
+        source += manager(True)
+    elif ordering == "redefinition after invocation":
+        source += manager(False)
+    namespace = {}
+    exec(compile(source, f"<{ordering}>", "exec"), namespace)  # noqa: S102
+    if outcome == "live":
+        with pytest.raises(AssertionError):
+            namespace["outer"](1)
+    elif outcome == "unbound":
+        with pytest.raises(NameError):
+            namespace["outer"](1)
+    else:
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[0].body[0]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is (outcome == "live")
+
+
 def test_the_user_exit_rule_does_not_fire_on_an_ordinary_context_manager():
     """#316 criterion 2: no over-breadth on the real pinned file.
 

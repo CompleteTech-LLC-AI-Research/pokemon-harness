@@ -3420,7 +3420,7 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
     if name is None:
         return None
     module = tree if tree is not None else _module_tree()
-    classes = _locally_defined_classes(module)
+    classes = _locally_defined_classes(module, function, expression)
     node = classes.get(name)
     if node is None:
         # The header usually names an *instance*, not the class:
@@ -3433,10 +3433,7 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
         # built by an unreadable call (a factory, a parameter) is not followed,
         # because assuming an arbitrary constructor returns a swallowing class
         # is the over-breadth this rule exists to avoid.
-        constructor = _constructed_class_of(expression, module, classes, function)
-        if constructor is None:
-            return None
-        node = classes.get(constructor)
+        node = _constructed_class_of(expression, module, function)
         if node is None:
             return None
     for child in node.body:
@@ -3447,11 +3444,11 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
     return None
 
 
-def _constructed_class_of(expression, tree, classes, function=None):
+def _constructed_class_of(expression, tree, function=None):
     """The class an instance-valued ``expression`` was constructed from.
 
     Reads the ``helper = Suppressor()`` that the ``with`` header names, and
-    returns ``"Suppressor"`` when that class is one this file defines. Anything
+    returns its ``ClassDef`` when that class is one this file defines. Anything
     else -- a factory call, a parameter, a subscript -- is ``None``, which
     leaves the assert ``enforced`` rather than guessing.
 
@@ -3478,20 +3475,23 @@ def _constructed_class_of(expression, tree, classes, function=None):
     """
     if not isinstance(expression, ast.Name):
         return None
-    value = _assigned_value(expression.id, function)
-    if value is None:
-        value = _assigned_value(expression.id, tree)
+    value = None
+    for scope in reversed(_class_lookup_scopes(tree, function)):
+        before = expression if not isinstance(scope, ast.Module) else None
+        value = _assigned_value(expression.id, scope, before)
+        if value is not None:
+            break
     if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)):
         return None
-    if value.func.id not in classes:
-        return None
-    return value.func.id
+    # An instance retains the class used at construction, even when the
+    # class name is subsequently redefined before the with header.
+    return _locally_defined_classes(tree, function, value).get(value.func.id)
 
 
-def _assigned_value(name, scope):
+def _assigned_value(name, scope, before=None):
     """The right-hand side ``name`` is assigned in ``scope``, or ``None``.
 
-    The *last* assignment wins, matching what a reader meets last, and a
+    The last assignment before the read wins in source order, and a
     function-scope lookup is offered before a module one by the caller so an
     inner binding shadows an outer one of the same name.
 
@@ -3524,11 +3524,15 @@ def _assigned_value(name, scope):
     if isinstance(scope, ast.Module):
         nodes = iter(scope.body)
     elif isinstance(scope, ast.AST):
-        nodes = ast.walk(scope)
+        nodes = _scope_body_nodes(scope)
     else:
         nodes = iter(())
     value = None
-    for node in nodes:
+    position = lambda node: (node.lineno, node.col_offset)
+    nodes = [node for node in nodes if isinstance(node, (ast.For, ast.Assign))]
+    for node in sorted(nodes, key=position):
+        if before is not None and position(node) >= position(before):
+            continue
         if isinstance(node, ast.For):
             if not (isinstance(node.target, ast.Name) and node.target.id == name):
                 continue
@@ -3561,97 +3565,120 @@ def _dotted_class_name(expression):
     return None
 
 
-def _locally_defined_classes(tree):
-    """``{name: ClassDef}`` for every class defined in ``tree`` at module level
-    or inside a function.
+def _locally_defined_classes(tree, function=None, before=None):
+    """Classes visible in the nearest lexical scope at this read position.
 
-    A class imported from elsewhere is deliberately absent, which is what keeps
-    the rule off ``pytest``'s and the harness's own context managers.
-
-    A class defined *inside a function* counts too. #410: executed, a
-    function-local manager swallows the assert exactly as a module-level one
-    does, and it was reported ``enforced`` -- a disarmed contract certified as
-    load-bearing:
-
-        def outer(x):
-            class Suppressor:
-                def __exit__(self, *exc): return exc[0] is AssertionError
-
-            helper = Suppressor()
-            with helper:
-                assert x == 99
-
-    It is reached through the *instance* spelling, exactly as a module-level one
-    is: ``_constructed_class_of`` asks which class the bound value was
-    constructed from, so the class is registered under the name it is
-    constructed by.
-
-    A class inside another class is still excluded, and
-    :func:`_class_defs_in_scope_order` explains why -- the two cases look alike
-    in a tree walk but are reached by different spellings.
-
-    **Over-breadth, measured rather than assumed.** #316's criterion is that a
-    rule firing on every ``__exit__`` does not count. The real pinned file was
-    walked with this widened: it holds 145 asserts and four module-level classes
-    (``Harness``, ``Symbols``, ``ReadOnly``, ``WriteFault``), all 40 of its
-    ``with``-items are ``Call`` expressions, and **zero** of them name a
-    file-defined class. Nothing actually pinned can reach this rule.
-
-    Only classes this module's own text defines are collected. An imported
-    class is still absent, which is what keeps ``pytest``'s and the harness's
-    real context managers out.
+    Sibling functions and class bodies define separate namespaces. Within a
+    function, a later definition replaces an earlier one only after it runs.
+    Module definitions are read after module initialization for function-local
+    constructor calls; a module-level construction instead uses its own point.
     """
+    scopes = _class_lookup_scopes(tree, function)
+    # A constructor may have been assigned at module scope before the function
+    # was called. Its class is resolved at construction, not at the later use.
+    if before is not None:
+        scopes = _class_lookup_scopes(tree, before)
     found = {}
-    for node in _class_defs_in_scope_order(tree):
-        if node.name in found:
-            # A same-named class in a later scope does not displace the one
-            # already registered; the first is the one a bare `Inner()` in the
-            # same function constructs.
-            continue
-        found[node.name] = node
+    position = lambda node: (node.lineno, node.col_offset)
+    for index, scope in enumerate(scopes):
+        definitions = [node for node in scope.body if isinstance(node, ast.ClassDef)]
+        if not isinstance(scope, ast.Module):
+            # A local class name shadows a module name even before its first
+            # definition, when reading it would raise UnboundLocalError.
+            for node in definitions:
+                found.pop(node.name, None)
+        cutoff = _class_scope_read_position(scopes, index, before)
+        for node in definitions:
+            if cutoff is None or position(node) < position(cutoff):
+                found[node.name] = node
     return found
 
 
-def _class_defs_in_scope_order(tree):
-    """Every ``ClassDef`` defined in a *function* body in ``tree``, in order.
+def _class_scope_read_position(scopes, index, read):
+    """An enclosing class cell is read when its child is invoked."""
+    scope = scopes[index]
+    if isinstance(scope, ast.Module):
+        return read if len(scopes) == 1 else None
+    if index == len(scopes) - 1:
+        return read
+    child = scopes[index + 1]
+    return next(
+        (
+            statement.value
+            for statement in scope.body
+            if isinstance(statement, (ast.Expr, ast.Return))
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id == child.name
+        ),
+        None,
+    )
 
-    A **class body is deliberately not descended into.** A class inside another
-    class is spelled ``Outer.Inner()`` at its use site, so registering it under
-    the bare name ``Inner`` would let a bare ``Inner`` -- a different object in a
-    different scope -- be reported as a defeat. That limit is deliberate and is
-    pinned by ``test_only_a_module_level_class_counts``. #410 widens only the
-    *function* case, where the class is reached through an instance binding
-    (``helper = Suppressor()``) rather than through its own name.
 
-    This flag is defence in depth, and it is worth being exact about which
-    guard actually does the work. Removing it and descending into class bodies
-    as well leaves ``test_only_a_module_level_class_counts`` **passing** --
-    because the header there is ``Outer.Inner()``, a ``Call``, and
-    :func:`_dotted_class_name` rejects a ``Call`` outright, so the header never
-    reaches the table by that route either. The mutation is therefore not
-    killed by the suite, and is documented here rather than claimed as pinned.
-    What the flag does guarantee is that the *name* ``Inner`` never enters the
-    table, so no other rule that consults it can be widened by accident later.
+def _class_lookup_scopes(tree, target):
+    """Module and enclosing function scopes, excluding unrelated siblings."""
+    if target is None or target is tree:
+        return [tree]
+    path = []
 
-    Nested functions *are* descended into, so a class defined two function
-    levels down is still found. Order is document order and the first
-    registration of a name wins, so a bare ``Inner()`` resolves to the class its
-    own scope defines rather than a same-named one from an unrelated function.
-    """
-    found = []
-    seen = set()
-
-    def visit(node, inside_class):
+    def find(node):
+        path.append(node)
+        if node is target:
+            return True
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                if not inside_class and id(child) not in seen:
-                    seen.add(id(child))
-                    found.append(child)
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                visit(child, inside_class)
+            if find(child):
+                return True
+        path.pop()
+        return False
 
-    visit(tree, False)
-    return found
+    if not find(tree):
+        return [tree]
+    return [
+        node
+        for node in path
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _unbound_local_class_constructor(value, function, module=None):
+    """A local or captured class must have been bound when construction runs."""
+    if (
+        not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        or not isinstance(value, ast.Call)
+        or not isinstance(value.func, ast.Name)
+    ):
+        return False
+    name = value.func.id
+    nodes = list(_scope_body_nodes(function))
+    if not any(node is value for node in nodes):
+        # A module-created instance is not constructed in this function's
+        # namespace, even when this function later shadows its class name.
+        return False
+    tree = module if module is not None else _owning_module(function)
+    scopes = _class_lookup_scopes(tree, value)
+    position = lambda node: (node.lineno, node.col_offset)
+    for index in reversed(range(1, len(scopes))):
+        scope = scopes[index]
+        nodes = list(_scope_body_nodes(scope))
+        if not any(isinstance(node, ast.ClassDef) and node.name == name for node in nodes):
+            continue
+        if _declares(scope, {name}, ast.Global) or _declares(scope, {name}, ast.Nonlocal):
+            return False
+        if any(
+            argument.arg == name
+            for argument in ast.walk(scope.args)
+            if isinstance(argument, ast.arg)
+        ):
+            return False
+        cutoff = _class_scope_read_position(scopes, index, value)
+        if cutoff is None:
+            return False
+        return not any(
+            position(node) < position(cutoff) and any(_names_bound_by_statement(node, name))
+            for node in nodes
+            if isinstance(node, ast.stmt)
+        )
+    return False
 
 
 def _provably_truthy_exit(exit_function):
@@ -4731,6 +4758,12 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # plain string rather than a synthesised AST node, so the store
             # stays attached to the real statement it came from.
             kinds.add(value)
+            continue
+        if _unbound_local_class_constructor(value, function, module):
+            # Resolving a local class before its first definition raises
+            # UnboundLocalError during construction, before this header can
+            # reach its assert. The future class must not vouch for it.
+            kinds.add("NoneType")
             continue
         if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
             # A call is a call: `nullcontext()` returns a real context manager
