@@ -567,14 +567,26 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
             and _carried_suppressor_has_unshadowed_arguments(carried[0], function)
         ):
             return carried[0]
-    # #441. Decline an elif suppression only when a proven assertion-failure
-    # value takes an earlier arm and retains an enterable plain manager. The
-    # same manager can suppress every value where the assert would fail, so
-    # merely seeing a non-suppressor on some path is not sufficient.
+    # #441/#452. Decline a branch suppression only when a proven
+    # assertion-failure value takes an earlier arm and retains an enterable
+    # plain manager. The same manager can suppress every value where the assert
+    # would fail, so merely seeing a non-suppressor on some path is not
+    # sufficient.
+    #
+    # #452 widens "an elif arm" to "a terminal else arm". The two are the same
+    # question -- an arm the failure value skips, so the binding it would have
+    # installed never happens -- and the witness below proves it for both.
+    # `len(competing) == 1` is what keeps a chain whose *both* arms bind out of
+    # this branch: there the suppressor really is installed on every path that
+    # reaches the header, and the answer is genuinely ambiguous rather than
+    # false-dead.
     if (
         len(competing) == 1
         and not any(_entry_may_be_an_unrun_capture(entry, function) for entry in competing)
-        and _store_is_in_an_elif_link(competing[0][0], function)
+        and (
+            _store_is_in_an_elif_link(competing[0][0], function)
+            or _store_is_in_a_skipped_else_arm(competing[0][0], function)
+        )
         and _entry_suppresses_assertion_errors(competing[0], bound)
         and _elif_skipped_path_can_fail(
             entries, orders, competing[0], bound, function, query, owning

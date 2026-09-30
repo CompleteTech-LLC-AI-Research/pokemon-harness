@@ -716,12 +716,20 @@ def _outermost_chain_link(block, function):
 
 
 def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, query, owning=None):
-    """Prove the filed literal-comparison failure reaches a skipped elif arm.
+    """Prove the filed literal-comparison failure reaches a skipped arm.
 
     A non-suppressor is not necessarily enterable. A live classification also
     needs a failure value that takes an earlier arm, rather than the suppressing
     one. Unknown managers, predicates, local rebinding and nested control flow
     retain the existing resolution.
+
+    #452. The walk below reaches the suppressor through the ``orelse`` chain
+    and stops when it meets an arm the failure value selects. That covers a
+    terminal ``else`` as well as an ``elif``: in both, the suppressor is not
+    installed on the failure path, so the manager carried in from before the
+    chain is what the ``with`` actually enters. A decided ``if False:`` whose
+    ``else`` always runs falls out of the walk with ``False``, which keeps it
+    DEFEATED.
     """
     if not isinstance(query, ast.Assert) or function is None:
         return False
