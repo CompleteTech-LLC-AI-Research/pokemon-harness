@@ -82,6 +82,12 @@ AMBIGUOUS_SUPPRESSOR = object()
 #: out as a missing key. Those are different answers: the second inherits the
 #: previous position's binding, which resurrects a superseded suppressor. The
 #: marker separates them.
+#:
+#: #441 reuses it for the neighbouring case. A name bound on two paths by an
+#: `elif` link, where the store that runs on only *some* calls swallows
+#: `AssertionError` but the store in force on the rest provably does not, is
+#: also "bound and carries no suppressor" as far as any caller can tell -- and
+#: the header has to stay live for the same reason.
 _NOT_A_SUPPRESSOR = object()
 
 #: Sentinel for a suppressor reached through ``name.__enter__()``. The dunder

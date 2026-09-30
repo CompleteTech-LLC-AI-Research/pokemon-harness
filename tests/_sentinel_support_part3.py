@@ -902,3 +902,44 @@ def _loop_value_source(statement, query=None, bound=None):
     ):
         return UNREADABLE_VALUE
     return iterable.elts[-1]
+
+
+def _readable_store_value(value, bound):
+    """The store's value, if it is a *suppressor candidate* this function owns.
+
+    This resolver answers "is the name in force a readable suppressor?", so it
+    must only ever hand back a value the suppressor machinery can read. That is
+    not every store value, and #367's tie branch is where the difference bites:
+
+    #359 records a carrier (`import ... as cs`, `def cs`, `class cs`) as a
+    plain ``str`` runtime kind -- "module"/"function"/"type" -- deliberately, so
+    the value stays attached to the real statement and containment and
+    ordering stay answerable. A carrier is *not* a suppressor and not a
+    readable right-hand side either, and `_entry_is_dead` is the rule that
+    answers it, by reading the ``str``. Returning one from here would put a
+    bare ``"module"`` in front of the alias machinery as though it were a call.
+
+    The failure that produced is measured. A carrier inside the header's own
+    scope has already run by the time the name is entered:
+
+        with (cs := suppress(AssertionError)):
+            import os as cs
+        with cs:
+            assert x != 1        # TypeError: 'module' object ...
+
+    Both stores sit in one top-level statement, so they share a binding order
+    and this tie branch answers with the conditional one. Returning the raw
+    ``"module"`` skipped the entry for *any* readable suppressor -- the tie had
+    already retired the `suppress` -- and reported the assert `enforced`,
+    certifying an unreachable contract as load-bearing. Base answers `False`
+    here, so the tie branch is what introduced it.
+
+    So: anything that is not a value the suppressor rules can read answers
+    ``None``, which is this function's existing "not a suppressor" answer, and
+    leaves the carrier to ``_entry_is_dead``. An unreadable right-hand side and
+    a carrier are different things that happen to share an answer here, which
+    is the safe one -- neither can be claimed harmless.
+    """
+    if isinstance(value, str):
+        return None
+    return value if _is_readable_suppressor(value, bound) else None

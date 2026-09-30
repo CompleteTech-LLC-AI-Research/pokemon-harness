@@ -157,7 +157,7 @@ def _is_enforced(function, target, tree=None):
         elif isinstance(ancestor, (ast.With, ast.AsyncWith)):
             if not _in_body(ancestor, target):
                 continue
-            if _is_suppressing_with(ancestor, bound, function, owning):
+            if _is_suppressing_with(ancestor, bound, function, owning, target):
                 return False
             if _is_user_defined_swallowing_with(ancestor, bound, function, owning):
                 return False
@@ -711,3 +711,284 @@ def _outermost_chain_link(block, function):
         if node.orelse[0] is block:
             return node
     return None
+
+
+def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, query, owning=None):
+    """Prove the filed literal-comparison failure reaches a skipped elif arm.
+
+    A non-suppressor is not necessarily enterable. A live classification also
+    needs a failure value that takes an earlier arm, rather than the suppressing
+    one. Unknown managers, predicates, local rebinding and nested control flow
+    retain the existing resolution.
+    """
+    if not isinstance(query, ast.Assert) or function is None:
+        return False
+    prior = [entry for entry in entries if orders[id(entry[0])] < orders[id(competitor[0])]]
+    if not prior:
+        return False
+    latest_order = max(orders[id(entry[0])] for entry in prior)
+    latest = [entry for entry in prior if orders[id(entry[0])] == latest_order]
+    if len(latest) != 1 or latest[0][2]:
+        return False
+    manager = latest[0][1]
+    if not (
+        isinstance(manager, ast.Call)
+        and not manager.args
+        and not manager.keywords
+        and _resolves_to(manager.func, "contextlib.nullcontext", bound)
+    ):
+        return False
+    root_name = manager.func
+    while isinstance(root_name, ast.Attribute):
+        root_name = root_name.value
+    if not isinstance(root_name, ast.Name):
+        return False
+    if any(
+        argument.arg == root_name.id
+        for argument in ast.walk(function.args)
+        if isinstance(argument, ast.arg)
+    ):
+        return False
+    if any(
+        root_name.id in _store_target_names_of(statement)
+        for statement in _scope_body_nodes(function)
+    ):
+        return False
+    if not isinstance(owning, ast.Module):
+        return False
+    own_imports = _bound_names(ast.Module(body=[], type_ignores=[]), function)
+    if root_name.id not in own_imports:
+        for statement in _scope_body_nodes(owning):
+            names = _store_target_names_of(statement)
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [statement.name]
+            if root_name.id in names:
+                return False
+            if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                )
+                if any(
+                    isinstance(target, (ast.Attribute, ast.Subscript))
+                    and any(
+                        isinstance(child, ast.Name) and child.id == root_name.id
+                        for child in ast.walk(target)
+                    )
+                    for target in targets
+                ):
+                    return False
+            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                return False
+    failure = query.test
+    values = None
+    if (
+        isinstance(failure, ast.Compare)
+        and len(failure.ops) == 1
+        and isinstance(failure.ops[0], ast.NotEq)
+    ):
+        left, right = failure.left, failure.comparators[0]
+        if isinstance(left, ast.Constant) and isinstance(right, ast.Name):
+            left, right = right, left
+        if isinstance(left, ast.Name) and isinstance(right, ast.Constant):
+            values = {left.id: right.value}
+    if values is None:
+        return False
+    parameters = {
+        argument.arg
+        for argument in (*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs)
+    }
+    if not set(values) <= parameters:
+        return False
+    for statement in _scope_body_nodes(function):
+        names = _store_target_names_of(statement)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [statement.name]
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            names = [alias.asname or alias.name.split(".")[0] for alias in statement.names]
+        elif isinstance(statement, ast.ExceptHandler) and statement.name is not None:
+            names = [statement.name]
+        if set(values) & set(names):
+            return False
+    chain = next(
+        (
+            node
+            for node in function.body
+            if isinstance(node, ast.If) and _contains(node, competitor[0])
+        ),
+        None,
+    )
+    if chain is None or not _elif_witness_reaches_header(function, chain, query, bound):
+        return False
+    while isinstance(chain, ast.If):
+        if _contains_any(chain.body, competitor[0]):
+            return False
+        decision = _elif_failure_predicate(chain.test, values)
+        if decision is True:
+            # A pass-only preceding arm preserves the known manager and failure
+            # value. Arbitrary statements cannot establish this witness.
+            return bool(chain.body) and all(isinstance(node, ast.Pass) for node in chain.body)
+        if (
+            decision is not False
+            or len(chain.orelse) != 1
+            or not isinstance(chain.orelse[0], ast.If)
+        ):
+            return False
+        chain = chain.orelse[0]
+    return False
+
+
+def _elif_witness_reaches_header(function, chain, query, bound):
+    """Keep the small witness proof free of earlier exits or opaque effects."""
+    header = next(
+        (node for node in function.body if isinstance(node, ast.With) and query in node.body), None
+    )
+    if (
+        header is None
+        or len(header.items) != 1
+        or not isinstance(header.items[0].context_expr, ast.Name)
+    ):
+        return False
+    chain_index, header_index = function.body.index(chain), function.body.index(header)
+    if chain_index >= header_index:
+        return False
+    if any(
+        not isinstance(node, ast.Pass) for node in function.body[chain_index + 1 : header_index]
+    ):
+        return False
+    if any(not isinstance(node, ast.Pass) for node in header.body[: header.body.index(query)]):
+        return False
+    for node in function.body[:chain_index]:
+        if isinstance(node, ast.Pass):
+            continue
+        if not isinstance(node, ast.Assign) or not all(
+            isinstance(target, ast.Name) for target in node.targets
+        ):
+            return False
+        value = node.value
+        if isinstance(value, ast.Constant):
+            continue
+        if not isinstance(value, ast.Call) or value.keywords:
+            return False
+        if _resolves_to(value.func, "contextlib.nullcontext", bound) and not value.args:
+            continue
+        if not _is_readable_suppressor(value, bound):
+            return False
+        if not all(
+            isinstance(argument, ast.Name)
+            and argument.id in ("AssertionError", "Exception", "BaseException", "ValueError")
+            for argument in value.args
+        ):
+            return False
+        argument_names = {argument.id for argument in value.args}
+        parameter_names = {
+            argument.arg for argument in ast.walk(function.args) if isinstance(argument, ast.arg)
+        }
+        if argument_names & parameter_names:
+            return False
+        if any(
+            argument_names & set(_store_target_names_of(store))
+            for store in _scope_body_nodes(function)
+        ):
+            return False
+    return True
+
+
+def _is_provably_unreached_store(entry, orders, function):
+    """Is this conditional store inside a loop body that can never run?
+
+    #378. A ``for`` over a literal empty iterable has no iterations, so every
+    statement in its body is unreachable. A store written there is recorded,
+    flagged ``conditional``, and would otherwise compete with the store that
+    really is in force -- retiring a live ``nullcontext`` and letting a
+    swallowed assert be reported as swallowed when it is in fact live.
+
+    The test is deliberately narrow: only a *provably* empty literal iterable
+    answers yes. ``helper.items()`` may yield nothing, but it may not, so a
+    store in that body keeps competing and the ordinary ambiguity handling
+    applies. ``range(0)`` and ``set()`` are excluded for the same reason
+    `_is_empty_literal_iterable` excludes them -- deciding them means
+    reasoning about builtins rather than reading a literal.
+
+    A ``while True:`` loop, or one whose test is merely truthy, is not
+    provably empty and so is not matched.
+
+    The ``For`` branch is gated on :func:`_in_body`, and that gate is the
+    whole difference between a correct answer and a regression. ``For.body``
+    and ``For.orelse`` are AST **siblings**: both are attributes of the same
+    ``ast.For`` node, and both therefore appear in the ancestor walk, but only
+    one of them is skipped when the loop has no iterations. The ``else``
+    clause is exactly what runs *because* the loop finished without
+    ``break``, so every statement in it executes on every path through a
+    zero-iteration loop:
+
+        for y in ():
+            pass
+        else:
+            cs = contextlib.suppress(AssertionError)   # this runs
+
+    Executed on CPython 3.12.14 the assert under the following ``with cs:`` is
+    swallowed in all of these -- a plain assign, the same over a list and a
+    dict literal, an assign nested in an ``if``, and one nested in a ``with``.
+    Unguarded, this helper answered "unreached" for every one of them and the
+    assert was reported **live**, which is the damaging direction #378 exists
+    to prevent and a regression against ``master`` (``2c81f10``), where all
+    five are already correct. The clause is reused rather than a new
+    containment test written, because it already answers the same question
+    for a ``with`` header: "inside the executed body, not a handler or an
+    ``else``".
+
+    This is the same question `_is_store_statement` answers for a header
+    *nested inside* the loop; both are needed because the two answer through
+    different tables. On ``master`` (``2c81f10``) the nested case was already
+    right and the after-loop case still certified three live asserts dead, so
+    neither guard covers the other.
+
+    The port originally also filtered ``_resolve_bindings``' competing set and
+    added an empty-competing fallback there. Mutation showed both **survived**
+    -- reverting either alone leaves the lane green -- because every caller
+    either pre-filters the same table (the `_assigned_suppressors` loop above)
+    or declines before reaching the ambiguity branch (the ``nonlocal``
+    resolver). They were removed rather than left in as untested code.
+    """
+    statement = entry[0]
+    if function is None:
+        return False
+    # `_ancestors` runs outermost-first and ends with ``target`` itself, so
+    # the last element is dropped: the question is which *containers* the
+    # store sits inside.
+    for ancestor in list(_ancestors(function, statement))[:-1]:
+        # `ast.AsyncFor` is included for symmetry with `_is_store_statement`,
+        # but it is deliberately untested here: an `async for` over a *literal*
+        # container cannot execute, because a literal is not an async
+        # iterable, so no fixture can put the analyzer and CPython in the same
+        # room for that shape. Reverting this clause to `ast.For` alone
+        # therefore survives mutation, and that is recorded rather than hidden
+        # behind a row that cannot run. The clause is kept because the
+        # narrowing that survives mutation would be the more surprising change.
+        # An outer empty loop's else can contain an inner empty loop body.
+        # Keep scanning unless this particular body contains the store.
+        if (
+            isinstance(ancestor, (ast.For, ast.AsyncFor))
+            and _is_empty_literal_iterable(ancestor.iter)
+            and _in_body(ancestor, statement)
+        ):
+            return True
+    return False
+
+
+def _carried_suppressor_has_unshadowed_arguments(value, function):
+    """Require builtin exception arguments throughout the enclosing scopes."""
+    owning = _module_for_function(function)
+    scope = function
+    while scope is not None:
+        if not _nonlocal_has_known_exception_arguments(value, _raw_store_values(scope), scope):
+            return False
+        scope = _nonlocal_parent_function(scope, owning)
+    if owning is None:
+        return False
+    for argument in value.args:
+        for statement in owning.body:
+            nodes = [statement, *_module_level_bindings(statement)]
+            if any(any(_names_bound_by_statement(node, argument.id)) for node in nodes):
+                return False
+    return True
