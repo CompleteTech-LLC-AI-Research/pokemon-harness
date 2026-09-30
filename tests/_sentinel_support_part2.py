@@ -10,7 +10,7 @@ if __name__ == "tests._sentinel_support_part2":
     )
 
 
-def _entry_may_be_an_unrun_capture(entry):
+def _entry_may_be_an_unrun_capture(entry, function=None):
     """Is this entry a ``match`` capture that is not guaranteed to have bound?
 
     The narrow companion to :func:`_store_retires`, asked of a whole
@@ -24,12 +24,19 @@ def _entry_may_be_an_unrun_capture(entry):
     a capture that is guaranteed to bind for *some* name is still a capture
     that may not bind for the name in question, so every owned name is
     checked and any one of them being undecidable makes the entry so.
+
+    ``function`` is forwarded so this asks :func:`_store_retires` the same
+    question the recording walk asked, and gets the same answer. Delegating
+    rather than re-deciding is the point: the two must agree, or a settled
+    capture is still counted as a competing one and the name is read as
+    ambiguous -- which is a different answer again, and a wrong one.
     """
     statement = entry[0]
     if not isinstance(statement, ast.Match):
         return False
     return not all(
-        _capture_always_binds(statement, name) for name in _match_capture_names_for(statement)
+        _store_retires(statement, name, function)
+        for name in _match_capture_names_for(statement)
     )
 
 
@@ -404,16 +411,21 @@ def _store_bindings(function, bound, query=None):
     # A `match` capture is the one store form that is not reachable from a
     # statement's target list, so it cannot ride along in the loop above.
     #
-    # `conditional` is False only when the capture is *guaranteed* to run --
-    # a last, irrefutable, unguarded clause (`_capture_always_binds`). For the
-    # refutable shapes the capture is marked conditional instead, because a
-    # clause that is not selected never binds anything. Marking those
-    # unconditional (the original #324 behaviour) made the capture supersede
-    # the earlier walrus on every path, so a subject that matched no clause at
-    # all still retired the carried suppressor and reported the assert below it
-    # as live while it was really swallowed. See #342.
+    # `conditional` is False only when the capture is *guaranteed* to run: a
+    # last, irrefutable, unguarded clause (`_capture_always_binds`), a #364/#369
+    # written-out subject that decides its own selection, **and** a `match`
+    # written directly in the function body rather than nested in a block.
+    # `:func:`_store_retires` owns all three so this call site and
+    # `_entry_may_be_an_unrun_capture` cannot drift apart.
+    #
+    # For the refutable shapes the capture is marked conditional instead,
+    # because a clause that is not selected never binds anything. Marking
+    # those unconditional (the original #324 behaviour) made the capture
+    # supersede the earlier walrus on every path, so a subject that matched no
+    # clause at all still retired the carried suppressor and reported the
+    # assert below it as live while it was really swallowed. See #342.
     for name, statement in _match_capture_names(function).items():
-        conditional = not _store_retires(statement, name)
+        conditional = not _store_retires(statement, name, function)
         bindings.setdefault(name, []).append((statement, None, conditional))
     # #359. The four string-field carriers (`import os as cs`, `def cs`,
     # `class cs`, ...) bind a name the loop above never sees, because their
@@ -525,7 +537,9 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
     if collapsed:
         competing = collapsed_entries
-    if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
+    if len(competing) > 1 or any(
+        _entry_may_be_an_unrun_capture(entry, function) for entry in competing
+    ):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
         # `AMBIGUOUS` marker rather than dropped: dropping it would fall back
