@@ -835,6 +835,26 @@ def _carrier_runtime_kinds(function):
             # `import a.b as cs` binds the module `a.b`, and the language
             # gives this one spelling exactly one meaning, so it is decidable.
             carriers.extend((alias.asname, "module") for alias in statement.names if alias.asname)
+        elif isinstance(statement, ast.ImportFrom):
+            # #389. `from os import path as cs` binds a *name decided by the
+            # module's own attribute*, which is why the docstring above
+            # declines this form outright: one spelling produces several
+            # runtime types and one of them is genuinely enterable
+            # (`from contextlib import nullcontext as cs`).
+            #
+            # The decline is lifted only for attributes the real interpreter
+            # can resolve to something that cannot implement the context
+            # manager protocol. `_from_import_kind` answers exactly that and
+            # returns `None` for an enterable or unresolvable attribute, so
+            # a live header keeps its assert. `from M import N` without an
+            # `asname` binds `N` itself, not a different name, so it is left
+            # to the ordinary store rules exactly as `import M` is.
+            carriers.extend(
+                (alias.asname, kind)
+                for alias in statement.names
+                if alias.asname
+                and (kind := _from_import_kind(statement.module, alias.name)) is not None
+            )
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             carriers.append((statement.name, "function"))
         elif isinstance(statement, ast.ClassDef):

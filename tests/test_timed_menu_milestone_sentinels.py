@@ -2704,7 +2704,8 @@ MODULE_CARRIER_SHAPES = (
     ),
 )
 
-#: #376: ``from M import N as cs`` binds an attribute, not a module.
+#: #376, revised by #389: ``from M import N as cs`` binds an attribute, and the
+#: attribute is now *resolved* rather than declined.
 #:
 #: It looks exactly like ``import os as cs`` -- a name carried in a string
 #: field of an import node -- but the two are not the same claim. ``import
@@ -2717,26 +2718,36 @@ MODULE_CARRIER_SHAPES = (
 #:     from decimal import Decimal as cs -> a class
 #:     from mymod import ctx as cs       -> WHATEVER mymod.ctx is
 #:
-#: The last row is the point. ``mymod.ctx`` is a real ``nullcontext()``, so
-#: ``with cs:`` **succeeds** and the assert is live. Recording the shape as a
-#: module would report that live assert as dead and drop a real pinned
-#: contract -- the damaging direction, introduced by the very rule meant to
-#: fix it. So the rule **declines** it, and the analyzer answers ``enforced``.
+#: The last row is why the shape cannot be answered from the *syntax* alone:
+#: ``mymod.ctx`` is a real ``nullcontext()``, so ``with cs:`` **succeeds** and
+#: the assert is live, while ``os.path`` raises ``TypeError`` and the assert is
+#: dead. Recording every ``from ... import ... as`` as a module would report
+#: that live assert as dead and drop a real pinned contract -- the damaging
+#: direction, introduced by the very rule meant to fix it.
 #:
-#: Declining costs the one genuinely dead ``os.path`` row, which is the right
-#: trade: a wrong "dead" is unrecoverable, and a conservative "enforced" is
-#: the same answer master already gave.
+#: The first cut therefore declined the whole shape, which made the analyzer
+#: answer ``enforced`` for all three rows above. Two of those are genuinely
+#: dead, so the decline certified a contract CPython never applies.
+#:
+#: #389 answers the question the decline was standing in for: not "is this an
+#: ``ImportFrom``" but "what does *this* attribute resolve to". The real
+#: interpreter is consulted through ``_from_import_kind``, which returns the
+#: runtime type name only for a value that cannot implement the context
+#: manager protocol, and ``None`` for an enterable one. The live control in
+#: :func:`test_an_import_from_as_can_bind_a_real_context_manager` is what keeps
+#: this honest: it is the same spelling, over a module that exports an actual
+#: context manager, and it must stay ``enforced``.
 UNDECIDABLE_IMPORT_FROM_SHAPES = (
     (
-        "an import-from-as binding a module is declined, not guessed",
+        "an import-from-as binding a module is resolved to its runtime type",
         "from os import path as cs",
     ),
     (
-        "an import-from-as binding a str is declined, not guessed",
+        "an import-from-as binding a str is resolved to its runtime type",
         "from os import sep as cs",
     ),
     (
-        "an import-from-as binding a class is declined, not guessed",
+        "an import-from-as binding a class is resolved to its runtime type",
         "from decimal import Decimal as cs",
     ),
 )
@@ -2747,19 +2758,25 @@ UNDECIDABLE_IMPORT_FROM_SHAPES = (
     UNDECIDABLE_IMPORT_FROM_SHAPES,
     ids=[shape[0] for shape in UNDECIDABLE_IMPORT_FROM_SHAPES],
 )
-def test_an_import_from_as_is_declined_rather_than_read_as_a_module(label, bind):
-    """``from M import N`` must not be answered as "a module".
+def test_an_import_from_as_is_resolved_rather_than_declined(label, bind):
+    """``from M import N as cs`` is answered by what ``N`` resolves to.
 
     Each row is a real ``import from`` whose bound value is genuinely
-    unenterable, so ``defeated`` would be right for all three -- the same
-    answer ``os.path`` alone would give. The rule declines anyway and so
-    answers ``enforced``: wrong for these three, and the price of not being
-    wrong for the fourth.
+    unenterable: ``os.path`` is a module, ``os.sep`` a ``str``, and
+    ``Decimal`` a class. None of them has ``__enter__``, so entering one
+    raises ``TypeError`` on the header, the assert under it is never
+    evaluated, and ``dead`` is the only correct verdict. #389 resolves the
+    attribute through the real interpreter instead of declining the shape.
 
-    This is not a coverage hole because of the control in
+    The earlier cut declined the whole shape, so all three read ``enforced``:
+    three dead contracts certified as load-bearing, the damaging direction.
+
+    This is still not a coverage hole because of the control in
     :func:`test_an_import_from_as_can_bind_a_real_context_manager`: the same
-    spelling, over a module that exports an actual context manager, is live.
-    A rule answering "module" there would drop a real contract.
+    spelling, over a module that exports an actual context manager, is live
+    and must stay ``enforced``. That control is what forces the resolution to
+    be per-attribute rather than per-spelling, and it is the row that breaks
+    under a rule answering "module" for the whole shape.
     """
     source = (
         "import contextlib\n"
@@ -2771,9 +2788,9 @@ def test_an_import_from_as_is_declined_rather_than_read_as_a_module(label, bind)
     function = tree.body[-1]
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     results = [_is_enforced(function, node, tree) for node in asserts]
-    assert results == [True], (
-        f"{label}: expected the rule to DECLINE, i.e. [True], got {results}. "
-        f"The value bound by `from M import N` is not readable off the syntax."
+    assert results == [False], (
+        f"{label}: expected [False] -- the bound value cannot be entered, so "
+        f"the assert is unreachable -- got {results}."
     )
 
 
@@ -4310,6 +4327,150 @@ def _assert_entry_contract(label, source, is_async, second_assert_live):
         f"{label}: the fixture returned normally, so the second assert was "
         f"swallowed rather than reachable. Row is stale."
     )
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected"),
+    [
+        (
+            "#390 a lambda rebound over a carried suppressor is not enterable",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    with (cs := contextlib.suppress(AssertionError)):\n"
+                "        pass\n"
+                "    cs = lambda: None\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+        (
+            "#394 a body import shadows a module-level suppressor alias",
+            (
+                "import contextlib as fake\n"
+                "def outer(x, flag, helper):\n"
+                "    import json as fake\n"
+                "    with fake.suppress(AssertionError):\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+        (
+            "#426 a starred unpack in the with header enters a tuple",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    cs = [contextlib.nullcontext(), contextlib.suppress(AssertionError)]\n"
+                "    with (*cs,):\n"
+                "        assert x != 1\n"
+            ),
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) and value.startswith("#") else None,
+)
+def test_a_header_that_cannot_be_entered_defeats_the_assert(label, source, expected):
+    """A ``with`` header that raises before the body leaves the assert unreachable.
+
+    Each row binds a value that cannot implement the context manager protocol
+    in the header itself -- a function object, an attribute the module does
+    not have, and a tuple. Entering any of them raises ``TypeError`` or
+    ``AttributeError`` while the header is evaluated, so the assert under it
+    never runs.
+
+    The analyzer answered ``True`` for all three: a disarmed contract
+    certified as load-bearing, which is the damaging direction. The verdicts
+    are checked against the runtime contract rather than against the
+    analyzer's own opinion, so a row cannot pass by the checker and the claim
+    being wrong together.
+    """
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected], f"{label}: expected {[expected]}, got {results}."
+
+    # Hold CPython to the same row, so the expected verdict is measured rather
+    # than asserted about. An unreachable row must raise something that is
+    # *not* an AssertionError.
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1, True, None)
+    except AssertionError:
+        if not expected:
+            raise AssertionError(
+                f"{label}: the assert fired, so the header was enterable and "
+                f"the contract is live. The row claims it is dead."
+            ) from None
+    except (TypeError, AttributeError, NameError, UnboundLocalError):
+        if expected:
+            raise AssertionError(
+                f"{label}: the header raised instead of running the body, so "
+                f"the assert is unreachable. The row claims it is live."
+            ) from None
+    else:
+        raise AssertionError(
+            f"{label}: the fixture returned normally, so the assert was "
+            f"swallowed rather than reachable."
+        )
+
+
+def test_a_live_header_is_not_read_as_dead_by_the_unenterable_rules():
+    """The controls that keep #390/#394/#426 from over-correcting.
+
+    Each of the three rules keys off a shape that is also the shape of a
+    genuinely live header:
+
+    * a name bound by ``from M import N as cs`` may be a real context manager;
+    * a ``cs = <call>`` store may return one; and
+    * a name read in a ``with`` header may be perfectly enterable.
+
+    A rule that answered "dead" for the whole family would drop each of these
+    real contracts, so they are pinned here as live.
+    """
+    live_rows = (
+        (
+            "a from-import binding a real context manager stays live",
+            (
+                "def outer(x, flag, helper):\n"
+                "    from tests._import_from_carrier_support import ctx as cs\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+        ),
+        (
+            "a store of a real context manager stays live",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    cs = contextlib.nullcontext()\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            ),
+        ),
+        (
+            "a lambda that RETURNS a context manager is not read as one",
+            (
+                "import contextlib\n"
+                "def outer(x, flag, helper):\n"
+                "    make = lambda: contextlib.nullcontext()\n"
+                "    with make():\n"
+                "        assert x != 1\n"
+            ),
+        ),
+    )
+    for label, source in live_rows:
+        tree = ast.parse(source)
+        function = tree.body[-1]
+        asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert results == [True], (
+            f"{label}: expected [True] -- the header is enterable, so the "
+            f"assert is live -- got {results}. A rule reading this family as "
+            f"dead would drop a real pinned contract."
+        )
 
 
 #: #350. Which nesting forms bind the *enclosing* function's local, and which

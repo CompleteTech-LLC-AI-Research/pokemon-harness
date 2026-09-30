@@ -40,6 +40,8 @@ if __name__ == "tests._sentinel_support_base":
 import ast
 import copy
 import inspect
+import sys
+import types
 
 import tests.test_timed_menu_milestones as milestones
 
