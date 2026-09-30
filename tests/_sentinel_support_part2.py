@@ -567,6 +567,35 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
             and _carried_suppressor_has_unshadowed_arguments(carried[0], function)
         ):
             return carried[0]
+    # #451. A loop `else` a `break` can skip is the same "the arm the failure
+    # path skips" question as #441's `elif` and #452's terminal `else`, but it
+    # needs no failure-value witness: the `break` makes the skip
+    # unconditional, so *some* call always enters the carried manager instead
+    # of this suppressor.
+    #
+    #     cs = contextlib.nullcontext()
+    #     for item in (1,):
+    #         break
+    #     else:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # Reading the suppressor and reporting defeated is the damaging direction
+    # -- a contract that really enforces, certified unreachable.
+    #
+    # Gated on the carried store being a plain, enterable manager, because a
+    # suppressor already in force would swallow the assert on the skipping
+    # call too and leave the header genuinely defeated.
+    if (
+        len(competing) == 1
+        and not any(_entry_may_be_an_unrun_capture(entry, function) for entry in competing)
+        and _store_is_in_a_skippable_loop_else_arm(competing[0][0], function)
+        and _entry_suppresses_assertion_errors(competing[0], bound)
+    ):
+        carried = [entry[1] for entry in unconditional if orders[id(entry[0])] == latest]
+        if len(carried) == 1 and _carried_store_leaves_the_assert_live(carried[0], bound, function):
+            return _NOT_A_SUPPRESSOR
     # #441/#452. Decline a branch suppression only when a proven
     # assertion-failure value takes an earlier arm and retains an enterable
     # plain manager. The same manager can suppress every value where the assert

@@ -9879,6 +9879,234 @@ def test_an_else_arm_suppressor_is_live_when_the_carried_store_is_not(label, cha
     )
 
 
+#: #451. #378 established that a zero-iteration loop's `else` still runs, and
+#: `_loop_else_always_runs` was built to answer "can control leave this loop's
+#: body without running its `else`?". The complementary rule -- a loop exited
+#: via `break` *skips* its `else` -- is what this family needs, and the same
+#: function already answers it. What was missing is that the skipped store was
+#: then still read as the value in force:
+#:
+#:     cs = contextlib.nullcontext()
+#:     for item in (1,):
+#:         break                       # leaves without completing
+#:     else:
+#:         cs = contextlib.suppress(AssertionError)   # never runs
+#:     with cs:
+#:         assert x != 1              # LIVE -- `cs` is still the nullcontext
+#:
+#: Executed on CPython the assert fires. The analyzer reported DEFEATED, which
+#: is the damaging direction: an enforcing contract certified unreachable.
+#:
+#: Every row is executed by :func:`_assert_suppression_contract` before the
+#: analyzer's verdict is compared, so CPython decides each row rather than this
+#: table.
+LOOP_ELSE_SKIPPED_SHAPES = (
+    # The filed shape. `break` leaves the loop before completion, so the
+    # `else` never runs and `cs` is still the preamble's `nullcontext`.
+    (
+        "a for else skipped by break is live",
+        (
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The `while` spelling. A `while` `else` is skipped by `break` the same
+    # way, and this row is what stops a repair that only reads `ast.For`.
+    (
+        "a while else skipped by break is live",
+        (
+            "    while True:\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The mirror control, and the row that decides whether the repair is
+    # correct or merely cautious. With no `break` the loop completes and the
+    # `else` really does run, so the suppressor is installed on every call and
+    # the header is genuinely defeated. Answering `live` here would certify a
+    # disarmed contract as load-bearing.
+    (
+        "CONTROL a for else that completes is dead",
+        (
+            "    for item in (1,):\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # #378's row, re-pinned from the other side. A zero-iteration loop also
+    # completes without `break`, so its `else` runs and the header is dead.
+    (
+        "CONTROL a zero-iteration for else is dead",
+        (
+            "    for item in ():\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # `continue` does NOT skip the `else`: it starts the next iteration, and a
+    # loop that runs to exhaustion completes. This is the row that separates
+    # "leaves the loop" from "leaves the statement", and it must stay dead.
+    (
+        "CONTROL a for else past a continue is dead",
+        (
+            "    for item in (1,):\n        continue\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # A `break` in a NESTED loop's body exits that inner loop, not this one,
+    # so the outer `else` still runs. This is the row that stops a repair
+    # treating any `break` anywhere in the body as disqualifying.
+    (
+        "CONTROL a break in a nested loop leaves the outer else running",
+        (
+            "    for item in (1,):\n        for inner in (1,):\n"
+            "            break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # A carried *suppressor* swallows the assert on the skipping call too, so
+    # the header really is defeated however often the `else` is skipped. This
+    # is what stops the repair from answering `live` for every loop `else`.
+    (
+        "CONTROL a loop else over a carried suppressor is dead",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"  # override preamble
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # A suppressor that does not catch `AssertionError` never disarms the
+    # contract, so no call swallows the failure.
+    (
+        "CONTROL a loop else binding suppress(ValueError) stays live",
+        (
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(ValueError)"
+        ),
+        True,
+    ),
+    # The carried value here is an *unreadable* call, not a manager. The loop
+    # `else` is still skipped by the `break`, so the breaking call enters
+    # whatever `helper()` returned -- and entering an arbitrary object raises
+    # `TypeError` while the header is evaluated, before the assert. The assert
+    # is therefore unreachable, which `assert_is_live = False` states. This is
+    # the row that catches a reading of "any call is a context manager": the
+    # `break` is irrelevant, the header dies first, and answering `live` would
+    # certify a dead contract as load-bearing.
+    (
+        "CONTROL a loop else over a carried unreadable call is dead",
+        (
+            "    cs = helper()\n"
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # The same shape with a *readable* non-manager. `list()` is pinned as
+    # `"list"` by `_literal_runtime_type`, so it is provably not enterable, and
+    # the skipping call raises `TypeError` before the body. The two rows above
+    # and here are the pair that pins both halves of the carried-manager test:
+    # unreadable is refused, and readable-but-not-a-manager is refused, so the
+    # rule cannot be satisfied by "a call is good enough" or "anything not
+    # caught by the suppressor set is a manager".
+    (
+        "CONTROL a loop else over a carried non-manager is dead",
+        (
+            "    cs = list()\n"
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # `_resolves_to` answers what a name resolves to, which is not the same as
+    # whether the callee still names the stdlib. A function-local rebinding
+    # shadows the module-level import without changing the resolution, so the
+    # carried store here builds its value off a *function object*: the header
+    # raises `AttributeError` before the body on every call, and the `break`
+    # never even gets the chance to matter. This is the row that keeps the
+    # carried-manager proof from trusting a bare resolution.
+    (
+        "CONTROL a loop else over a carried value behind a local module shadow is dead",
+        (
+            "    contextlib = helper\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # The `from` spelling of the same shadow, where the shadowed name is the
+    # attribute itself rather than the module. Entering the helper's result
+    # raises `TypeError` instead of `AttributeError`, but the answer is the
+    # same one: nothing enterable was ever proved, so the header is dead.
+    (
+        "CONTROL a loop else over a carried value behind a local attribute shadow is dead",
+        (
+            "    nullcontext = helper\n"
+            "    cs = nullcontext()\n"
+            "    for item in (1,):\n        break\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "chain", "assert_is_live"),
+    LOOP_ELSE_SKIPPED_SHAPES,
+    ids=[row[0] for row in LOOP_ELSE_SKIPPED_SHAPES],
+)
+def test_a_loop_else_skipped_by_break_is_live(label, chain, assert_is_live):
+    """A loop `else` a `break` skips does not defeat the assert on its own.
+
+    This is #451. The machinery already existed and already answered the
+    question -- `_loop_else_always_runs` returns `False` for a loop whose body
+    can `break` out -- but the store written in that `else` was still read as
+    the value in force at the `with`, so a suppressor that never ran retired
+    the carried `nullcontext`.
+
+    The repair reads the existing answer rather than re-deriving it, which is
+    what keeps the `CONTROL` rows correct: `continue` and `return` leave the
+    enclosing statement instead of falling through to the `else`, and a
+    `break` inside a nested loop exits that inner loop, so in both cases the
+    `else` really does run and the header really is defeated.
+
+    No assertion-failure witness is required here, unlike #441 and #452. Those
+    ask whether a *specific* failure value reaches an earlier arm; this asks
+    whether *any* call skips the `else`, and a `break` guarantees one
+    unconditionally -- whatever the assert says.
+
+    Every row is executed across the fixture's argument domain by
+    :func:`_assert_suppression_contract` before the analyzer's verdict is
+    compared, so a row cannot claim "live" unless CPython agrees, nor
+    "defeated" unless CPython swallows on every call.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n" + chain + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. A loop "
+        f"`else` runs only when the loop finishes without `break`, so the "
+        f"binding it would install never happens on a breaking call and the "
+        f"carried manager is what that call enters."
+    )
+
+
 #: #435. #429 made an `elif` link's *own* literal-true test stop implying an
 #: unconditional store, but it only looked one link deep. A store nested under
 #: a further `if True:` -- or under a third `elif True:` -- is reached through

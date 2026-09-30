@@ -1018,3 +1018,106 @@ def _store_is_in_a_skipped_else_arm(statement, function=None):
         if _contains_any(block.orelse, statement):
             return True
     return False
+
+
+def _store_is_in_a_skippable_loop_else_arm(statement, function=None):
+    """Is this store in a loop ``else`` that a ``break`` can skip?
+
+    #451. A loop ``else`` runs only when the loop finishes *without* a
+    ``break``, which is the same question #441 and #452 ask of an ``elif`` or
+    a terminal ``else``: is the arm the assertion-failure path skips, so the
+    binding it would install never happens?
+
+        cs = contextlib.nullcontext()
+        for item in (1,):
+            break                       # the loop leaves without completing
+        else:
+            cs = contextlib.suppress(AssertionError)   # never runs
+        with cs:
+            assert x != 1              # LIVE -- `cs` is still the nullcontext
+
+    ``_loop_else_always_runs`` already answers this exactly, and with the
+    distinctions that matter: a ``break`` in the loop's own body suppresses
+    the ``else``, while ``return``/``raise``/``continue`` do not (they leave
+    the enclosing statement rather than falling through to the ``else``), and
+    a ``break`` inside a *nested* loop's body exits that inner loop and so
+    lets the outer ``else`` run. This predicate only reads that answer; it
+    does not re-derive it.
+
+    Deliberately narrower than the #441/#452 arm tests: no assertion-failure
+    witness is needed, because the ``break`` makes the skip unconditional. A
+    loop that can break always has a call that skips the ``else``, whatever
+    the assert says.
+    """
+    if function is None:
+        return False
+    for block in _enclosing_blocks(statement, function):
+        if not isinstance(block, (ast.For, ast.AsyncFor, ast.While)):
+            continue
+        if _loop_else_always_runs(block):
+            continue
+        if _contains_any(block.orelse, statement):
+            return True
+    return False
+
+
+def _carried_store_leaves_the_assert_live(value, bound, function=None):
+    """Does entering ``value`` let an ``AssertionError`` escape?
+
+    #451. The skipping call of a loop ``else`` a ``break`` can skip enters
+    whatever the carried store bound, so the header is only live when that
+    value really is a context manager that does not swallow the failure.
+
+    The question is whether the value can be entered at all, so it is asked as
+    a positive proof and everything else is refused. That direction matters:
+    the ``CONTROL`` rows that keep this rule from being satisfied by "any
+    carried value is a manager" would all be certified load-bearing while
+    CPython raised ``TypeError`` on the header before the body ever ran.
+
+    ``cs = helper()`` is the row that catches a too-broad reading. A call is
+    not a context manager merely by being a call: an arbitrary callee is
+    unreadable, it may return a plain object, and entering that raises
+    ``TypeError`` before the assert -- so the assert is *unreachable*, which is
+    the same damaging direction as certifying a dead contract enforced. The
+    same holds for a readable non-manager: ``cs = list()`` is pinned as
+    ``"list"`` by :func:`_literal_runtime_type` and cannot be entered.
+
+    A value with a provably non-manager runtime type is therefore not live,
+    and a suppressor that does catch ``AssertionError`` swallows the failure
+    on the skipping call too, so it is not live either. What remains is the
+    plain manager this question is actually about -- a ``nullcontext()`` call
+    -- which is the one value provably both enterable and unable to swallow
+    the failure.
+
+    ``_resolves_to`` alone is not enough to claim that. It answers what a name
+    *resolves to*, so ``import contextlib`` at module level plus a function-local
+    ``contextlib = helper`` still resolves ``contextlib.nullcontext`` even
+    though the attribute is read off whatever the local holds:
+
+        def outer(x, flag, helper):
+            contextlib = helper                       # a function object
+            cs = contextlib.nullcontext()             # AttributeError
+
+    Reading that as the plain manager certified a header CPython kills on the
+    header as load-bearing. :func:`_literal_subject_callee_is_intact` is the
+    same guard ``#369`` uses to ask that question, and it is what the #441/#452
+    branch already requires of its carried manager, so this rule holds itself
+    to the identical bar rather than a looser one.
+    """
+    # A suppressor is answered from its own names rather than refused outright,
+    # so the `CONTROL` row that carries one can still be reported. A
+    # `suppress(ValueError)` really does let the failure escape; a
+    # `suppress(AssertionError)` does not.
+    if _is_readable_suppressor(value, bound):
+        names = _suppression_names(value)
+        return not any(_name_catches_assertion_error(name) for name in names)
+    if not isinstance(value, ast.Call) or value.keywords:
+        return False
+    if not _resolves_to(value.func, "contextlib.nullcontext", bound):
+        return False
+    root = value.func
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    if not isinstance(root, ast.Name):
+        return False
+    return _literal_subject_callee_is_intact(root, function, value)
