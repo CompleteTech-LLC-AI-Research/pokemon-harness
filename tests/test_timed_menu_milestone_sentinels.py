@@ -4796,3 +4796,282 @@ def test_a_suppressing_loop_target_is_still_misread_and_that_is_known():
         "and delete this test. Executed CPython raises for x=1: "
         f"fires={fires}."
     )
+
+
+NONLOCAL_REBIND_REGRESSIONS = (
+    (
+        "the nearest function owns the binding",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def middle():\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        def inner():\n"
+            "            nonlocal cs\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        inner()\n"
+            "    middle()\n"
+        ),
+        True,
+    ),
+    (
+        "the nearest suppressor defeats independently of the outer value",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    def middle():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "        def inner():\n"
+            "            nonlocal cs\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        inner()\n"
+            "    middle()\n"
+        ),
+        False,
+    ),
+    (
+        "the parent's later store retires its suppressor",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+    (
+        "an inner store retires the enclosing suppressor",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+    (
+        "a grandchild declaration does not govern its parent's local",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def inner():\n"
+            "        cs = contextlib.nullcontext()\n"
+            "        def grandchild():\n"
+            "            nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+    (
+        "a parent store after invocation has not run yet",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+        ),
+        True,
+    ),
+    (
+        "a later nullcontext cannot change an earlier invocation",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+            "    cs = contextlib.nullcontext()\n"
+        ),
+        False,
+    ),
+    (
+        "another called closure can replace the captured object",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def rebind():\n"
+            "        nonlocal cs\n"
+            "        cs = contextlib.nullcontext()\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    rebind()\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+)
+
+
+NONLOCAL_REBIND_REGRESSIONS += (
+    (
+        "a with target binds after its context expression",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs as cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        False,
+    ),
+)
+
+
+NONLOCAL_REBIND_REGRESSIONS += (
+    (
+        "an empty enclosing suppressor catches no exceptions",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress()\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+    (
+        "the parent exception name can shadow a builtin",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    AssertionError = ValueError\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+)
+
+
+NONLOCAL_REBIND_REGRESSIONS += (
+    (
+        "the parent can shadow the suppression constructor",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    import contextlib as actual\n"
+            "    class Other:\n"
+            "        def suppress(self, *args):\n"
+            "            return actual.nullcontext()\n"
+            "    contextlib = Other()\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+)
+
+
+NONLOCAL_REBIND_REGRESSIONS += (
+    (
+        "a conditional parent replacement cannot certify a captured suppressor",
+        (
+            "def outer(x):\n"
+            "    import contextlib\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    if x:\n"
+            "        cs = contextlib.nullcontext()\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        True,
+    ),
+    (
+        "the parent's import overrides an unrelated module alias",
+        (
+            "from contextlib import nullcontext as make\n"
+            "def outer(x):\n"
+            "    from contextlib import suppress as make\n"
+            "    cs = make(AssertionError)\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    inner()\n"
+        ),
+        False,
+    ),
+    (
+        "an outer lexical import is inherited by the nearest parent",
+        (
+            "def outer(x):\n"
+            "    import contextlib as c\n"
+            "    def middle():\n"
+            "        cs = c.suppress(AssertionError)\n"
+            "        def inner():\n"
+            "            nonlocal cs\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+            "        inner()\n"
+            "    middle()\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "source", "enforced"), NONLOCAL_REBIND_REGRESSIONS)
+def test_nonlocal_scope_and_rebinding_match_executed_calls(label, source, enforced):
+    """A readable historical value cannot defeat a currently live assertion."""
+    namespace = {}
+    exec(compile(source, f"<nonlocal-path:{label}>", "exec"), namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        reached = True
+    else:
+        reached = False
+    assert reached is enforced, f"{label}: fixture's interpreter truth differs"
+    tree = ast.parse(source)
+    inner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "inner"
+    )
+    assertion = next(node for node in ast.walk(inner) if isinstance(node, ast.Assert))
+    assert _is_enforced(inner, assertion, tree) is enforced, label

@@ -27,6 +27,7 @@ teeth check and the count check.
 """
 
 import ast
+import copy
 import inspect
 
 import tests.test_timed_menu_milestones as milestones
@@ -2218,7 +2219,9 @@ def _aliased_suppressions(node, function, bound, owning=None):
                         # returns the bare name. The enclosing function's
                         # binding is the real answer (#355).
                         entered.extend(
-                            _nonlocal_suppressors(walrus.value.id, function, bound, owning)
+                            _nonlocal_suppressors(
+                                walrus.value.id, function, bound, owning, walrus.value
+                            )
                         )
                 # #367: `_NOT_A_SUPPRESSOR` is a *record*, not a value. It says
                 # the name is bound here and carries nothing this module can
@@ -2238,7 +2241,9 @@ def _aliased_suppressions(node, function, bound, owning=None):
                     # at a time, so a suppressor sitting in the parent scope is
                     # invisible here even though the header really enters it
                     # (#355).
-                    entered.extend(_nonlocal_suppressors(expression.id, function, bound, owning))
+                    entered.extend(
+                        _nonlocal_suppressors(expression.id, function, bound, owning, expression)
+                    )
                 if not isinstance(expression, ast.Call) or not isinstance(
                     expression.func, ast.Attribute
                 ):
@@ -2338,100 +2343,216 @@ def _nonlocal_declared(function):
     if function is None:
         return frozenset()
     declared = set()
-    for node in ast.walk(function):
+    for node in _scope_body_nodes(function):
         names = getattr(node, "names", None)
         if isinstance(node, ast.Nonlocal) and names:
             declared.update(names)
     return frozenset(declared)
 
 
-def _nonlocal_suppressors(name, function, bound, owning=None):
-    """A readable suppressor this function reaches through a ``nonlocal``.
+def _nonlocal_suppressors(name, function, bound, owning=None, header=None):
+    """Readable enclosing values still in force at direct calls of this function.
 
-    ``nonlocal cs`` makes ``cs`` inside ``function`` an alias for the
-    *enclosing* function's variable, so this:
-
-        def outer():
-            cs = contextlib.suppress(AssertionError)
-            def inner():
-                nonlocal cs
-                with (cs := cs):    # `cs` is the parent's suppressor
-                    assert 1 == 2   # swallowed
-            inner()
-
-    really does enter a suppressor and swallow the assert. The walk that
-    classifies headers is handed ``inner`` alone, and ``inner`` contains no
-    store of ``cs``, so the name resolved to nothing and the swallowed assert
-    was certified load-bearing. That is the damaging direction, and it is
-    pre-existing on master (#355, #356).
-
-    Two gates keep this from becoming the over-reading the surrounding rule
-    refuses:
-
-    * The name must be declared ``nonlocal`` *in this function*. A closure
-      variable the source never declared, or a module global, is still not
-      followed -- an arbitrary outer binding is as untraceable as any other.
-    * The enclosing store must resolve to a **readable** suppressor through
-      exactly the same rules used everywhere else. An ordinary call, a
-      parameter, or a ``nullcontext()`` binding contributes nothing, so a live
-      assert stays live.
-
-    Only the immediately enclosing function is consulted. A name declared
-    ``nonlocal`` must exist in some enclosing scope, and the nearest one is
-    the one a read resolves to; if the nearest does not bind it, the read
-    either raises or reaches further out, and neither is a swallowed assert
-    this rule can prove.
+    A nonlocal declaration identifies a scope, not a permanently fixed value.
+    A store in this function can retire the enclosing suppressor, and parent
+    stores must be read at the invocation rather than collected indiscriminately.
+    Only direct calls whose binding can be proved readable are followed. A
+    returned closure or an opaque intervening call is left undecided.
     """
     if name not in _nonlocal_declared(function):
+        return ()
+    if _nonlocal_rebound_before(name, function, header, bound):
         return ()
     parent = _nonlocal_parent_function(function, owning)
     if parent is None:
         return ()
-    _, raw_values = _assigned_suppressors(parent, bound)
-    entries = raw_values.get(name)
+    # The ordinary raw table walks nested bodies. Those stores have not run
+    # merely because their definitions were executed, so remove the bodies
+    # from a private AST before building the parent's invocation snapshots.
+    scope = copy.deepcopy(parent)
+    for node in _scope_body_nodes(scope):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            node.body = []
+        elif isinstance(node, ast.Lambda):
+            node.body = ast.Constant(value=None)
+    parent_bound = _nonlocal_parent_imports(parent, owning)
+    bindings, _raw = _store_bindings(scope, parent_bound)
+    entries = bindings.get(name, ())
     if not entries:
         return ()
-    orders = {
-        id(statement): _binding_order(parent, statement)
-        for values in raw_values.values()
-        for statement, _ in values
-    }
-    # The parent's own `with` headers can also bind the name, so those are
-    # folded in; a `with ... as cs` is a store of the name all the same.
+    orders = {id(statement): _binding_order(scope, statement) for statement, _, _ in entries}
+    calls = [
+        index
+        for index, statement in enumerate(scope.body)
+        if isinstance(statement, (ast.Expr, ast.Return))
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == function.name
+    ]
+    if not calls:
+        return ()
     resolved = []
-    for statement, value in entries:
-        deref = _deref_alias(value, raw_values, orders, _binding_order(parent, statement), name)
-        if _is_readable_suppressor(deref, bound):
-            resolved.append(deref)
-    if resolved:
-        return resolved
-    return ()
+    for index in calls:
+        visible = [entry for entry in entries if orders[id(entry[0])] < index]
+        if not visible:
+            return ()
+        unconditional = [entry for entry in visible if not entry[2]]
+        if not unconditional:
+            return ()
+        latest = max(orders[id(entry[0])] for entry in unconditional)
+        if any(entry[2] and orders[id(entry[0])] >= latest for entry in visible):
+            # A conditional replacement may have changed the object. The
+            # ordinary suppression reader's ambiguity marker is not proof
+            # that every possible captured value actually suppresses.
+            return ()
+        # Another call can mutate the captured cell. Its effects are opaque;
+        # a readable earlier assignment is insufficient evidence after it.
+        if any(
+            any(isinstance(node, ast.Call) for node in _scope_body_nodes(statement))
+            or isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and statement.decorator_list
+            for statement in scope.body[latest + 1 : index]
+        ):
+            return ()
+        value = _resolve_bindings(visible, parent_bound, orders, index, scope)
+        if not _is_readable_suppressor(value, parent_bound):
+            return ()
+        if not _nonlocal_has_known_exception_arguments(value, bindings, scope):
+            return ()
+        if not _nonlocal_constructor_is_unshadowed(value, parent, owning):
+            return ()
+        resolved.append(value)
+    return resolved
+
+
+def _nonlocal_parent_imports(parent, owning):
+    """Resolve the constructor using lexical imports, with inner scopes winning."""
+    scopes = []
+    scope = parent
+    while scope is not None:
+        scopes.append(scope)
+        scope = _nonlocal_parent_function(scope, owning)
+    bound = _bound_names(owning) if owning is not None else {}
+    for scope in reversed(scopes):
+        # _own_imports uses a stack; restore source order for sequential imports.
+        imports = sorted(_own_imports(scope), key=lambda node: (node.lineno, node.col_offset))
+        bound.update(_bound_names(ast.Module(body=imports, type_ignores=[])))
+    return bound
+
+
+def _nonlocal_constructor_is_unshadowed(value, parent, owning):
+    """An import spelling must still identify its constructor in enclosing scopes."""
+    root = value.func
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    if not isinstance(root, ast.Name):
+        return False
+    scopes = []
+    scope = parent
+    while scope is not None:
+        scopes.append(scope)
+        scope = _nonlocal_parent_function(scope, owning)
+    if isinstance(owning, ast.Module):
+        scopes.append(owning)
+    for scope in scopes:
+        for node in _scope_body_nodes(scope):
+            if (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Store)
+                and node.id == root.id
+            ):
+                return False
+            if isinstance(node, ast.arg) and node.arg == root.id:
+                return False
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.name == root.id
+            ):
+                return False
+            if isinstance(node, ast.ExceptHandler) and node.name == root.id:
+                return False
+        if root.id in _match_capture_names(scope):
+            return False
+    return True
+
+
+def _nonlocal_has_known_exception_arguments(value, bindings, scope):
+    """Follow only unshadowed builtin exception arguments across a scope boundary.
+
+    The ordinary suppression reader treats an unreadable exception as universal.
+    That is insufficient evidence for following an outer object: suppress()
+    catches nothing, and an alias or a shadowed AssertionError may name a
+    harmless exception. Decline those values rather than importing that guess.
+    """
+    if not value.args:
+        return False
+    builtins = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+    parameters = {
+        argument.arg
+        for argument in [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]
+    }
+    parameters.update(
+        argument.arg for argument in (scope.args.vararg, scope.args.kwarg) if argument is not None
+    )
+    for argument in value.args:
+        if not isinstance(argument, ast.Name):
+            return False
+        candidate = builtins.get(argument.id)
+        if not isinstance(candidate, type) or not issubclass(candidate, BaseException):
+            return False
+        if argument.id in parameters or argument.id in bindings:
+            return False
+    return True
+
+
+def _nonlocal_rebound_before(name, function, header, bound):
+    """Has this function already replaced the enclosing binding at this read?"""
+    if header is None:
+        return False
+    bindings, _raw = _store_bindings(function, bound)
+    own_nodes = {id(node) for node in _scope_body_nodes(function)}
+    position = (header.lineno, header.col_offset)
+    for statement, _value, _conditional in bindings.get(name, ()):
+        if id(statement) not in own_nodes:
+            continue
+        if (statement.lineno, statement.col_offset) > position:
+            continue
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
+            # An as-target binds after its own context expression, and before
+            # a later item's expression. Compare that target, not the whole
+            # with statement, to the particular read being resolved.
+            for item in statement.items:
+                target = item.optional_vars
+                if (
+                    target is not None
+                    and name in _store_target_names([target])
+                    and (target.lineno, target.col_offset) < position
+                ):
+                    return True
+            continue
+        # A self-alias does not replace the object; all other stores retire
+        # the parent answer even when their value is not a readable suppressor.
+        value = getattr(statement, "value", None)
+        if isinstance(value, ast.Name) and value.id == name:
+            continue
+        return True
+    return False
 
 
 def _nonlocal_parent_function(function, owning=None):
-    """The nearest function definition enclosing ``function``, or ``None``.
-
-    ``ast`` nodes carry no parent pointer, so the chain is recovered by
-    walking the parsed module that owns ``function`` -- the same module
-    :func:`_owning_module` already resolves for import bindings. A parent is
-    accepted only on *identity*: the candidate function must contain this
-    exact ``function`` object somewhere beneath it. That identity check is what
-    makes the walk safe when ``_owning_module`` falls back to the milestones
-    module for a probe whose own tree is not registered: a same-named function
-    in an unrelated file is never mistaken for the real parent.
-    """
-    trees = [owning] if owning is not None else []
-    trees += [milestones_tree(), _module_tree()]
+    """The nearest function ancestor of this exact node, not the outermost."""
+    trees = [owning] if owning is not None else [milestones_tree(), _module_tree()]
     for tree in trees:
         if tree is None:
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
+        pending = [(tree, None)]
+        while pending:
+            node, parent = pending.pop()
             if node is function:
-                continue
-            if any(child is function for child in ast.walk(node)):
-                return node
+                return parent
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parent = node
+            pending.extend((child, parent) for child in ast.iter_child_nodes(node))
     return None
 
 
