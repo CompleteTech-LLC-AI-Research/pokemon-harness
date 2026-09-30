@@ -675,9 +675,23 @@ def _is_empty_literal_iterable(node):
     empty ``bytes`` literal also yields nothing, and one test keeps the branch
     about "a literal sequence with a readable length" instead of about a
     specific type.
+
+    An f-string with no replacement fields is the same empty string reached
+    through a different node: ``f''`` parses to a ``JoinedStr`` with an empty
+    ``values`` list rather than to a ``Constant``, so the branch above cannot
+    see it (#449). It is still a *literal* with a decidable value, which is the
+    boundary this function draws -- ``range(0)`` is out of scope because
+    deciding it means reasoning about a builtin, not because it is a call.
+
+    The guard is emptiness, not mere presence: only the no-``values`` form is
+    decided. An f-string carrying replacement fields is left alone, since
+    deciding it means reasoning about the expressions substituted into it --
+    the ``range(0)`` problem again.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
         return not node.value
+    if isinstance(node, ast.JoinedStr) and not node.values:
+        return True
     if not isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
         return False
     return not _literal_value(node)

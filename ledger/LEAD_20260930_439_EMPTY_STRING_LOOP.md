@@ -91,6 +91,37 @@ Closed by adding four non-string-constant controls, not by waiving the mutant.
 Re-run confirms the kill: `[CONTROL for over an int is not empty]`,
 `[... None ...]` and `[... False ...]` fail under M5.
 
+## #449 folded in — the same omission one AST node over
+
+`f''` is the same empty string reached through a different node: it parses to a
+`JoinedStr` with no `values`, not to a `Constant`, so the str/bytes branch
+cannot see it. #449's own reasoning places it inside #439's boundary — it is a
+*literal* with a decidable value, not a call — so it is folded in here rather
+than opened as a separate PR:
+
+```python
+if isinstance(node, ast.JoinedStr) and not node.values:
+    return True
+```
+
+Guarded on emptiness, not mere presence. An f-string carrying replacement fields
+is deliberately left alone: deciding it means reasoning about the substituted
+expressions, which is the `range(0)` problem the rule already declines.
+
+Measured (master vs this head):
+
+| shape | truth | `02776f8` | this head |
+|---|---|---|---|
+| `for _ in f'':` | not evaluated | `True` **wrong** | `False` correct |
+| `for _ in f'a':` | fires | `True` correct | `True` correct |
+| `for _ in f'{x}':` | fires | `True` correct | `True` correct |
+
+Mutation, new branch only: **3/3 killed** — M6 remove the branch (1 row), M7 any
+`JoinedStr` is empty (2 rows, caught by the field-bearing control), M8
+`JoinedStr` never empty (1 row).
+
+Lane with both issues: **991 tests, 0 errors, 0 failures, 0 skipped**.
+
 ## Rebase onto `02776f8` (PR #448)
 
 The first push was based on `2c81f10`. PR #442 (#378) merged to master as

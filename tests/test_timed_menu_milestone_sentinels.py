@@ -1202,6 +1202,20 @@ RESIDUAL_DEFEAT_SHAPES = (
     ("CONTROL for over a float is not empty", "    for _ in 1.5:\n        assert x != 1", True),
     ("CONTROL for over None is not empty", "    for _ in None:\n        assert x != 1", True),
     ("CONTROL for over False is not empty", "    for _ in False:\n        assert x != 1", True),
+    # #449: `f''` is the same empty string reached through a different node. It
+    # parses to a `JoinedStr` with no `values`, not to a `Constant`, so the
+    # str/bytes branch above cannot see it. Still a literal with a decidable
+    # value, so it belongs here rather than with the undecidable calls.
+    ("for over empty f-string", "    for _ in f'':\n        assert x != 1", False),
+    # An f-string carrying a replacement field is deliberately NOT decided --
+    # that means reasoning about the substituted expressions, the same problem
+    # as `range(0)`. Both of these must keep their non-empty answer.
+    ("CONTROL for over non-empty f-string", "    for _ in f'a':\n        assert x != 1", True),
+    (
+        "CONTROL for over f-string with a field",
+        "    for _ in f'{x}':\n        assert x != 1",
+        True,
+    ),
     # A tuple with one falsy member still iterates once, so the assert runs.
     ("for over single falsy member", "    for _ in (0,):\n        assert x != 1", True),
     # --- controls: every one of these must stay enforced ---
