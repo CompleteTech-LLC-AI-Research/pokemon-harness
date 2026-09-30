@@ -145,3 +145,80 @@ before the transport began returning `unsupported call` for
 
 No merge. No push. No PR marked ready. No issue closed. No branch or worktree
 deleted. No review self-approved. No fabricated evidence. `master` unmoved.
+
+---
+
+# Addendum, same day — #421 stacked, and a blocking defect found in it
+
+## #421 on top of the resolved tree
+
+`165b5b3d` auto-merged clean (no conflict) onto the `aaf31e5` tree. Sim commit
+`8b12532`.
+
+The 9-row #418/#412 probe stayed green on the new tree. The full suite did
+not: **710 tests, 130 failures**.
+
+## Root cause is #421's own code, not the conflict resolution
+
+`_binds_starred_target` applied `name in` to
+`_starred_names_in_loop_target(...)`, which already returns a `bool`. Every
+non-`ast.Assign` store therefore raised
+`TypeError: argument of type 'bool' is not iterable`.
+
+Isolation evidence, because this could easily have been misattributed to my
+resolution:
+
+| tree | `_binds_starred_target(for *cs, in ...)` |
+|---|---|
+| #419 head `318d9a2c` | `False` — clean |
+| #421 head `165b5b3d` | `TypeError` |
+| simulation, fixed | `True` |
+
+#421's own suite is green on its own head — **358 tests, 0 failures, 0 errors,
+0 skipped** — because the crashing branch has no coverage. Its green CI does
+not clear it.
+
+One-line fix applied in the simulation only. Result: **710 tests, 0 failures,
+0 errors, 0 skipped** (`/tmp/simint_final.xml`). Sim commit `961e586`.
+`ruff check tests/` clean.
+
+Filed on the PR as a blocking comment:
+<https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/421#issuecomment-5904792850>
+
+Full write-up: `ledger/FINDING_421_BOOL_MEMBERSHIP_20260930.md`.
+
+## Refreshed live state
+
+- `origin/master` **unmoved** at `6b72bf62b5722e1df2c44c988bbdb14803024032`.
+- **18 open PRs, 82 open issues** (was 81; #425 opened since the last refresh).
+- **All 18 PRs have `reviewDecision` empty — zero reviews anywhere.**
+- #392 (`fee41bfbd`) and #379 (`0845ca56a`) are `CONFLICTING/DIRTY`.
+- The other 16 are `MERGEABLE/CLEAN`.
+- #421's required hosted check reports **pass** in 7m42s while the head is
+  broken. That is the concrete demonstration that an empty or green hosted
+  rollup is not the gate.
+
+## New issues, all in the same family, none fixed by this tree
+
+- **#425** — a loop target's surviving non-enterable element is not checked
+  after the loop. This is the same gap `deliv_probe` reported as the 3
+  remaining false-LIVEs in `_single_loop_element`.
+- **#423** — a starred store in a loop body is not read when the `with` is a
+  later sibling. #421 claims to fix this; my #421 probe covered the loop-*body*
+  row via its own tests, but #423's exact framing has not been re-verified
+  against the fixed tree.
+- **#422** — a suppressor reached through a subscript or attribute is never
+  resolved. Fixed by nothing on the board.
+- **#417** — a user-defined suppressor as a completed loop's LAST element.
+
+## Still blocked, and it is still only this
+
+**No independent review verdict exists for any head.** `list_agents`,
+`wait_agent`, and `spawn_agent` are again returning `unsupported call`; the
+`send_message` pointer at `REVIEW_TASK_SIMINT_RESOLUTION.md` produced no
+reply. That is the 36th dropped dispatch, recorded in
+`INCIDENT_DISPATCH_TEXT_DROPPED_36TH_20260930.md`.
+
+So: nothing merged, no PR marked ready, no issue closed. Release remains
+`PARTIAL`. The simulation is now four PRs deep and fully green, which is the
+strongest position available without a reviewer.
