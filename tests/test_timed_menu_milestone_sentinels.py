@@ -8594,3 +8594,238 @@ def test_module_scope_order_scope_and_builtins_reading(label, source, expected_l
         f"binding that has already run is a different callable; one that has "
         f"not run yet still reaches the real builtin."
     )
+
+
+#: #379-repair: a ``for``-target that holds a REAL context manager, read after
+#: the loop, must stay live.
+#:
+#: The #379 merge tree reported this row ``enforced=False`` while CPython
+#: raises, so a contract the interpreter evaluates was certified dead -- the
+#: damaging direction (#308 criterion 1). It is a *regression against master*,
+#: not a pre-existing gap: ``6b72bf6`` answers ``True`` here. The suite was
+#: green throughout (367 rows on that tree), because no row covered a
+#: ``for``-target read after the loop.
+#:
+#: The ``suppress`` counterpart is not decoration. It is what makes the
+#: ``nullcontext`` row non-vacuous: a ``nullcontext()`` swallows nothing, so
+#: without a defeating partner there is no way to tell a correct "live" answer
+#: from a rule that simply never fires on ``for`` targets.
+#:
+#: Both rows are asserted here. The ``suppress`` one is answered ``True`` on
+#: ``6b72bf6`` -- a false-LIVE that was the pre-existing defect tracked as
+#: #434 -- so it could not be pinned while the gap was open without encoding a
+#: known-wrong answer as expected behavior. Folding #437's ``nonlocal``
+#: resolution into this table's sibling rule closed that gap, and the row now
+#: carries the answer execution actually produces: ``False``, because CPython
+#: really does swallow the assert. ``test_the_after_loop_for_target
+#: _expectation_matches_executed_cpython`` scores every row against the
+#: interpreter, so this expectation cannot drift from CPython again.
+AFTER_LOOP_FOR_TARGET_SHAPES = (
+    (
+        "a nullcontext target, which really enters",
+        (
+            "    for cs in (1, contextlib.nullcontext()):\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "a suppress target, which really swallows the assert",
+        (
+            "    for cs in (1, contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    AFTER_LOOP_FOR_TARGET_SHAPES,
+    ids=[shape[0] for shape in AFTER_LOOP_FOR_TARGET_SHAPES],
+)
+def test_a_loop_target_read_after_the_loop_keeps_its_real_value(label, body, enforced):
+    """A `for` target read after the loop carries the loop's LAST element.
+
+    The loop literal is multi-element, so the value that survives the loop is
+    decided by position: the trailing ``nullcontext()`` for the first row and
+    the trailing ``suppress(...)`` for the second. Reading the *first* element
+    would make both rows ``1``, which is not a context manager at all, and the
+    answer would collapse to a single wrong verdict for the pair.
+    """
+    source = "def probe(x):\n    import contextlib\n" + body
+    tree = ast.parse(source)
+    probe = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "probe"
+    )
+    target = next(node for node in ast.walk(probe) if isinstance(node, ast.Assert))
+    assert _is_enforced(probe, target, tree) is enforced, (
+        f"{label}: expected enforced={enforced}. After the loop `cs` is the "
+        f"last element of the literal, and the header enters whatever that is."
+    )
+
+
+def test_the_after_loop_for_target_expectation_matches_executed_cpython():
+    """The row above is scored against the interpreter, not against a table.
+
+    A hand-written expectation pins whatever the author believed; executing
+    the fixture pins what the contract actually does. This is the check that
+    would have caught the merge regression at authoring time rather than in a
+    follow-up differential, and it is deliberately the *only* place in this
+    group that calls the function.
+    """
+    for label, body, enforced in AFTER_LOOP_FOR_TARGET_SHAPES:
+        source = "import contextlib\ndef probe(x):\n" + body
+        namespace: dict = {}
+        exec(compile(source, "<after-loop-for-target>", "exec"), namespace)  # noqa: S102
+        try:
+            namespace["probe"](1)
+        except AssertionError:
+            fires = True
+        except (TypeError, UnboundLocalError, NameError):
+            # A loud `TypeError` on entry is still a live contract: the
+            # interpreter is refusing to enter, not swallowing the assert.
+            fires = True
+        else:
+            fires = False
+        assert enforced is fires, (
+            f"{label}: the test table says enforced={enforced} but executed "
+            f"CPython {'raises' if fires else 'does not raise'} for x=1"
+        )
+
+
+#: #355 / #356: a ``nonlocal`` name is bound in an ENCLOSING function, and this
+#: module classifies a header by walking one function at a time. The enclosing
+#: binding is therefore invisible, so a swallowed assert was reported
+#: ``enforced`` -- a disarmed contract certified as load-bearing.
+#:
+#: Every row here is built so the suppressor is bound in ``outer`` and the
+#: assert is written in ``inner``, which is the only arrangement that
+#: reproduces the defect. The order of the store relative to ``def inner():``
+#: is NOT cosmetic and both orders are pinned: ``ast`` keeps no parent
+#: pointer, so the parent lookup walks the owning module, and a store written
+#: *before* the nested ``def`` is a genuinely different walk. Each suppressor
+#: row ships with a paired ``nullcontext`` control, because the fix is only
+#: allowed to follow an enclosing binding that resolves to a *readable*
+#: suppressor -- a live context manager must stay live.
+NONLOCAL_SUPPRESSOR_SHAPES = (
+    (
+        "a walrus self-alias, store after the nested def",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1\n"
+            "    cs = {value}\n"
+            "    inner()"
+        ),
+    ),
+    (
+        "a walrus self-alias, store before the nested def",
+        (
+            "    cs = {value}\n"
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with (cs := cs):\n"
+            "            assert x != 1\n"
+            "    inner()"
+        ),
+    ),
+    (
+        "a rebind then a direct read",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        cs = cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    cs = {value}\n"
+            "    inner()"
+        ),
+    ),
+    (
+        "a direct read with no rebind at all",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        with cs:\n"
+            "            assert x != 1\n"
+            "    cs = {value}\n"
+            "    inner()"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    NONLOCAL_SUPPRESSOR_SHAPES,
+    ids=[shape[0] for shape in NONLOCAL_SUPPRESSOR_SHAPES],
+)
+@pytest.mark.parametrize(
+    ("value", "enforced"),
+    [
+        ("contextlib.suppress(AssertionError)", False),
+        ("contextlib.nullcontext()", True),
+    ],
+    ids=["suppressor-is-defeating", "nullcontext-stays-live"],
+)
+def test_a_nonlocal_name_reaches_its_enclosing_binding(label, body, value, enforced):
+    """A `nonlocal` header reads the enclosing function's binding.
+
+    The assert is scored in `inner`, the scope it is written in. That matters:
+    handed `outer` instead, a whole-module walk finds the assert in the wrong
+    scope and answers a different question (#355 spells this trap out).
+    """
+    source = "def outer(x):\n    import contextlib\n" + body.format(value=value) + "\n"
+    tree = ast.parse(source)
+    inner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "inner"
+    )
+    asserts = [node for node in ast.walk(inner) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(inner, node, tree) for node in asserts]
+    assert results == [enforced], (
+        f"{label}: expected {[enforced]}, got {results}. A `nonlocal` name is "
+        f"an alias for the enclosing function's binding, so the header enters "
+        f"whatever `cs` holds out there."
+    )
+
+
+def test_a_closure_name_that_is_not_declared_nonlocal_is_not_followed():
+    """Following an outer binding is confined to names declared `nonlocal`.
+
+    The rule that consults the enclosing function is gated on the declaration,
+    because a `nonlocal` is the one place the source states outright that a
+    name belongs to an enclosing function. A plain closure read is not
+    followed, and here the enclosing store is a `nullcontext()`, so the assert
+    is live and must stay live. This is the guard on the fix over-reaching.
+    """
+    source = (
+        "def outer(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    def inner():\n"
+        "        with cs:\n"
+        "            assert x != 1\n"
+        "    inner()\n"
+    )
+    tree = ast.parse(source)
+    inner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "inner"
+    )
+    asserts = [node for node in ast.walk(inner) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(inner, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True], got {results}. Nothing declared `cs` nonlocal, so "
+        f"the enclosing store is out of scope for the resolution."
+    )
