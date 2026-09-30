@@ -473,6 +473,71 @@ def _swallows_assertion_error(handler):
 
 _MILESTONES_TREE = None
 
+#: ``id(function) -> module tree or None``. Memoises the module a function was
+#: defined in, which :func:`_module_binds_name` needs per condition and which
+#: costs a full tree walk to answer. Keyed by node identity because the AST is
+#: built once per parsed file and outlives the call.
+_MODULE_FOR_FUNCTION = {}
+
+#: Statements that open a *block* without opening a new name scope. A binding
+#: inside one of these still runs in the module scope, so the module walk has
+#: to descend through them; every other child is either a binding itself or the
+#: body of a nested scope, and neither is descended into.
+_MODULE_LEVEL_BLOCKS = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+    ast.Match,
+)
+
+
+def _block_body(statement):
+    """The statements a block statement runs, in source order.
+
+    ``Try`` and ``Match`` run several bodies, so every one of them is included;
+    a binding in any of them is a module binding on the path that runs. A
+    ``match`` clause is flattened to its statements rather than returned as a
+    ``Case`` node, because ``Case`` is not one of the block types this walk
+    knows how to open -- a ``def`` inside a case is still a module binding on
+    the path that matches, and reading past it reported a header DEAD that
+    CPython enters.
+
+    An ``except`` handler is a body too, and it is a body that has plainly run
+    by the time anything below the ``try`` is evaluated:
+
+        try:
+            raise ValueError
+        except ValueError:
+            def list(): return nullcontext()
+        cs = list()          # the handler's `list`, not the builtin
+
+    Leaving handler bodies out of the walk skipped the binding entirely and
+    reported that ``cs`` as the builtin ``list`` -- a ``TypeError``-raising
+    header as LIVE. A handler's ``name`` (``except E as exc``) is a binding too,
+    but that one is *deleted* when the handler exits, so the handler body is
+    what is walked and the bound name is read from it like any other.
+    """
+    if isinstance(statement, ast.Try):
+        return [
+            *statement.body,
+            *statement.orelse,
+            *statement.finalbody,
+            *(nested for handler in statement.handlers for nested in handler.body),
+        ]
+    if isinstance(statement, ast.Match):
+        return [nested for case in statement.cases for nested in case.body]
+    if isinstance(statement, (ast.If, ast.While)):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return list(statement.body)
+    return []
+
 
 def milestones_tree():
     """The parsed milestones module, cached for repeated name resolution."""
@@ -1469,8 +1534,10 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     ``entries`` are ``(statement, value, conditional)`` triples, already
     filtered to the stores that run at or before the ``with`` in question.
     ``index`` is the position of that ``with`` among the function's top-level
-    statements and ``function`` the scope it sits in; together they are what
-    tell a *settled* store from one still waiting on a branch.
+    statements and ``function`` the scope it sits in. ``index`` and
+    ``function`` together are what tell a *settled* store from one still
+    waiting on a branch; ``function`` is also what tells a real builtin from
+    a name the function rebinds.
     """
     # An unconditional store runs on *every* path, so the last one of those is
     # the value in force unless some conditional store comes after it. Only the
@@ -1493,6 +1560,41 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     competing = [
         entry for entry in entries if entry[2] and (latest is None or orders[id(entry[0])] > latest)
     ]
+    # A `for cs in ...:` target and an assignment to `cs` in that loop's own
+    # body are not two competing bindings. The body runs *after* the target on
+    # every pass, so whichever it stores is the value left behind and the
+    # target's element is gone. Counting both made
+    #
+    #     import os as cs
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = nullcontext()
+    #
+    # ambiguous and reported a live header dead: the name really is a context
+    # manager whenever the loop runs. The target is dropped from the competing
+    # set when its own body rebinds the name, leaving the body's store as the
+    # single conditional binding -- which supersedes the carried carrier.
+    #
+    # The collapse is only sound while the body's own store is what actually
+    # answers the header, and that store is not always readable. Dropping the
+    # target while the body binds `contextlib.suppress(AssertionError)` and
+    # then answering from the *target* retired a suppressor that is really in
+    # force on the path where the loop runs:
+    #
+    #     cs = None
+    #     if flag:
+    #         for cs in (None,):
+    #             cs = contextlib.suppress(AssertionError)
+    #
+    # Once the target is out of the competing set, the body's store is the one
+    # answer, so the collapse is kept only when the body's last rebind is a
+    # store this can read. An unreadable one leaves the target in place, and
+    # the two competing bindings are then reported ambiguous -- which is the
+    # safe direction, because the name is genuinely a suppressor on the path
+    # where the loop runs.
+    collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
+    if collapsed:
+        competing = collapsed_entries
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
@@ -1555,8 +1657,32 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     # every enumerated shape (630 order/conditional combinations, zero
     # reachable) and has been removed rather than left as a branch no mutation
     # can kill.
-    latest = max(orders[id(entry[0])] for entry in entries)
-    tied = [entry for entry in entries if orders[id(entry[0])] == latest]
+    # The tie-break below runs over the *surviving* candidates, not over every
+    # entry. A loop target that its own body rebinds shares the body's order --
+    # both are ordered by the top-level `for` that contains them -- so reading
+    # `entries` here reinstated the very binding `_collapse_loop_targets_into_bodies`
+    # had just retired, and the #367 tie-break then declined a name the collapse
+    # had made decidable:
+    #
+    #     def outer(x, flag):
+    #         import os as cs
+    #         if flag:
+    #             for cs in (None,):
+    #                 cs = nullcontext()
+    #         with cs:
+    #             assert x != 1
+    #
+    # The collapse reduces the two conditional stores to the body's alone, but
+    # the maximal order over *all* entries is still 1 with both the `for`
+    # target and the body store tied at it. `_latest_write_in_block` cannot
+    # separate stores inside one loop (neither has run in a way that settles
+    # the other), so it returns `None` and the resolution became
+    # `AMBIGUOUS` -- read downstream as a *possible suppressor*, which retired
+    # a header CPython really enters. The maximum is therefore taken over the
+    # same set the collapse produced, matching the no-tie branch below.
+    candidates = competing if competing else entries
+    latest = max(orders[id(entry[0])] for entry in candidates)
+    tied = [entry for entry in candidates if orders[id(entry[0])] == latest]
     if len(tied) > 1:
         # Mixed tie: an unconditional store and a conditional one share the
         # order. `_binding_order` cannot separate them -- it keys a store by the
@@ -1603,8 +1729,28 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
         if latest_write is None:
             return AMBIGUOUS_SUPPRESSOR
         return _readable_store_value(latest_write[1], bound)
-    last = tied[0][1]
-    return last if _is_readable_suppressor(last, bound) else None
+    else:
+        # No tie, so the single highest-ordered candidate is the value in
+        # force.
+        #
+        # The sort runs over `candidates`, the *surviving* set the collapse
+        # above produced -- for the same reason the tie-break does. A loop
+        # target that its own body rebinds shares the body's source order, so
+        # taking the maximum over every entry let the retired target win a tie
+        # it should not have been in, and the suppressor stored by the body was
+        # dropped in favour of the element the target yielded:
+        #
+        #     cs = None
+        #     if flag:
+        #         for cs in (None,):
+        #             cs = contextlib.suppress(AssertionError)
+        #
+        # The collapse above is what makes the body's store the only
+        # candidate, so the candidate set has to be the same one the collapse
+        # produced. Reading `entries` here reinstated the very binding that
+        # was just retired.
+        last = max(candidates, key=lambda entry: orders[id(entry[0])])[1]
+        return last if _is_readable_suppressor(last, bound) else None
 
 
 def _latest_write_in_block(tied, orders=None, index=None, function=None):
@@ -2208,6 +2354,432 @@ def _raw_store_values(function, query=None, bound=None):
     return raw
 
 
+def _single_loop_element(iterable):
+    """The one element a ``for`` over ``iterable`` binds, or ``None``.
+
+    #370. Only a literal tuple or list with exactly one element qualifies. That
+    is the shape where every iteration binds the same object, so recording the
+    element is sound regardless of where the later read sits -- inside the body
+    or after the loop.
+
+    Everything else returns ``None`` and the ``for`` target stays unrecorded,
+    which leaves the name unreadable rather than misread. In particular a
+    multi-element literal is refused even though its last element is the right
+    answer for a header *after* the loop, because the same recorded value is
+    also what an in-body header would resolve to, and there it is wrong. #385
+    measured that trade on a real head: picking an index moves a damaging cell
+    rather than removing it.
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return None
+    if len(iterable.elts) != 1:
+        return None
+    return iterable.elts[0]
+
+
+def _unanimous_non_enterable_element(iterable, bound):
+    """#413. One element standing for a literal whose elements all agree.
+
+    Returns an element of ``iterable`` when the iterable is a literal with at
+    least two elements and *every* one of them is a value that cannot be
+    entered, and ``None`` in every other case.
+
+    A `for` over a literal binds a different object per iteration, so the
+    in-body target is normally unreadable and declining is correct -- see
+    :func:`_single_loop_element`. That reasoning rests on the elements
+    *disagreeing*: `(suppress(), nullcontext())` is swallowed on the first
+    iteration and live on the second, so no single recorded value describes
+    both. When the elements agree there is no disagreement to preserve. Each
+    iteration binds a value that is itself non-enterable, `with cs:` raises
+    before the body every time, and the assert is unreachable on every
+    iteration. The verdict does not depend on which iteration is read, so the
+    thing that made the multi-element case undecidable is absent.
+
+    Only a readable suppressor counts as non-enterable here. Anything this
+    module cannot read as a suppressor -- an arbitrary call, a bare name, a
+    starred element -- makes the answer `None`, so a literal containing one
+    keeps the existing decline. That is the conservative direction and it
+    matches the single-element rule, which only ever records a value it can
+    read.
+
+    The first element is returned because the recorded value is never read as
+    *this* element: unanimity is what makes the choice irrelevant, and the
+    caller only needs a readable value to stand for "all of them".
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return None
+    if len(iterable.elts) < 2:
+        return None
+    # `bound` is whatever import bindings the caller had. Every caller passes
+    # either the real map or a stand-in for "no imports recorded" -- `None` from
+    # a defaulted signature, an empty `set()` from `_module_stores`, which
+    # passes one deliberately -- and `_resolved_dotted` looks names up with
+    # `.get`. A stand-in that is not a mapping has no `.get`, so an empty dict
+    # stands in for all of them. That is the conservative answer: with no
+    # import recorded, `contextlib.suppress(...)` does not resolve, no element
+    # reads as a suppressor, unanimity fails, and the caller keeps the decline.
+    if not hasattr(bound, "get"):
+        bound = {}
+    if not all(_is_readable_suppressor(element, bound) for element in iterable.elts):
+        return None
+    return iterable.elts[0]
+
+
+def _loop_element_for_read_after(iterable):
+    """The element a ``for`` target holds once the loop has finished, or ``None``.
+
+    #385. :func:`_single_loop_element` refuses a multi-element literal because a
+    header *inside* the body sees a different value on each iteration, and no
+    one element answers for all of them. A header *after* the loop is the
+    opposite case and the refusal is wrong there:
+
+        for cs in (contextlib.nullcontext(),
+                   contextlib.suppress(AssertionError)):
+            pass
+        with cs:                 # `cs` is the LAST element, the suppressor
+            assert x == 99       # executed: swallowed
+
+    After the last iteration the target holds the final element, so that one is
+    what any later read sees -- and it is the same answer on every path, which
+    is the property the in-body case lacks. Executed, the analyzer above
+    reported this header ``enforced``: a disarmed contract certified as
+    load-bearing (#308 criterion 1).
+
+    Refusing it was the safe direction for the *in-body* question and the
+    damaging one here, so the two are separated by position rather than
+    averaged. The value is only used by a caller that has already established
+    the header is positioned after the loop; :func:`_single_loop_element`
+    remains what the in-body path consults, so the multi-element limit the
+    sentinel suite pins is untouched.
+
+    A non-literal iterable still returns ``None``: which element survives is
+    then a runtime property of the object, and declining leaves the contract
+    ``enforced`` rather than guessing.
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)):
+        return None
+    if not iterable.elts:
+        return None
+    return iterable.elts[-1]
+
+
+def _loop_target_bindings_after_loop(function, header, bound=None, raw_values=None):
+    """Bindings a *completed* loop leaves in force at a header read after it.
+
+    #385. :func:`_loop_target_bindings` answers for a header written **inside** a
+    loop's body, where the target holds a different value on each iteration.
+    Its refusal to guess is right there and is left untouched. This function
+    answers the different question raised by a header positioned **after** the
+    loop has run to exhaustion:
+
+        for cs in (contextlib.nullcontext(),
+                   contextlib.suppress(AssertionError)):
+            pass
+        with cs:                 # `cs` is the LAST element, the suppressor
+            assert x == 99       # executed: swallowed
+
+    Once the last iteration is done the target holds the final element, and
+    that is the same answer on every path -- the property the in-body case
+    lacks. Executed, the analyzer reported this header ``enforced``: a disarmed
+    contract certified as load-bearing (#308 criterion 1).
+
+    Three conditions gate the answer, and all three are required:
+
+    * the loop must **precede** the header in the block that sequences them, so
+      the target has reached its final value rather than an in-flight one;
+    * the loop must be able to run to **exhaustion**. A ``break`` leaves the
+      target on whichever element was current, not the last one, so a loop
+      containing one is declined;
+    * the loop **body must not rebind the name**. The body runs after the
+      target on every pass, so a rebound name is whatever the body's own store
+      left behind and the iterable's final element says nothing about it.
+
+    A ``return`` in the body is *not* a reason to decline. It stops the loop on
+    the header's own path, so the header is only ever reached when the loop
+    finished -- which is exactly the case being claimed.
+
+    A non-literal or empty iterable is declined too: which element survives is
+    then a property of the object rather than of the syntax, and an empty one
+    binds nothing at all (CPython raises ``UnboundLocalError`` at the header
+    rather than entering a context). Both leave the contract ``enforced``,
+    the safe direction.
+
+    The loop's own binding is offered only while nothing later has overwritten
+    the name. :func:`_raw_store_values` declines to record a multi-element loop
+    at all, so a store that follows one is absent from the table too; the
+    positional check below is therefore made against every recorded store of
+    the name rather than against the table's completeness. That is what keeps
+    a later ``cs = nullcontext()`` from inheriting the loop's suppressor.
+    """
+    if function is None:
+        return {}
+    if raw_values is None:
+        raw_values = _raw_store_values(function)
+    header_order = _binding_order(function, header)
+    resolved = {}
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        if not _loop_completes_before(node, header, function):
+            continue
+        loop_order = _binding_order(function, node)
+        for name in _store_target_names([node.target]):
+            if _loop_body_rebinds_the_name(node, name):
+                continue
+            element = _loop_element_for_read_after(node.iter)
+            if element is None:
+                continue
+            if _name_rebound_after_loop(name, loop_order, header_order, raw_values, function):
+                continue
+            if _store_precedes_header_in_shared_block(name, node, header, raw_values, function):
+                continue
+            # A readable element stands in for the name's binding. An
+            # unreadable one is recorded as `_NOT_A_SUPPRESSOR` so the loop
+            # still retires a suppressor carried in from an enclosing block,
+            # exactly as the in-body path does. Dropping it instead would let
+            # a stale carried value outlive the loop that overwrote it.
+            resolved[name] = (
+                element if _is_readable_suppressor(element, bound) else _NOT_A_SUPPRESSOR
+            )
+    return resolved
+
+
+def _loop_completes_before(loop, header, function):
+    """Is ``header`` read only after ``loop`` has run to exhaustion?
+
+    A header in the loop's own *body* is the in-body question and is answered
+    by :func:`_loop_target_bindings`; a loop that merely encloses the header
+    has not finished when the header is evaluated, so it is excluded here
+    rather than consulted twice.
+
+    The ``else`` arm was excluded alongside the body and that was wrong, and
+    measurably so. An ``else`` arm runs *after* the iterable is exhausted --
+    that is the only way to reach it without a ``break`` -- so the target
+    holds the final element there for the same reason a header after the loop
+    does:
+
+        for cs in (nullcontext(), suppress(AssertionError)):
+            pass
+        else:
+            with cs:                 # `cs` IS the last element
+                assert x == 99       # executed: swallowed
+
+    Executed, that assert never fires; reported ``enforced`` it certifies a
+    disarmed contract as load-bearing. Grouping the arm with the body was a
+    reading of :func:`_loop_arms_reach`, which answers "is this header in an
+    arm of the loop" and cannot distinguish the two by itself. The arm is
+    therefore separated here, where the question is which value the target
+    holds, and it is left to :func:`_loop_target_bindings` to decline when the
+    element is not a single readable one.
+
+    ``break`` is the other exclusion. It leaves the loop part-way, so the
+    target holds the element that was current at the break rather than the
+    last one, and reading the last would be a guess about which iteration
+    stopped the loop.
+
+        for cs in (nullcontext(), suppress(AssertionError)):
+            if flag:
+                break
+        with cs:                 # the element current at the break, not the last
+            assert x != 1
+
+    Executed, the two values of ``flag`` disagree -- swallowed on one, live on
+    the other -- so the loop is declined and the header stays ``enforced``,
+    which is the safe direction. ``continue`` is deliberately not treated the
+    same way: it still ends on the final element, so the answer it leaves
+    behind is the one being claimed.
+    """
+    if _header_in_loop_body(loop, header):
+        return False
+    # A `break` anywhere in the body means the `else` arm is skipped on that
+    # path, but a header *inside* the arm is only ever reached when the loop
+    # ran to exhaustion -- so the arm is not declined for the break. The
+    # position check below is what places it after the loop.
+    # `_breaks_own_loop` answers for a NON-loop node: handed a loop it reads
+    # only the `else` arm, because a nested loop's own `break` belongs to that
+    # nested loop. So it is asked about each statement of this loop's body,
+    # which is the shape it was written for.
+    if not _header_in_loop_else(loop, header) and any(
+        _breaks_own_loop(child) for child in loop.body
+    ):
+        return False
+    if _header_in_loop_else(loop, header):
+        return True
+    return _precedes_in_shared_block(loop, header, function)
+
+
+def _header_in_loop_body(loop, header):
+    """Is ``header`` inside ``loop``'s own ``body``?"""
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return False
+    return any(child is header for statement in loop.body for child in ast.walk(statement))
+
+
+def _header_in_loop_else(loop, header):
+    """Is ``header`` inside ``loop``'s ``else`` arm?"""
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return False
+    return any(child is header for statement in loop.orelse for child in ast.walk(statement))
+
+
+def _precedes_in_shared_block(first, second, function):
+    """Does ``first`` come before ``second`` in the innermost block holding both?
+
+    Top-level statement index is the module's usual order key, but it is too
+    coarse here: a loop and a header written inside one ``if`` share that index
+    by construction, which would decline the ordinary in-one-block reading:
+
+        if flag:
+            for cs in (contextlib.nullcontext(), suppress(AssertionError)):
+                pass
+            with cs: ...
+
+    The block that actually sequences the two is the innermost one enclosing
+    both, so that is the list the positions are read from. Ordering is compared
+    there and nowhere else, which is what makes a loop written *after* the
+    header keep declining.
+
+    """
+    first_parent = _enclosing_node(function, first)
+    second_parent = _enclosing_node(function, second)
+    if first_parent is None or first_parent is not second_parent:
+        return False
+    body = _statements_of_block(first_parent)
+    first_position = _position_of_child(body, first)
+    second_position = _position_of_child(body, second)
+    if first_position is None or second_position is None:
+        return False
+    return first_position < second_position
+
+
+def _enclosing_node(function, target):
+    """The statement whose body directly holds ``target``, or ``None``."""
+    for parent in ast.walk(function):
+        for child in ast.iter_child_nodes(parent):
+            if child is target:
+                return parent
+            if any(node is target for node in ast.walk(child)):
+                break
+    return function if target in getattr(function, "body", []) else None
+
+
+def _statements_of_block(block):
+    """The statement list a node executes, with a function's own body included.
+
+    :func:`_block_body` opens the branch constructs (``if``/``try``/``match``/
+    loop) because the rules that use it care which *branch* a store sits in.
+    This question is different: it asks what order two siblings are evaluated
+    in, and a function's top-level body is the block in which a loop and a
+    trailing ``with`` are siblings. That case has no entry in
+    :func:`_block_body`, so it is added here rather than widening that helper
+    and changing the branch test every other caller depends on.
+    """
+    if isinstance(block, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return list(block.body)
+    return _block_body(block)
+
+
+def _position_of_child(statements, target):
+    """Index of the direct child of ``statements`` that holds ``target``."""
+    for index, child in enumerate(statements):
+        if child is target or any(grandchild is target for grandchild in ast.walk(child)):
+            return index
+    return None
+
+
+def _name_rebound_after_loop(name, loop_order, header_order, raw_values, function):
+    """Does a later store of ``name`` supersede ``loop_order`` before the header?
+
+    The check is positional rather than a search for "the last recorded store",
+    because :func:`_raw_store_values` records a multi-element loop as *nothing*.
+    A store written between the loop and the header is absent from the table
+    whenever the loop itself is unrecorded, so a table-completeness argument
+    would read the loop as the final write and hand the header a stale
+    suppressor:
+
+        for cs in (suppress(AssertionError), nullcontext()):
+            pass
+        cs = nullcontext()
+        with cs:                 # the nullcontext, not the loop's suppressor
+            assert x != 1
+
+    The same check has to run over the *statement list* that sequences the
+    header, because :func:`_binding_order` cannot separate two stores that
+    share a top-level statement -- it maps both to the same index and says so
+    in its own docstring. A store written in a loop's ``else`` arm is the
+    exact case:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            pass
+        else:
+            cs = contextlib.nullcontext()   # same top-level index as the loop
+            with cs:                        # the nullcontext wins
+                assert x != 1
+
+    Read through the order key alone the arm's store compared *equal* to the
+    loop, the strict ``<`` never fired, and the loop's suppressor was layered
+    over a name the arm had already rebound -- reporting the assert defeated
+    and dropping a contract that really fires. :func:`_precedes_in_shared_block`
+    is what carries the ordering the order key cannot express.
+    """
+    for statement, _ in raw_values.get(name, []):
+        order = _binding_order(function, statement)
+        if loop_order < order <= header_order:
+            return True
+    return False
+
+
+def _store_precedes_header_in_shared_block(name, loop, header, raw_values, function):
+    """Does a store of ``name`` sit between ``loop`` and ``header`` in one block?
+
+    :func:`_name_rebound_after_loop` asks the same question through
+    :func:`_binding_order`, which maps every store inside one top-level
+    statement to the same index and explicitly documents that equal keys carry
+    no ordering. A loop and a store in its ``else`` arm are exactly that pair,
+    so the arm's store is invisible to the order key and the loop's element
+    would be layered over a name already rebound:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            pass
+        else:
+            cs = contextlib.nullcontext()
+            with cs:                 # the nullcontext, not the loop's element
+                assert x == 99
+
+    Executed, that assert fires; reporting it defeated drops a load-bearing
+    contract. The check is the positional one, over the block that actually
+    sequences the two, so it holds for an arm and for an ordinary block alike.
+
+    The store is declined whether or not it is *guaranteed* to have run, and
+    that is the same safe direction the ambiguity rule takes. A store inside an
+    ``if`` between the loop and the header may not have run, in which case the
+    loop's element really is in force -- so the loop's value is right on that
+    path. But the store's value is right on the other, and the two disagree:
+
+        for cs in (nullcontext(), suppress(AssertionError)):
+            pass
+        if flag:
+            cs = nullcontext()
+        with cs:                 # nullcontext when flag, suppressor otherwise
+            assert x != 1
+
+    Executed, the assert fires when ``flag`` is true and is swallowed when it
+    is false, so no single verdict is right and the loop is declined. Layering
+    the loop's element over the store answers ``enforced`` and is a false LIVE
+    on the ``flag=True`` path.
+
+    Every recorded store of the name is considered rather than only the last,
+    because :func:`_raw_store_values` records a multi-element loop as nothing
+    and the table is therefore not a complete account of the name's writes.
+    """
+    for statement, _ in raw_values.get(name, []):
+        if statement is loop:
+            continue
+        if _precedes_in_shared_block(statement, header, function):
+            return True
+    return False
+
+
 def _value_bound_by(targets, value, name):
     """The right-hand side that actually lands on ``name``.
 
@@ -2352,6 +2924,13 @@ def _loop_value_source(statement, query=None, bound=None):
         ):
             return iterable.elts[0]
         return UNREADABLE_VALUE
+    if any(isinstance(node, ast.Break) for child in statement.body for node in ast.walk(child)):
+        return UNREADABLE_VALUE
+    if any(
+        _loop_body_rebinds_the_name(statement, name)
+        for name in _store_target_names([statement.target])
+    ):
+        return UNREADABLE_VALUE
     return iterable.elts[-1]
 
 
@@ -2458,9 +3037,26 @@ def _aliased_suppressions(node, function, bound, owning=None):
                 bound_so_far
                 if header is statement
                 else _bindings_before(
-                    header, statement, bound_so_far, by_index.get(index, {}), function
+                    header,
+                    statement,
+                    bound_so_far,
+                    by_index.get(index, {}),
+                    function,
+                    bound,
+                    raw_values,
                 )
             )
+            # #385. A header that reads a loop target *after* the loop has
+            # finished is not the in-body question `_bindings_before` asks,
+            # and the raw table cannot answer it: `_raw_store_values` records a
+            # multi-element loop as nothing at all, so the name has no entry to
+            # resolve against and the header reads as an ordinary unbound name.
+            # The loop's own binding is layered on for that case only, and
+            # `live` is copied rather than mutated so the hand-off to the next
+            # top-level statement is unaffected.
+            after_loop = _loop_target_bindings_after_loop(function, header, bound, raw_values)
+            if after_loop:
+                live = {**live, **after_loop}
             for item in header.items:
                 expression = item.context_expr
                 # `with (cs := contextlib.suppress(AssertionError)):` binds the
@@ -2859,7 +3455,9 @@ def _nonlocal_parent_function(function, owning=None):
     return None
 
 
-def _bindings_before(header, statement, bound_so_far, own, function=None):
+def _bindings_before(
+    header, statement, bound_so_far, own, function=None, bound=None, raw_values=None
+):
     """The bindings in force at a nested ``with`` inside ``statement``.
 
     A store that appears *before* the nested header in the same block has run
@@ -2882,31 +3480,22 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
         body = getattr(block, "body", None)
         if not isinstance(body, list):
             continue
-        # A loop binds its target before the first iteration's body runs, so a
-        # header directly inside that body has already had the target assigned
-        # when it is read (#359):
+        # A loop's `else` arm is a block of its own and a header written in one
+        # is decided by exactly the same rule as one in the body. Reading only
+        # `body` never reached the arm at all:
         #
-        #     for cs in (contextlib.suppress(AssertionError),):
-        #         with cs:             # the loop's live value, a suppressor
-        #             assert x != 1    # swallowed
+        #     for cs in [contextlib.suppress(AssertionError)]:
+        #         pass
+        #     else:
+        #         with cs:            # `cs` IS bound here
+        #             assert x != 1  # executed: swallowed
         #
-        # The `for` is the *block* here, not an entry in some enclosing body
-        # list, so the `seen_store` scan below never sees it. Without this the
-        # header reads as carrying nothing, the resolved suppressor is thrown
-        # away, and the swallowed assert is reported live.
-        #
-        # Only the *target* is guaranteed, so only the target's own binding may
-        # be pulled in. `own` is the whole statement's store set, and a store
-        # written further down the same body has not run yet:
-        #
-        #     for a in items:
-        #         with cs:            # `cs` is not bound at all -> NameError
-        #             assert x != 1   # live
-        #         cs = contextlib.suppress(AssertionError)
-        #
-        # Adopting the whole of `own` here would answer that first header with
-        # the `cs =` below it and report a live assert as swallowed.
-        loop_target = _loop_target_names(block)
+        # The arm's own earlier stores still win, exactly as they do in `body`:
+        # a store before the header in the arm has run, and one after it has
+        # not. `seen_store` is shared across both lists, so that falls out of
+        # the ordinary rule rather than needing a second path.
+        orelse = getattr(block, "orelse", None)
+        block_body = body + (orelse if isinstance(orelse, list) else [])
         seen_store = False
         # Captures owned by this block have run by the time a header inside the
         # same clause body is reached, even though no store *statement* does.
@@ -2919,20 +3508,318 @@ def _bindings_before(header, statement, bound_so_far, own, function=None):
             for name, owner in _match_capture_names(captures_scope).items()
             if any(child is block for child in ast.walk(owner))
         }
-        for node in body:
+        for node in block_body:
             if node is header:
                 # Nothing in this block has been stored before the header, so
                 # only the bindings carried in from earlier statements apply.
-                if seen_store or captures:
-                    return dict(own)
-                if loop_target:
-                    scoped = dict(bound_so_far)
-                    scoped.update({n: own[n] for n in loop_target if n in own})
-                    return scoped
-                return bound_so_far
-            if _is_store_statement(node):
+                # #370. A loop body is the one exception: the loop's own target
+                # is assigned before the body runs, so a header in the first
+                # position already sees it.
+                #
+                #     for cs in [contextlib.suppress(AssertionError)]:
+                #         with cs:            # `cs` IS bound here
+                #             assert 1 == 2
+                #
+                # Executed, that assert is swallowed, so reporting it enforced
+                # certifies a disarmed contract as load-bearing. The ordinary
+                # same-block case is the opposite and must keep raising loudly:
+                #
+                #     if flag:
+                #         with cs:            # NameError -- not bound yet
+                #             assert 1 == 2
+                #         cs = contextlib.suppress(AssertionError)
+                #
+                # so the exception is scoped to the loop that owns the body.
+                loop_bindings = _loop_target_bindings(function, header, bound)
+                if loop_bindings:
+                    # The loop's own target is *one more* store in force at
+                    # this point, not a replacement for what the enclosing
+                    # blocks already carried in. A name the loop does not
+                    # bind still has the value it had on entry, so the
+                    # carried bindings are kept and the loop's are layered
+                    # on top:
+                    #
+                    #     base = contextlib.suppress(AssertionError)
+                    #     for other in [0]:
+                    #         with base:            # still the suppressor
+                    #             assert x != 1
+                    #
+                    # Substituting instead of merging would drop `base` and
+                    # report that assert live.
+                    # A store *in this very block*, before the header, is the
+                    # latest write and supersedes the loop's target:
+                    #
+                    #     for cs in [contextlib.suppress(AssertionError)]:
+                    #         pass
+                    #     else:
+                    #         cs = contextlib.nullcontext()
+                    #         with cs:            # the nullcontext
+                    #             assert x != 1
+                    #
+                    # Reading the loop's element here would report the assert
+                    # defeated and drop a contract that fires. The arm's own
+                    # store is read from the raw table rather than from `own`,
+                    # because `own` is keyed by position in `function.body` and
+                    # a store in a loop's `else` arm has no index of its own --
+                    # it is filed under the loop, so `own` alone never sees it.
+                    in_block = _block_store_bindings(block_body, header, raw_values, bound)
+                    if in_block:
+                        return {**bound_so_far, **in_block}
+                    return {**bound_so_far, **loop_bindings}
+                return dict(own) if seen_store or captures else bound_so_far
+            if (
+                isinstance(node, ast.Assign)
+                or (isinstance(node, ast.AnnAssign) and node.value is not None)
+                or (
+                    isinstance(node, (ast.For, ast.AsyncFor))
+                    and isinstance(node.iter, (ast.Tuple, ast.List))
+                    and bool(node.iter.elts)
+                )
+            ):
                 seen_store = True
     return bound_so_far
+
+
+def _block_store_bindings(block_body, header, raw_values, bound):
+    """Bindings written by a store that precedes ``header`` in ``block_body``.
+
+    #370b. The ``own`` map this function otherwise reads is keyed by position in
+    ``function.body``, so it answers for a header's *enclosing statement* but not
+    for a store written in a block that has no index of its own -- a loop's
+    ``else`` arm among them. That store is still in force at the header, so the
+    raw table is consulted directly and every store appearing before the header
+    in the same block contributes.
+
+    Only stores strictly before the header count. A store after it has not run
+    when the header is evaluated -- that is the ``UnboundLocalError`` case the
+    caller handles by falling through to the carried bindings -- so counting it
+    would report a loud failure as a swallowed one.
+    """
+    if not raw_values or header not in block_body:
+        return {}
+    cutoff = block_body.index(header)
+    resolved = {}
+    for entries in raw_values.values():
+        for entry_statement, value in entries:
+            if entry_statement not in block_body or block_body.index(entry_statement) >= cutoff:
+                continue
+            if not _is_store_statement(entry_statement):
+                continue
+            targets = (
+                entry_statement.targets
+                if isinstance(entry_statement, ast.Assign)
+                else [entry_statement.target]
+            )
+            for name in _store_target_names(targets):
+                readable = value if _is_readable_suppressor(value, bound) else _NOT_A_SUPPRESSOR
+                resolved[name] = readable
+    return resolved
+
+
+def _loop_target_bindings(function, header, bound=None, raw_values=None):
+    """Bindings a containing loop's own target puts in force around ``header``.
+
+    #370. A ``for`` target is assigned before its body runs, so it is the one
+    same-block store already in force at a header written in the body's first
+    position. Executed both ways: the loop shape swallows the assert, while the
+    ``if`` shape above raises ``UnboundLocalError`` on entry.
+
+    Only a single-element literal iterable contributes. A multi-element or
+    non-literal iterable binds a *different* value per iteration, so no single
+    element is the answer and the name stays unreadable -- keeping the header
+    ``enforced``, which is the safe direction. #385 measured that choosing an
+    index instead moves a damaging cell rather than removing it.
+
+    #413. A multi-element literal is admitted by one further test, and the
+    distinction is *agreement* rather than *count*. When every element of the
+    literal is a readable suppressor there is no per-iteration disagreement to
+    preserve: each iteration binds a value that cannot be entered, so the
+    `with` header raises before the body and the assert is unreachable on every
+    iteration. The recorded representative is never read as "this element" --
+    unanimity is what makes the choice irrelevant.
+
+        for cs in (suppress(AssertionError), suppress(AssertionError)):
+            with cs:
+                assert 1 == 2        # swallowed on every iteration
+
+    A literal whose elements merely *happen* to include a suppressor still
+    fails the test and keeps the decline, which is the point:
+
+        for cs in (suppress(AssertionError), nullcontext()):
+            with cs:
+                assert 1 == 2        # swallowed once, fires once
+
+    Executed, the first shape never fails and the second shape fails on its
+    second iteration, so the first is a disarmed contract and the second is a
+    live one. Declining the first reported it ``enforced``, certifying a
+    contract that can never fail as load-bearing.
+
+    The enclosing body is found by looking for the *header* rather than for
+    the list the caller is iterating, because a single-statement loop body
+    puts the ``with`` directly in ``node.body`` while the caller's list is the
+    enclosing block. A ``while`` body has no target, and an ``if``/``try`` body
+    is not a loop body, so both return ``{}`` and the ordinary rule still
+    applies.
+
+    ``bound`` is the module's import bindings, needed to decide whether the
+    element is a suppressor at all, and ``raw_values`` is the whole-function
+    store table, accepted from the caller when it already has one and rebuilt
+    otherwise. Only the entries belonging to this loop are read, so the lookup
+    stays narrow regardless of how many stores the function contains.
+    """
+    if function is None:
+        return {}
+    if raw_values is None:
+        raw_values = _raw_store_values(function)
+    resolved = {}
+    for node in _enclosing_loops(function, header):
+        if (
+            _single_loop_element(getattr(node, "iter", None)) is None
+            # #413. The multi-element refusal above is a statement about
+            # *which* element the target holds, and it holds only while the
+            # elements disagree. A literal whose every element is a
+            # readable suppressor has no disagreement to preserve: each
+            # iteration binds a value that cannot be entered, so `with cs:`
+            # raises before the body on every iteration and the assert is
+            # unreachable every time. `_unanimous_non_enterable_element`
+            # is the same test the recording walk applies, and asking it
+            # here keeps the two from disagreeing about the same loop --
+            # a loop the table declines to record and this rule declined to
+            # consult would simply keep the old false LIVE.
+            and _unanimous_non_enterable_element(getattr(node, "iter", None), bound) is None
+        ):
+            continue
+        for name in _store_target_names([node.target]):
+            for entry_statement, value in raw_values.get(name, []):
+                if entry_statement is node:
+                    # The element has to clear the same readability bar every
+                    # other store value clears before it can stand in for a
+                    # name's binding. Without it a `nullcontext` element is
+                    # handed to `_aliased_suppressions` as though it were a
+                    # suppressor, and that rule appends a live `live[...]`
+                    # value without re-testing it -- so
+                    #
+                    #     for cs in [contextlib.nullcontext()]:
+                    #         with cs:
+                    #             assert x != 1
+                    #
+                    # reports the assert defeated, certifying a contract that
+                    # really does fire. `None` and an unreadable value are
+                    # different, though: the name IS bound here, so the
+                    # "not a suppressor" answer has to be recorded as
+                    # `_NOT_A_SUPPRESSOR` rather than dropped, or a suppressor
+                    # carried in from an enclosing block is carried past the
+                    # loop that just overwrote it.
+                    readable = value if _is_readable_suppressor(value, bound) else _NOT_A_SUPPRESSOR
+                    # A later loop in this ordering is nested inside this one,
+                    # so its target is the LAST write before the header runs
+                    # and its element is the binding actually in force. Writing
+                    # it over the outer loop's entry is what keeps
+                    #
+                    #     for cs in [suppress(AssertionError)]:
+                    #         for cs in [nullcontext()]:
+                    #             with cs:          # nullcontext, not suppress
+                    #                 assert x != 1
+                    #
+                    # reporting the assert live when it is really swallowed.
+                    resolved[name] = readable
+    return resolved
+
+
+def _enclosing_loops(function, header):
+    """The ``for``/``async for`` loops whose body contains ``header``, outermost first.
+
+    #370b. The binding a header sees comes from the *innermost* loop that binds
+    the name, because an inner loop's target is the last write before the header
+    runs:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            for cs in [contextlib.nullcontext()]:
+                with cs:                     # `nullcontext` is in force
+                    assert x != 1
+
+    Matching only the direct body list answered for `for other in [0]:` bodies
+    containing a *nested* header as well, so every header one block down still
+    reported `enforced` when executed it is swallowed. The body is therefore
+    walked, and the walk is bounded by the loop so an unrelated loop elsewhere
+    in the function cannot contribute.
+
+    Innermost-last ordering matters: a loop that does not bind the header's name
+    contributes nothing, so a name bound only by the outer loop still resolves,
+    while a name rebound by the inner loop resolves to the inner element. A
+    loop whose iterable is undecidable is *skipped* rather than treated as a
+    barrier, so it cannot retire an outer loop's readable binding -- declining
+    to read a name is not the same as saying the name is not a suppressor.
+    """
+    loops = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, (ast.For, ast.AsyncFor)) and _loop_arms_reach(node, header)
+    ]
+    if not loops:
+        return []
+    return _outermost_first(loops, function)
+
+
+def _loop_arms_reach(loop, header):
+    """Does ``header`` sit inside ``loop``'s body or inside its ``else`` arm?
+
+    #370b. Both arms run only after the target has been assigned, so a header in
+    either one reads it. The body is the common case; the ``else`` arm is easy to
+    miss because it is a sibling list rather than a child:
+
+        for cs in [contextlib.suppress(AssertionError)]:
+            pass
+        else:
+            with cs:                 # `cs` IS bound here
+                assert x != 1       # executed: swallowed
+
+    The walk is deliberately scope-blind, the same test the body uses. Descending
+    only to the loop's own scope was measured, and it is *worse*: a ``with`` in a
+    nested ``def`` reads the loop variable as a free variable, so refusing to
+    descend there turns a correct ``False`` into a false LIVE. The shape that
+    guard was meant to protect -- a nested ``def`` rebinding the name as its own
+    local -- is already correct without it, because the walk finds the nested
+    ``def``'s own store first and that store is the later write. A ``while`` loop
+    has no target at all, so it is never a candidate here and the ordinary rules
+    still decide its headers.
+    """
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return False
+    arms = [*loop.body, *loop.orelse]
+    return any(child is header for statement in arms for child in ast.walk(statement))
+
+
+def _outermost_first(loops, function):
+    """``loops`` ordered so an enclosing loop always precedes a nested one.
+
+    ``ast.walk`` is breadth-first, so its order is neither source order nor
+    containment order, and the order decides which loop's element a name
+    resolves to. Sorting on the parent chain states the intent directly.
+
+    For a nested ``for`` this coincides with sorting on line number -- an
+    enclosed statement cannot start before the header that encloses it -- so a
+    mutation to line-number order is behaviourally equivalent here and is not
+    covered by a test row. The parent chain is kept because it is the property
+    that actually matters, and because it stays correct if a future construct
+    ever moves a loop body out of source order (``while``/``else``, ``match``
+    guards). Two rows do pin the *outcome* of this ordering: the inner target
+    superseding the outer one, and the three-deep chain.
+    """
+    parents = {}
+    for parent in ast.walk(function):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def depth(node):
+        level = 0
+        current = parents.get(id(node))
+        while current is not None:
+            level += 1
+            current = parents.get(id(current))
+        return level
+
+    return sorted(loops, key=depth)
 
 
 def _loop_target_names(block):
@@ -3065,11 +3952,53 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
     ordinary managers on the live side of the line.
     """
     name = _dotted_class_name(expression)
+    if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name):
+        name = expression.func.id
     if name is None:
         return None
     module = tree if tree is not None else _module_tree()
-    classes = _locally_defined_classes(module)
+    classes = _locally_defined_classes(module, function, expression)
     node = classes.get(name)
+    if isinstance(expression, ast.Call) and node is not None and function is not None:
+        scopes = _class_lookup_scopes(module, expression)
+        for index in reversed(range(len(scopes))):
+            scope = scopes[index]
+            cutoff = _class_scope_read_position(scopes, index, expression)
+            if cutoff is None and not isinstance(scope, ast.Module):
+                return None
+            if not isinstance(scope, ast.Module):
+                parameters = {
+                    argument.arg
+                    for argument in ast.walk(scope.args)
+                    if isinstance(argument, ast.arg)
+                }
+                if name in parameters and node not in scope.body:
+                    return None
+            stores = scope.body if isinstance(scope, ast.Module) else _scope_body_nodes(scope)
+            for store in stores:
+                names = _store_target_names_of(store)
+                if isinstance(store, (ast.Import, ast.ImportFrom)):
+                    names = [alias.asname or alias.name.split(".")[0] for alias in store.names]
+                elif (
+                    isinstance(store, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    or isinstance(store, ast.ExceptHandler)
+                    and store.name is not None
+                ):
+                    names = [store.name]
+                if name not in names or store is node:
+                    continue
+                if cutoff is not None and (store.lineno, store.col_offset) >= (
+                    cutoff.lineno,
+                    cutoff.col_offset,
+                ):
+                    continue
+                if node not in scope.body or (store.lineno, store.col_offset) > (
+                    node.lineno,
+                    node.col_offset,
+                ):
+                    return None
+            if node in scope.body:
+                break
     if node is None:
         # The header usually names an *instance*, not the class:
         #
@@ -3081,10 +4010,7 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
         # built by an unreadable call (a factory, a parameter) is not followed,
         # because assuming an arbitrary constructor returns a swallowing class
         # is the over-breadth this rule exists to avoid.
-        constructor = _constructed_class_of(expression, module, classes, function)
-        if constructor is None:
-            return None
-        node = classes.get(constructor)
+        node = _constructed_class_of(expression, module, function)
         if node is None:
             return None
     for child in node.body:
@@ -3095,11 +4021,11 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
     return None
 
 
-def _constructed_class_of(expression, tree, classes, function=None):
+def _constructed_class_of(expression, tree, function=None):
     """The class an instance-valued ``expression`` was constructed from.
 
     Reads the ``helper = Suppressor()`` that the ``with`` header names, and
-    returns ``"Suppressor"`` when that class is one this file defines. Anything
+    returns its ``ClassDef`` when that class is one this file defines. Anything
     else -- a factory call, a parameter, a subscript -- is ``None``, which
     leaves the assert ``enforced`` rather than guessing.
 
@@ -3126,20 +4052,23 @@ def _constructed_class_of(expression, tree, classes, function=None):
     """
     if not isinstance(expression, ast.Name):
         return None
-    value = _assigned_value(expression.id, function)
-    if value is None:
-        value = _assigned_value(expression.id, tree)
+    value = None
+    for scope in reversed(_class_lookup_scopes(tree, function)):
+        before = expression if not isinstance(scope, ast.Module) else None
+        value = _assigned_value(expression.id, scope, before)
+        if value is not None:
+            break
     if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)):
         return None
-    if value.func.id not in classes:
-        return None
-    return value.func.id
+    # An instance retains the class used at construction, even when the
+    # class name is subsequently redefined before the with header.
+    return _locally_defined_classes(tree, function, value).get(value.func.id)
 
 
-def _assigned_value(name, scope):
+def _assigned_value(name, scope, before=None):
     """The right-hand side ``name`` is assigned in ``scope``, or ``None``.
 
-    The *last* assignment wins, matching what a reader meets last, and a
+    The last assignment before the read wins in source order, and a
     function-scope lookup is offered before a module one by the caller so an
     inner binding shadows an outer one of the same name.
 
@@ -3148,17 +4077,52 @@ def _assigned_value(name, scope):
     assignment and the two scopes would not be distinguishable. The module
     scope is therefore its own top-level statement list, which is what makes
     the function-first lookup in :func:`_constructed_class_of` meaningful.
+
+    A ``for`` target is a store too, and it is the one this used to miss. #370
+    taught the module to record a loop target's element for the *suppression*
+    question; :func:`_constructed_class_of` asks the same "what does this name
+    hold" question, so the same answer has to be readable here:
+
+        for cs in [Suppressor()]:      # `__exit__` returns True for AssertionError
+            with cs:
+                assert x != 1          # swallowed; was reported enforced
+
+    Read by :func:`_single_loop_element`, so the limit is #370's already-measured
+    one rather than a second, looser rule: only a single-element literal
+    iterable contributes, and a multi-element or non-literal iterable stays
+    ``None`` and keeps the assert ``enforced`` -- the safe direction, since a
+    guessed value would read a suppressor that is not the one in force.
+
+    Only an ``ast.Name`` target is followed, matching the ``Assign`` arm: a
+    tuple target (``for a, b in ...``) unpacks and is not read here.
     """
     if scope is None:
         return None
     if isinstance(scope, ast.Module):
         nodes = iter(scope.body)
     elif isinstance(scope, ast.AST):
-        nodes = ast.walk(scope)
+        nodes = _scope_body_nodes(scope)
     else:
         nodes = iter(())
     value = None
-    for node in nodes:
+
+    def position(node):
+        return node.lineno, node.col_offset
+
+    nodes = [node for node in nodes if isinstance(node, (ast.For, ast.Assign))]
+    for node in sorted(nodes, key=position):
+        if before is not None and position(node) >= position(before):
+            continue
+        if isinstance(node, ast.For):
+            if not (isinstance(node.target, ast.Name) and node.target.id == name):
+                continue
+            element = _single_loop_element(node.iter)
+            if element is None:
+                # Undecidable: leave any earlier `Assign` in force rather than
+                # overwrite it with a guess. #385 measured the alternative.
+                continue
+            value = element
+            continue
         if not isinstance(node, ast.Assign):
             continue
         if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
@@ -3181,23 +4145,126 @@ def _dotted_class_name(expression):
     return None
 
 
-def _locally_defined_classes(tree):
-    """``{name: ClassDef}`` for every class defined at module level in ``tree``.
+def _locally_defined_classes(tree, function=None, before=None):
+    """Classes visible in the nearest lexical scope at this read position.
 
-    A class imported from elsewhere is deliberately absent, which is what keeps
-    the rule off ``pytest``'s and the harness's own context managers. Only a
-    module-level ``class`` counts. A class *nested* inside another is excluded
-    too, and that is a measured limit rather than an oversight: such a class is
-    spelled ``Outer.Inner()`` in a ``with`` header, and matching the inner name
-    alone would fire on a bare ``Inner`` that is a different object in a
-    different scope. Widening this collection to every scope was tried and left
-    the suite green, so the narrow rule is the one doing the work.
+    Sibling functions and class bodies define separate namespaces. Within a
+    function, a later definition replaces an earlier one only after it runs.
+    Module definitions are read after module initialization for function-local
+    constructor calls; a module-level construction instead uses its own point.
     """
+    scopes = _class_lookup_scopes(tree, function)
+    # A constructor may have been assigned at module scope before the function
+    # was called. Its class is resolved at construction, not at the later use.
+    if before is not None:
+        scopes = _class_lookup_scopes(tree, before)
     found = {}
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            found[node.name] = node
+
+    def position(node):
+        return node.lineno, node.col_offset
+
+    for index, scope in enumerate(scopes):
+        definitions = [node for node in scope.body if isinstance(node, ast.ClassDef)]
+        if not isinstance(scope, ast.Module):
+            # A local class name shadows a module name even before its first
+            # definition, when reading it would raise UnboundLocalError.
+            for node in definitions:
+                found.pop(node.name, None)
+        cutoff = _class_scope_read_position(scopes, index, before)
+        for node in definitions:
+            if cutoff is None or position(node) < position(cutoff):
+                found[node.name] = node
     return found
+
+
+def _class_scope_read_position(scopes, index, read):
+    """An enclosing class cell is read when its child is invoked."""
+    scope = scopes[index]
+    if isinstance(scope, ast.Module):
+        return read if len(scopes) == 1 else None
+    if index == len(scopes) - 1:
+        return read
+    child = scopes[index + 1]
+    return next(
+        (
+            statement.value
+            for statement in scope.body
+            if isinstance(statement, (ast.Expr, ast.Return))
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id == child.name
+        ),
+        None,
+    )
+
+
+def _class_lookup_scopes(tree, target):
+    """Module and enclosing function scopes, excluding unrelated siblings."""
+    if target is None or target is tree:
+        return [tree]
+    path = []
+
+    def find(node):
+        path.append(node)
+        if node is target:
+            return True
+        for child in ast.iter_child_nodes(node):
+            if find(child):
+                return True
+        path.pop()
+        return False
+
+    if not find(tree):
+        return [tree]
+    return [
+        node
+        for node in path
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _unbound_local_class_constructor(value, function, module=None):
+    """A local or captured class must have been bound when construction runs."""
+    if (
+        not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        or not isinstance(value, ast.Call)
+        or not isinstance(value.func, ast.Name)
+    ):
+        return False
+    name = value.func.id
+    nodes = list(_scope_body_nodes(function))
+    if not any(node is value for node in nodes):
+        # A module-created instance is not constructed in this function's
+        # namespace, even when this function later shadows its class name.
+        return False
+    tree = module if module is not None else _owning_module(function)
+    scopes = _class_lookup_scopes(tree, value)
+
+    def position(node):
+        return node.lineno, node.col_offset
+
+    for index in reversed(range(1, len(scopes))):
+        scope = scopes[index]
+        nodes = list(_scope_body_nodes(scope))
+        if not any(isinstance(node, ast.ClassDef) and node.name == name for node in nodes):
+            continue
+        if _declares(scope, {name}, ast.Global) or _declares(scope, {name}, ast.Nonlocal):
+            return False
+        if any(
+            argument.arg == name
+            for argument in ast.walk(scope.args)
+            if isinstance(argument, ast.arg)
+        ):
+            return False
+        cutoff = _class_scope_read_position(scopes, index, value)
+        if cutoff is None:
+            return False
+        return not any(
+            position(node) < position(cutoff) and any(_names_bound_by_statement(node, name))
+            for node in nodes
+            if isinstance(node, ast.stmt)
+        )
+    return False
 
 
 def _provably_truthy_exit(exit_function):
@@ -3425,8 +4492,708 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
         "module",
         "type",
         "function",
+        # #388. The builtin constructors read by `_builtin_constructor_kind`
+        # have to be non-enterable *here* as well: a type name the set omits
+        # makes the constructor read as possibly-enterable, and the guard then
+        # declines a header CPython settles to a value it cannot enter. `range`
+        # and `frozenset` are the two a first pass missed, because they are
+        # builtins that are not spelled in everyday source as a `with` target
+        # and so were not already listed.
+        "frozenset",
+        "range",
+        "bytearray",
     }
 )
+
+#: Bare builtin constructors whose result is a value no ``with`` can enter.
+#:
+#: ``cs = int()`` and ``cs = list()`` are decided by the *name being called*,
+#: not by the call being a call. Every entry here is a builtin type object
+#: spelled without a module prefix, so a call of it returns a fresh instance of
+#: the corresponding :data:`NON_CONTEXT_MANAGER_TYPES` entry and nothing else.
+#: Reading these as "a call is a call" reports a dead header as live.
+#:
+#: Only the *unqualified* spellings are listed. ``builtins.int()`` is
+#: recognised separately by :func:`_builtin_constructor_kind`, and a
+#: user-shadowed ``int`` is a different binding entirely -- shadowing is not
+#: modelled here, so the conservative direction is taken for a name this
+#: module cannot prove is the builtin.
+_BUILTIN_CONSTRUCTOR_TYPES = {
+    "int": "int",
+    "float": "float",
+    "complex": "complex",
+    "str": "str",
+    "bytes": "bytes",
+    "bool": "bool",
+    "list": "list",
+    "tuple": "tuple",
+    "set": "set",
+    "frozenset": "frozenset",
+    "dict": "dict",
+    "bytearray": "bytearray",
+    "range": "range",
+}
+
+#: Marker for a constructor call that *raises* for the arguments given, so the
+#: store it appears in never happens. ``range()`` with no argument is a
+#: `TypeError`; the name keeps whatever was bound before, which for a header
+#: following a carrier is the carrier itself.
+_RAISING_CONSTRUCTOR = object()
+
+#: Constructors called with no arguments that are **falsy**: `if set():` never
+#: enters its body, and `for cs in set():` runs zero times so the loop never
+#: binds the name. Both spellings of "empty builtin container" are decided from
+#: this one set, so the condition form and the loop form cannot disagree.
+_EMPTY_CONSTRUCTOR_TYPES = frozenset({"set", "frozenset", "dict", "list", "tuple", "bytearray"})
+
+
+def _builtin_constructor_kind(value, function=None):
+    """The type name a zero-argument builtin constructor call produces.
+
+    ``int()`` is decided by the callee's name, so this is the *call* form of
+    :func:`_literal_runtime_type`: a bare ``ast.Name`` callee drawn from
+    :data:`_BUILTIN_CONSTRUCTOR_TYPES`, or the same spelled as ``builtins.int``.
+
+    ``function``, when given, is the scope the call appears in. A name the
+    function itself rebinds -- ``def int(): ...``, ``int = ...``, ``import int``
+    -- is a *different* binding, and calling it may return anything at all,
+    including a real context manager. Reading it as the builtin produces a
+    false-dead: the header is reported dead while CPython enters it. A shadowed
+    name therefore answers ``None`` here and falls through to the caller's
+    ordinary "a call is a call" rule, which is the safe direction.
+
+    Returns ``None`` for every other call, so the caller's existing "a call is
+    a call" rule stays in force. That rule is the safe direction: a
+    ``nullcontext()`` really does return a context manager, and declining to
+    read it keeps a live header live.
+    """
+    if isinstance(value, ast.Call) and _callee_is_shadowed(value.func, function, value):
+        return None
+    if not isinstance(value, ast.Call):
+        # A constructor called with arguments may return a subclass or a
+        # different object entirely (``bool(1)`` is still bool, but
+        # ``range(3)`` is a range and ``str(b"")`` is a str, while a future
+        # spelling need not be). The constructors below are read through
+        # :func:`_builtin_constructor_arguments_are_ignorable` instead, which
+        # admits the argument forms that cannot change the result type.
+        return None
+    func = value.func
+    if isinstance(func, ast.Name):
+        kind = _BUILTIN_CONSTRUCTOR_TYPES.get(func.id)
+    elif (
+        isinstance(func, ast.Attribute)
+        and func.attr in _BUILTIN_CONSTRUCTOR_TYPES
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "builtins"
+    ):
+        kind = _BUILTIN_CONSTRUCTOR_TYPES[func.attr]
+    else:
+        return None
+    if kind is None or not _builtin_constructor_arguments_are_ignorable(func, value):
+        return None
+    return kind
+
+
+def _name_is_shadowed_in(func, function):
+    """Is the callee a name this function rebinds away from the builtin?
+
+    Only a *binding in the function's own scope* counts, and only for a bare
+    ``ast.Name`` callee: ``cs = range(3)`` is only the builtin when nothing
+    in scope rebinds ``range``. A ``def``/``class``/``import``/assignment to
+    that name anywhere in the function body makes the call a different one.
+
+    Nested scopes bind their own names, so a ``def range(...)`` inside another
+    ``def`` inside this function does not shadow the builtin's meaning *here*;
+    those are skipped, matching :func:`_own_imports`' scope discipline.
+    """
+    if not isinstance(func, ast.Name):
+        return False
+    name = func.id
+    for node in _own_scope_bindings(function):
+        if node is name:
+            continue
+        for bound in _names_bound_by_statement(node, name):
+            if bound:
+                return True
+    return False
+
+
+def _name_is_rebound_away_from_module(name_node, function, call=None):
+    """Is ``name_node.id`` rebound to something other than its own module?
+
+    The question is asked only of a name that a qualified ``builtins.attr``
+    call is written through, so the answer separates the one import that
+    *is* the module from every other way the name can be taken:
+
+    * ``import builtins`` and ``import builtins as builtins`` bring the real
+      module in and leave the name meaning that module;
+    * a parameter, a local store, a function-local ``def``/``class``, or a
+      module-level store of any kind replace it with an arbitrary object, so
+      ``builtins.attr`` is then some attribute of *that* object.
+
+    ``from builtins import list`` does not bind the name ``builtins`` at all,
+    so it never reaches here; a store that is the module's own canonical import
+    is the only shape that keeps the qualified form trustworthy.
+    """
+    name = name_node.id
+    if function is None:
+        # No scope to consult, so the name cannot be proved to be the module.
+        return True
+    if name in _signature_bound_names(function):
+        return True
+    for node in _own_scope_bindings(function):
+        if node is name_node:
+            continue
+        for bound in _names_bound_by_statement(node, name):
+            if bound and not _is_canonical_module_import(node, name):
+                return True
+    return _module_rebinds_name(function, name, call)
+
+
+def _is_canonical_module_import(statement, name):
+    """Is this binding the ordinary ``import <name>`` of the module itself?"""
+    if not isinstance(statement, ast.Import):
+        return False
+    return any(
+        (alias.asname or alias.name) == name and alias.name == name for alias in statement.names
+    )
+
+
+def _callee_is_shadowed(func, function, call=None):
+    """Is ``func`` a call target that does not reach the real builtin?
+
+    This is the full shadowing question, and it is a strict superset of
+    :func:`_name_is_shadowed_in`. That helper only ever looked inside the
+    function's *body*, which missed the two bindings that are not written in
+    the body at all:
+
+    * a **parameter** -- ``def f(int=None): cs = int()`` binds ``int`` for the
+      whole call, so the call is whatever the caller passed. Reading it as the
+      builtin ``int`` reports ``cs`` as a zero that cannot be entered;
+    * a **module-level** binding -- ``def int(): ...`` at module scope binds
+      ``int`` for every function in the file, and a module-level
+      ``cs = int()`` is a store that has already run by the time any header
+      reads it.
+
+    Both were read as the builtin, so a header CPython enters was reported
+    dead. A parameter or a module binding can only make the call *less*
+    determinate, so the answer here is always the conservative one: treat the
+    callee as shadowed and let the caller's ordinary "a call is a call" rule
+    keep the header live.
+
+    ``function`` may be ``None`` -- the condition path is handed no enclosing
+    scope by some callers -- and a caller that does not know the scope cannot
+    prove the name is the builtin either, so it is answered the same
+    conservative way rather than as "not shadowed".
+
+    ``call`` is the ``ast.Call`` whose callee ``func`` is, when the caller has
+    it. It only tells the module walk where to stop, so it is optional.
+    """
+    if isinstance(func, ast.Attribute):
+        # `builtins.int` only means the builtin when `builtins` itself is not
+        # rebound, so the question moves to the attribute's own base name.
+        # Returning `False` for the name outright answered every `builtins.*`
+        # call as the real module, including one through a name that some
+        # store has replaced:
+        #
+        #     builtins = SimpleNamespace(list=nullcontext)
+        #     cs = builtins.list()      # any callable, not the builtin `list`
+        #
+        # That read a `TypeError`-raising header as LIVE. `import builtins` is
+        # the one binding that must still count as canonical: it is not a
+        # *rebinding* but the ordinary import that brings the real module in,
+        # and every other `import x` in the file is exactly the spelling that
+        # means "this is the module named x". Treating it as a shadow would
+        # make `cs = builtins.list()` LIVE where CPython raises.
+        if isinstance(func.value, ast.Name) and func.value.id == "builtins":
+            return _name_is_rebound_away_from_module(func.value, function, call)
+        return _callee_is_shadowed(func.value, function, call)
+    if not isinstance(func, ast.Name):
+        return False
+    if function is None:
+        # No enclosing scope to consult. A name the caller could not resolve
+        # is not provably the builtin, so it is answered as shadowed.
+        return True
+    if func.id in _signature_bound_names(function):
+        return True
+    if _name_is_shadowed_in(func, function):
+        return True
+    return _module_binds_name(function, func.id, call)
+
+
+def _signature_bound_names(function):
+    """Every name the function's own signature binds when it is called.
+
+    The positional parameters, the keyword-only parameters, ``*args`` and
+    ``**kwargs`` all bind for the duration of the call, so each of them
+    shadows the builtin of the same name inside the body. ``*args`` and
+    ``**kwargs`` are matched through their own attribute, because ``ast``
+    records those under ``vararg``/``kwarg`` rather than in the flat ``args``
+    list -- a filter reading only ``args`` saw a call whose shadow arrives
+    through ``*values`` as an un-shadowed builtin.
+    """
+    args = getattr(function, "args", None)
+    if args is None:
+        return frozenset()
+    names = {argument.arg for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return frozenset(names)
+
+
+def _module_binds_name(function, name, call=None):
+    """Does the module holding ``function`` bind ``name`` at module scope, and
+    does that binding run before ``function`` does?
+
+    A module-level ``def int(): ...``, ``import int`` or ``int = ...`` rebinds
+    the name for every function in the file, and a module-level ``cs = int()``
+    is a real store that has already run by the time any header reads it.
+
+    Two things have to be true, and asking for either alone was a false-live:
+
+    * the binding must be in the **module** scope. This walk starts at the
+      module's own statements, so ``outer``'s own ``def list(): ...`` -- a
+      binding one scope *below* the module -- is never consulted here. Before
+      this walk existed the question was reached through the module, so a
+      function-local definition was answered twice: once correctly by
+      :func:`_name_is_shadowed_in` and once, wrongly, from here.
+    * the binding must be in force **where the call is evaluated**, and that
+      point is not the same for the two kinds of call:
+
+      - a call written at **module scope** is evaluated as the module runs, so
+        only the statements before it count:
+
+            cs = list()             # the builtin -- runs first
+            def list(): return None # too late to matter for the line above
+
+      - a call inside a **function body** is evaluated only when that function
+        is called, which is after the *whole* module has finished executing.
+        Every module binding therefore counts, including one written after the
+        function's own ``def``:
+
+            def outer(x):
+                cs = list()         # `list` is whatever the module ended with
+                with cs: ...
+            def list(): return nullcontext()
+
+        Reading that ``cs`` as the builtin reported a header CPython enters as
+        DEAD. Cutting the walk at the function's ``def`` was the fix for the
+        module-scope case above, and it is exactly wrong for this one.
+
+      The two are told apart by whether the call is inside the analysed
+      function's own scope, which :func:`_call_runs_at_module_scope` answers.
+
+    The walk descends into module-level blocks -- a binding inside a
+    module-level ``if`` still binds the name whenever that branch is taken --
+    while a nested ``def``/``class`` *body* stays a separate scope, matching
+    :func:`_own_scope_bindings`' discipline.
+
+    ``call`` is the ``ast.Call`` node the question is being asked about, when
+    the caller has it. It only decides *where* the walk stops, so omitting it
+    is safe -- it just falls back to stopping at the function's own ``def``,
+    which is the conservative choice for a function-body call.
+    """
+    module = _module_for_function(function)
+    if module is None:
+        return False
+    if _call_runs_at_module_scope(function, call):
+        return _module_binds_name_at_module_scope(module, function, call, name)
+    # The call is inside a function body, so it runs only after the whole
+    # module has executed and every module binding is in force. A nested
+    # `def`/`class` *body* is still a separate scope and is not counted.
+    for statement in getattr(module, "body", []):
+        if any(_names_bound_by_statement(statement, name)):
+            return True
+        for node in _module_level_bindings(statement):
+            if any(_names_bound_by_statement(node, name)):
+                return True
+    return False
+
+
+def _module_rebinds_name(function, name, call=None):
+    """Does the module holding ``function`` bind ``name`` to something else?
+
+    This is the ``builtins.attr`` form's own question -- "is the qualified name
+    still the module itself" -- and it takes the call node so the answer is
+    scoped the same way :func:`_module_binds_name` scopes its own. A store
+    written *after* a module-scope call has not run when the call is evaluated,
+    so the callee still reached the real module:
+
+        import builtins
+        cs = builtins.list()          # the builtin; runs first
+        builtins = SimpleNamespace(list=nullcontext)
+
+    Counting that later store read the rebound attribute and reported the
+    ``TypeError`` CPython raises as LIVE. A function-body call is reached after
+    the whole module has run, so for one every store counts and the same order
+    cut is not applied.
+
+    The ordinary ``import builtins`` is not a rebinding and is skipped here, so
+    the canonical spelling stays trustworthy.
+    """
+    module = _module_for_function(function)
+    if module is None:
+        return False
+    at_module_scope = _call_runs_at_module_scope(function, call)
+    for statement in getattr(module, "body", []):
+        if at_module_scope and _module_statement_precedes_call(statement, function, call):
+            # The call has been evaluated by the end of this statement, so a
+            # binding written from here on is not yet in force where it was.
+            break
+        if _is_canonical_module_import(statement, name):
+            continue
+        if any(_names_bound_by_statement(statement, name)):
+            return True
+        for node in _module_level_bindings(statement):
+            if _is_canonical_module_import(node, name):
+                continue
+            if at_module_scope and _node_precedes_call(statement, node, call):
+                continue
+            if any(_names_bound_by_statement(node, name)):
+                return True
+    return False
+
+
+def _call_runs_at_module_scope(function, call):
+    """Is ``call`` evaluated while the module runs, rather than in a body?
+
+    A call written among the module's own statements is reached as the module
+    executes, so only the bindings before it are in force. A call inside the
+    analysed function -- or inside any other nested scope -- is reached later,
+    when the module has finished, so every module binding counts. The question
+    is answered by position: a call that is *not* under ``function`` is a
+    module-scope one, which is also the safe answer for a caller that supplied
+    no call node at all.
+    """
+    if call is None:
+        return True
+    return not _contains(function, call)
+
+
+def _module_binds_name_at_module_scope(module, function, call, name):
+    """Module bindings in force where a module-scope ``call`` is evaluated.
+
+    The walk runs the module's statements in source order, descending into
+    module-level blocks so that a binding *inside* a block is ordered with
+    respect to the call rather than to the block as a whole. That ordering is
+    what separates
+
+        if True:
+            cs = list()             # the builtin; runs first
+            def list(): return None # too late to matter for the line above
+
+    from the same block with the two the other way round, where ``cs`` really
+    is the shadow and the header is dead. Stopping at the enclosing block
+    instead of at the statement holding the call answered the first as
+    shadowed -- a false-live, since CPython raises ``TypeError`` there.
+
+    The walk stops at the first statement at or after the call's own position,
+    and the statement holding the call has already been checked, so a store
+    written on that same line still counts.
+    """
+    for statement in getattr(module, "body", []):
+        if _module_statement_binds_name_before_call(statement, call, name):
+            return True
+        if _module_statement_precedes_call(statement, function, call):
+            break
+    return False
+
+
+def _module_statement_precedes_call(statement, function, call):
+    """Has execution reached ``call`` by the end of ``statement``?"""
+    if statement is function:
+        # The function's own definition binds its name; the body that follows
+        # is a separate scope. A module-scope call is not inside it, so
+        # reaching the `def` means the call has already been evaluated.
+        return True
+    return _contains(statement, call)
+
+
+def _node_precedes_call(statement, node, call):
+    """Has execution reached ``call`` before ``node`` inside ``statement``?
+
+    ``node`` is a binding found *inside* ``statement`` by the block descent,
+    so the two are ordered within that one statement rather than across the
+    module. Only the path the descent actually took is walked, and a nested
+    ``def``/``class`` body -- a separate scope -- stops the walk rather than
+    being scanned, because nothing there has run.
+    """
+    if node is statement:
+        return False
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return False
+    if not _contains(statement, call):
+        # The call is not in this statement at all, so every binding in it
+        # runs before the call does.
+        return False
+    for inner in _module_level_bindings_in_order(statement):
+        if inner is node:
+            return True
+        if _contains(inner, call):
+            return False
+    return False
+
+
+def _module_statement_binds_name_before_call(statement, call, name):
+    """Does ``statement`` bind ``name``, counting only what runs before ``call``?
+
+    When the call is not inside ``statement`` the whole statement has run, so
+    every binding it contains counts. When it is inside, the walk descends in
+    order and stops once the call's own statement is reached, so a binding
+    written after the call inside the same block is correctly ignored.
+    """
+    if not _contains(statement, call):
+        return any(_names_bound_by_statement(statement, name)) or any(
+            _names_bound_by_statement(node, name) for node in _module_level_bindings(statement)
+        )
+    # The call lives inside this statement, so descend in source order and
+    # stop at the first inner statement that has already run it. The call's
+    # own statement is checked before stopping, so a store on the same line
+    # (`cs = list()`) is still counted.
+    for inner in _module_level_bindings_in_order(statement):
+        if any(_names_bound_by_statement(inner, name)):
+            return True
+        if _contains(inner, call):
+            break
+    return False
+
+
+def _module_level_bindings_in_order(statement):
+    """Like :func:`_module_level_bindings`, but the blocks' own statements too.
+
+    The order matters only for a statement that holds the call, because that is
+    the one case where a later binding in the same block must not be counted.
+    Each block's children are yielded before the block itself so that the
+    reader sees them in the order they run.
+    """
+    ordered = []
+    for node in _module_level_bindings(statement):
+        if isinstance(node, _MODULE_LEVEL_BLOCKS):
+            ordered.append(node)
+            ordered.extend(_module_level_bindings_in_order(node))
+        else:
+            ordered.append(node)
+    return ordered
+
+
+def _module_level_bindings(statement):
+    """Bindings inside one module-level statement, excluding nested scopes.
+
+    Only *blocks* are descended into, because a block runs in the scope that
+    encloses it:
+
+        if flag:
+            def list(): return None      # still a module binding
+
+    A nested ``def``/``class`` **body** is a separate scope and is never
+    entered, which is what keeps
+
+        def unrelated():
+            def list(): return None
+
+    from answering for ``list`` at module scope: ``unrelated``'s body binds
+    ``list`` only when ``unrelated`` is called, and nothing here has run it.
+    """
+    found = []
+    # The statement's own body list, so a block is entered at its statements
+    # rather than at its own child nodes: descending from the block itself
+    # would push its `If.test`/body onto the stack unfiltered, which is how a
+    # `def` inside a module `if` was skipped. A `def`/`class` is not a block, so
+    # this is empty for one and nothing inside it is entered:
+    #
+    #     def unrelated():
+    #         def list(): return None
+    #
+    # `list` is bound in `unrelated`'s locals, when `unrelated` is called.
+    # Descending made the module answer for a name no module store has written,
+    # and read the `TypeError` a real call raises as a callable the header
+    # enters.
+    stack = list(reversed(_block_body(statement)))
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.Lambda,)):
+            # A bare lambda has no name of its own and its body is a separate
+            # scope, so there is nothing here that binds in the module scope.
+            continue
+        if isinstance(
+            current,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.Assign,
+                ast.AnnAssign,
+                ast.AugAssign,
+                ast.Import,
+                ast.ImportFrom,
+                ast.For,
+                ast.AsyncFor,
+                ast.With,
+                ast.AsyncWith,
+            ),
+        ):
+            found.append(current)
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # Recorded for its own name -- `def list()` inside a module
+                # `if` really does bind the module name -- then left alone:
+                # its body is a separate scope.
+                continue
+        if isinstance(current, _MODULE_LEVEL_BLOCKS):
+            stack.extend(reversed(_block_body(current)))
+    return found
+
+
+def _module_for_function(function):
+    """The parsed module ``function`` was defined in, or ``None``.
+
+    The tree is the one the caller is actually analysing, so a module-level
+    binding is read from the file the assert lives in rather than from
+    whichever module happens to be importable. The result is memoised by node
+    identity because the AST is built once per parsed file and outlives the
+    call, and because this runs per condition in a large tree.
+    """
+    if function is None:
+        return None
+    if id(function) in _MODULE_FOR_FUNCTION:
+        return _MODULE_FOR_FUNCTION[id(function)]
+    module = None
+    for tree in _candidate_module_trees():
+        if any(node is function for node in ast.walk(tree)):
+            module = tree
+            break
+    _MODULE_FOR_FUNCTION[id(function)] = module
+    return module
+
+
+def _remember_module_for_function(function, module):
+    """Record the module ``function`` was found in, so lookups can reuse it.
+
+    The caller that resolved the module -- :func:`_is_enforced`, which takes
+    the tree from its own caller -- knows the answer exactly. Recording it
+    keeps :func:`_module_binds_name` from re-deriving it by walking two module
+    trees per condition, and it is what makes the module pass answer for a
+    probe tree rather than for the importable milestones module.
+    """
+    if function is not None and module is not None:
+        _MODULE_FOR_FUNCTION[id(function)] = module
+
+
+def _candidate_module_trees():
+    """Every parsed module a function could have been defined in.
+
+    Each tree is read through :func:`_owning_module`'s own pair, and a tree
+    that cannot be produced at all is skipped rather than raised: this runs
+    inside a decision function called once per condition, and a decision
+    function must answer for the node it is handed instead of crashing the
+    analyzer. The real production path always finds the milestones tree; the
+    skip only matters when the source is unavailable.
+    """
+    candidates = []
+    for produce in (_module_tree, milestones_tree):
+        try:
+            candidates.append(produce())
+        except (OSError, TypeError, AttributeError):
+            # The source cannot be read back, so the tree is unavailable. The
+            # module pass then has nothing to contribute and the answer stays
+            # conservative, which is the safe direction. Only the failures
+            # `inspect.getsource` actually raises are caught, so a genuine
+            # bug in a producer still surfaces instead of being swallowed.
+            continue
+    for tree in candidates:
+        if tree is None:
+            continue
+        yield tree
+
+
+def _own_scope_bindings(function):
+    """Statements in ``function``'s own scope, excluding nested scopes."""
+    found = []
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # A `def`/`class` statement *is* a binding in the enclosing scope --
+            # that is exactly the shadowing being looked for -- so it is
+            # recorded. Its *body* is a separate scope and is not descended
+            # into. A bare `Lambda` has no name, so there is nothing to record
+            # and its body is skipped with the rest.
+            found.append(node)
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        found.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _names_bound_by_statement(statement, name):
+    """Does this statement bind ``name`` in the enclosing function's scope?"""
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [statement.name == name]
+    if isinstance(statement, ast.ClassDef):
+        return [statement.name == name]
+    if isinstance(statement, ast.Assign):
+        return [any(isinstance(t, ast.Name) and t.id == name for t in statement.targets)]
+    if isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+        target = statement.target
+        return [isinstance(target, ast.Name) and target.id == name]
+    if isinstance(statement, ast.Import):
+        return [any((a.asname or a.name) == name for a in statement.names)]
+    if isinstance(statement, ast.ImportFrom):
+        return [any((a.asname or a.name) == name for a in statement.names)]
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [name in _store_target_names([statement.target])]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return [
+            any(
+                a.optional_vars is not None and name in _store_target_names([a.optional_vars])
+                for a in statement.items
+            )
+        ]
+    if isinstance(statement, ast.ExceptHandler):
+        return [statement.name == name]
+    if isinstance(statement, (ast.Global, ast.Nonlocal)):
+        return [name in (statement.names or [])]
+    return [False]
+
+
+def _builtin_constructor_arguments_are_ignorable(func, call):
+    """Can these arguments turn the constructor call into a different type?
+
+    ``int()``, ``int("3")`` and ``int(b"\\x03")`` all return an ``int``.
+    ``list()`` and ``list((1, 2))`` both return a ``list``. But ``range(3)``
+    is a ``range`` while ``range()`` is not a range at all, and a *shadowed*
+    ``int`` may be any callable, so the question is asked per name rather than
+    assumed for the whole set.
+
+    :data:`_BUILTIN_CONSTRUCTOR_TYPES` is consulted with that in mind: an
+    entry is only read when its arguments provably cannot select a different
+    type, which is decided here from the constructor's own signature-free
+    property that the accepted arguments are *inputs to a conversion* rather
+    than *selectors of a different class*.
+    """
+    name = func.id if isinstance(func, ast.Name) else func.attr
+    if name == "range":
+        # `range(stop)`, `range(start, stop)` and `range(start, stop, step)`
+        # are all ranges, but `range()` with no argument is a TypeError, so
+        # the call raises and the store never happens, which leaves the carrier
+        # in force. That is a decided outcome, not an unreadable one, so the
+        # argument-bearing forms still answer `"range"` and the empty form is
+        # recognised by the *caller* as a store that cannot happen.
+        if not call.args:
+            return _RAISING_CONSTRUCTOR
+        return _BUILTIN_CONSTRUCTOR_TYPES["range"]
+    # An unpacked argument list may carry anything, including a value that
+    # makes the call fail, so it is treated as unreadable.
+    return not (
+        any(isinstance(argument, ast.Starred) for argument in call.args)
+        or any(
+            isinstance(keyword, ast.keyword) and keyword.arg is None for keyword in call.keywords
+        )
+    )
+    return None
 
 
 def _entry_is_dead(expression, by_index, index, function, bound, module=None):
@@ -3462,6 +5229,47 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         return False
     name = expression.id
     stores = _stores_of(name, by_index, index, function)
+    # #388. `_stores_of` keeps only unconditional stores, so an *unconditional*
+    # carrier survives a *conditional* non-carrier store that follows it. That
+    # later store may have run and replaced the carrier with an enterable
+    # value, in which case the carrier is stale and reading it would answer
+    # `defeated` on an assert the interpreter really does evaluate. The
+    # `_module_stores` half of this already declines; without the same decline
+    # here the function scope is the only one that answers from a carrier a
+    # conditional store may have superseded, which is the damaging direction.
+    # #388. `_stores_of` keeps only *unconditional* stores, so an
+    # unconditional carrier survives a *conditional* non-carrier store that
+    # follows it. That later store may have run and replaced the carrier with
+    # an enterable value, in which case the carrier is stale and reading it
+    # would answer `defeated` on an assert the interpreter really does
+    # evaluate. Declining here is the safe direction.
+    #
+    # #392's #375 guard in `_stores_of` asks a *wider* question -- "can any
+    # later conditional store leave something enterable here?" -- but it only
+    # fires when the settled value is one `_store_may_bind_enterable` can read.
+    # A carrier is a string kind, and the `with`-header families
+    # (`with nullcontext(enter_result=...) as cs:`) settle it through a path
+    # that never reaches that guard. Both guards are load-bearing, and both
+    # now share one reading of "can this store leave something enterable?",
+    # so the two questions cannot answer the same store differently.
+    # The guard reads the *raw* binding list rather than `_stores_of`'s
+    # filtered one, so it still answers when `_stores_of` declines. That is
+    # the nested-scope case: a store inside a nested `def`/`lambda`/`class`
+    # is not decidable for this rule, so `_stores_of` returns `None` -- but
+    # the carrier written before it is still an unconditional store in this
+    # scope, and the header must be read from that carrier rather than
+    # reported live. Gating on `stores is not None` skipped exactly that, and
+    # `test_a_function_carrier_decline_ignores_non_enterable_stores` read nine
+    # unreachable asserts as load-bearing.
+    if _carrier_may_have_been_superseded(
+        by_index["bindings"].get(name, ()),
+        by_index["orders"],
+        index,
+        bound,
+        function,
+        name,
+    ):
+        return False
     if stores is None and module is not None:
         # #359. A carrier bound at module scope leaves no store in the
         # function's own table, so `_stores_of` declines and the header reads
@@ -3591,10 +5399,55 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # stays attached to the real statement it came from.
             kinds.add(value)
             continue
+        if _unbound_local_class_constructor(value, function, module):
+            # Resolving a local class before its first definition raises
+            # UnboundLocalError during construction, before this header can
+            # reach its assert. The future class must not vouch for it.
+            kinds.add("NoneType")
+            continue
         if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
             # A call is a call: `nullcontext()` returns a real context manager
-            # and must not be read as a non-manager here.
-            return False
+            # and must not be read as a non-manager here. The *builtin
+            # constructors* are the exception, because their result type is
+            # fixed by the callee's name: `cs = int()` leaves an `int`, and
+            # `with cs:` raises before the assert. Reading every call as
+            # unreadable left an unconditional `cs = int()` reported live
+            # where CPython raises -- a false-live.
+            constructor = _builtin_constructor_kind(value, function)
+            if constructor is None or constructor is _RAISING_CONSTRUCTOR:
+                # A raising constructor never stores, so it does not settle the
+                # name; an ordinary call is genuinely unreadable. Both leave
+                # whatever the earlier stores decided, so the set is not
+                # narrowed here.
+                if constructor is _RAISING_CONSTRUCTOR:
+                    continue
+                return False
+            kinds.add(constructor)
+            continue
+        if _binds_starred_target(statement, name):
+            # #418. `*cs, = (...)` and `a, *cs = (...)` collect a run of
+            # elements into a **list**, so the *name* is a list whatever the
+            # right-hand side held. `list` has no `__enter__`, so entering it
+            # raises `TypeError` before the body is reached and the assert
+            # never runs: the contract is dead.
+            #
+            # This is deliberately checked *before* the general
+            # destructuring decline below. That decline exists because the
+            # type of a plain element is not readable from the container's
+            # syntax, so it answers "cannot tell" and keeps the assert live --
+            # the safe direction. A starred target is not such a case: the
+            # list-wrapping is decided by the target syntax alone, and it is
+            # decidable. Reading the wrapped element's kind instead let a
+            # usable suppressor vouch for a bare list, certifying a dead
+            # assert as enforced.
+            #
+            # Executed on CPython 3.12.14:
+            #   *cs, = (contextlib.suppress(AssertionError),)  -> cs == [suppress]
+            #   a, *cs = (contextlib.suppress(...), 2)         -> cs == [2]
+            #   b, *c = (1, contextlib.suppress(...))         -> c == [suppress]
+            # and in all three `hasattr(cs, "__enter__")` is False.
+            kinds.add("list")
+            continue
         if _binds_element_of(statement, name):
             # `cs, other = (contextlib.nullcontext(), 2)` binds `cs` to the
             # tuple's *first element*, not to the tuple. Reading the right-hand
@@ -3660,24 +5513,20 @@ def _module_stores(name, module):
     rather than declined.
 
     That conservatism is not new to the module path. The function-scope walk
-    already answers the identical shape the same way, because
-    :func:`_stores_of` is what drops conditional stores on *both* sides.
-    Given
+    answers the identical shape the same way, because :func:`_stores_of` is
+    what drops conditional stores on *both* sides, and both paths now run the
+    same ordered decline through
+    :func:`_carrier_may_have_been_superseded`. Lifting the shared
+    conservatism -- reading a conditional binding as settled -- would mean
+    changing :func:`_stores_of` for every rule at once, and is deliberately
+    not folded in here.
 
-        def outer(...):
-            import os as cs
-            if flag:
-                cs = contextlib.nullcontext()
-            else:
-                cs = contextlib.nullcontext()
-            with cs: ...
-
-    the function path keeps the unconditional carrier and answers ``defeated``
-    on master, before this rule existed. The module path now agrees with it
-    rather than inventing a stricter policy for one scope only. Lifting the
-    shared conservatism -- reading a conditional binding as settled -- would
-    mean changing :func:`_stores_of` for every rule at once, and is
-    deliberately not folded in here.
+    #388 is what made that agreement real rather than aspirational. This
+    decline was written for the module path only, and the function path had no
+    equivalent, so a function-scope carrier that a later conditional store
+    may have superseded went stale and answered ``defeated`` on a live assert.
+    The two scopes now call one helper, so a future change to the ordering
+    test cannot reach one without reaching the other.
 
     A *conditional non-carrier* store is the one case where dropping it is
     not safe here, and it is handled separately. A store nested in a block may
@@ -3726,35 +5575,10 @@ def _module_stores(name, module):
         for statement, _, _ in entries
     }
     name_entries = bindings.get(name)
-    if name_entries:
-        # #359. `_stores_of` keeps only unconditional stores, so a carrier
-        # that is unconditional survives a *conditional* non-carrier store
-        # that follows it. That store may have run and replaced the carrier
-        # with an enterable value, in which case the carrier is stale and
-        # answering from it would drop a live assert. When that happens the
-        # value is genuinely undecidable, so decline rather than guess.
-        #
-        # `except ... as cs:` is excluded because it *unbinds* rather than
-        # supersedes: CPython deletes the name when the handler exits, so the
-        # earlier carrier is what remains in force. `_stores_of` makes the same
-        # exception for the same reason, and without it here a try/except that
-        # merely mentions the name would flip a correct `defeated` to
-        # `enforced`.
-        carrier_orders = [
-            orders[id(statement)]
-            for statement, value, conditional in name_entries
-            if not conditional and isinstance(value, str)
-        ]
-        if carrier_orders:
-            last_carrier = max(carrier_orders)
-            if any(
-                conditional
-                and not isinstance(value, str)
-                and not isinstance(statement, ast.ExceptHandler)
-                and orders[id(statement)] > last_carrier
-                for statement, value, conditional in name_entries
-            ):
-                return None
+    if name_entries and _carrier_may_have_been_superseded(
+        name_entries, orders, None, _bound_names(module, module), module, name
+    ):
+        return None
     by_index = {"bindings": bindings, "orders": orders}
     index = max(orders.values(), default=-1) + 1
     return _stores_of(name, by_index, index, module)
@@ -3790,6 +5614,1983 @@ def _binds_element_of(statement, name):
         isinstance(target, (ast.Tuple, ast.List)) and name in _store_target_names([target])
         for target in statement.targets
     )
+
+
+def _target_is_bare_name(statement, name):
+    """Does ``name`` receive this assignment's whole right-hand side?
+
+    The complement of :func:`_binds_element_of`, asked per target rather than
+    per statement. A chained assignment can mix the two spellings in one
+    statement:
+
+        cs = (other, x) = (helper, 1)
+
+    Here ``cs`` is a bare target and receives the whole tuple, while ``other``
+    and ``x`` receive elements of it. Deciding the statement once -- "this is a
+    destructuring assignment" -- is wrong for ``cs`` in both halves of that
+    example, and reading the right-hand side's type for ``cs`` is right.
+
+    Only ``ast.Assign`` carries several targets, so any other store form binds
+    its name the ordinary way and answers ``True``.
+    """
+    if not isinstance(statement, ast.Assign):
+        return True
+    return any(isinstance(target, ast.Name) and target.id == name for target in statement.targets)
+
+
+def _binds_a_starred_name(statement, name):
+    """Is ``name`` a starred target, so unpacking pins it to a list?
+
+    ``*cs, = (helper,)`` and ``first, *cs = pair`` both build a list for ``cs``
+    whatever the elements are, so the name cannot hold a context manager
+    afterwards. :func:`_literal_runtime_type` reads the ``ast.Starred`` that
+    records this as ``"list"`` for the ordinary entry rule; this is the same
+    question asked about the target rather than the value, because
+    :func:`_store_may_bind_enterable` has to know it *before* it decides
+    whether the element type is readable at all.
+    """
+    if not isinstance(statement, ast.Assign):
+        return False
+
+    def starred(node):
+        if isinstance(node, ast.Starred):
+            return name in _store_target_names([node.value])
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return any(starred(element) for element in node.elts)
+        return False
+
+    return any(starred(target) for target in statement.targets)
+
+
+def _element_kind_readable_from(statement, value, name):
+    """The type ``name`` receives from a destructuring of a literal container.
+
+    The complement of the "element is unreadable" rule in
+    :func:`_store_may_bind_enterable`. When the right-hand side is a literal
+    container *of literals*, the element this target receives is readable, and
+    declining it reports a dead header as live:
+
+        if flag:
+            cs, other = (None, 1)
+
+    ``cs`` receives ``None``. ``with cs:`` raises ``TypeError`` on both paths,
+    so the assert is dead, but the unreadable-element rule declined and
+    reported it live.
+
+    The target is walked in lockstep with the container's elements, because
+    that is what Python's unpacking does. A star target breaks the lockstep
+    and is answered by :func:`_binds_a_starred_name` before this is reached.
+
+    Returns the element's type name, or ``None`` when the element is not
+    statically readable -- an unreadable element falls back to the caller's
+    "possibly enterable" rule, which is the safe direction.
+    """
+    if not isinstance(statement, ast.Assign) or not isinstance(value, (ast.Tuple, ast.List)):
+        return None
+    elements = list(value.elts)
+    for target in statement.targets:
+        kind = _pattern_kind(target, elements)
+        if kind is not None and _pattern_binds_name(target, name):
+            return kind
+    return None
+
+
+def _pattern_binds_name(target, name):
+    """Does this assignment target list bind ``name``, however deeply nested?"""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_pattern_binds_name(element, name) for element in target.elts)
+    if isinstance(target, ast.Starred):
+        return _pattern_binds_name(target.value, name)
+    return False
+
+
+def _pattern_kind(target, elements):
+    """The type ``target`` receives from ``elements``, or ``None`` if unreadable.
+
+    Walks the assignment pattern in lockstep with the right-hand side's
+    elements, because that is what Python's unpacking does. A star consumes a
+    variable-length run and breaks the lockstep, so it answers ``None`` and is
+    left to :func:`_binds_a_starred_name`. A pattern that runs out of elements
+    raises at runtime, so the verdict is not readable either.
+    """
+    if isinstance(target, ast.Starred):
+        return None
+    if isinstance(target, (ast.Tuple, ast.List)):
+        if any(_pattern_kind(element, elements) is None for element in target.elts):
+            return None
+        consumed = len(target.elts)
+        if consumed > len(elements):
+            return None
+        return "tuple" if isinstance(target, ast.Tuple) else "list"
+    if isinstance(target, ast.Name):
+        return _literal_runtime_type(elements[0]) if elements else None
+    return None
+
+
+def _statement_never_runs(statement, function):
+    """Is this store written inside a branch that provably never executes?
+
+    ``if False: cs = nullcontext()`` never runs its body, so a carrier written
+    earlier is still the settled value and the header still raises. Reading the
+    store as a possible supersession declines the header and reports a dead
+    assert as live, which is the damaging direction.
+
+    The test is the loop spelling and the conjunction spelling of the
+    ``if False:`` defeat the module already closes elsewhere:
+    :func:`_falsy_literal` for a literal-false condition, and
+    :func:`_is_empty_literal_iterable` for a loop over a container that yields
+    nothing. A conjunction counts as false when *any* operand is a literal
+    false, because ``flag and False`` is false for every value of ``flag``.
+
+    Only shapes whose non-execution is decidable from the syntax are matched.
+    A condition this cannot read is treated as possibly-true, which is the
+    conservative direction.
+    """
+    # The recorded statement is the store itself -- the `cs = ...` assignment
+    # inside the branch -- not the branch that encloses it, so the enclosing
+    # blocks are found by walking *out* to the function and asking which of its
+    # bodies contain this statement.
+    for enclosing in _enclosing_blocks(statement, function):
+        if isinstance(enclosing, ast.If) and _condition_is_never_true(enclosing.test, function):
+            return True
+        if isinstance(enclosing, ast.While) and _condition_is_never_true(enclosing.test, function):
+            # `while False:` is the loop spelling of `if False:` -- the body
+            # never runs, so it is never the last element either.
+            return True
+        if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
+            enclosing.iter
+        ):
+            return True
+    for node in ast.walk(statement):
+        if isinstance(node, ast.If) and _condition_is_never_true(node.test, function):
+            return True
+        if isinstance(node, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(node.iter):
+            return True
+    return False
+
+
+def _enclosing_blocks(statement, function):
+    """Every block node between ``statement`` and the top of ``function``."""
+    if function is None:
+        return ()
+    found = []
+    for node in ast.walk(function):
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith)):
+            for child in ast.iter_child_nodes(node):
+                if child is statement or _contains(child, statement):
+                    found.append(node)
+                    break
+    return found
+
+
+def _condition_is_never_true(node, function=None):
+    """A condition that is false for every binding, so its body never runs.
+
+    ``function`` is the scope the condition appears in. It is not optional
+    decoration: the ``set()``/``list()`` spelling of a falsy condition is only
+    falsy while the name reaches the *builtin* constructor, so a function that
+    rebinds the name locally -- ``def set(): return nullcontext()`` -- makes
+    ``if set():`` a condition this cannot decide. Without the scope threaded
+    in, that call was read as the builtin and a body CPython enters was
+    reported as never running.
+    """
+    if _falsy_literal(node, function):
+        return True
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        # `a and b` is false when *any* operand is false, so one literal-false
+        # operand settles it. `a or b` is the opposite: `flag or False` is
+        # true whenever `flag` is, so a false operand there says nothing and
+        # the body can still run. Reading both the same way made
+        # `if flag or False: cs = nullcontext()` report a live header dead.
+        return any(_condition_is_never_true(value, function) for value in node.values)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        # `a or b` is true when *any* operand is true, so it is never-true
+        # only when **every** operand is false. `flag or False` has a live
+        # operand and stays reachable; `(False or ())` has none and never
+        # runs its body. Reading an `or` like an `and` missed the second case
+        # and reported a genuinely dead header live.
+        return all(_condition_is_never_true(value, function) for value in node.values)
+    return False
+
+
+def _condition_is_always_true(node, function=None):
+    """A condition that is true for every binding, so its body always runs.
+
+    This is the mirror of :func:`_condition_is_never_true`, and it matters for
+    the same reason. A store inside ``if True:`` is written as a conditional
+    one, but the body runs on every import, so the store settles the name just
+    as an unconditional store would:
+
+        if True:
+            cs = list()             # runs on every import; `cs` is a `list`
+            def list(): return nullcontext()
+
+    Read as genuinely conditional, the ``cs = list()`` above settled nothing
+        and the name was left to a later store, which reported the `TypeError`
+    CPython raises as a live header. Reading it as conditional is only right
+        when the condition may or may not hold, so the always-true case has to
+        be told apart rather than left to the conservative default.
+
+    Only shapes decidable from the syntax are matched, exactly as in the
+    never-true direction. A condition this cannot read is *not* always-true,
+    which keeps the caller's existing treatment of it.
+    """
+    if _is_literal_true(node):
+        return True
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        # `a or b` is true whenever *any* operand is, so one literal-true
+        # operand settles it. The `and` case is the opposite: `flag and True`
+        # is false whenever `flag` is, so a true operand there says nothing.
+        return any(_condition_is_always_true(value, function) for value in node.values)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        return all(_condition_is_always_true(value, function) for value in node.values)
+    return False
+
+
+def _statement_always_runs(statement, function):
+    """Is this store written inside a branch that provably always executes?
+
+    The counterpart to :func:`_statement_never_runs`, used for the same
+    purpose from the other side: a store that always runs settles the name, so
+    it belongs with the unconditional ones in :func:`_stores_of` rather than
+    being left to a later conditional store that may never have written.
+
+    *Every* block between the store and the top of the function has to run
+    every time, not just the innermost one. A literal-true branch nested inside
+    a loop that never iterates never runs either:
+
+        cs = nullcontext()
+        for _ in ():
+            if True:
+                cs = list()          # the `if` is true, but the loop never runs
+
+    Reading only the `if` settled the name on the `cs = list()` above, and the
+    `nullcontext` that was in force was never reached -- a `TypeError`-raising
+    header reported DEAD where CPython enters it. The same applies to a
+    `while False:` body and to an `else` arm, which runs exactly when its `if`
+    does *not*.
+
+    #403. The `else`/`elif` case is subtler than the `while False:` one,
+    because an arm that always runs is the *settling* direction rather than the
+    never-runs one, and it was the shape that stayed wrong after the plain
+    `if True:` spelling was fixed:
+
+        if False:
+            pass
+        elif True:
+            cs = list()          # the arm always runs, so this settles `cs`
+
+    `_is_always_true_arm` reads that, and the unreachable-arm check at the end
+    still subtracts the mirror-image shape (`if True: ... else: <store>`,
+    which never runs), so the two directions stay distinct.
+    """
+    if function is None:
+        return False
+    blocks = _enclosing_blocks(statement, function)
+    # #403. An always-true **arm** counts from this side as well as an
+    # always-true body: `if False: ... elif True: <store>` runs the store on
+    # every call, exactly as `if True: <store>` does. Both spellings settle the
+    # name, so both belong with the unconditional stores in `_stores_of`.
+    if not any(
+        _is_always_true_branch(block, statement, function)
+        or _is_always_true_arm(block, statement, function)
+        for block in blocks
+    ):
+        # The store is not inside an always-true branch at all, so there is
+        # nothing to claim. This is the ordinary case and the cheap exit.
+        return False
+    # It is inside one, so every other block on the path has to run every time
+    # as well. A never-true `if`, a loop over an empty literal, a `while False`
+    # and an `else` beside a literal-true test are all read by the same
+    # never-runs question, which is the safe direction: the store is left
+    # conditional, so whatever the enclosing scope really does still decides.
+    # #403. `_is_always_true_arm` counts here for the same reason it counts in
+    # the `any` above: an always-run arm settles the name just as an
+    # always-true body does, so the `if False:` link that makes the arm
+    # reachable must not veto it.
+    return all(
+        (
+            _is_always_true_branch(block, statement, function)
+            or _is_always_true_arm(block, statement, function)
+            if isinstance(block, ast.If)
+            else _block_always_reaches_store(block, statement, function)
+        )
+        for block in blocks
+    ) and not any(_statement_in_unreachable_arm(block, statement, function) for block in blocks)
+
+
+def _block_always_reaches_store(block, statement, function):
+    """Does ``block`` reach ``statement`` on every call, or only on some?
+
+    #435. The always-true-branch rule has to survive two very different
+    enclosings, and both of them are *conditional* in the same way: the arm
+    holding the store is entered only when some enclosing test comes out a
+    particular way, and that is decided per call.
+
+    The first is a literal-true `elif` link (#429). The `elif True:` has a
+    literal-true test of its own, so the enclosing block reads as
+    always-true, but the link is entered only when every test above it failed.
+    The second is a plain conditional `if` with a literal-true arm nested
+    inside it:
+
+        cs = contextlib.nullcontext()
+        if not x:
+            if True:
+                cs = list()
+
+    Here the `if True:` really does run whenever it is entered -- but it is
+    entered only when `not x` is truthy. With `x = 1` the outer arm never
+    runs, `cs` is still the `nullcontext`, and `with cs:` enters and the
+    assert fires.
+
+    Both were reported DEAD by the same mistake, and it is worth naming
+    precisely: the rule had only two answers -- "this block always runs" and
+    "this block never runs" -- and treated *anything that is not never-runs*
+    as always-runs. A branch taken on some calls and skipped on others is
+    neither, and it fell into the gap. Answering False for a block whose
+    reachability depends on a per-call test is the safe direction: the store
+    stays conditional, the earlier store remains in force, and whatever the
+    enclosing scope really does still decides the header.
+
+    A `while True:` and a loop over a non-empty literal are read as always
+    running, which is what lets a store inside one settle the name. That is
+    the pre-existing treatment and it is left alone here; only the
+    conditional-`if` gap is closed.
+    """
+    if _is_always_true_branch(block, statement, function):
+        return True
+    if isinstance(block, ast.If) and _condition_is_never_true(block.test, function):
+        # Runs on no call, so it cannot be the reason a store always runs.
+        return False
+    if _elif_link_is_conditional(block, statement, function):
+        # #429. Entered only when every test above the link failed.
+        return False
+    if (
+        isinstance(block, ast.If)
+        and _contains_any(block.body, statement)
+        and not _condition_is_always_true(block.test, function)
+    ):
+        # #435. A conditional `if` holding the store in its own body: taken
+        # when its test is truthy and skipped when it is not, so the store
+        # settles the name on some calls only.
+        return False
+    return not _block_never_runs(block, function)
+
+
+def _is_always_true_branch(block, statement, function):
+    """Is ``block`` an always-true ``if`` whose *body* holds ``statement``?
+
+    "Always-true" is about the test alone, which is enough only when the body
+    is reached on every call. That is true of a standalone ``if True:`` and
+    false of an ``elif`` link: an ``elif`` body runs only when every test above
+    it in the chain failed, so its own always-true test says nothing about
+    whether it is ever entered (#416):
+
+        from contextlib import nullcontext
+
+        def outer(x):
+            cs = nullcontext()
+            if x:
+                pass
+            elif True:
+                cs = list()      # reached only when x is FALSE
+            with cs:
+                assert x != 1    # CPython, x=1: fires
+
+    The ``elif True:`` link satisfies the test on its own, so the store was
+    promoted to an unconditional one and the header answered ``defeated`` --
+    a live contract dropped. The store settles the name only when ``x`` is
+    false, so the header is undecidable and must not be settled.
+
+    :func:`_elif_link_is_reached` supplies that missing question, and it is
+    the same reachability the ``_always_true_arm_within`` chain walk already
+    models for the arm case.
+    """
+    return (
+        isinstance(block, ast.If)
+        and _condition_is_always_true(block.test, function)
+        and _contains_any(block.body, statement)
+        and _elif_link_is_reached(block, function)
+    )
+
+
+def _elif_link_is_conditional(block, statement, function):
+    """Is ``block`` an ``elif`` link, reached only when every test above failed?
+
+    #429. An ``elif`` is not its own top-level statement: it is an ``ast.If``
+    nested inside the *previous* ``if``'s ``orelse``. So
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        elif True:
+            cs = list()
+
+    hands the store to two enclosing blocks, and the inner one has a
+    literal-true test. :func:`_is_always_true_branch` reads that inner block
+    on its own and answers "yes, the store always runs" -- but the link is
+    entered only when ``if x:`` is *false*, and ``x`` is a parameter. The
+    store therefore settles the name on some calls only, while the rule
+    treated it as settling it on all of them, dropped the earlier
+    ``nullcontext`` from :func:`_stores_of`, and reported the ``with cs:``
+    header DEAD. CPython enters that header: with ``x = 1`` the ``if x:``
+    arm runs, the ``elif`` body never does, ``cs`` is still the
+    ``nullcontext``, and the assert fires.
+
+    A literal-true *first* ``if`` really is unconditional, and must keep being
+    read that way -- that is the ``if True:`` row this rule exists to serve.
+    The distinction is exactly whether the literal-true test is the first link
+    in the chain or a later one.
+    """
+    if function is None or not isinstance(block, ast.If):
+        return False
+    # The store has to sit somewhere inside this link for the question to mean
+    # anything: either its own body, or its `orelse` for the `else` tail.
+    if not _contains_any(block.body, statement) and not _contains_any(block.orelse, statement):
+        return False
+    # An `elif` link is an `ast.If` that is an entry of an enclosing
+    # `If.orelse`. Its own test being literal-true says nothing about whether
+    # the link is *reached*: that is decided by every test above it.
+    #
+    # #435. This still only reads the *immediate* parent, so it misses a
+    # store nested a further level down:
+    #
+    #     cs = contextlib.nullcontext()
+    #     if x:
+    #         pass
+    #     elif True:
+    #         if True:
+    #             cs = list()
+    #
+    # The nested `if True:` sees the literal-true `elif True:` as its only
+    # link parent and concludes the store is unconditional. The `elif True:`
+    # link is itself entered only when the outer `if x:` is false, so the
+    # store is still conditional. Widening this walk to the whole chain was
+    # measured and changed no verdict in 2368 generated shapes, because the
+    # enclosing `if x:` is caught by the conditional-branch rule in
+    # :func:`_block_always_reaches_store` either way -- so the one-level walk
+    # is kept and the gap is closed there instead.
+    for parent in _enclosing_blocks(block, function):
+        if not isinstance(parent, ast.If):
+            continue
+        if not any(child is block for child in parent.orelse):
+            continue
+        if not _condition_is_always_true(parent.test, function):
+            return True
+    return False
+
+
+def _block_never_runs(block, function):
+    """Is ``block`` a construct that provably never reaches its body?"""
+    if isinstance(block, ast.If):
+        return _condition_is_never_true(block.test, function)
+    if isinstance(block, ast.While):
+        return _condition_is_never_true(block.test, function)
+    if isinstance(block, (ast.For, ast.AsyncFor)):
+        return (
+            _is_empty_literal_iterable(block.iter)
+            or _is_empty_literal_string(block.iter)
+            or _is_zero_argument_empty_container(block.iter, function)
+        )
+    return False
+
+
+def _statement_in_unreachable_arm(block, statement, function=None):
+    """Is ``statement`` in an arm of ``block`` that can never be taken?
+
+    An ``else`` arm runs exactly when its ``if`` does **not**, so a store
+    written in the ``else`` of an always-true test never runs:
+
+        if True:
+            if True:
+                pass
+            else:
+                cs = list()          # the inner `if` is true, so this is dead
+
+    The condition itself is true, which is what made the enclosing block look
+    like an always-true branch, and the dead arm was then read as a store that
+    always runs. `cs` stayed the `nullcontext` it was before the branch, so a
+    header CPython enters came back DEAD.
+
+    ``function`` is the scope this condition appears in, for the same reason
+    :func:`_condition_is_always_true` takes it: the call spelling of a
+    literal is only that literal while the name reaches the *builtin*, so a
+    scope that rebinds it keeps the arm undecided.
+
+    An ``elif`` needs no walk of its own. It is an ``else`` whose body is
+    another ``if``, so a chain of always-true tests leaves every ``elif``
+    dead, and the check below already covers everything under it:
+
+        if True:
+            pass
+        elif True:
+            cs = list()          # reached only when the test above is false
+
+    An earlier version recursed into that nested ``if`` to read its own test,
+    which was dead code: the direct check subsumes every ``elif`` body. The
+    recursion was also unsound, because it fell back on the *parent's* test
+    and so labelled a reachable `elif False:` arm dead.
+
+    The always-true test changes the verdict, though not in a way any current
+    row can pin. An ``else`` whose own test cannot be decided sits inside an
+    always-true branch:
+
+        cs = nullcontext()
+        if True:
+            if os.name:
+                pass
+            else:
+                cs = list()
+
+    Dropping the test reports that arm dead, which leaves the store
+    undecided; keeping it settles the store. **Neither answer is correct** --
+    the arm is not provably dead, and the module-carrier limit means the tool
+    reports a header CPython enters as DEAD either way. The test is kept
+    because "an undecidable test is not a dead arm" is the true statement, and
+    because answering `True` for *any* ``if`` would additionally claim the arm
+    of a never-true test is dead, which is wrong for a different reason.
+    """
+    if not isinstance(block, ast.If) or not _condition_is_always_true(block.test, function):
+        # A non-`if`, or an `if` that can fail: its whole `else` arm is a
+        # runnable one and there is nothing dead to report. See above: an
+        # undecidable test lands here too, and has to.
+        return False
+    return _contains_any(block.orelse, statement)
+
+
+def _is_empty_literal_string(node):
+    """Is this iterable a string literal that is empty, so the loop never runs?
+
+    ``for _ in "":`` is the same never-run body as ``for _ in ():`` -- the
+    string has no elements to yield -- but it is an ``ast.Constant``, not one
+    of the container literals :func:`_is_empty_literal_iterable` matches, so
+    that helper answered `False` and the body was read as running. ``"a"`` has
+    one element, so it is *not* empty and its body does run.
+    """
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and not node.value
+
+
+def _is_bare_name(target, name):
+    """Is this loop target the plain name ``name``, with no unpacking?"""
+    return isinstance(target, ast.Name) and target.id == name
+
+
+def _loop_last_element_kind(iterable):
+    """The type of the last element a literal loop iterable yields, or ``None``.
+
+    ``for cs in (None,):`` yields ``None``, so the name holds ``None`` and
+    cannot be entered. The **last** element is the one in force once the loop
+    finishes, because the body may reassign the name on every pass: reading the
+    first element instead gets ``for cs in (nullcontext(), None):`` backwards,
+    and that error is in the damaging direction -- it reports a live assert
+    dead. So the last element decides, and ``for cs in (None, nullcontext()):``
+    correctly stays enterable.
+
+    An empty or non-literal iterable answers ``None``, which leaves the
+    caller's "possibly enterable" rule in force -- the safe direction.
+    """
+    if not isinstance(iterable, (ast.Tuple, ast.List)) or not iterable.elts:
+        # A set literal is left out on purpose: `{nullcontext(), None}` has no
+        # readable order, so which element the loop leaves bound is not
+        # decidable from the syntax. Answering the first element would report
+        # `for cs in {nullcontext(), None}:` dead, which is the damaging
+        # direction. `for cs in set():` yields nothing and is already covered
+        # by `_is_empty_literal_iterable`'s sibling case here.
+        return None
+    return _literal_runtime_type(iterable.elts[-1])
+
+
+def _loop_body_rebinds_the_name(statement, name):
+    """Does the loop body assign ``name``, so the yield is not what survives?
+
+    A ``for`` target is re-bound on every pass, and the *body* runs after the
+    assignment. If the body assigns the name again, the value left in force
+    once the loop finishes is whatever the last pass's body stored, and the
+    iterable's final element says nothing about it.
+
+    Only the loop's own body counts, and nested scopes are skipped for the
+    same reason :func:`_own_scope_bindings` skips them: a name bound inside a
+    nested ``def`` is not the enclosing function's variable.
+    """
+    for node in statement.body:
+        if _names_bound_in_scope(node, name):
+            return True
+        if _nested_rebinds(node, name):
+            return True
+    return False
+
+
+def _collapse_loop_targets_into_bodies(entries):
+    """Drop a loop target when its own body is the store that answers.
+
+    A ``for cs in ...:`` target and an assignment to ``cs`` in that loop's
+    body are not two competing bindings: the body runs *after* the target on
+    every pass, so whatever the body stores is the value left behind and the
+    target's element is gone. Returning the target as one of two competitors
+    made
+
+        import os as cs
+        if flag:
+            for cs in (None,):
+                cs = nullcontext()
+
+    ambiguous and reported a live header dead, where the name really is a
+    context manager whenever the loop runs.
+
+    The collapse is only sound when the body's store is what the caller will
+    then answer from, and that requires the body's **last** rebind to be one
+    this can read. A body whose final rebind is itself unreadable -- a second
+    loop over something undecidable, a ``match`` capture -- leaves the value
+    genuinely undecided, so the target stays and the two competitors make the
+    answer ambiguous, which is the safe direction.
+
+    Readable here means the same thing it means everywhere else: the body ends
+    in a value this module can pin down by type (including a carrier and the
+    builtin constructors, both of which :func:`_store_may_bind_enterable`
+    reads). A suppressor call is the important case -- it *is* readable, so
+    the collapse is kept and the suppressor survives to answer the header,
+    which is exactly what a version that collapsed unconditionally and then
+    answered from the retired target got wrong.
+
+    A call that is *neither* a pinned type nor a resolved suppressor also
+    counts as readable, and it has to: ``for cs in (None,): cs =
+    nullcontext()`` leaves the name holding a real context manager on the path
+    where the loop runs, so the target is definitively gone and the body is
+    the only binding. Refusing to collapse such a store -- because a call has
+    no pinned *type* -- left the target and the body competing, made the name
+    ambiguous, and read the ambiguity as a possible suppressor, which retires
+    a live header. That is the original #388 regression, so "has no readable
+    type" cannot mean "not readable" here.
+    """
+    rebinding_targets = {
+        id(entry[0].target): entry
+        for entry in entries
+        if isinstance(entry[0], (ast.For, ast.AsyncFor))
+        and isinstance(entry[0].target, ast.Name)
+        and _loop_body_rebinds_the_name(entry[0], entry[0].target.id)
+    }
+    if not rebinding_targets:
+        return entries, False
+    kept = []
+    for entry in entries:
+        statement = entry[0]
+        if not (
+            isinstance(statement, (ast.For, ast.AsyncFor))
+            and id(statement.target) in rebinding_targets
+        ):
+            kept.append(entry)
+            continue
+        name = statement.target.id
+        if _loop_body_last_store_is_readable(statement, name):
+            continue
+        kept.append(entry)
+    return kept, len(kept) != len(entries)
+
+
+def _loop_body_last_store_is_readable(loop, name):
+    """Is the final store this loop's body makes to ``name`` one we can read?
+
+    The body's statements are scanned in source order and the last binding of
+    ``name`` wins, matching the way the binding table itself resolves "which
+    store ran last".
+
+    Only two shapes are *not* readable, and both are shapes whose surviving
+    value depends on a decision this function would have to make twice:
+
+    * a ``match`` capture, whose value is only bound when the clause is
+      selected at runtime;
+    * a nested ``for`` target, which recurses through this same question and
+      so defers rather than answering.
+
+    Everything else -- a literal, a carrier, a builtin constructor, an
+    arbitrary call, even a ``del`` -- leaves the target definitively gone,
+    because the body ran after it on every pass and rebinding is what remains.
+    Restricting this to stores whose *type* can be pinned was the mistake that
+    regressed #388: ``cs = nullcontext()`` has no pinned type, so refusing to
+    collapse it kept the loop target in the competing set, made the name
+    ambiguous, and read that ambiguity as a possible suppressor.
+    """
+    last = None
+    for statement in _statements_binding_name(loop.body, name):
+        last = statement
+    if last is None:
+        return False
+    if isinstance(last, (ast.For, ast.AsyncFor)):
+        # A nested loop rebinds the name under the same question this function
+        # answers, so it is deferred rather than answered here. The outer
+        # target stays in the competing set, which is the safe direction: two
+        # candidates read as ambiguous, and ambiguous keeps the name a
+        # possible suppressor instead of retiring one.
+        return _loop_body_last_store_is_readable(last, name)
+    # A `match` capture is the one shape whose value is only bound when the
+    # clause is selected at runtime, so it is the one body store that is not
+    # readable here.
+    return not isinstance(last, (ast.Match, ast.MatchAs, ast.MatchStar))
+
+
+def _statements_binding_name(body, name):
+    """Statements in ``body`` that bind ``name``, in source order.
+
+    Nested scopes are skipped for the same reason
+    :func:`_names_bound_in_scope` skips them: a ``def`` inside the loop body
+    binds its own names, not the enclosing function's. Blocks *within* the body
+    are still walked, because a store inside an ``if`` in the body is a
+    rebind that happens on some pass and the last one written is the one that
+    decides the question.
+    """
+    found = []
+    stack = list(reversed(body))
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if any(_names_bound_by_statement(current, name)):
+            found.append(current)
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+    return found
+
+
+def _names_bound_in_scope(node, name):
+    """Every statement under ``node`` that binds ``name``, nested scopes aside."""
+    found = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if any(_names_bound_by_statement(current, name)):
+            found.append(current)
+        stack.extend(ast.iter_child_nodes(current))
+    return found
+
+
+def _nested_rebinds(node, name):
+    """Does ``node`` contain a binding of ``name`` in a nested block of its own?"""
+    for statement in getattr(node, "body", []) or []:
+        if _names_bound_in_scope(statement, name):
+            return True
+    for handler in getattr(node, "handlers", []) or []:
+        if _names_bound_in_scope(handler, name):
+            return True
+    for case in getattr(node, "cases", []) or []:
+        if _names_bound_in_scope(case, name):
+            return True
+    return False
+
+
+def _store_may_bind_enterable(entry, name, function=None, starred_asked=False):
+    """Could this store leave ``name`` holding something a ``with`` accepts?
+
+    The narrow companion to the stale-carrier guard in :func:`_stores_of`.
+    That guard asks whether a later conditional store makes the header's value
+    undecidable, and the honest answer is only "yes" when the store could have
+    put something *enterable* there. A store pinned to a type that cannot be
+    entered settles the name just as surely as leaving it alone, because every
+    path through the header then raises before the assert is evaluated.
+
+    ``name`` is the name the header under test reads, because whether a store
+    pins that name is a question about *that name's own target*. A statement
+    can bind several names at once and, in a chained assignment, can mix a bare
+    target with a destructured one; the answer differs per target.
+
+    The same reading the literal-type rule already uses is applied, so the two
+    cannot disagree about a value:
+
+    * a *carrier* (``import os as cs``, ``def cs``, ``class cs``) is a module,
+      a function or a type -- none of which can be entered;
+    * a value-less store is `with ... as cs:`, `del cs` or `except E as cs:`,
+      none of which leaves a usable manager bound;
+    * a literal is read through :func:`_literal_runtime_type`; a literal whose
+      type is in :data:`NON_CONTEXT_MANAGER_TYPES` cannot be entered;
+    * a **starred** target binds a list whatever the elements are. This is a
+      property of the target, not of the value, so it is decided first and
+      without reading the right-hand side at all;
+    * any other non-bare target -- a tuple or list target -- binds an *element*
+      of the right-hand side, and the element's type is not readable from the
+      container's syntax;
+    * a call, an attribute, a subscript, a loop target or a `match` capture is
+      **not** read. The value is whatever the call returns or the loop yields,
+      which the syntax does not fix -- `nullcontext()` is a real context
+      manager and the other calls may be too. Reading those as unenterable
+      would drop a live assert, so they are reported as possibly-enterable and
+      the caller declines, which is the safe direction.
+
+    Direction: reporting a store as *not* possibly-enterable keeps a correct
+    dead verdict; reporting it as possibly-enterable makes the caller decline.
+    Only the second is the damaging one, so an unreadable value is always
+    resolved toward "possibly enterable".
+    """
+    statement, value, _conditional = entry
+    if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+        value = statement.value
+    elif isinstance(statement, (ast.For, ast.AsyncFor)) and value is UNREADABLE_VALUE:
+        value = None
+    if isinstance(value, str):
+        # A carrier: a module, a function or a class, none enterable.
+        return False
+    constructor = _builtin_constructor_kind(value, function)
+    if constructor is not None:
+        # `cs = int()` is decided by the callee, not by the call. Reading every
+        # call as possibly-enterable is right for `nullcontext()` and wrong for
+        # the builtin constructors, so a header the head reported live where
+        # CPython raises `TypeError` on both paths is recovered here.
+        if constructor is _RAISING_CONSTRUCTOR:
+            # `range()` raises before binding, so this store never happens and
+            # the carrier stays in force. Reporting it possibly-enterable
+            # would decline a header CPython settles on the carrier.
+            return False
+        return constructor not in NON_CONTEXT_MANAGER_TYPES
+    if not starred_asked and _binds_a_starred_name(statement, name):
+        # A starred target pins the name to a **list** whatever the elements
+        # are, so the right-hand side does not have to be readable at all:
+        # `*cs, = (helper,)`, `*cs, = helper` and `first, *cs = pair` all leave
+        # `cs` holding a list, which cannot be entered.
+        #
+        # This has to be asked *before* the readable-literal checks below.
+        # Only the first of those is a tuple literal, so a version that tested
+        # "is this a literal?" first answered "no" for `*cs, = helper` and for
+        # every `= pair` form, reported the store as possibly-enterable, and
+        # made the caller decline -- four more false-live regressions against a
+        # master that answers them correctly. The type is a property of the
+        # target, not of the value.
+        return False
+    if value is None:
+        # `with ... as cs:`, `del cs`, `except E as cs:` and a loop target.
+        # A loop target binds the next element of an iterable this rule cannot
+        # read, so it is declined as unreadable below rather than assumed.
+        if isinstance(statement, (ast.For, ast.AsyncFor)):
+            # A loop over a *literal* container yields a literal element, so
+            # `for cs in (None,):` binds `None` and `with cs:` raises before
+            # the assert. Declining every loop target left this one reported
+            # live where CPython raises on both paths. The **last** element
+            # decides, not the first: the body may rebind the name on each
+            # pass, so the one in force afterwards is the final yield, and
+            # reading the first would report `for cs in (nullcontext(), None):`
+            # live.
+            # An empty *builtin* container yields nothing, so the name is never
+            # bound at all and the header raises `UnboundLocalError`; the
+            # carrier never gets the chance to be superseded either way.
+            #
+            # Only the *no-argument* form is empty, for the same reason
+            # `_falsy_literal` requires it: `for cs in set([1]):` binds the
+            # element `1` and the loop runs once, so the name is very much
+            # bound. Reading the argument-bearing call as empty here reported
+            # a live header dead.
+            empty_builtin = _is_zero_argument_empty_container(statement.iter, function)
+            if _is_bare_name(statement.target, name) and empty_builtin:
+                # `for cs in set():` and `for cs in ():` iterate zero times, so
+                # the loop never binds the name. The carrier is untouched and
+                # the header still raises on entry.
+                return False
+            if _is_bare_name(statement.target, name):
+                if _loop_body_rebinds_the_name(statement, name):
+                    # The body assigns the name, so whatever it leaves on the
+                    # last pass is in force afterwards -- not the final yield.
+                    # `for cs in (None,): cs = nullcontext()` binds a real
+                    # context manager, so reading the iterable's last element
+                    # would report a live header dead. The body's store may be
+                    # any value, so the loop is declined as unreadable, which
+                    # keeps the header live.
+                    return True
+                element = _loop_last_element_kind(statement.iter)
+                if element is not None:
+                    return element not in NON_CONTEXT_MANAGER_TYPES
+            return True
+        return bool(isinstance(statement, ast.Match))
+    if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+        # A call is a call. `nullcontext()` returns a real context manager and
+        # must not be read as unenterable here.
+        return True
+    if isinstance(statement, ast.Assign) and not _target_is_bare_name(statement, name):
+        # A destructuring target: `cs, other = (...)` binds `cs` to one
+        # *element* of the right-hand side, and the element's type is not
+        # readable from the container's syntax. Reading the whole right-hand
+        # side's type would call the name a tuple and drop a live assert, so
+        # this is reported as possibly enterable and the caller declines.
+        #
+        # This is about *this name's* own target, not about the statement.
+        # A chained assignment mixes the two, and the two spellings are not
+        # equivalent:
+        #
+        #     *cs, = (helper,)              # `cs` is a list
+        #     cs = (other, x) = (helper, 1)  # `cs` is the whole RHS tuple
+        #
+        # The second is pinned non-enterable too, so declining it would replace
+        # a correct dead verdict with a false-live one; the direct `cs` target
+        # in a chain is a bare name and falls through to the literal reading
+        # below, which is right for it. Reading the statement as "destructuring
+        # happened" and returning early for both got that wrong in six
+        # fixtures. The starred half is answered above, before the literal
+        # checks, because it does not depend on the right-hand side at all.
+        element = _element_kind_readable_from(statement, value, name)
+        if element is not None:
+            return element not in NON_CONTEXT_MANAGER_TYPES
+        return True
+    kind = _literal_runtime_type(value)
+    if kind is None:
+        return True
+    return kind not in NON_CONTEXT_MANAGER_TYPES
+
+
+def _carrier_may_have_been_superseded(
+    entries, orders, index=None, bound=None, function=None, name=None
+):
+    """May a store a conditional binding performed have replaced the carrier?
+
+    #388. :func:`_stores_of` keeps only *unconditional* stores, because a
+    store nested in a block may not have run. That is the right default, but
+    it has one damaging consequence for a name that also carries a carrier:
+    an unconditional carrier survives a *conditional* non-carrier store that
+    follows it, so the stale carrier wins and the rule answers ``defeated``
+    from a value the name may no longer hold.
+
+    Given
+
+        def outer(x, flag, helper):
+            import os as cs                 # carrier: pins cs to module os
+            if flag:
+                cs = contextlib.nullcontext()   # may supersede the carrier
+            with cs:
+                assert x != 1               # FIRES: cs is a nullcontext
+
+    ``with cs:`` succeeds and the assert runs, so calling it defeated drops a
+    live pinned contract. When that happens the value is genuinely
+    undecidable -- the carrier runs first, the later store *may* replace it --
+    so the answer is to decline rather than guess.
+
+    The ordering test is what keeps this narrow. A conditional store *before*
+    the last carrier really is superseded by it and needs no special case, and
+    a carrier followed only by further carriers is decided by the last one.
+
+    `except ... as cs:` is excluded because it *unbinds* rather than
+    supersedes: CPython deletes the name when the handler exits, so the
+    earlier carrier is what remains in force. :func:`_stores_of` makes the same
+    exception for the same reason, and without it here a try/except that
+    merely mentions the name would flip a correct ``defeated`` to
+    ``enforced``.
+
+    ``del cs`` is excluded for the same reason, and the exclusion is what keeps
+    this rule from inventing a dead assert. A delete *unbinds* the name; it
+    never installs an enterable value in its place:
+
+        def outer(flag):
+            import os as cs
+            if flag:
+                del cs
+            with cs:            # never runs the body, on either path
+                assert False
+
+    With ``flag=False`` the carrier is still in force and the header raises
+    ``TypeError``; with ``flag=True`` CPython has deleted the name and the
+    header raises ``UnboundLocalError``. The assert is unreachable either way.
+    Counting the delete as a superseding store declines the header, and a
+    decline reports ``enforced`` -- so the delete would turn a *dead* assert
+    into a purportedly load-bearing one, the opposite error from the one this
+    rule exists to prevent. Reviewed as a blocking finding on #388.
+
+    The same reasoning settles the other forms that cannot leave an enterable
+    value, and settling them by *category* rather than one at a time is the
+    point. The question this predicate has to answer is not "is this store
+    conditional?" but **"can this store leave something enterable bound to
+    ``name``?"** Anything that cannot is excluded, because counting it would
+    decline the header and manufacture a dead assert.
+
+    ``bound`` and ``function`` are what let :func:`_may_bind_something_enterable`
+    answer the one category that is not decidable from the store node alone. A
+    ``with ... as cs:`` binds ``__enter__``'s return value, so *which* value
+    depends on the context expression, and that expression is only readable
+    with the import-alias map. ``function`` is the owning scope, needed for
+    the same reason ``_scope_body_nodes`` takes it: to tell a store that binds
+    *this* name from one that binds a nested scope's local of the same name.
+
+    ``index`` restricts the question to the stores that precede the queried
+    ``with`` header, so a later store cannot be read backwards into an earlier
+    one. It is ``None`` for the module path, where the header is evaluated
+    only after every module-level statement has run.
+    """
+    carriers = [
+        orders[id(statement)]
+        for statement, value, conditional in entries
+        if not conditional
+        and isinstance(value, str)
+        and (index is None or orders[id(statement)] <= index)
+    ]
+    if not carriers:
+        return False
+    last_carrier = max(carriers)
+    return any(
+        conditional
+        and _may_bind_something_enterable(statement, value, name, bound, function)
+        and not _statement_never_runs(statement, function)
+        and orders[id(statement)] > last_carrier
+        and (index is None or orders[id(statement)] <= index)
+        for statement, value, conditional in entries
+    )
+
+
+def _may_bind_something_enterable(statement, value, name=None, bound=None, function=None):
+    """Can this store leave a name bound to something ``with`` can enter?
+
+    #388. The decline in :func:`_carrier_may_have_been_superseded` is only
+    safe when the competing store genuinely might have replaced the carrier
+    with an *enterable* value. Counting a store that cannot would decline the
+    header, and a decline reports ``enforced`` -- so it would manufacture a
+    dead assert, the opposite error from the one the decline exists to
+    prevent.
+
+    Four families cannot, and each was measured against CPython 3.12.14 by
+    executing the header rather than by reasoning about it:
+
+    - ``except ... as cs:`` and ``del cs`` **unbind**. CPython deletes the
+      name, so the earlier carrier is what remains in force.
+    - A store inside a nested ``def``/``lambda``/``class`` body binds *that*
+      scope's local, not this function's name. This is the boundary
+      :func:`_scope_body_nodes` already draws elsewhere in this module.
+    - A ``with ... as cs:`` whose context expression is a **known
+      ``None``-returning** context manager. See
+      :func:`_with_binds_a_known_non_enterable`.
+    - ``*cs, = (...)`` builds a **list**, which cannot be entered. The
+      starred target is not visible on the recorded value, so it is read off
+      the statement's target list.
+
+    Everything else -- a call, a walrus, a loop target, a capture, a
+    destructuring element, and a ``with`` on an arbitrary expression -- *may*
+    bind something enterable, so it counts and the header is declined.
+    """
+    if isinstance(value, str):
+        # A carrier recorded by `_carrier_runtime_kinds`: a module, a class
+        # or a function. None of those has `__enter__`.
+        return False
+    if isinstance(statement, (ast.ExceptHandler, ast.Delete)):
+        # Both *unbind*. `del cs` removes the name outright, and CPython
+        # deletes an `except ... as cs` name when the handler exits, so
+        # neither can install an enterable value over the carrier.
+        return False
+    if function is not None and not _store_is_in_scope(statement, function):
+        # A nested `def`/`lambda`/`class` body has its own locals. A store
+        # there binds *that* scope's `cs`, so the carrier in the enclosing
+        # scope is untouched and still in force. Measured:
+        #
+        #     def outer(x, flag):
+        #         import os as cs
+        #         if flag:
+        #             def inner():
+        #                 cs = contextlib.nullcontext()
+        #         with cs:          # cs is still the module -> TypeError
+        #             assert x != 1
+        #
+        # The assert never runs on either path, so the carrier -- not the
+        # nested store -- is what decides the header.
+        return False
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return not _with_binds_a_known_non_enterable(statement, name, bound)
+    # `*cs, = (...)` binds a list, which cannot be entered, so the header
+    # cannot run the assert. The recorded `value` is the whole right-hand side
+    # rather than the element, so the starred *target* has to be read off the
+    # statement itself.
+    #
+    # This branch owns that question for the carrier path rather than sharing
+    # it with :func:`_store_may_bind_enterable`, which answers the same thing
+    # through `_binds_a_starred_name`. The two must not both answer it: while
+    # both did, neutralising `_target_is_starred` changed nothing, so the
+    # exclusion it names was not the one keeping the store out of the decline
+    # -- and `test_each_non_enterable_exclusion_is_load_bearing` says so
+    # explicitly. The value is read from `_target_is_starred` below, so the
+    # helper that names the exclusion stays load-bearing.
+    if name is not None and _target_is_starred(statement, name):
+        return False
+    # #388. The four families above are decidable from the store node alone.
+    # Everything else is decided by :func:`_store_may_bind_enterable`, which
+    # reads the *value* as well: it knows the builtin constructors
+    # (``cs = int()`` leaves an ``int``), distinguishes a bare target from a
+    # destructured one, and reads a loop's last element or its body's rebind.
+    #
+    # Delegating is what keeps the two readings of the same store from
+    # disagreeing. An earlier version answered every remaining store as
+    # "possibly enterable" on its own, which is the safe direction in
+    # isolation -- but the stale-carrier guard in
+    # :func:`_carrier_may_have_been_superseded` calls this for a *conditional*
+    # store, and a store already pinned to a non-enterable type cannot
+    # supersede the carrier. Answering `True` there declines the header, and a
+    # decline reports ``enforced`` -- so 47 rows of
+    # `test_a_nonenterable_conditional_store_does_not_revive_a_stale_carrier`
+    # read a genuinely unreachable assert as load-bearing. Reading the value
+    # through the shared helper settles all three suites at once.
+    # The starred question is answered above, from `_target_is_starred`, so the
+    # shared helper is told to skip its own `_binds_a_starred_name` branch.
+    # The two disagree on purpose: `_binds_a_starred_name` also matches
+    # `first, *cs = pair`, where `cs` holds an *element* of the right-hand
+    # side rather than a list, and the carrier path must not exclude that
+    # case. Letting the shared helper answer as well would make both branches
+    # decide the row, and neutralising `_target_is_starred` alone would then
+    # change nothing -- which is the dead-exclusion that
+    # `test_each_non_enterable_exclusion_is_load_bearing` exists to catch.
+    return _store_may_bind_enterable((statement, value, True), name, function, starred_asked=True)
+
+
+def _store_is_in_scope(statement, function):
+    """Is ``statement`` part of ``function``'s own scope?
+
+    ``_store_bindings`` records a store nested in a nested ``def``/``lambda``/
+    ``class`` as an ordinary conditional binding of the same *spelling* of the
+    name, because the name it binds really is called ``cs``. What differs is
+    the *scope* it lands in: a class body is its own namespace and a nested
+    ``def`` owns its locals, so neither rebinds the enclosing function's
+    ``cs``. Measured:
+
+        def outer(x, flag):
+            import os as cs
+            if flag:
+                def inner():
+                    cs = contextlib.nullcontext()
+            with cs:          # cs is still the module -> TypeError, dead
+                assert x != 1
+
+    The boundary is the same one :func:`_scope_body_nodes` draws, and it is
+    asked here by membership in that set rather than by re-walking, so the two
+    rules cannot drift apart on what counts as a nested scope.
+
+    A ``global`` (or ``nonlocal``) declaration moves the store *out* of the
+    nested scope. At module level the ``global`` spelling is the whole of
+    #375's `_rebind` shape:
+
+        def _rebind():
+            global cs
+            cs = contextlib.nullcontext()
+
+    writes the *module's* ``cs``, so the carrier really is superseded and the
+    header really is live. Reading it as a nested local -- which is what
+    membership alone would do -- would exclude the only store that decides the
+    question and answer `defeated` on an assert CPython evaluates. So the
+    nested scope is only a real boundary for a name that is *not* declared in
+    an enclosing scope from within it.
+
+    A declaration only moves a store out of the nested scope when it targets
+    the scope that actually *owns* the queried carrier. ``global cs`` names the
+    module namespace, so it supersedes a module-level ``cs`` and nothing else:
+
+        def outer(x, flag):
+            import os as cs
+            if flag:
+                def inner():
+                    global cs        # writes the MODULE's cs
+                    cs = contextlib.nullcontext()
+            with cs:                # `outer`'s own local cs -> TypeError
+                assert x != 1
+
+    Here ``outer``'s ``cs`` is a function local, the nested store lands in the
+    module, and the header is entered with the module -- so it raises on both
+    paths and the assert is dead. Reading the ``global`` as if it governed
+    ``outer``'s binding made the checker report that dead assert as live.
+    ``nonlocal`` is the mirror image: it names a *function* scope, so it
+    supersedes a function-scope carrier and says nothing about a module one.
+    The two are told apart by the scope being queried, which is why this test
+    reads ``function`` and not just the store.
+
+    Only the declarations that *govern* the owning scope count. ``ast.walk``
+    descends into scopes of its own, and a declaration in a grandchild says
+    nothing about the store beside it:
+
+        def outer(x, flag):
+            import os as cs
+            if flag:
+                def inner():
+                    cs = contextlib.nullcontext()      # inner's local
+                    def grandchild():
+                        global cs                      # no effect on inner
+            with cs:                                  # still the module
+                assert x != 1
+
+    :func:`_scope_body_nodes` draws the boundary, and it is asked here by
+    iteration rather than by re-walking, so the two rules cannot drift apart
+    on what counts as a nested scope.
+    """
+    if any(node is statement for node in _scope_body_nodes(function)):
+        return True
+    owner = _owning_scope_of(statement, function)
+    if owner is None:
+        return False
+    # `global` and `nonlocal` are told apart by the namespace they name: a
+    # module-level carrier is the one a `global` can supersede, and a
+    # function-scope carrier is the one a `nonlocal` can. Asking the
+    # declaration alone would have each of them claim the other's case.
+    declaration = ast.Global if isinstance(function, ast.Module) else ast.Nonlocal
+    return _declares(owner, _store_target_names_of(statement), declaration)
+
+
+def _target_is_starred(statement, name):
+    """Does this store bind the name through an ``ast.Starred`` target?
+
+    ``*cs, = (...)`` builds a list, and ``cs, *rest = (...)`` does not bind
+    the starred name at all. Only the first shape binds a non-enterable value,
+    so the two are told apart by asking whether ``name`` is *the* starred
+    target -- which is why the name is a parameter. Matching any ``Starred``
+    in the target list would exclude the second shape too, and there the
+    starred element is discarded while ``cs`` keeps a perfectly enterable
+    value, so excluding it would be wrong in the damaging direction.
+
+    The recorded ``value`` is the whole right-hand side, so the starred
+    *target* has to be read off the statement; :func:`_literal_runtime_type`
+    sees the ``ast.Starred`` from the opposite direction, on the value, and
+    reads the same list type for the non-carrier path.
+    """
+    targets = []
+    if isinstance(statement, (ast.AnnAssign, ast.NamedExpr)):
+        targets = [statement.target]
+    elif isinstance(statement, ast.Assign):
+        targets = statement.targets
+    return any(
+        isinstance(node, ast.Starred) and isinstance(node.value, ast.Name) and node.value.id == name
+        for target in targets
+        for node in ast.walk(target)
+    )
+
+
+def _store_target_names_of(statement):
+    """The names a single store statement binds, or ``[]`` for a non-store.
+
+    Thin wrapper over :func:`_store_target_names` so the scope test can ask
+    the question in terms of one statement. A node that is not one of the
+    store forms binds nothing here and is reported as binding nothing, which
+    keeps the caller from having to enumerate the forms a second time.
+    """
+    if isinstance(statement, ast.Assign):
+        return _store_target_names(statement.targets)
+    if isinstance(statement, ast.AnnAssign):
+        return _store_target_names([statement.target])
+    if isinstance(statement, ast.NamedExpr):
+        return _store_target_names([statement.target])
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return _store_target_names([statement.target])
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return _store_target_names(
+            [item.optional_vars for item in statement.items if item.optional_vars is not None]
+        )
+    if isinstance(statement, ast.Delete):
+        return _store_target_names(statement.targets)
+    if isinstance(statement, ast.ExceptHandler):
+        return [statement.name] if statement.name is not None else []
+    return []
+
+
+def _owning_scope_of(statement, function):
+    """The nested ``def``/``lambda``/``class`` that ``statement`` sits inside.
+
+    ``None`` when the statement is part of ``function``'s own body, or when
+    no single nested scope contains it. Only the *nearest* enclosing scope is
+    returned, because a ``global`` declaration in an inner scope says nothing
+    about an intermediate one, and a doubly-nested store writes to whichever
+    scope declared its name.
+    """
+    return _nearest_scope_containing(function, statement)
+
+
+def _nearest_scope_containing(scope, statement):
+    """The innermost scope strictly inside ``scope`` that contains ``statement``."""
+    for node in ast.iter_child_nodes(scope):
+        if any(child is statement for child in ast.walk(node)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                # An inner scope wins: descend and prefer whatever is closest.
+                return _nearest_scope_containing(node, statement) or node
+            # `node` is a plain statement that contains the store, so the
+            # scope boundary is further out; keep looking among the siblings
+            # that also contain it.
+            deeper = _nearest_scope_containing(node, statement)
+            if deeper is not None:
+                return deeper
+    return None
+
+
+def _declares(scope, names, kind):
+    """Does ``scope`` govern its own stores with a ``kind`` declaration?
+
+    ``global cs`` is the declaration that makes a nested store write to the
+    *module's* binding, and it is what separates #375's ``_rebind`` -- whose
+    store really does supersede a module carrier -- from a nested ``def`` that
+    merely shadows the name. ``nonlocal cs`` does the same for the nearest
+    *enclosing function* instead. The caller picks between them by the scope it
+    is reasoning about, because the two name different namespaces.
+
+    Only declarations that govern ``scope`` are read. A ``global`` in a nested
+    ``def`` binds that ``def``'s stores, so it has no say over a store sitting
+    in ``scope`` itself -- and ``ast.walk`` cannot draw that line, since it
+    descends straight through the nested scope. :func:`_scope_body_nodes` is
+    the boundary this module draws everywhere else, so it is what asks, and
+    the nodes it yields are read *directly*.
+
+    Reading them directly is what makes the boundary hold at any depth. A
+    second walk over each yielded node re-enters a nested scope reached
+    through a wrapper, so a ``nonlocal`` in a grandchild written under an
+    ``if`` was still attributed to its grandparent:
+
+        def inner():
+            cs = contextlib.nullcontext()
+            if True:
+                def grandchild():
+                    nonlocal cs
+
+    ``_scope_body_nodes`` yields the ``FunctionDef`` and stops, and the check
+    is a type test on the node itself, so the declaration inside it is never
+    reached. A wrapper changes nothing, because ``_scope_body_nodes``
+    descends through statements and yields the nested scope wherever it sits.
+
+    Neither declaration takes effect unless the name is actually bound
+    somewhere in the scope, so the answer here is the necessary half of the
+    test and the target list is what supplies the other.
+    """
+    wanted = set(names)
+    if not wanted:
+        return False
+    for node in _scope_body_nodes(scope):
+        if isinstance(node, kind) and wanted.intersection(node.names):
+            return True
+    return False
+
+
+#: Dotted paths whose ``__enter__`` provably returns ``None``.
+#:
+#: ``with EXPR as cs:`` binds ``EXPR.__enter__()``, so whether the header
+#: still holds an *enterable* value is a question about the manager's
+#: ``__enter__``, not about the syntax of the ``with``. It is decidable only
+#: for a closed set of callables whose ``__enter__`` is known to return
+#: ``None``:
+#:
+#: * ``contextlib.suppress.__enter__`` is a bare ``pass``, so the call returns
+#:   ``None`` implicitly however the manager was built.
+#: * ``contextlib.nullcontext.__enter__`` is ``return None`` -- it is
+#:   documented to return None and that is what makes it a *null* context --
+#:   but *only* when the manager was built with no ``enter_result``. Given one
+#:   it returns that argument, so the spelling alone does not settle the
+#:   bound value. :func:`_binds_a_null_returning_context` therefore asks about
+#:   the call rather than the name.
+#:
+#: The ``asyncio`` spelling from :data:`SUPPRESSING_CONTEXTS` is deliberately
+#: **not** inherited here, and the reason is a measured one. ``asyncio`` has no
+#: ``suppress`` in CPython 3.12.14, so the name is only ever whatever the
+#: program put there:
+#:
+#:     asyncio.suppress = CM       # `CM.__enter__` returns self
+#:     with asyncio.suppress() as cs:
+#:         pass                    # `cs` is a CM -- `with cs:` enters
+#
+#: A module attribute is rebindable, and reading the spelling as a fixed
+#: ``None``-returning callable excluded a store that really does bind an
+#: enterable value. ``contextlib.suppress`` has no such spelling problem: the
+#: name resolves to the library object.
+#:
+#: Nothing else belongs here. A user-defined ``CM()`` whose ``__enter__``
+#: returns ``self`` is syntactically identical to one that returns ``None``,
+#: so treating *any* ``with`` as non-enterable would report the header dead
+#: on an assert CPython really evaluates. Measured on CPython 3.12.14:
+#
+#:     def outer(x, flag):
+#:         import os as cs
+#:         if flag:
+#:             with CM() as cs:      # flag -> cs is the CM, `with cs:` enters
+#:                 pass
+#:         with cs:                  # and `assert x != 1` FIRES
+#:             assert x != 1
+#
+#: An unrecognised manager therefore *counts* as a superseding store and the
+#: header is declined, which is the direction this module takes when a value
+#: cannot be read: a decline reports the assert live, and calling a live
+#: assert dead is the damaging direction.
+NULL_RETURNING_CONTEXTS = ("contextlib.nullcontext", "contextlib.suppress")
+
+
+def _with_binds_a_known_non_enterable(statement, name, bound=None):
+    """Does this ``with`` bind a name to a provably non-enterable value?
+
+    ``with EXPR as cs:`` binds ``EXPR.__enter__()``. When ``EXPR`` resolves to
+    one of :data:`NULL_RETURNING_CONTEXTS` -- and binds no ``enter_result`` --
+    the bound value is ``None``, cannot be entered, and so cannot supersede a
+    carrier with anything enterable; the carrier stays in force. Every other
+    manager may return an enterable object and is reported as a genuine
+    superseder.
+
+    Only the item that binds ``name`` is asked about. A ``with`` binds each of
+    its items independently, so a non-enterable *sibling* says nothing about
+    the item the queried name came from:
+
+        with CM() as cs, contextlib.nullcontext() as other:
+            pass
+
+    ``cs`` receives ``CM().__enter__()`` -- a real object -- and ``other``'s
+    ``None`` is not what the header goes on to enter. Reading the whole
+    statement instead of the one item excluded a store that *can* bind an
+    enterable value, which is the damaging direction: a decline reports the
+    assert live, so a dead assert was certified as load-bearing.
+
+    ``contextlib.nullcontext(CM())`` is the same argument one level in. The
+    argument is the value its ``__enter__`` returns, so this call binds
+    ``CM()`` and the header is entered with an object. Only the no-argument
+    spelling returns ``None``, and requiring an empty argument list is what
+    keeps the two apart.
+
+    The alias map resolves every spelling: ``contextlib.nullcontext()``,
+    ``from contextlib import nullcontext as nc`` and a re-exported attribute
+    all collapse to the same dotted path before the comparison.
+
+    A ``with`` whose *unbound* value is the queried name (``with cs:`` with no
+    ``as`` clause) binds nothing, so no item here matches the name and the
+    answer is ``False`` -- the store is not a rebind of the name at all, and
+    :func:`_store_bindings` only records items that carry an ``optional_vars``.
+
+    When *several* items bind the same name, the **last** one is what the
+    header goes on to enter, because CPython processes the items in order:
+
+        with contextlib.nullcontext() as cs, CM() as cs:
+            pass
+
+    leaves ``cs`` holding ``CM().__enter__()``, not ``None``. Reading any
+    qualifying item as the answer excluded the whole statement, so a name an
+    enterable item re-bound last was reported as a ``None``. Only the last
+    binder is asked about, and a ``with`` that rebinds the name more than once
+    is not claimed by the first item to match.
+
+    Reading the *last* binder still does not make this rule reach the end-to-end
+    verdict on such a statement. A ``with`` that binds the same name twice
+    leaves ``_store_bindings`` with two entries for it, and #308 reads a name
+    bound by several stores as ambiguous and reports the assert as swallowed
+    before this rule is consulted at all. That is the pre-existing answer on
+    ``ed9d9b0`` for this shape, it is pinned at
+    ``FUNCTION_CARRIER_SUPERSESSION_LIMIT_SHAPES``, and it is not introduced
+    here. What this rule controls is narrower and is what the decline asks:
+    whether *the* store can be a superseding one, and it now answers from the
+    binder whose value survives.
+    """
+    binding = None
+    for item in statement.items:
+        if item.optional_vars is not None and name in _store_target_names([item.optional_vars]):
+            binding = item
+    if binding is None:
+        return False
+    return _binds_a_null_returning_context(binding.context_expr, bound or {})
+
+
+def _binds_a_null_returning_context(expression, bound):
+    """Does ``expression`` call a known ``None``-returning manager outright?
+
+    A call in :data:`NULL_RETURNING_CONTEXTS` binds its manager's
+    ``__enter__`` result, and the manager is only *known* to return ``None``
+    where that is decided by the call itself rather than by an argument:
+
+    * ``contextlib.suppress`` has a ``__enter__`` that is a bare ``pass``, so
+      it returns ``None`` however it is called. That is why its arguments are
+      not inspected: it takes its exceptions as arguments, and excluding the
+      call for carrying one would give up the ``suppress(AssertionError)``
+      spelling.
+    * ``contextlib.nullcontext`` passes its ``enter_result`` straight
+      through, so the bound value is whatever the argument evaluates to.
+
+    The second member is why a truthiness or emptiness test is not enough.
+    Measured on CPython 3.12.14 across the whole ``enter_result`` space, only
+    a *knowably enterable* argument leaves a value a later ``with cs:`` can
+    enter:
+
+        nullcontext()                      -> None   (not enterable)
+        nullcontext(enter_result=0)       -> 0      (not enterable)
+        nullcontext(enter_result=())      -> ()     (not enterable)
+        nullcontext(enter_result=(CM(),)) -> tuple  (not enterable)
+        nullcontext(enter_result=[CM()])  -> list   (not enterable)
+        nullcontext(enter_result=CM())    -> CM     (ENTERABLE)
+        nullcontext(CM())                 -> CM     (ENTERABLE)
+        nullcontext(*[CM()])              -> CM     (ENTERABLE)
+
+    The tuple and list rows are the ones a truthiness test gets wrong: the
+    container holds a context manager and is still not one. So the argument
+    has to be *typed*, not merely evaluated -- see
+    :func:`_null_context_binds_an_enterable`.
+
+    A call that binds its parameter twice, or names one that does not exist,
+    is a ``TypeError`` at the call: the statement raises before it can bind
+    anything, so there is no store to exclude. That is
+    :func:`_null_context_call_raises`.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    dotted = _resolved_dotted(expression, bound)
+    if dotted not in NULL_RETURNING_CONTEXTS:
+        return False
+    if dotted == "contextlib.suppress":
+        return True
+    if _null_context_call_raises(expression):
+        # `enter_result` is the *only* parameter, so a second value for it is
+        # a `TypeError` at the call. The whole `with` statement raises before
+        # the header is entered, so there is no store here to exclude and the
+        # assert under it is unreachable. Counting the call as a superseding
+        # store would decline the header and report a dead assert as
+        # load-bearing, so it keeps the exclusion.
+        return True
+    return not _null_context_binds_an_enterable(expression, bound)
+
+
+#: A ``with`` binds ``EXPR.__enter__()``, so what decides whether the name
+#: still holds something enterable is the *type* of the value
+#: ``enter_result`` evaluates to -- not whether it is ``None``, and not how it
+#: is spelled. Measured on CPython 3.12.14 over the ``enter_result`` space:
+#:
+#:     nullcontext()                      -> None   (not enterable)
+#:     nullcontext(enter_result=0)       -> 0      (not enterable)
+#:     nullcontext(enter_result=())      -> ()     (not enterable)
+#:     nullcontext(enter_result=(CM(),)) -> tuple  (not enterable)
+#:     nullcontext(enter_result=[CM()])  -> list   (not enterable)
+#:     nullcontext(enter_result=CM())    -> CM     (ENTERABLE)
+#:     nullcontext(CM())                 -> CM     (ENTERABLE)
+#:
+#: A literal *container* holding a manager is still not one, so the rule reads
+#: the value's type. It cannot read a runtime type off an expression, and the
+#: two ways of guessing each get one of these rows wrong:
+#:
+#: * "any ``ast.Call`` binds an enterable" is wrong for ``list()``, ``int()``,
+#:   ``dict()``, ``set()`` and every other builtin, which bind objects with no
+#:   ``__enter__``. :data:`_NON_ENTERABLE_BUILTIN_CALLS` is that list.
+#: * "only a bare ``ast.Call`` binds an enterable" is wrong for every other
+#:   *spelling* of the same value -- a walrus, an ``IfExp``, a ``BoolOp``, a
+#:   subscript, a local name, a computed ``*`` or ``**`` -- and excluding those
+#:   declares a live contract dead, which is the damaging direction.
+#:
+#: So the classifier is an **allowlist of known-non-enterable types** and
+#: everything else answers "may be enterable". See
+#: :func:`_value_may_be_enterable`.
+_ENTERABLE_CLASS_NAMES = (ast.Name,)
+
+#: Builtin containers and scalars whose instances have no ``__enter__``.
+#:
+#: ``frozenset``, ``set``, ``dict``, ``list``, ``tuple``, ``range``,
+#: ``enumerate``, ``zip``, ``map``, ``filter`` and the numeric/``bytes``
+#: builtins are all *calls* that bind something a ``with`` cannot enter, so a
+#: rule reading "any call is enterable" would declare every one of them live.
+#: Measured on CPython 3.12.14 by entering each result. This is the call
+#: arm of the allowlist; the display arm is the container literals below.
+#:
+#: The rule is by *name*, not by arity or by category: ``bool()``,
+#: ``object()``, ``complex()`` and ``bytearray()`` are as fixed as ``list()``
+#: even though none of them is a container, and leaving them out made
+#: ``nullcontext(enter_result=bool())`` a live superseder on a header that
+#: raises. Every entry below was measured by entering its zero-argument result
+#: on CPython 3.12.14. Adding a name is a claim that ``NAME()`` has no
+#: ``__enter__``, so it is checked, not assumed.
+_NON_ENTERABLE_BUILTIN_CALLS = frozenset(
+    {
+        "bool",
+        "bytearray",
+        "bytes",
+        "complex",
+        "dict",
+        "enumerate",
+        "filter",
+        "float",
+        "frozenset",
+        "int",
+        "list",
+        "map",
+        "object",
+        "range",
+        "set",
+        "str",
+        "tuple",
+        "zip",
+    }
+)
+
+#: Values whose *type the language pins* to something with no ``__enter__``.
+#:
+#: This is an allowlist, so membership is the only thing that may decline a
+#: store. Each entry is a type CPython decides, not a guess about the program:
+#:
+#: * a ``None`` constant is the value the no-argument form produces;
+#: * a numeric / ``bytes`` / ``str`` constant is a literal of that type;
+#: * a list, tuple, set or dict *display* builds a container, and a container
+#:   is not a context manager however it is filled -- ``[CM()]`` holds a
+#:   manager and is still a list.
+#:
+#: A call to a builtin in :data:`_NON_ENTERABLE_BUILTIN_CALLS` is the same
+#: decision made through a call rather than a display, and is kept in
+#: :func:`_value_may_be_enterable` so the builtin list and the display rule
+#: read as one allowlist.
+_NON_ENTERABLE_LITERAL_TYPES = (type(None), int, float, complex, str, bytes, bool)
+
+
+def _null_context_binds_an_enterable(expression, bound):
+    """Does this ``nullcontext`` call bind something a ``with`` could enter?
+
+    ``nullcontext.__enter__`` is ``return self.enter_result``, so the bound
+    value *is* the argument, and the question is whether its type has
+    ``__enter__``. The answer comes from a known-non-enterable allowlist: only
+    a value whose type the source pins may answer "no", and everything else
+    answers "maybe", which is what declines the header.
+
+    The "maybe" default is the load-bearing decision, and it is forced by the
+    two errors not being symmetric. Declining reports the assert **live**, so
+    reading an unreadable value as non-enterable calls a live contract dead --
+    the damaging direction. :func:`_value_may_be_enterable` documents the
+    choice and the rows that hold it to CPython.
+    """
+    for value in _null_context_enter_results(expression, bound):
+        if _value_may_be_enterable(value, bound):
+            return True
+    return False
+
+
+def _value_may_be_enterable(node, bound):
+    """May ``node`` evaluate to something a ``with`` header can be entered on?
+
+    The answer is ``False`` only for a value whose type is *pinned* to a
+    non-enterable one, and ``True`` for everything else. A ``None`` constant, a
+    scalar constant, a container display, and a call to a known non-enterable
+    builtin are the pinned cases.
+
+    Every other expression answers ``True``, and the reason is the direction of
+    each error rather than a preference. ``True`` declines the header, so the
+    assert is reported **live**; a live assert reported dead is the damaging
+    error, and a dead assert reported live is recoverable. The two are
+    therefore not symmetric, and the unreadable cases have to land on the
+    recoverable one:
+
+        with contextlib.nullcontext(enter_result=[CM()][0]) as cs:
+            pass
+
+    binds a ``CM`` -- the subscript is computed, so the source does not pin its
+    type -- and the assert fires. The same value reached as a walrus, a
+    conditional, a ``BoolOp``, a local name, or a computed ``*``/``**`` is the
+    same live header, and no spelling of it may be read as non-enterable.
+
+    The recursion is over the *values* a container display holds, never over a
+    call's arguments: ``nullcontext(enter_result=(CM(),))`` binds a **tuple**,
+    and the tuple is decided by the display rule. An earlier version recursed
+    into a one-element tuple with the *call* classifier, which read ``.args``
+    off an ``ast.Tuple`` and raised ``AttributeError`` on
+    ``nullcontext(enter_result=((CM(),),))`` -- a crash where CPython simply
+    binds a tuple and raises ``TypeError`` entering it.
+    """
+    if isinstance(node, ast.Constant):
+        return not isinstance(node.value, _NON_ENTERABLE_LITERAL_TYPES)
+    if isinstance(node, (ast.JoinedStr, ast.FormattedValue)):
+        # An f-string is a `str` whatever it interpolates, and `ast` gives it
+        # its own node type rather than folding it into `ast.Constant` -- so
+        # `nullcontext(enter_result=f"{x}")` binds a string and cannot be
+        # entered. Left to the fall-through it answered "may be enterable" and
+        # declared a dead header live. Measured on CPython 3.12.14 by entering
+        # the result.
+        return False
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        # A container *display* builds a container, whatever fills it.
+        return False
+    if isinstance(node, ast.Dict):
+        # Same for a dict display. A `**` of a dict *display* is different --
+        # that one names parameters -- and is handled by the argument model.
+        return False
+    if isinstance(node, ast.Call):
+        return not _is_a_call_to_a_non_enterable_builtin(node)
+    if isinstance(node, ast.Starred):
+        # A starred expression only appears where the argument model has
+        # already expanded it; reaching one here means an unexpanded container
+        # is being read, and its type is not pinned.
+        return True
+    return True
+
+
+def _is_a_call_to_a_non_enterable_builtin(node):
+    """Is this a call to a builtin whose result type has no ``__enter__``?
+
+    ``nullcontext(enter_result=list())`` binds a list and
+    ``nullcontext(enter_result=int())`` binds an ``int``; neither can be
+    entered, so counting the call as a live superseder declared a dead assert
+    load-bearing. The call is only asked about when the callee is a bare
+    name, because that is the spelling that names a builtin -- an attribute
+    (``mod.list()``) or a subscript is a value this module cannot read, and it
+    answers as unreadable rather than assuming.
+    """
+    if not isinstance(node.func, _ENTERABLE_CLASS_NAMES):
+        return False
+    return node.func.id in _NON_ENTERABLE_BUILTIN_CALLS
+
+
+def _null_context_enter_results(expression, bound):
+    """The ``enter_result`` values this ``nullcontext`` call is given.
+
+    A ``nullcontext`` signature is ``__init__(self, enter_result=None)``, so
+    at most one argument can be effective, and it is the *first* positional
+    value, or else the sole keyword named ``enter_result``. Every spelling is
+    normalised to the value that would actually reach the parameter, in the
+    order CPython applies them -- positional arguments first, then keywords:
+
+    * the first positional node, which binds the parameter;
+    * a ``*`` of a *literal* list/tuple/set, whose elements are the positional
+      arguments -- so the *first element* is the one that binds it, and an
+      empty star supplies nothing at all;
+    * a ``*`` of anything else, which pins no value and so may supply any;
+    * a ``**`` of a *literal dict*, whose ``"enter_result"`` key is the
+      keyword, with the **last** duplicate winning as CPython's dict display
+      does;
+    * a ``**`` of a computed mapping, whose keys are unreadable -- it may
+      carry ``enter_result`` and it may carry anything else, so its value is
+      reported as unreadable rather than as absent.
+
+    Returning the *effective* value rather than every syntactic node is what
+    keeps the cardinality question separate from the type question:
+    ``nullcontext(*[], enter_result=CM())`` unpacks to nothing, so its
+    ``enter_result`` is the keyword, while ``nullcontext(*(), CM())`` supplies
+    ``CM()`` positionally and the empty star contributes nothing.
+
+    Only *one* value is returned, because only one can bind the parameter: the
+    extra values of an over-supplied call are what make it raise, and that is
+    :func:`_null_context_call_raises`'s question rather than this one's.
+    """
+    positional = _first_positional_value(expression)
+    if positional is not None:
+        return [positional]
+    for keyword in expression.keywords:
+        if keyword.arg == "enter_result":
+            return [keyword.value]
+    for keyword in expression.keywords:
+        if keyword.arg is not None:
+            continue
+        literal = _dict_literal_value(keyword.value, "enter_result")
+        if literal is not None:
+            return [literal]
+        # A `**` of a mapping the source does not pin may carry the key. A
+        # `**` of a literal that simply has no such key cannot, so those are
+        # skipped rather than reported.
+        if _literal_dict_keys(keyword.value) is None:
+            return [_UNREADABLE_VALUE]
+    return []
+
+
+def _first_positional_value(expression):
+    """The value the first positional argument binds, or ``None`` if there is none.
+
+    A starred argument contributes its elements, so an empty literal star
+    supplies nothing and the argument after it becomes the first
+    (``nullcontext(*(), CM())`` binds ``CM()``). An unreadable star pins
+    nothing, so it is reported as the value and left for the type question.
+    """
+    for argument in expression.args:
+        if not isinstance(argument, ast.Starred):
+            return argument
+        elements = _literal_star_elements(argument.value)
+        if elements is None:
+            return _UNREADABLE_VALUE
+        if elements:
+            return elements[0]
+        # An empty literal star unpacks to nothing; the next argument is first.
+    return None
+
+
+#: Sentinel for "a value the source does not pin, so it may be anything".
+_UNREADABLE_VALUE = ast.Name(id="__unreadable__", ctx=ast.Load())
+
+
+def _literal_star_elements(node):
+    """The elements a starred literal unpacks to, or ``None`` if unreadable.
+
+    A dict display is included because it is a readable *iterable* here: it
+    unpacks to its **keys**, and the checker does not need to guess what they
+    are to know how many values reach the call. ``nullcontext(*{})`` unpacks
+    to nothing, so it supplies no argument at all -- which is the same
+    no-argument form as ``nullcontext()`` and binds ``None``. Treating it as
+    unreadable made it supply a "maybe enterable" value and declared a dead
+    header live. A dict display with *computed* keys is still unreadable, so
+    only a fully literal one counts.
+    """
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return list(node.elts)
+    if isinstance(node, ast.Dict) and _literal_dict_keys(node) is not None:
+        return [key for key in _literal_dict_keys(node) or ()]
+    return None
+
+
+def _dict_literal_value(node, key):
+    """The value a literal dict stores under ``key``, or ``None`` if unreadable.
+
+    Python keeps the **last** of several duplicate keys, so this walks to the
+    end rather than returning the first match:
+
+        nullcontext(**{"enter_result": CM(), "enter_result": None})
+
+    binds ``None`` -- the second value wins, the header raises entering it --
+    while the same dict with the values swapped binds ``CM()`` and the header
+    is live. Reading the first key reversed both.
+    """
+    if not isinstance(node, ast.Dict):
+        return None
+    value = None
+    for literal_key, literal_value in zip(node.keys, node.values):
+        if isinstance(literal_key, ast.Constant) and literal_key.value == key:
+            value = literal_value
+    return value
+
+
+def _null_context_call_raises(expression):
+    """Would this ``nullcontext`` call raise before it binds anything?
+
+    ``nullcontext.__init__(self, enter_result=None)`` is the whole signature, so
+    the call raises at bind time when it supplies **more than one** effective
+    argument, or when it names a parameter that does not exist. The ``with``
+    then fails before it can bind ``cs``, so there is no store to exclude and
+    the assert under it is unreachable.
+
+    The count is over *effective* arguments, not syntax nodes, so the starred
+    spellings are measured by what they unpack to:
+
+    * ``nullcontext(*[CM(), CM()])`` supplies two and raises;
+    * ``nullcontext(*[], enter_result=CM())`` supplies one -- the empty star
+      unpacks to nothing -- and does not;
+    * ``nullcontext(*(), CM())`` likewise supplies one.
+
+    A keyword is unexpected when it is not ``enter_result``. An explicit
+    ``foo=1`` is read directly; a ``**`` mapping is read for the keys it
+    carries, with the last duplicate winning, so
+    ``nullcontext(CM(), **{"foo": 1})`` is seen to raise the same way
+    ``nullcontext(CM(), foo=1)`` does. A ``**`` of a mapping the source does
+    not pin is treated as possibly carrying any key, so it may raise; the
+    store then is not one that can be excluded, which is the recoverable
+    direction.
+    """
+    if not isinstance(expression, ast.Call):
+        return False
+    positional = 0
+    unknown = False
+    for argument in expression.args:
+        if isinstance(argument, ast.Starred):
+            elements = _literal_star_elements(argument.value)
+            if elements is None:
+                # An unreadable star could hold any *number* of values, so
+                # this cannot say the call raises -- and it must not say it
+                # does not, either, because `nullcontext(*[CM(), CM()])`
+                # really does raise while `nullcontext(*values)` with
+                # `values = [CM()]` does not. Both spellings are therefore
+                # left to the *value* question, which reports the unreadable
+                # one as maybe-enterable. Claiming a raise here would
+                # exclude a live store; this is the recoverable direction.
+                unknown = True
+                continue
+            positional += len(elements)
+        else:
+            positional += 1
+    if unknown:
+        return False
+    keywords = []
+    for keyword in expression.keywords:
+        if keyword.arg is not None:
+            keywords.append(keyword.arg)
+            continue
+        state = _dict_literal_key_state(keyword.value)
+        if state is None:
+            # Not a dict display at all, so nothing about it is pinned.
+            return _mapping_may_add_a_key(expression, positional)
+        keys, has_computed, has_spread = state
+        if has_computed and "enter_result" in keys:
+            # A computed key is a *distinct* entry beside a readable
+            # `enter_result`, and `nullcontext` takes one parameter, so the
+            # call raises whatever the computed key evaluates to:
+            #
+            #     nullcontext(**{("enter_" + "r"): 1, "enter_result": CM()})
+            #     -> TypeError: unexpected keyword argument 'enter_r'
+            return True
+        if has_spread:
+            # A `**` spread may *overwrite* a key rather than add one, so it
+            # can leave the mapping with exactly the keys already read:
+            #
+            #     nullcontext(**{"enter_result": CM(), **other})
+            #
+            # binds `CM()` when `other` carries only `enter_result`, and
+            # raises when `other` adds a name. Which one it is depends on a
+            # value the source does not pin, so this claims neither and the
+            # value question takes it from there.
+            continue
+        keywords.extend(keys)
+    if positional > 1:
+        return True
+    if keywords.count("enter_result") > 1:
+        return True
+    if positional and "enter_result" in keywords:
+        return True
+    return any(name != "enter_result" for name in keywords)
+
+
+def _literal_dict_keys(node):
+    """The keys a literal dict carries, last duplicate winning, else ``None``."""
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = []
+    for literal_key in node.keys:
+        if literal_key is None:
+            # `**` inside a dict display (`{**other}`) is itself unreadable.
+            return None
+        if not isinstance(literal_key, ast.Constant):
+            # A computed key -- `("enter_" + "result")` -- pins no name, so
+            # the mapping it builds is not one the checker can read.
+            return None
+        if literal_key.value in keys:
+            keys.remove(literal_key.value)
+        keys.append(literal_key.value)
+    return keys
+
+
+def _dict_literal_key_state(node):
+    """``(keys, has_computed_key, has_spread)`` for a dict display, else ``None``.
+
+    The three answers are needed apart because they are not the same claim. A
+    readable key names a parameter. A **computed** key (``("enter_" + "r")``)
+    names one the source does not pin, and it is always a *separate* entry --
+    it cannot overwrite its neighbours, because a dict display evaluates keys
+    left to right and a computed key lands at its own position. A **spread**
+    (``{**other}``) is the opposite: it can overwrite whatever came before it,
+    so it cannot be counted as an extra key at all.
+
+    Returning ``None`` for a non-display means "this is not a mapping the
+    source shows", which the caller treats differently from "a mapping with
+    computed keys" -- the first is a ``Name`` like ``**values`` and pins
+    nothing; the second pins a readable ``enter_result`` *and* hides a key.
+    """
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = []
+    has_computed = False
+    has_spread = False
+    for literal_key in node.keys:
+        if literal_key is None:
+            has_spread = True
+            continue
+        if not isinstance(literal_key, ast.Constant):
+            has_computed = True
+            continue
+        if literal_key.value in keys:
+            keys.remove(literal_key.value)
+        keys.append(literal_key.value)
+    return keys, has_computed, has_spread
+
+
+def _mapping_may_add_a_key(expression, positional):
+    """Could this unreadable ``**`` mapping add a key to the call?
+
+    ``nullcontext`` takes exactly one parameter, so *any* key beyond the one
+    it already supplies is unexpected and raises. The mapping itself may
+    carry nothing, though, so this answers only where the source has already
+    pinned a key elsewhere:
+
+    * ``nullcontext(CM(), **values)`` has a positional already, so a key in
+      ``values`` would be a second value for the same parameter.
+    * ``nullcontext(enter_result=CM(), **values)`` is the same in the keyword
+      position.
+    * ``nullcontext(**values)`` on its own pins nothing: the call may raise or
+      not, so it is left to the value question.
+
+    The *empty* mapping is the boundary and it is measured, not assumed:
+    ``nullcontext(CM(), **{})`` and ``nullcontext(enter_result=CM(), **{})``
+    both build a manager without raising, because an empty mapping adds
+    nothing. The name is unreadable, so this cannot tell it from the populated
+    case, and it does not try -- the two disagree about whether the *call*
+    raises while neither can be decided from the source, so both are left to
+    the value question.
+    """
+    if positional:
+        return True
+    return any(keyword.arg == "enter_result" for keyword in expression.keywords)
 
 
 def _binds_starred_target(statement, name):
@@ -3877,6 +7678,18 @@ def _stores_of(name, by_index, index, function):
     # usable context manager afterwards -- if the handler ran, CPython deleted
     # the name when the handler exited, and if it did not run, the previous
     # binding is still in force and is settled by an unconditional store.
+    # A store inside an always-true branch joins them from the other side:
+    # `if True:` runs its body on every import, so the store settles the name
+    # exactly as an unconditional one does. Left out, it settled nothing and a
+    # later conditional store was read as the one in force -- which reported
+    # the `TypeError` CPython raises for
+    #
+    #     if True:
+    #         cs = list()
+    #         def list(): return nullcontext()
+    #
+    # as a live header. Only a branch that is true for every binding counts, so
+    # a condition this cannot read keeps its existing treatment.
     decidable = [
         entry
         for entry in entries
@@ -3884,19 +7697,106 @@ def _stores_of(name, by_index, index, function):
         or isinstance(entry[0], ast.ExceptHandler)
         or _starred_store_decides_kind(entry, name, orders, index, function, by_index.get("header"))
         or _store_is_settled_before(entry, orders, index, function)
+        or _statement_always_runs(entry[0], function)
     ]
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
     if latest is None:
         return None
+    # #375. A conditional store that may *supersede* a carrier leaves the
+    # name's final value undecidable, so the carrier must not be read as
+    # still in force. This is checked BEFORE the #367 tie-break below,
+    # because the tie-break's premise -- that `latest` identifies the value
+    # actually in force -- is exactly what a superseding conditional store
+    # denies. Declining here is the safe direction: `_entry_is_dead` then
+    # treats the header as live rather than certifying a reachable assert as
+    # swallowed.
+    #
+    #     def outer(flag, x):
+    #         import os as cs
+    #         if flag:
+    #             cs = nullcontext()
+    #         with cs:
+    #             assert x != 1
+    #
+    # When the branch runs the name holds a real context manager and the
+    # assert is **live**; when it does not, the module is in force and entry
+    # raises `TypeError`. Either way the carrier alone does not settle the
+    # header, and answering "dead entry" from it reports a live contract as
+    # unreachable.
+    #
+    # Three restrictions keep the guard from over-claiming, each pinned by a
+    # row that master already gets right:
+    #
+    # * It fires only when the settled store is itself a carrier. An
+    #   unconditional store after the carrier has already settled the name and
+    #   a later conditional store cannot unsettle it.
+    # * A later conditional store that is itself pinned non-enterable, or is
+    #   itself a carrier, cannot rescue the header on the path where it runs,
+    #   so the carrier still decides every path:
+    #
+    #       def outer(flag, x):
+    #           import os as cs
+    #           if flag:
+    #               cs = None
+    #           with cs:
+    #               assert x != 1
+    #
+    #   CPython raises `TypeError` for `flag=False` (the module) *and* for
+    #   `flag=True` (`None`), so the assert is unreachable on both paths.
+    # * `except ... as cs:` is excluded because the handler *deletes* the name
+    #   on exit rather than superseding it, and the list above already keeps
+    #   that shape decidable. Excluding it here stops a try/except that merely
+    #   mentions the name from flipping a correct `defeated` to `enforced`.
     tied = [entry for entry in decidable if orders[id(entry[0])] == latest]
+    # The guard fires when the *settled* store is a value the header could not
+    # otherwise have entered -- a carrier, a pinned unenterable literal, `None`,
+    # and so on -- and a *later conditional* store might make the header
+    # enterable by superseding it with a real context manager. It must not be
+    # restricted to carriers: with
+    #
+    #     def outer(flag, x):
+    #         import os as cs
+    #         cs = None
+    #         if flag:
+    #             cs = nullcontext()
+    #
+    # the settled value is `None` (not a carrier) yet a later conditional store
+    # *does* make the header live for `flag=True`. Restricting the guard to
+    # carriers read the stale `None` and reported that live header dead. The
+    # "later store must itself be enterable" restriction below still keeps the
+    # `cs = None; if False: cs = nullcontext()` family correctly dead, because
+    # a conditional store that is itself pinned unenterable cannot rescue the
+    # header on the path where it runs.
+    settled_unenterable = any(
+        orders[id(entry[0])] == latest and not _store_may_bind_enterable(entry, name, function)
+        for entry in decidable
+    )
+    if settled_unenterable and any(
+        entry[2]
+        and not isinstance(entry[0], ast.ExceptHandler)
+        and orders[id(entry[0])] > latest
+        and not _statement_never_runs(entry[0], function)
+        # A store inside a nested `def`/`lambda`/`class` body binds *that*
+        # scope's local, so it cannot supersede this scope's carrier. Without
+        # this the row below declined on a store the name cannot hold, which
+        # reports `enforced` -- turning a genuinely unreachable assert into a
+        # purportedly load-bearing one, the exact error the decline exists to
+        # prevent. `global`/`nonlocal` are handled inside the helper: they
+        # name the scope that actually owns the settled value, so a
+        # `nonlocal` store here *does* supersede and a `global` one does not.
+        and _store_is_in_scope(entry[0], function)
+        and _store_may_bind_enterable(entry, name, function)
+        for entry in entries
+    ):
+        return None
     if len(tied) == 1:
         return tied
-    # Two stores share the top-level statement, so `orders` cannot separate
-    # them. Among the tied, the one this rule newly deemed *settled* is the
-    # later write in the block: it is written into a `with` body, and by the
-    # time a *subsequent* top-level statement is reached it has run, so it is
-    # the value in force. Returning it alone keeps the dead-entry rule from
-    # reading the earlier carried suppressor as if it were still in play.
+    # #367. Two stores share the top-level statement, so `orders` cannot
+    # separate them. Among the tied, the one this rule newly deemed *settled*
+    # is the later write in the block: it is written into a `with` body, and
+    # by the time a *subsequent* top-level statement is reached it has run, so
+    # it is the value in force. Returning it alone keeps the dead-entry rule
+    # from reading the earlier carried suppressor as if it were still in play.
     settled = [entry for entry in tied if _store_is_settled_before(entry, orders, index, function)]
     return settled or tied
 
@@ -3931,7 +7831,10 @@ def _starred_store_decides_kind(entry, name, orders, index, function, header=Non
     # Even a conditional intervening store can replace the list. Decline it
     # rather than deciding one path's value for every path to the header.
     bindings, _ = _store_bindings(function, {})
-    position = lambda node: (node.lineno, node.col_offset)
+
+    def position(node):
+        return node.lineno, node.col_offset
+
     return not any(
         other is not statement and position(statement) < position(other) < position(header)
         for other, _, _ in bindings.get(name, ())
@@ -4330,9 +8233,65 @@ def _in_body(branch, target):
     return any(_contains(statement, target) for statement in branch.body)
 
 
-def _falsy_literal(node):
+def _falsy_literal(node, function=None):
     """A condition that is a literal false, so its body can never run."""
-    return isinstance(node, ast.Constant) and not node.value
+    if isinstance(node, ast.Constant) and not node.value:
+        return True
+    # An empty literal container is false for the same reason `False` is, and
+    # `if flag and ():` never enters its body. CPython evaluates the tuple's
+    # truth value at runtime; the empty form is decidable from the syntax, so
+    # it belongs to the same rule rather than to the loop-emptiness check,
+    # which is about a *container of values* rather than a condition.
+    #
+    # `ast.Dict` has to be asked about its own emptiness, not `.elts`: a dict
+    # node carries `keys`/`values`, so reading `.elts` on it raised
+    # `AttributeError` inside the decision function and crashed the analyzer on
+    # `if {}: cs = nullcontext()`. A decision function must answer for every
+    # node the caller can hand it, not raise.
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    # A zero-argument call that builds an *empty* container is falsy for the
+    # same runtime reason `()` is: `if set():` never enters its body, exactly
+    # like `if ():`.
+    #
+    # **Only** the no-argument form is decided. An argument-bearing call of the
+    # same constructor is truthy whenever the argument produces an element:
+    # `if set([1]):`, `if list((1,)):` and `if bytearray(b"x"):` all enter
+    # their bodies in CPython, and `if dict(a=1):` does too. Reading them as
+    # empty reported a live header dead -- the damaging direction -- because
+    # :func:`_builtin_constructor_kind` answers the *type* a call produces and
+    # the emptiness question was asked of that type rather than of the
+    # argument list. The check belongs here, next to the container literals it
+    # sits beside, and it is a property of the call's own argument list.
+    return _is_zero_argument_empty_container(node, function)
+
+
+def _is_zero_argument_empty_container(node, function=None):
+    """Is ``node`` a ``set()``-shaped call that provably builds an empty one?
+
+    Two properties have to hold together, and both were needed for the answer
+    to be right:
+
+    * the call must carry **no arguments**. `set([1])`, `list((1,))`,
+      `dict(a=1)` and `bytearray(b"x")` are all non-empty, and reading them as
+      empty reported a live header dead -- in a *condition* and in a *loop
+      iterable* alike, because both call sites asked the type question through
+      :func:`_builtin_constructor_kind` and never looked at the argument list;
+    * the callee must be the real **builtin**, which
+      :func:`_callee_is_shadowed` decides from the enclosing scope. A local
+      ``def set(): return nullcontext()`` makes the call a different one, and
+      a false "empty" there retires a header CPython enters.
+
+    Both spellings of "empty builtin container" are decided from this one
+    function, so the condition form and the loop form cannot disagree -- which
+    is the property :data:`_EMPTY_CONSTRUCTOR_TYPES` was introduced to
+    guarantee and an argument-blind helper would have broken.
+    """
+    if not isinstance(node, ast.Call) or node.args or node.keywords:
+        return False
+    return _builtin_constructor_kind(node, function) in _EMPTY_CONSTRUCTOR_TYPES
 
 
 def _is_empty_literal_iterable(node):
@@ -4785,6 +8744,13 @@ def _is_enforced(function, target, tree=None):
         # *container* that may not be entered, while this is a statement
         # positioned after one that can never fall through.
         return False
+    # The shadowing rules below have to answer "is this name the real builtin",
+    # and that question includes bindings written at *module* scope. The module
+    # the caller just resolved is exactly that answer, so it is registered
+    # here rather than rediscovered per callee -- which also means a probe
+    # built by a test is classified against the tree the caller passed, not
+    # against whichever module happens to be importable.
+    _remember_module_for_function(function, owning)
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
@@ -4806,7 +8772,7 @@ def _is_enforced(function, target, tree=None):
                 return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
-            and _falsy_literal(ancestor.test)
+            and _falsy_literal(ancestor.test, function)
             and _in_body(ancestor, target)
         ):
             # `if False:` / `while False:` -- the body never runs. Only the `if
@@ -5018,6 +8984,17 @@ def _is_bare_transfer(node):
     )
 
 
+def _contains_any(statements, target):
+    """True if ``target`` is one of ``statements`` or lies beneath any of them.
+
+    :func:`_contains` answers the same question for a single node, but the
+    ``if``/``else`` split is a pair of *statement lists*, and asking a list for
+    its ``_fields`` raised inside a decision function. A branch membership test
+    is the question several rules ask of one of those lists.
+    """
+    return any(_contains(statement, target) for statement in statements or ())
+
+
 def guard_rejects_the_deadline_terminal_state():
     """Does the guard still *reject* ``termination == "cancelled_or_deadline"``?
 
@@ -5163,3 +9140,181 @@ def _unpacked_keywords(node):
         return
     for key, item in value.items():
         yield (key if isinstance(key, str) else "<unreadable>", item)
+
+
+def _elif_link_is_reached(block, function):
+    """Is this ``if`` link's body entered on every call, or is it an ``elif``?
+
+    Returns ``True`` for a link that is not part of an ``orelse`` chain: a
+    standalone ``if True:`` and the opening link of a chain are both reached
+    whenever their test holds, and here the test does hold.
+
+    For a link reached *through* an ``orelse`` -- the ``elif`` shape -- the
+    body runs only when every test above it failed, so each of those has to be
+    never-true for the link to be entered on every call. One test that can
+    hold ends the walk and this returns ``False``, leaving the store
+    conditional.
+    """
+    return _link_is_always_entered(block, function)
+
+
+def _is_always_true_arm(block, statement, function):
+    """Is ``statement`` in an ``else``/``elif`` arm of ``block`` that always runs?
+
+    #403. :func:`_is_always_true_branch` only recognised the **body** of an
+    always-true ``if``, so the same rule went unread in the arm that runs
+    *because* the test failed:
+
+        from contextlib import nullcontext
+        cs = nullcontext()
+        if False:
+            pass
+        elif True:
+            cs = list()             # this arm always runs
+        def outer(x):
+            with cs:               # CPython: `with list():` raises TypeError
+                assert x != 1     # unreachable
+
+    The store is written as a conditional one, so it settled nothing and the
+    name was left to the ``nullcontext`` above -- reporting a header CPython
+    cannot enter as a live one, the damaging direction. The plain ``else:``
+    spelling of the same thing was wrong for the same reason:
+
+        if False:
+            pass
+        else:
+            cs = list()
+
+    The arm runs exactly when the test is false **and** every earlier test in
+    the chain also failed, so both have to be read: an ``elif`` behind a
+    never-true ``if`` always runs, while the same arm behind an always-true
+    ``if`` never does. That second case is already handled, and handled
+    correctly, by :func:`_statement_in_unreachable_arm` -- which is why this
+    helper is consulted alongside it rather than instead of it, and why
+    :func:`_statement_always_runs` still subtracts the unreachable-arm answer
+    at the end.
+
+    An ``elif`` is an ``else`` whose body is another ``if``, so the chain is
+    walked by following ``orelse`` while it holds a single ``ast.If``. A
+    trailing plain ``else`` settles the same way once the chain is exhausted.
+
+    This says nothing about a store written *directly* in a loop body, which
+    may not run at all; that boundary is #403's AC4 and is preserved by
+    leaving :func:`_block_never_runs` the only loop-side test.
+    """
+    if not isinstance(block, ast.If):
+        return False
+    # An `if False:` / `elif True:` chain runs the `elif` body on every call,
+    # while the `if` link's own body never runs. The *outer* link is claimed
+    # here as well as the arm itself, because the per-block `all(...)` in
+    # :func:`_statement_always_runs` would otherwise see a never-running block
+    # on the path to the store and reject it. That is the right answer for that
+    # question: this arm settles the name on every call.
+    #
+    # The whole rest of the chain still has to be read before claiming it, and
+    # `_always_true_arm_within` is what reads it -- an early return here on the
+    # strength of this link's test alone is the bug that had the conditional
+    # chain below settled on its opening `if False:`.
+    if not _condition_is_never_true(block.test, function):
+        return False
+    return _always_true_arm_within(block, statement, function)
+
+
+def _always_true_arm_within(block, statement, function):
+    """Does an always-run ``orelse`` arm of ``block`` hold ``statement``?
+
+    #403. The chain walk behind :func:`_is_always_true_arm`. ``block``'s own
+    # test is already known to be never-true by the caller, so this starts at
+    its ``orelse`` and follows the chain downwards:
+
+    * an ``elif`` link is reached only when its own test is also never-true,
+      and the claim is made at the first link whose body holds the statement;
+      a link whose test is *always*-true settles the name as surely as an
+      unconditional store, so it is claimed there too;
+    * a trailing plain ``else`` runs when the whole chain above it failed, so
+      it settles the name as well;
+    * a link whose test can hold ends the walk with ``False`` -- the arm beyond
+      it runs on some calls and not others, which is the undecidable case and
+      must leave the store conditional.
+
+    Reading every link is what keeps
+
+        if False:
+            pass
+        elif flag:
+            pass
+        elif True:
+            cs = list()
+
+    from being settled on the strength of the opening ``if False:`` alone. That
+    arm is reached only when ``flag`` is false, so the store settles the name
+    only sometimes and the header is undecidable.
+    """
+    arm = block.orelse
+    while len(arm) == 1 and isinstance(arm[0], ast.If):
+        # An `elif` is reached only when the tests above it failed, so an
+        # always-true test here both runs its body on every call *and* is
+        # itself the settling store. `_is_always_true_branch` is asked first so
+        # the body case is settled by the body rule, keeping the two questions
+        # in one place.
+        test = arm[0].test
+        if _contains_any(arm[0].body, statement):
+            if _condition_is_always_true(test, function):
+                return _is_always_true_branch(arm[0], statement, function)
+            return _condition_is_never_true(test, function)
+        if not _condition_is_never_true(test, function):
+            return False
+        arm = arm[0].orelse
+    # A trailing `else` runs when the whole chain above it failed.
+    return _contains_any(arm, statement)
+
+
+def _link_is_always_entered(block, function):
+    """Is this ``if`` node's body entered on every call?
+
+    Walks the ``orelse`` chain containing ``block`` from the outermost link
+    inward, which is the only direction that can answer the question: a link
+    deeper in the chain is reached only when every test above it failed.
+
+    A node that is not inside any chain is a standalone ``if`` or the opening
+    link of one, and is entered whenever its own test holds -- the caller's
+    question is about the test, so the answer here is ``True`` and the test
+    itself is judged by the caller.
+    """
+    outer_link = _outermost_chain_link(block, function)
+    if outer_link is None:
+        return True
+    link = outer_link
+    while True:
+        if link is block:
+            return True
+        if not isinstance(link, ast.If) or len(link.orelse) != 1:
+            return False
+        nxt = link.orelse[0]
+        if not isinstance(nxt, ast.If):
+            # A trailing plain `else`. `block` is not in this arm, so it is
+            # never reached through this chain.
+            return False
+        # `nxt` is an `elif`: it is entered only when `link`'s test failed, so
+        # `link` must be never-true for the walk to continue inward.
+        if not _condition_is_never_true(link.test, function):
+            return False
+        link = nxt
+
+
+def _outermost_chain_link(block, function):
+    """The opening ``if`` of the ``orelse`` chain containing ``block``.
+
+    ``None`` when ``block`` is not inside such a chain. Only a genuine
+    ``elif`` -- a node that is the single element of some ``if``'s
+    ``orelse`` -- has a parent link, and the search is by identity through
+    the function so an unrelated nested ``if`` cannot be mistaken for one.
+    """
+    if function is None:
+        return None
+    for node in ast.walk(function):
+        if not isinstance(node, ast.If) or len(node.orelse) != 1:
+            continue
+        if node.orelse[0] is block:
+            return node
+    return None
