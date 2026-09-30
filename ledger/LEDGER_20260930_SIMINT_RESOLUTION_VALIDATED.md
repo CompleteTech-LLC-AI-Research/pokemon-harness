@@ -222,3 +222,94 @@ reply. That is the 36th dropped dispatch, recorded in
 So: nothing merged, no PR marked ready, no issue closed. Release remains
 `PARTIAL`. The simulation is now four PRs deep and fully green, which is the
 strongest position available without a reviewer.
+
+---
+
+# Addendum 2 — three blocking findings, and one new issue
+
+The simulation itself is complete and green, but the exercise turned up
+**three defects on PRs I was preparing to integrate**, and one of them is a
+regression in the damaging direction. None is fixed upstream; all are filed.
+
+## F1 — PR #421: `TypeError` on every non-`ast.Assign` store
+
+`_binds_starred_target` applied `name in` to a helper that already returns a
+`bool`. 130 failures on the combined tree; #421's own 358-test suite is green
+because the branch has no coverage.
+
+Filed: <https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/421#issuecomment-5904792850>
+Detail: `FINDING_421_BOOL_MEMBERSHIP_20260930.md`
+
+## F2 — PR #405: introduces a **false-DEAD**
+
+`for cs in (1, contextlib.nullcontext()): pass` then `with cs:` — CPython
+fires the assert, #405 reports it dead. #405 fixes the two non-enterable rows
+of #425 but over-corrects past the control. Its own suite is **362 green**.
+
+Filed: <https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/405#issuecomment-5904886121>
+Detail: addendum in `VERIFY_423_NOT_FIXED_20260930.md`
+
+**Consequence for merge order:** #425 must not be closed by merging #405. That
+would trade a weaker defect (false-live) for a stronger one (false-dead).
+
+## F3 — PR #412 / #424: a false-DEAD regression at `b90f985` — NEW ISSUE #429
+
+An `elif` arm's store is treated as unconditionally reached, so
+
+```python
+cs = contextlib.nullcontext()
+if x: pass
+elif True: cs = list()
+with cs: assert x != 1
+```
+
+is reported **dead** where CPython **fires**. Bisected exactly:
+`5535135` correct → `b90f985` wrong → wrong through the rest of the stack.
+
+The regression lives inside a commit whose own message says it was fixing
+false-deads, and survived six further review rounds plus the #392 merge. All
+669 tests pass with it present.
+
+Filed: <https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/issues/429>
+PR comments: [#412](https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/412#issuecomment-5905026690),
+[#424](https://github.com/CompleteTech-LLC-AI-Research/pokemon-harness/pull/424#issuecomment-5905027249)
+Detail: `FINDING_412_B90F985_FALSE_DEAD_20260930.md`
+
+This is the one that matters most. #412 was the prerequisite for the whole
+stack, and it is not mergeable as it stands.
+
+## Also verified this round
+
+- **#423** — real, still open on every tree including the simulation. Filed
+  measured evidence on the issue.
+- **#425** — real, still open on the simulation. See F2.
+- **#417** — reproduces its own table exactly, both controls green. Still open.
+- **#416** — **stale**: #406 head `eb7c15f7` answers the shape correctly. Not a
+  live defect, but should stay open until confirmed on the merge tree.
+
+## A methodology error worth recording
+
+My first #417 probe used a stand-in `Sup` class whose `__exit__` tested
+`isinstance(exc[0], AssertionError)`. `exc[0]` is the exception *class* and
+`exc[1]` the instance, so the class did not suppress at all, and the probe
+reported all three rows **live** — contradicting a correct issue.
+
+Caught by executing the fixture under real CPython (the assert propagated when
+the issue says it is swallowed) and by re-reading the issue's own `return True`
+contract. Rewriting the probe from the issue's fixture reproduced the issue's
+table exactly.
+
+The generalisable lesson: a probe's stand-in object must do what the issue's
+does, or the probe measures a different question. This is the same class of
+error as the malformed fixtures recorded earlier in this ledger, and it is the
+one most likely to manufacture a false "disproved".
+
+## Review transport
+
+Three `spawn_agent` calls this session. One child answered the wrong task
+visibly; two produced **silence**. `list_agents` and `wait_agent` continue to
+return `unsupported call`. A returned task name is not evidence; silence is
+not a pending approval.
+
+Zero of 18 open PRs has an independent review. **Nothing merged. No PR marked
+ready. No issue closed.** Release remains `PARTIAL`.
