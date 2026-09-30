@@ -3559,6 +3559,151 @@ def _binds_element_of(statement, name):
     )
 
 
+def _target_is_bare_name(statement, name):
+    """Does ``name`` receive this assignment's whole right-hand side?
+
+    The complement of :func:`_binds_element_of`, asked per target rather than
+    per statement. A chained assignment can mix the two spellings in one
+    statement:
+
+        cs = (other, x) = (helper, 1)
+
+    Here ``cs`` is a bare target and receives the whole tuple, while ``other``
+    and ``x`` receive elements of it. Deciding the statement once -- "this is a
+    destructuring assignment" -- is wrong for ``cs`` in both halves of that
+    example, and reading the right-hand side's type for ``cs`` is right.
+
+    Only ``ast.Assign`` carries several targets, so any other store form binds
+    its name the ordinary way and answers ``True``.
+    """
+    if not isinstance(statement, ast.Assign):
+        return True
+    return any(isinstance(target, ast.Name) and target.id == name for target in statement.targets)
+
+
+def _binds_a_starred_name(statement, name):
+    """Is ``name`` a starred target, so unpacking pins it to a list?
+
+    ``*cs, = (helper,)`` and ``first, *cs = pair`` both build a list for ``cs``
+    whatever the elements are, so the name cannot hold a context manager
+    afterwards. :func:`_literal_runtime_type` reads the ``ast.Starred`` that
+    records this as ``"list"`` for the ordinary entry rule; this is the same
+    question asked about the target rather than the value, because
+    :func:`_store_may_bind_enterable` has to know it *before* it decides
+    whether the element type is readable at all.
+    """
+    if not isinstance(statement, ast.Assign):
+        return False
+
+    def starred(node):
+        if isinstance(node, ast.Starred):
+            return name in _store_target_names([node.value])
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return any(starred(element) for element in node.elts)
+        return False
+
+    return any(starred(target) for target in statement.targets)
+
+
+def _store_may_bind_enterable(entry, name):
+    """Could this store leave ``name`` holding something a ``with`` accepts?
+
+    The narrow companion to the stale-carrier guard in :func:`_stores_of`.
+    That guard asks whether a later conditional store makes the header's value
+    undecidable, and the honest answer is only "yes" when the store could have
+    put something *enterable* there. A store pinned to a type that cannot be
+    entered settles the name just as surely as leaving it alone, because every
+    path through the header then raises before the assert is evaluated.
+
+    ``name`` is the name the header under test reads, because whether a store
+    pins that name is a question about *that name's own target*. A statement
+    can bind several names at once and, in a chained assignment, can mix a bare
+    target with a destructured one; the answer differs per target.
+
+    The same reading the literal-type rule already uses is applied, so the two
+    cannot disagree about a value:
+
+    * a *carrier* (``import os as cs``, ``def cs``, ``class cs``) is a module,
+      a function or a type -- none of which can be entered;
+    * a value-less store is `with ... as cs:`, `del cs` or `except E as cs:`,
+      none of which leaves a usable manager bound;
+    * a literal is read through :func:`_literal_runtime_type`; a literal whose
+      type is in :data:`NON_CONTEXT_MANAGER_TYPES` cannot be entered;
+    * a **starred** target binds a list whatever the elements are. This is a
+      property of the target, not of the value, so it is decided first and
+      without reading the right-hand side at all;
+    * any other non-bare target -- a tuple or list target -- binds an *element*
+      of the right-hand side, and the element's type is not readable from the
+      container's syntax;
+    * a call, an attribute, a subscript, a loop target or a `match` capture is
+      **not** read. The value is whatever the call returns or the loop yields,
+      which the syntax does not fix -- `nullcontext()` is a real context
+      manager and the other calls may be too. Reading those as unenterable
+      would drop a live assert, so they are reported as possibly-enterable and
+      the caller declines, which is the safe direction.
+
+    Direction: reporting a store as *not* possibly-enterable keeps a correct
+    dead verdict; reporting it as possibly-enterable makes the caller decline.
+    Only the second is the damaging one, so an unreadable value is always
+    resolved toward "possibly enterable".
+    """
+    statement, value, _conditional = entry
+    if isinstance(value, str):
+        # A carrier: a module, a function or a class, none enterable.
+        return False
+    if _binds_a_starred_name(statement, name):
+        # A starred target pins the name to a **list** whatever the elements
+        # are, so the right-hand side does not have to be readable at all:
+        # `*cs, = (helper,)`, `*cs, = helper` and `first, *cs = pair` all leave
+        # `cs` holding a list, which cannot be entered.
+        #
+        # This has to be asked *before* the readable-literal checks below.
+        # Only the first of those is a tuple literal, so a version that tested
+        # "is this a literal?" first answered "no" for `*cs, = helper` and for
+        # every `= pair` form, reported the store as possibly-enterable, and
+        # made the caller decline -- four more false-live regressions against a
+        # master that answers them correctly. The type is a property of the
+        # target, not of the value.
+        return False
+    if value is None:
+        # `with ... as cs:`, `del cs`, `except E as cs:` and a loop target.
+        # A loop target binds the next element of an iterable this rule cannot
+        # read, so it is declined as unreadable below rather than assumed.
+        if isinstance(statement, (ast.For, ast.AsyncFor)):
+            return True
+        return bool(isinstance(statement, ast.Match))
+    if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+        # A call is a call. `nullcontext()` returns a real context manager and
+        # must not be read as unenterable here.
+        return True
+    if isinstance(statement, ast.Assign) and not _target_is_bare_name(statement, name):
+        # A destructuring target: `cs, other = (...)` binds `cs` to one
+        # *element* of the right-hand side, and the element's type is not
+        # readable from the container's syntax. Reading the whole right-hand
+        # side's type would call the name a tuple and drop a live assert, so
+        # this is reported as possibly enterable and the caller declines.
+        #
+        # This is about *this name's* own target, not about the statement.
+        # A chained assignment mixes the two, and the two spellings are not
+        # equivalent:
+        #
+        #     *cs, = (helper,)              # `cs` is a list
+        #     cs = (other, x) = (helper, 1)  # `cs` is the whole RHS tuple
+        #
+        # The second is pinned non-enterable too, so declining it would replace
+        # a correct dead verdict with a false-live one; the direct `cs` target
+        # in a chain is a bare name and falls through to the literal reading
+        # below, which is right for it. Reading the statement as "destructuring
+        # happened" and returning early for both got that wrong in six
+        # fixtures. The starred half is answered above, before the literal
+        # checks, because it does not depend on the right-hand side at all.
+        return True
+    kind = _literal_runtime_type(value)
+    if kind is None:
+        return True
+    return kind not in NON_CONTEXT_MANAGER_TYPES
+
+
 def _stores_of(name, by_index, index, function):
     """The ``(statement, value, conditional)`` stores binding ``name`` here.
 
@@ -3590,6 +3735,81 @@ def _stores_of(name, by_index, index, function):
     ]
     latest = max((orders[id(entry[0])] for entry in decidable), default=None)
     if latest is None:
+        return None
+    # A conditional store that may *supersede* a carrier leaves the name's
+    # final value undecidable, so the carrier must not be read as still in
+    # force:
+    #
+    #     def outer(flag, x):
+    #         import os as cs
+    #         if flag:
+    #             cs = nullcontext()
+    #         with cs:
+    #             assert x != 1
+    #
+    # When the branch runs the name holds a real context manager and the
+    # assert is **live**; when it does not, the module is in force and entry
+    # raises `TypeError`. Either way the header's value is not settled by the
+    # carrier alone, and answering "dead entry" from the carrier reports a
+    # live contract as unreachable -- the damaging direction. `None` makes
+    # `_entry_is_dead` decline, which is the safe direction.
+    #
+    # The guard is anchored to the *settled* store and fires only when that
+    # store is itself a carrier. Both restrictions are load-bearing:
+    #
+    # * Anchoring to the last **carrier** rather than to `latest` is too
+    #   broad. An unconditional store after the carrier has already settled
+    #   the name, and a later conditional store cannot unsettle it. Given
+    #
+    #       def outer():
+    #           import os as cs
+    #           cs = None
+    #           if False:
+    #               cs = nullcontext()
+    #
+    #   the settled value is `None`, `with cs:` raises `TypeError` on every
+    #   path, and the assert is unreachable. Measured against master, which
+    #   gets all four of these right.
+    #
+    # * Firing whenever *any* conditional store follows `latest` is also too
+    #   broad, and regresses a different four the same way. A conditional
+    #   store that is itself pinned non-enterable cannot rescue the header on
+    #   the path where it runs, so the carrier still decides every path:
+    #
+    #       def outer(flag, x):
+    #           import os as cs
+    #           if flag:
+    #               cs = None
+    #           with cs:
+    #               assert x != 1
+    #
+    #   CPython raises `TypeError` for `flag=False` (the module) *and* for
+    #   `flag=True` (`None`), so the assert is unreachable on both paths and
+    #   the correct verdict is dead. This is the same precision
+    #   `_module_stores` already applies to the module-scope rule, which
+    #   declines only for a conditional store that is neither a carrier nor
+    #   pinned unenterable. Without the restriction, the first cut of this
+    #   guard fixed the four live rows above while turning these four correct
+    #   dead verdicts into false-live ones -- a regression against master, not
+    #   a repair. Both directions are shipped as rows.
+    #
+    # * A conditional store that is itself a *carrier* also cannot make the
+    #   header enterable, for the same reason, so it is excluded alongside the
+    #   unenterable literals and the two are read by the same helper.
+    # * `except ... as cs:` is excluded because the handler *deletes* the name
+    #   on exit rather than superseding it, and the list above already keeps
+    #   that shape decidable. Excluding it here stops a try/except that merely
+    #   mentions the name from flipping a correct `defeated` to `enforced`.
+    settled_is_carrier = any(
+        isinstance(entry[1], str) and orders[id(entry[0])] == latest for entry in decidable
+    )
+    if settled_is_carrier and any(
+        entry[2]
+        and not isinstance(entry[0], ast.ExceptHandler)
+        and orders[id(entry[0])] > latest
+        and _store_may_bind_enterable(entry, name)
+        for entry in entries
+    ):
         return None
     tied = [entry for entry in decidable if orders[id(entry[0])] == latest]
     if len(tied) == 1:
