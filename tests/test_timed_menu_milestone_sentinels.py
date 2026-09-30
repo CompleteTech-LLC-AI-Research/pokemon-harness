@@ -36,6 +36,7 @@ from tests._timed_menu_milestone_sentinel_support import (
     RETENTION_SUBSCRIPT_COUNT_SITES,
     RUN_OWNER,
     _bypassing_sites,
+    _is_canonical_module_import,
     _is_enforced,
     _is_tautology,
     _may_bypass,
@@ -11954,3 +11955,112 @@ def test_literal_match_requires_reachable_assertion_failure(prefix, subject, pat
     function = tree.body[1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+#: #369 bare-name residual. The filed fixture spells its subject element with a
+#: from-import alias (``nullcontext()``) rather than the qualified
+#: ``contextlib.nullcontext()`` that #364/#455 accepted. Executed, the assert
+#: below the capture fires; the analyzer called it defeated, which is the
+#: damaging false-DEAD direction.
+#:
+#: The carrier spelling is deliberately varied across these rows so the fix
+#: cannot be satisfied by looking at the ``with`` instead of the subject: only
+#: the *subject element* spelling decided the verdict when this was measured.
+FROM_IMPORT_SUBJECT_ROWS = (
+    (
+        "both the subject and the carrier use from-import aliases",
+        (
+            "from contextlib import suppress, nullcontext\n\n"
+            "def outer(x, flag, helper, items):\n"
+            "    subject = [nullcontext()]\n"
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    (
+        "a from-import subject beside a qualified carrier",
+        (
+            "from contextlib import nullcontext\nimport contextlib\n\n"
+            "def outer(x, flag, helper, items):\n"
+            "    subject = [nullcontext()]\n"
+            "    with (cs := contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    (
+        "a qualified subject beside a from-import carrier",
+        (
+            "import contextlib\nfrom contextlib import suppress\n\n"
+            "def outer(x, flag, helper, items):\n"
+            "    subject = [contextlib.nullcontext()]\n"
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+    (
+        "a from-import subject with no intervening carrier at all",
+        (
+            "from contextlib import nullcontext\n\n"
+            "def outer(x, flag, helper, items):\n"
+            "    subject = [nullcontext()]\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+            "    with cs:\n        assert x != 1\n"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    FROM_IMPORT_SUBJECT_ROWS,
+    ids=[row[0] for row in FROM_IMPORT_SUBJECT_ROWS],
+)
+def test_a_from_import_subject_alias_settles_its_own_selection(label, source):
+    """A ``from``-imported name is a written-out subject like any other. (#369)
+
+    ``from contextlib import nullcontext`` binds ``nullcontext`` to
+    ``contextlib.nullcontext``, so ``subject = [nullcontext()]`` is exactly the
+    one-element literal the literal-subject rule already accepts when it is
+    spelled ``contextlib.nullcontext()``.
+
+    It was not accepted, because ``_module_rebinds_name`` counted that very
+    import as a rebinding *away* from the module: ``_is_canonical_module_import``
+    recognised only ``import <name>``, never ``from M import x``. The gate then
+    refused the subject element, the selection proof was abandoned, and a fired
+    assert was reported defeated.
+
+    Every row is executed first and the analyzer is checked against that, so no
+    row can claim "live" on the strength of the checker's own opinion.
+    """
+    namespace = {}
+    exec(compile(source, "<from-import-subject>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1, True, namespace.get("helper"), [])
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True, (
+        f"{label}: the assert fires under CPython, so the analyzer must report it enforced."
+    )
+
+
+def test_a_from_import_of_an_unexported_name_is_still_a_rebinding():
+    """Widening the canonical-import rule must not cover a name that is absent.
+
+    ``_is_canonical_module_import`` now accepts ``from M import x`` -- but only
+    when ``M`` really exports ``x``. Without that check the widening would make
+    every from-import name look like a trustworthy alias and let a rebound
+    qualified name through the ``builtins.attr`` rule that shares this helper.
+    """
+    exported = ast.parse("from contextlib import nullcontext\n").body[0]
+    missing = ast.parse("from contextlib import not_a_real_attribute\n").body[0]
+    assert _is_canonical_module_import(exported, "nullcontext") is True
+    assert _is_canonical_module_import(missing, "not_a_real_attribute") is False

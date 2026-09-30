@@ -782,12 +782,61 @@ def _name_is_rebound_away_from_module(name_node, function, call=None):
 
 
 def _is_canonical_module_import(statement, name):
-    """Is this binding the ordinary ``import <name>`` of the module itself?"""
-    if not isinstance(statement, ast.Import):
+    """Is this binding the ordinary ``import <name>`` of the module itself?
+
+    A ``from M import x`` is a canonical binding of ``x`` in exactly the same
+    sense, provided ``x`` really is an attribute of ``M``. It names the
+    attribute directly, so the qualified form the callers are about to resolve
+    -- ``x`` standing for ``M.x`` -- is trustworthy, and counting the
+    from-import as a *rebinding* was the defect #369's filed fixture trips:
+
+        from contextlib import nullcontext
+
+        def outer(...):
+            subject = [nullcontext()]      # <- the veto fired here
+
+    :func:`_module_rebinds_name` asks whether ``name`` has been taken over by
+    something other than the module, and answered ``True`` for the very
+    statement that established the correct binding, so every bare from-import
+    alias was refused and a fired assert was certified defeated.
+
+    The attribute check is what keeps this from over-widening. ``from M
+    import x`` binds ``x`` to ``M.x`` only if ``M`` exports ``x``; a name the
+    module does not export is still an arbitrary object and is deliberately
+    left counting as a rebinding. Resolution is asked of the real interpreter
+    and declines when it cannot read, so an unreadable answer stays on the
+    conservative side.
+    """
+    if isinstance(statement, ast.Import):
+        return any(
+            (alias.asname or alias.name) == name and alias.name == name for alias in statement.names
+        )
+    if isinstance(statement, ast.ImportFrom) and statement.module:
+        for alias in statement.names:
+            if (alias.asname or alias.name) != name:
+                continue
+            # `from M import x` -- the name is the attribute `x` of module `M`.
+            if not _module_exports_attribute(statement.module, alias.name):
+                continue
+            return True
+    return False
+
+
+def _module_exports_attribute(module_name, attribute):
+    """Does ``module_name`` export ``attribute``? ``False`` when unreadable."""
+    import sys
+
+    module = sys.modules.get(module_name)
+    if module is None:
+        # The module has not been imported, so the attribute cannot be read off
+        # it. Importing here would be a side effect this check must not cause.
         return False
-    return any(
-        (alias.asname or alias.name) == name and alias.name == name for alias in statement.names
-    )
+    try:
+        return hasattr(module, attribute)
+    except Exception:  # noqa: BLE001 - a module with a hostile __getattr__
+        # An unreadable attribute is declined, which is the safe direction:
+        # the name stays a rebinding, so the qualified form stays untrusted.
+        return False
 
 
 def _callee_is_shadowed(func, function, call=None):
