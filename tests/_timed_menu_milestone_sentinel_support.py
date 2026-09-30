@@ -2309,14 +2309,31 @@ def _loop_value_source(statement):
     different question (#336) and it is answered from the literal element,
     which is exactly the distinction `_entry_is_dead` already documents.
 
-    Only a literal container is read, and only its first element, because
-    that is the only position a bare target can take. A ``Name`` or ``Call``
-    iterable returns :data:`UNREADABLE_VALUE`, which is the conservative
-    choice for the same reason an arbitrary iterable is undecidable.
+    Only a literal container is read, and it is the **last** element, because
+    that is the value the name holds once the loop has finished. A bare target
+    takes the whole right-hand side, so a multi-element iterable leaves the
+    final element bound:
+
+        for cs in (1, contextlib.nullcontext()):
+            pass
+        with cs:                # `cs` is the nullcontext, not the `1`
+            assert x != 1       # FIRES
+
+    Reading the *first* element instead reported that assert defeated -- the
+    damaging direction, a live contract certified as dead -- because the `1`
+    was read as a value that cannot be entered. Every shipped loop row uses a
+    single-element iterable, where first and last coincide, so the suite was
+    green while the rule was wrong. #379's merge review found this by
+    execution; the regression it introduced against master is recorded in
+    ``FINDING_379_MERGE_INTRODUCES_FALSE_DEAD_20260930.md``.
+
+    A ``Name`` or ``Call`` iterable returns :data:`UNREADABLE_VALUE`, which is
+    the conservative choice for the same reason an arbitrary iterable is
+    undecidable.
     """
     iterable = statement.iter
     if isinstance(iterable, (ast.Tuple, ast.List)) and iterable.elts:
-        return iterable.elts[0]
+        return iterable.elts[-1]
     return UNREADABLE_VALUE
 
 

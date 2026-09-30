@@ -55,6 +55,83 @@ def _sentinel_uses(name, owner_name):
     )
 
 
+#: #379's merge review found this by executing the fixture on both trees: the
+#: loop-target rule read the iterable's **first** element, so after a loop that
+#: iterates more than once the wrong value was in force. Single-element
+#: iterables -- the only shape any shipped row used -- cannot tell first from
+#: last, which is why the suite stayed green while the rule was wrong.
+#:
+#: Every row here is read *after* the loop has finished, so the value in force
+#: is the last element, and each expectation was taken from what CPython does,
+#: not from what either analyzer reports.
+AFTER_LOOP_TARGET_ROWS = (
+    (
+        "a single-element loop leaves that element bound",
+        (
+            "    for cs in (contextlib.nullcontext(),):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "a later element wins over an earlier one after the loop",
+        (
+            "    for cs in (1, contextlib.nullcontext()):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "a trailing suppressor defeats the read after the loop",
+        (
+            "    for cs in (contextlib.nullcontext(), "
+            "contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a trailing suppressor wins over an earlier enterable element",
+        (
+            "    for cs in (contextlib.nullcontext(), "
+            "contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a leading suppressor is not the value in force after the loop",
+        (
+            "    for cs in (contextlib.suppress(AssertionError), "
+            "contextlib.nullcontext()):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "a three-element loop leaves the last element bound",
+        (
+            "    for cs in (contextlib.nullcontext(), 1, "
+            "contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+)
+
+
 @pytest.mark.parametrize(
     ("predicate", "caller", "defect"),
     (
@@ -3753,6 +3830,70 @@ def test_a_binding_form_reads_the_value_that_lands_on_the_name(
         f"{control_results}. A rule that calls this defeated drops a real "
         f"contract."
     )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live"),
+    AFTER_LOOP_TARGET_ROWS,
+    ids=[row[0] for row in AFTER_LOOP_TARGET_ROWS],
+)
+def test_a_loop_target_reads_the_last_element_after_the_loop(
+    label, body, expected_live
+):
+    """After the loop, the target holds the *last* element it was given.
+
+    The in-loop question and the after-loop question have different answers,
+    and the rule has to keep them apart. Inside the body, `cs` is whatever
+    element the current iteration is on, so a bare `with cs:` reading a
+    multi-element iterable is genuinely undecidable. After the loop, the
+    iterable is exhausted and the name holds the final element -- a fact the
+    source states outright.
+
+    Reading the first element instead turned `for cs in (1, nullcontext()):`
+    into a dead contract, which is the damaging direction: a header CPython
+    really enters was certified as defeated. Master happened to answer these
+    rows correctly by never modelling a loop target's value at all, so the
+    regression was invisible to a test count -- every shipped loop row uses a
+    one-element iterable, where first and last are the same node.
+
+    Each row is executed before it is judged, so a `defeated` expectation is
+    only credible when CPython really swallows the assert.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    # Runtime settles the expectation. A row whose last element is a real
+    # context manager really does let the assert fire, and that is the *live*
+    # answer -- so the fired case is a pass, not a broken fixture. Only a
+    # row that expected the suppress to swallow and did not is stale, and
+    # one that raises before the assert is a fixture that never ran.
+    try:
+        namespace["outer"](1, None)
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+    else:
+        fired = False
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    assert fired is expected_live, (
+        f"{label}: the fixture was executed and the assert "
+        f"{'fired' if fired else 'did not fire'}, so the row's expectation "
+        f"{expected_live} does not match CPython. Row is stale."
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], (
+        f"{label}: expected {[expected_live]}, got {results}. A loop target "
+        f"reads the last element once the loop has finished."
+    )
+
 
 @pytest.mark.parametrize(
     ("label", "body", "expected"),
