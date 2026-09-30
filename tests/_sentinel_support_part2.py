@@ -135,6 +135,19 @@ def _assigned_suppressors(function, bound, query=None):
     for index in range(len(function.body)):
         for name, entries in bindings.items():
             seen = [entry for entry in entries if orders[id(entry[0])] <= index]
+            # #378. A store inside a loop body that provably cannot run has
+            # not happened, so it cannot be what the name holds at this
+            # index. Dropping it here keeps both consumers honest -- the
+            # resolution below and `_aliased_suppressions`' bare-name branch
+            # read this table:
+            #
+            #     cs = contextlib.nullcontext()
+            #     for y in ():               # zero iterations
+            #         cs = suppress(...)     # never executes
+            #     with cs:                  # still the nullcontext -> LIVE
+            seen = [
+                entry for entry in seen if not _is_provably_unreached_store(entry, orders, function)
+            ]
             if not seen:
                 continue
             value = _resolve_bindings(seen, bound, orders, index, function)
@@ -525,6 +538,17 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
     if collapsed:
         competing = collapsed_entries
+    # A conditional non-enterable value cannot revive a carried suppressor:
+    # the skipped path still suppresses, and the taken path fails on entry.
+    if len(competing) == 1 and _literal_runtime_type(competing[0][1]) in NON_CONTEXT_MANAGER_TYPES:
+        carried = [entry[1] for entry in unconditional if orders[id(entry[0])] == latest]
+        if (
+            len(carried) == 1
+            and isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _is_readable_suppressor(carried[0], bound)
+            and _carried_suppressor_has_unshadowed_arguments(carried[0], function)
+        ):
+            return carried[0]
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
