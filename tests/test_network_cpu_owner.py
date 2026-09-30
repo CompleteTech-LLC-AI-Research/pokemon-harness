@@ -19,6 +19,13 @@ from pyboy.core.serial import CYCLES_PER_BYTE_DMG, Serial
 from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 
+# ``_wait_for_edge_requests_retired`` was moved to a focused retirement
+# helper module under the #122 file-size split; it is re-exported here so the
+# byte-progress and owner-execution suites keep importing it from this module.
+from tests._network_edge_retirement_support import (  # noqa: F401
+    _wait_for_edge_requests_retired,
+)
+
 # Reuse the repository's original 32 KiB, asset-free PyBoy fixture.  The
 # program and interrupt vector are replaced in cartridge memory below.
 from tests.test_serial_backend_boundary import emulator as _emulator_fixture  # noqa: F401

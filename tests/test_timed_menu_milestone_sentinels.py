@@ -11004,3 +11004,333 @@ def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_module_import():
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+UNREACHED_LOOP_BODY_ROWS = (
+    (
+        "an empty tuple loop body never rebinds the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "an empty list loop body never rebinds the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in []:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "a header nested in the same block reads the earlier binding too",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for item in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "an empty loop nested in a running loop is still unreachable",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for outer in (1,):\n"
+            "        for item in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+    ),
+    (
+        "CONTROL a loop that iterates does rebind the name",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in [1]:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "CONTROL a falsy member still counts as an iteration",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (0,):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "CONTROL a two-element loop rebinds on the last iteration",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1, 2):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    # #378, from the independent review of `3edecda`. The `else` clause of a
+    # loop is what runs *because* the loop finished without `break`, so it
+    # executes on every path through a zero-iteration loop -- the body is
+    # skipped, the `else` is not. `For.body` and `For.orelse` are AST
+    # siblings, so a walk over the ancestors sees both, and treating any
+    # ancestor `For` as "its stores are unreachable" swept these up too.
+    #
+    # Executed on CPython 3.12.14 each of these *swallows* the assert, and
+    # `master` (`2c81f10`) already answered all of them correctly. Reporting
+    # them live was a regression the `3edecda` helper introduced, in the
+    # damaging direction: a defeated contract certified as load-bearing.
+    (
+        "the else clause of a zero-iteration loop still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "an else clause over a list literal still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in []:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "an else clause over a dict literal still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in {}:\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a store nested in the else clause still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        if True:\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    (
+        "a store inside a with in the else clause still runs",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in ():\n"
+            "        pass\n"
+            "    else:\n"
+            "        with contextlib.suppress(ValueError):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+    # Control for the rows above. A `for`/`else` `else` clause runs on normal
+    # completion, and a loop that completes normally has run every iteration,
+    # so a non-empty loop's `else` rebinds as well -- it must keep reporting
+    # `False`, or a fix that read *every* `else` as unreachable would pass the
+    # five rows above.
+    #
+    # The `break` case is deliberately not a row here. A `break` really does
+    # skip the `else`, so the assert is live, but the analyzer answers
+    # `defeated` for that shape on `master` (`2c81f10`) exactly as it does on
+    # this branch -- measured on both, CPython fires and both trees report
+    # `False`. That is a pre-existing false-DEAD of its own, unrelated to
+    # #378, and pinning it here would either fail this PR for a defect it did
+    # not introduce or quietly widen its scope. It is left for a separate
+    # issue rather than absorbed.
+    (
+        "CONTROL a completed loop runs its else clause too",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in (1,):\n"
+            "        pass\n"
+            "    else:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live"),
+    UNREACHED_LOOP_BODY_ROWS,
+    ids=[row[0] for row in UNREACHED_LOOP_BODY_ROWS],
+)
+def test_an_unreachable_loop_body_does_not_rebind_the_name(label, body, expected_live):
+    """A loop with no iterations performs none of the stores in its body.
+
+    #378. `for item in ():` is a statement that has been *reached*, and the
+    store rules list statements by that question -- "have the block's stores
+    run by the time this header is read" -- so a `for` was counted. But the
+    guarantee a loop offers is per *iteration*: a loop over a literal empty
+    iterable has none, and the body store never happens.
+
+    The consequence was a live contract reported as defeated, because the
+    carried `nullcontext` was retired by a suppressor that was never bound.
+
+    Scoped to a provably empty literal on purpose. `helper.items()` may yield
+    nothing, but it may not, so a store in that body keeps competing and the
+    ordinary conservative handling applies. The controls pin that a loop which
+    does iterate still rebinds, and that a falsy member `(0,)` is an iteration.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1, None)
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    # CPython settles the expectation, so a `defeated` row is only credible
+    # when the assert really is swallowed, and a `live` row only when it
+    # really fires.
+    assert fired is expected_live, (
+        f"{label}: executed on CPython the assert "
+        f"{'fired' if fired else 'did not fire'}, so the row's expectation "
+        f"{expected_live} does not match. Row is stale."
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], (
+        f"{label}: expected {[expected_live]}, got {results}. A loop over an "
+        f"empty literal performs none of its body's stores."
+    )
+
+
+@pytest.mark.parametrize(
+    "initial,conditional,live",
+    (
+        ("contextlib.suppress(AssertionError)", "None", False),
+        ("contextlib.suppress(AssertionError)", "1", False),
+        ("contextlib.suppress(AssertionError)", "[]", False),
+        ("contextlib.suppress(AssertionError)", "{}", False),
+        ("contextlib.suppress(AssertionError)", "()", False),
+        ("contextlib.suppress(AssertionError)", "contextlib.nullcontext()", True),
+        ("contextlib.suppress(AssertionError)", "contextlib.suppress(ValueError)", True),
+        ("contextlib.suppress(ValueError)", "None", True),
+        ("contextlib.nullcontext()", "None", True),
+    ),
+)
+@pytest.mark.parametrize(
+    "ghost", ("contextlib.nullcontext()", "contextlib.suppress(AssertionError)", "None", "1")
+)
+@pytest.mark.parametrize("ghost_before", (False, True))
+def test_empty_loop_filter_keeps_conditional_entry_outcomes(
+    initial, conditional, live, ghost, ghost_before
+):
+    conditional_store = "    if flag:\n        cs = " + conditional + "\n"
+    ghost_store = "    for item in ():\n        cs = " + ghost + "\n"
+    source = (
+        "import contextlib\ndef outer(x, flag):\n    cs = "
+        + initial
+        + "\n"
+        + (ghost_store + conditional_store if ghost_before else conditional_store + ghost_store)
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<conditional-empty-loop>", "exec"), namespace)  # noqa: S102
+    fired = []
+    for flag in (False, True):
+        try:
+            namespace["outer"](1, flag)
+        except AssertionError:
+            fired.append(True)
+        except TypeError:
+            fired.append(False)
+        else:
+            fired.append(False)
+    assert any(fired) is live
+    tree = ast.parse(source)
+    function = tree.body[1]
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is live
+
+
+@pytest.mark.parametrize("placement", ("module", "parent", "parameter", "local"))
+def test_empty_loop_filter_declines_shadowed_exception_argument(placement):
+    module = "AssertionError = ValueError\n" if placement == "module" else ""
+    setup = "    AssertionError = ValueError\n" if placement == "local" else ""
+    signature = "flag, AssertionError=ValueError" if placement == "parameter" else "flag"
+    body = (
+        "def outer("
+        + signature
+        + "):\n"
+        + setup
+        + "    cs = contextlib.suppress(AssertionError)\n"
+        + "    if flag:\n        cs = None\n"
+        + "    for item in ():\n        cs = contextlib.nullcontext()\n"
+        + "    with cs:\n        assert False\n"
+    )
+    if placement == "parent":
+        body = (
+            "def parent():\n    AssertionError = ValueError\n"
+            + "".join("    " + line for line in body.splitlines(keepends=True))
+            + "    return outer\nouter = parent()\n"
+        )
+    source = "import contextlib\n" + module + body
+    namespace = {}
+    exec(compile(source, "<shadowed-empty-loop>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](False)
+    with pytest.raises(TypeError):
+        namespace["outer"](True)
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is True
