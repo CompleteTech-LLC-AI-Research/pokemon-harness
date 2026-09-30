@@ -89,7 +89,11 @@ records the REDUCED destructuring element for suppression analysis, while
 
 Recorded so you know what is already claimed; you must NOT take it as a verdict.
 
-- Focused suite on `a89c1d7`: **696 passed, 0 failed**
+- Focused suite on `a89c1d7`: **617 collected, 0 failed, 0 errors, 0 skipped**
+  (CORRECTED 2026-09-30: an earlier revision of this brief said 696. That figure
+  is not reproducible. Measured twice on the exact head from two worktrees, and
+  via `--junitxml` and `--collect-only`. See
+  `ledger/FIND_20260930_696_CLAIM_NOT_REPRODUCIBLE.md`.)
 - `ruff check tests`: clean
 - Resolved support module independently dropped onto #412, #405, #408, and
   master: 0 failures each (contributor worktrees restored afterward)
@@ -142,8 +146,10 @@ truth.
 5. **Non-regression.** Run the focused suite and `ruff check tests` on the exact
    head. Report terminal counts from JUnit/XML or captured output, not prose.
 
+    # NOTE: this suite prints no "N passed" line (addopts="-q"). Use --junitxml.
     <abs-scratch-path>/.venv/bin/python -m pytest \
-        tests/test_timed_menu_milestone_sentinels.py -q
+        tests/test_timed_menu_milestone_sentinels.py -q \
+        --junitxml=/tmp/a89c1d7.xml
 
 ## Known pre-existing defect — do NOT re-report as a merge blocker
 
