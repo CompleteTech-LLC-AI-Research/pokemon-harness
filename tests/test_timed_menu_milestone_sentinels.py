@@ -9655,6 +9655,112 @@ ELSE_ARM_SUPPRESSOR_SHAPES = (
         ),
         False,
     ),
+    # #452, second form. The trailing `else` here is reached through an `elif`
+    # link, so the #441 walk above cannot descend to it: that walk needs the
+    # *failure value* to decide every link above the arm, and `assert x != 1`
+    # says nothing about `flag`. The `else` does not need that -- it only has
+    # to be skippable, meaning some call takes no arm at all and so keeps the
+    # preamble's `nullcontext`.
+    #
+    #     cs = contextlib.nullcontext()
+    #     if False:
+    #         pass
+    #     elif flag:
+    #         pass
+    #     else:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x == 1, flag == True` the leading link is decided-false and `flag` is
+    # true, so no arm runs and the assert FIRES. This row failed on the first
+    # `else`-arm head (`4d7c5c4`) as well as on base.
+    (
+        "an else arm reached past a decided link and an unbound predicate is live",
+        (
+            "    if False:\n        pass\n    elif flag:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The control that decides whether the relaxation above is sound or merely
+    # eager. The decided-true link here is an `elif`, and an `elif True` is
+    # always taken, so the trailing `else` is *unreachable* rather than merely
+    # skipped: the suppressor is never installed at all, the preamble's
+    # `nullcontext` is what every call enters, and the assert fires at
+    # `x == 1`. The analyzer reports live, which is the right answer -- and
+    # crucially it is the answer it already gave before this repair, so the
+    # row pins that reaching a decided-true link does not change anything.
+    (
+        "CONTROL a decided-true elif above makes the else unreachable and stays live",
+        (
+            "    if False:\n        pass\n    elif True:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The row that actually discriminates soundness from eagerness, and the
+    # one that caught a real FALSE-LIVE while this was being written.
+    #
+    # Here the decided link is the *first* link, and it is decided-false, so
+    # its body never runs and the chain always falls through to the `else`:
+    # the suppressor is installed on every call that reaches the header, the
+    # preamble's `nullcontext` is never entered, and the assert never fires.
+    # The header is genuinely DEFEATED.
+    #
+    # A relaxation that treated "some link above is skippable" as sufficient
+    # would answer `live` here and certify a disarmed contract as load-bearing.
+    # The difference from the row two above is that this chain's `else` is
+    # *always* taken, so there is no skipping call at all -- the walk has to
+    # fall off the end of the chain rather than find a value that skips it.
+    (
+        "CONTROL a decided-false leading link means the else always runs and stays dead",
+        (
+            "    if False:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # The second false-LIVE this relaxation produced while it was written, and
+    # the row that pins the direction the walk has to travel. The link's test
+    # is `local`, a name this scope pins to `0`:
+    #
+    #     cs = contextlib.nullcontext()
+    #     local = 0
+    #     if False:
+    #         pass
+    #     elif local:         # never true
+    #         pass
+    #     else:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # `local` is always falsy, so both arms above the `else` are dead and the
+    # `else` runs on every call: the suppressor swallows the assert and the
+    # header is genuinely DEFEATED. Treating "some link above may be true" as
+    # sufficient answered `live` here.
+    (
+        "CONTROL a link pinned to a falsy constant keeps the else always running and dead",
+        (
+            "    local = 0\n"
+            "    if False:\n        pass\n    elif local:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # The mirror of the filed row, and the one that shows the walk is looking
+    # for a *link that can be true* rather than for the failure value. Here the
+    # unconstrained name is supplied by the caller, so a truthy call skips the
+    # `else` and the assert fires.
+    (
+        "an else arm skipped by a caller-supplied truthy link is live",
+        (
+            "    if False:\n        pass\n    elif flag:\n        pass\n    else:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
 )
 
 
