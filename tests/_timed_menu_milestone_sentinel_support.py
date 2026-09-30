@@ -3119,30 +3119,33 @@ def _binds_starred_target(statement, name):
     """
     if not isinstance(statement, ast.Assign):
         return False
-    return any(
-        isinstance(target, (ast.Tuple, ast.List)) and name in _starred_target_names([target])
-        for target in statement.targets
-    )
+    return name in _starred_target_names(statement.targets)
 
 
 def _starred_target_names(targets):
-    """The names these targets bind *through* an ``ast.Starred``."""
-    names = set()
-    pending = list(targets)
+    """Names whose final store in these targets collects a starred list.
+
+    CPython assigns targets and nested elements from left to right. A later
+    plain target can overwrite the list: ``*cs, cs = (1, nullcontext())``
+    leaves ``cs`` a context manager. Track every name store in that order,
+    including the separate targets of a chained assignment.
+    """
+    final_stores = {}
+    pending = list(reversed(targets))
     while pending:
         target = pending.pop()
         if isinstance(target, ast.Name):
-            continue
-        if isinstance(target, (ast.Tuple, ast.List)):
-            pending.extend(target.elts)
+            final_stores[target.id] = False
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(reversed(target.elts))
         elif isinstance(target, ast.Starred):
             if isinstance(target.value, ast.Name):
-                names.add(target.value.id)
+                final_stores[target.value.id] = True
             else:
-                # `(*(a, b),) = ...` is not valid Python, but a nested target
-                # keeps the walk total rather than silently ignoring a store.
+                # Unpacking the collected list again binds its elements,
+                # rather than assigning the list itself to every nested name.
                 pending.append(target.value)
-    return names
+    return {name for name, starred in final_stores.items() if starred}
 
 
 def _stores_of(name, by_index, index, function):

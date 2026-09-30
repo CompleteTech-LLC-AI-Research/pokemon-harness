@@ -3334,6 +3334,52 @@ def test_a_starred_target_binds_a_list_so_the_assert_is_unreachable(
     )
 
 
+@pytest.mark.parametrize(
+    ("store", "starred", "live"),
+    (
+        ("*cs, cs = (1, contextlib.nullcontext())", False, True),
+        ("(*cs, (cs,)) = (1, (contextlib.nullcontext(),))", False, True),
+        ("*cs, tail = head, cs = (1, contextlib.nullcontext())", False, True),
+        ("head, cs = *cs, tail = (1, contextlib.nullcontext())", True, False),
+        ("cs, *cs = (contextlib.nullcontext(), 1)", True, False),
+        ("(*cs, (cs, *cs)) = (1, (contextlib.nullcontext(), 2))", True, False),
+        ("*(cs, tail), = (contextlib.nullcontext(), 2)", False, True),
+    ),
+)
+def test_starred_target_kind_uses_the_final_store(store, starred, live):
+    """A repeated target name receives its last value, including nested stores.
+
+    Pin the dead-entry predicate directly: an older duplicate-binding
+    limitation elsewhere in `_is_enforced` masks this specific regression.
+    Every expected entry outcome is checked by executing the same fixture.
+    """
+    source = (
+        f"def outer(x, flag, helper):\n    import contextlib\n    {store}\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_entry_contract(store, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    statement = function.body[1]
+    header = function.body[2]
+    assert support._binds_starred_target(statement, "cs") is starred
+    assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
+        not live
+    )
+
+
+@pytest.mark.parametrize(
+    "store",
+    (
+        "*cs, tail = cs = (1, contextlib.nullcontext())",
+        "(*cs, tail) = (cs, tail) = (1, contextlib.nullcontext())",
+    ),
+)
+def test_later_chained_plain_target_clears_a_starred_binding(store):
+    statement = ast.parse(store).body[0]
+    assert not support._binds_starred_target(statement, "cs")
+
+
 #: AC1's second position. A carrier can sit in two places relative to the
 #: header that reads it: as a *later sibling* statement (the rows above), or
 #: **inside the header's own scope**, so it has already run by the time the
