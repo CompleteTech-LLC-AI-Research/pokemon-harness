@@ -468,6 +468,33 @@ def _literal_match_reaches_header(function, match):
             alias.name == "contextlib" for alias in statement.names
         ):
             continue
+        if (
+            isinstance(statement, ast.ImportFrom)
+            # #369. The filed reproduction imports inside the function body,
+            # and `from contextlib import ...` is a *different node type* from
+            # the `import contextlib` admitted just above. Falling through to
+            # the closing `return False` ended the walk, so the capture was
+            # never decided for the issue's own spelling and a header
+            # CPython enters was reported defeated.
+            #
+            # The gate stays exactly as narrow as the qualified form: the
+            # import must come from `contextlib` and nothing may be renamed,
+            # since an `as` alias is a rebinding this walk cannot follow. The
+            # names it binds are resolved later, by
+            # `_literal_subject_element_is_safe`, which re-checks that the
+            # callee still names what this import gave it.
+            #
+            # The `asname` half is not decoration. An alias whose `asname`
+            # happens to repeat the imported name -- `nullcontext as
+            # nullcontext` -- is a rewrite the walk cannot follow, and the
+            # element check reads the callee as intact, so without this
+            # condition the row is decided `enforced` and the widened gate
+            # would accept a rebinding. Mutation-tested: dropping only the
+            # `asname` clause flips that control from `False` to `True`.
+            and statement.module == "contextlib"
+            and not any(alias.asname for alias in statement.names)
+        ):
+            continue
         if isinstance(statement, ast.Assign) and all(
             isinstance(target, ast.Name) for target in statement.targets
         ):

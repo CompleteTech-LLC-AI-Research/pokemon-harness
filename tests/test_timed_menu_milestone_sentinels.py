@@ -11896,6 +11896,125 @@ def test_literal_match_declines_a_rebound_callee(prefix):
     assert _is_enforced(function, target, tree) is False
 
 
+#: #369, the issue's own reproduction. The filed text imports *inside* the
+#: function body, builds the subject, then hangs the carried suppressor off a
+#: walrus `with` that sits between the assignment and the `match`.
+#:
+#: Two independent gaps made this report `defeated`, and each is pinned by its
+#: own row below, so neither can silently come back:
+#:
+#:   * `_literal_match_reaches_header` admitted `ast.Import` before the match
+#:     but not `ast.ImportFrom`, so the function-body `from` spelling ended
+#:     the walk for *every* carrier form;
+#:   * the carrier is a walrus `with`, which the subject walk used to reject
+#:     because the assignment was not literally adjacent to the `match`.
+#:
+#: The runtime column is the point: the capture binds a genuine
+#: `nullcontext`, so the carried suppressor is superseded and the assert is
+#: live. Reporting `enforced` is the damaging false-DEAD fix. The controls hold
+#: the widened gate to the two conditions it is actually justified by -- the
+#: module is `contextlib`, and nothing is renamed.
+FROM_IMPORT_CARRIER_ROWS = (
+    (
+        "the filed reproduction: from-import, walrus carrier, named subject",
+        (
+            "    from contextlib import suppress, nullcontext\n"
+            "    subject = [nullcontext()]\n"
+            "    with (cs := suppress(AssertionError)):\n"
+            "        pass\n"
+            "    match subject:\n        case [cs]:\n            pass\n"
+        ),
+        True,
+    ),
+    (
+        "a from-import in the body decides a directly written subject",
+        (
+            "    from contextlib import suppress, nullcontext\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nullcontext()]:\n        case [cs]:\n            pass\n"
+        ),
+        True,
+    ),
+    (
+        "CONTROL a renamed from-import is a rebinding, not a plain import",
+        (
+            "    from contextlib import suppress, nullcontext as nc\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nc()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL an alias that even spells the same name is still a rewrite",
+        (
+            "    from contextlib import nullcontext as nullcontext\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nullcontext()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL a from-import of another module is not a contextlib import",
+        (
+            "    from decimal import Decimal\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [Decimal()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+    (
+        "CONTROL a callee rebound after the from-import is not decided",
+        (
+            "    from contextlib import suppress, nullcontext\n"
+            "    nullcontext = int\n"
+            "    cs = contextlib.suppress(AssertionError)\n"
+            "    match [nullcontext()]:\n        case [cs]:\n            pass\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "enforced"),
+    FROM_IMPORT_CARRIER_ROWS,
+    ids=[row[0] for row in FROM_IMPORT_CARRIER_ROWS],
+)
+def test_a_from_import_in_the_body_is_a_plain_import_for_this_walk(label, body, enforced):
+    """#369: a ``from contextlib import`` in the body is a canonical binding.
+
+    The pre-match walk already let ``import contextlib`` through. ``from
+    contextlib import ...`` is a different ``ast`` node, so it fell through to
+    ``return False`` and the capture was never decided -- for the issue's own
+    reproduction, and for every carrier form. This rows it with the qualified
+    spelling on exactly its own terms: the module is ``contextlib`` and nothing
+    is renamed, since an ``as`` alias is a rebinding this walk cannot follow.
+
+    Each ``True`` row is executed before the analyzer is consulted, so it
+    cannot pass on the checker's own opinion. The ``False`` rows are the
+    controls that keep the widened gate from swallowing a genuine rebinding.
+    """
+    source = "import contextlib\ndef outer(x):\n" + body + "    with cs:\n        assert x != 1\n"
+    if enforced:
+        namespace = {}
+        exec(compile(source, "<from-import-carrier>", "exec"), namespace)  # noqa: S102
+        try:
+            namespace["outer"](1)
+        except AssertionError:
+            fired = True
+        else:
+            fired = False
+        assert fired is True, f"{label}: the captured plain manager must leave the assert live"
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is enforced
+
+
 @pytest.mark.parametrize(
     "element,error",
     (
