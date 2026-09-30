@@ -21,6 +21,7 @@ backstop that keeps them from being quietly removed.
 
 import ast
 import asyncio
+import contextlib
 import inspect
 
 import pytest
@@ -3342,6 +3343,272 @@ def test_a_capture_binds_only_the_namespace_it_was_written_in(label, nested, ver
     )
 
 
+#: #359: the binding forms whose right-hand side is an *element* of a
+#: container, or a loop's next element, rather than the whole value.
+#:
+#: Every row here binds a name to a real ``contextlib.suppress`` and then reads
+#: it back -- directly, or through a self-alias. The assert under it is
+#: genuinely swallowed on all of them, so each row's ``defeated`` verdict is a
+#: *contract* and not a preference.
+#:
+#: These are the spellings the per-statement rules could not read. A ``for``
+#: target was recorded with no value at all, a destructuring target was
+#: recorded with the whole container, and :func:`_bindings_before` did not count
+#: a loop as a store that had run by the time a ``with`` nested in its body was
+#: read. Each of those reported a swallowed assert as ``enforced`` -- a
+#: disarmed contract certified as load-bearing, the damaging direction per #308
+#: criterion 1.
+#:
+#: ``expected_live`` is the exact verdict for the marked assert.
+#: ``control_element`` pairs each row with the same spelling over a
+#: ``nullcontext()`` element, which is genuinely live; without it a rule that
+#: answered "defeated" for everything would pass this table while dropping
+#: every real contract in it. ``None`` means the row has no readable control,
+#: because an arbitrary iterable genuinely is undecidable.
+BINDING_FORM_SHAPES = (
+    (
+        "a tuple-unpack target reads its own element",
+        (
+            "    cs, other = (contextlib.suppress(AssertionError), 2)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a list target reads its own element",
+        (
+            "    [cs] = [contextlib.suppress(AssertionError)]\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested destructuring target reads the nested element",
+        (
+            "    cs, (other, third) = (contextlib.suppress(AssertionError), (2, 3))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested second-position target reads its own element",
+        (
+            "    (other, (cs, third)) = (2, (contextlib.suppress(AssertionError), 3))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a loop target reads the iterated element",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),):\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a self-alias after a loop target keeps the element",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),):\n"
+            "        with (cs := cs):\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a self-alias in a tuple target keeps its own element",
+        (
+            "    cs, other = (contextlib.suppress(AssertionError), 2)\n"
+            "    with (cs := cs):\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a starred target is declined rather than paired with an element",
+        (
+            "    cs, *rest = (contextlib.suppress(AssertionError), 2, 3)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a target after a starred one is bound from the end",
+        (
+            "    first, *rest, cs = (1, 2, 3, contextlib.suppress(AssertionError))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a leading star still binds the trailing target",
+        (
+            "    *rest, cs = (1, 2, contextlib.suppress(AssertionError))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "two targets after a star bind from the end in order",
+        (
+            "    first, *rest, cs, last = "
+            "(1, 2, 3, contextlib.suppress(AssertionError), 5)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a deeply nested target reads the deeply nested element",
+        (
+            "    a, (b, (cs, d)) = "
+            "(1, (2, (contextlib.suppress(AssertionError), 4)))\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a loop over an unreadable iterable is declined, not guessed",
+        ('    for cs in helper.items():\n        with cs:\n            assert x != 1, "A1"'),
+        True,
+        None,
+    ),
+    # #359, residual found by the 09:00Z lead triage and confirmed on this
+    # head: the container does not have to be a *literal* at the destructuring
+    # site. A name already bound to one is the common spelling, and picking the
+    # element out of the right-hand side saw a bare `Name` instead of a
+    # container, so the suppressor was never extracted and the swallowed assert
+    # came back `enforced`. All four were damaging.
+    (
+        "a tuple target over a named container reads the element",
+        (
+            "    t = (contextlib.suppress(AssertionError),)\n"
+            "    cs, = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a first-of-two target over a named container reads the element",
+        (
+            "    t = (contextlib.suppress(AssertionError), 2)\n"
+            "    cs, other = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a second-of-two target over a named container reads the element",
+        (
+            "    t = (2, contextlib.suppress(AssertionError))\n"
+            "    other, cs = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    (
+        "a nested target over a named container reads the nested element",
+        (
+            "    t = (2, (contextlib.suppress(AssertionError), 3))\n"
+            "    other, (cs, third) = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    # #381/#382: the element a destructuring target receives can be a *Name*,
+    # and then it stands for whatever that name holds rather than for itself.
+    # A swap makes that unavoidable -- both elements are names -- and it is the
+    # shape that decides the verdict, because the answer depends entirely on
+    # which name lands on the target. The two rows below are one pair: same
+    # spelling, elements exchanged, opposite verdicts. A rule that reported
+    # "defeated" for every name element, or "live" for every name element,
+    # passes one of them and fails the other, which is the point.
+    (
+        "a swapped element that lands a suppressor is defeated",
+        (
+            "    a = contextlib.nullcontext()\n"
+            "    b = contextlib.suppress(AssertionError)\n"
+            "    a, b = b, a\n"
+            "    with a:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        # Each swap row is the other's control: exchanging the two elements
+        # flips the verdict, and a rule that cannot tell them apart fails one.
+        # A `nullcontext()` substitution would not help here, because the whole
+        # question is *which* element the target receives.
+        None,
+    ),
+    (
+        "a swapped element that lands a live manager is enforced",
+        (
+            "    a = contextlib.suppress(AssertionError)\n"
+            "    b = contextlib.nullcontext()\n"
+            "    a, b = b, a\n"
+            "    with a:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        None,
+    ),
+    (
+        "a list target over a named container reads the element",
+        (
+            "    t = [contextlib.suppress(AssertionError)]\n"
+            "    [cs] = t\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+    # The same element reached through two hops has to survive both. Only the
+    # first link is a destructuring one, so a rule that stopped after one step
+    # would answer "enforced" here while the assert is swallowed.
+    (
+        "a target over an aliased named container reads the element",
+        (
+            "    t = (contextlib.suppress(AssertionError), 2)\n"
+            "    u = t\n"
+            "    cs, other = u\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
+)
+
+
 @pytest.mark.parametrize(
     ("label", "rebind", "second_assert_live"),
     CARRIER_ENTRY_UNREACHABLE_ROWS,
@@ -3581,6 +3848,91 @@ CARRIER_IN_HEADER_ROWS = (
         True,
     ),
 )
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live", "control_element"),
+    BINDING_FORM_SHAPES,
+    ids=[row[0] for row in BINDING_FORM_SHAPES],
+)
+def test_a_binding_form_reads_the_value_that_lands_on_the_name(
+    label, body, expected_live, control_element
+):
+    """A destructuring or loop target must resolve to its own element.
+
+    The one question every row asks is whether the analyzer sees the
+    ``suppress`` that really is bound to ``cs``. If it does, the marked assert
+    is swallowed and must be reported defeated; if it does not, the very same
+    code is reported enforced and a disarmed contract is certified as
+    load-bearing.
+
+    Runtime is executed per row, so a ``defeated`` expectation is credible only
+    when CPython really swallows the assert. The control row repeats the
+    spelling with a ``nullcontext()`` element, which does not suppress, and
+    requires that one to be reported live. That pair is what stops this table
+    from degenerating into "report every alias as a suppressor".
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outer = namespace["outer"]
+    # A helper whose `items()` yields exactly one *non-suppressing* manager.
+    # Yielding nothing was the original spelling and it made this fixture
+    # vacuous: the unreadable-iterable row ran its body zero times, never
+    # reached the assert, and passed its runtime check without executing the
+    # code it claims to pin. With one real element the body really runs, the
+    # assert really is reached, and because the element is a `nullcontext` it
+    # cannot swallow anything -- so a rule that answered "defeated" for every
+    # unreadable iterable now fails here instead of passing silently.
+    _yielded = [contextlib.nullcontext()]
+    helper = type("H", (), {"items": staticmethod(lambda: _yielded)})()
+    fired = False
+    try:
+        outer(1, helper)
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    # The runtime half is a cross-check against the verdict this row expects,
+    # not a one-sided "it did not fire" test. A row that claims the assert is
+    # swallowed must be shown CPython swallowing it, and a row that claims the
+    # assert is live must be shown the failure actually escaping -- otherwise a
+    # fixture that never reaches its assert passes either way. `fired` and
+    # `expected_live` describe the same two states, so they must be equal, and
+    # that also keeps the live rows honest: they are the ones that were
+    # previously vacuous.
+    assert fired is expected_live, (
+        f"{label}: expected the assert to "
+        f"{'fire' if expected_live else 'be swallowed'}, but it "
+        f"{'did not fire' if expected_live else 'was swallowed'}."
+    )
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
+
+    if control_element is None:
+        return
+    control = body.replace("contextlib.suppress(AssertionError)", control_element)
+    assert control != body, f"{label}: the control row is identical to the row"
+    control_source = "def outer(x, helper):\n    import contextlib\n" + control + "\n"
+    control_tree = ast.parse(control_source)
+    control_function = control_tree.body[0]
+    control_asserts = [node for node in ast.walk(control_function) if isinstance(node, ast.Assert)]
+    control_results = [
+        _is_enforced(control_function, node, control_tree) for node in control_asserts
+    ]
+    assert control_results == [True], (
+        f"{label}: the nullcontext control must be reported live, got "
+        f"{control_results}. A rule that calls this defeated drops a real "
+        f"contract."
+    )
 
 
 @pytest.mark.parametrize(
@@ -3971,6 +4323,135 @@ def _async_loop_target_is_undecidable(label, source):
     except (TypeError, UnboundLocalError, NameError):
         return
     raise AssertionError(f"{label}: the hostile variant returned normally; the fixture is stale.")
+
+
+#: #377 and #378, from the independent review of `c6d488d`: rows whose correct
+#: verdict is **live**. They cannot live in ``BINDING_FORM_SHAPES``, because
+#: that table executes every fixture and rejects one whose assert fires -- a
+#: guard that is right for its own rows (a `defeated` expectation is only
+#: credible if the assert really is swallowed) and structurally wrong for these.
+#:
+#: The failure mode is the mirror of the one the module exists to prevent. That
+#: table catches "swallowed but reported live"; this one catches "live but
+#: reported defeated", where a real pinned contract stops being counted. Both
+#: are silent, so this is stated as its own contract with an executed runtime.
+#:
+#: ``expected_live`` is the exact verdict for the marked assert and
+#: ``swallowed`` says whether CPython really swallows it -- asserted here rather
+#: than assumed, so a fixture that stops behaving as described fails loudly
+#: instead of quietly testing nothing.
+LOOP_ELEMENT_LIVE_SHAPES = (
+    (
+        "a multi-element loop with the suppressor first leaves it live",
+        (
+            "    for cs in (contextlib.suppress(AssertionError),\n"
+            "               contextlib.nullcontext()):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The pair for the row above. Same shape, elements swapped, so the LAST one
+    # is the suppressor and the assert is really swallowed. Reading element zero
+    # in both directions answered `enforced` where it is swallowed and
+    # `defeated` where it is live -- a confident answer that was wrong in both
+    # directions at once, which one row on its own cannot pin.
+    (
+        "a multi-element loop with the suppressor last swallows",
+        (
+            "    for cs in (contextlib.nullcontext(),\n"
+            "               contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    # #378: a loop over an empty literal reaches its body zero times, so the
+    # store inside it never ran. Counting the `for` as a store that had executed
+    # admitted the dead assignment and reported this live assert as defeated.
+    # Master answers `enforced` here, so this was a regression the change
+    # introduced rather than a pre-existing gap.
+    (
+        "a zero-iteration loop does not count as having run its body",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for x in ():\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The non-empty loop is the control for the row above: one element, so the
+    # body really does run and the assert really is swallowed. Without it a rule
+    # that declined *every* loop would pass both rows.
+    (
+        "a one-iteration loop does count as having run its body",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    if True:\n"
+            "        for x in (1,):\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "        with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected_live", "swallowed"),
+    LOOP_ELEMENT_LIVE_SHAPES,
+    ids=[row[0] for row in LOOP_ELEMENT_LIVE_SHAPES],
+)
+def test_a_loop_binds_the_element_it_leaves_behind(label, body, expected_live, swallowed):
+    """A ``for`` over a literal must resolve to what the loop leaves bound.
+
+    Two questions, and both directions are load-bearing. Which element survives
+    a multi-element loop is the LAST one, not the first, and which direction
+    that decides depends on the order. And a loop that provably iterates zero
+    times must not be treated as proof that its body's stores ran.
+    """
+    source = "def outer(x, helper):\n    import contextlib\n" + body + "\n"
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    fired = False
+    # One real, non-suppressing element, for the same reason as the
+    # binding-form table: an empty `items()` made the `with cs:` body
+    # unreachable, so `fired` stayed False for every row regardless of what
+    # the analyzer said and the runtime half of this test proved nothing.
+    _yielded = [contextlib.nullcontext()]
+    try:
+        namespace["outer"](1, type("H", (), {"items": staticmethod(lambda: _yielded)})())
+    except AssertionError:
+        fired = True
+    except (NameError, TypeError, UnboundLocalError) as error:
+        raise AssertionError(
+            f"{label}: the fixture raised {type(error).__name__} instead of "
+            f"running the assert. Row is stale."
+        ) from None
+    # Stated, not assumed: a fixture that stops behaving as described fails
+    # loudly rather than quietly testing nothing.
+    assert fired is not swallowed, (
+        f"{label}: expected the assert to "
+        f"{'fire' if not swallowed else 'be swallowed'}, but it "
+        f"{'was swallowed' if not swallowed else 'fired'}."
+    )
+
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [expected_live], f"{label}: expected {[expected_live]}, got {results}."
 
 
 def test_an_except_as_handler_is_decidable_even_after_a_conditional_store():
@@ -5001,18 +5482,19 @@ def test_a_module_scope_lookup_does_not_descend_into_a_function_body():
 #: green throughout (367 rows on that tree), because no row covered a
 #: ``for``-target read after the loop.
 #:
-#: The ``suppress`` counterpart is not decoration. It is what makes the
-#: ``nullcontext`` row non-vacuous: a ``nullcontext()`` swallows nothing, so
-#: without a defeating partner there is no way to tell a correct "live" answer
-#: from a rule that simply never fires on ``for`` targets.
-#:
-#: Only the ``nullcontext`` row is asserted here. Its ``suppress`` counterpart
-#: is answered ``True`` on ``6b72bf6`` as well, so pinning it would encode a
-#: known-wrong answer as expected behavior and lock the gap in place. That
-#: false-LIVE is the pre-existing defect tracked as #434; asserting ``True``
-#: for it here is deliberate, and the row is restated below so the reason
-#: travels with the test rather than living only in a ledger.
+#: The suppressing counterpart is now resolved by the integrated #371 loop
+#: binding repair; both outcomes are checked against executed CPython below.
 AFTER_LOOP_FOR_TARGET_SHAPES = (
+    (
+        "a suppressing target, which swallows the assertion",
+        (
+            "    for cs in (1, contextlib.suppress(AssertionError)):\n"
+            "        pass\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
     (
         "a nullcontext target, which really enters",
         (
@@ -5079,53 +5561,6 @@ def test_the_after_loop_for_target_expectation_matches_executed_cpython():
             f"{label}: the test table says enforced={enforced} but executed "
             f"CPython {'raises' if fires else 'does not raise'} for x=1"
         )
-
-
-def test_a_suppressing_loop_target_is_still_misread_and_that_is_known():
-    """Characterize the #434 gap this repair deliberately does not close.
-
-    The `suppress` counterpart of the row above is answered `enforced=True`
-    while CPython swallows the assert, on `6b72bf6` and on this tree alike.
-    The direction is safe -- a defeated contract is reported as live, so a
-    real defect stays visible -- and the gap is tracked as #434 rather than
-    fixed here, because closing it means deciding the after-loop
-    suppressor case, which is #434's own scope and not a merge resolution.
-
-    This test asserts the *current* answer on purpose. It fails loudly the day
-    #434 is fixed, at which point the row moves to the table above. Silently
-    encoding the correct answer here would make the suite pass on a tree that
-    still misreads the shape, which is the exact failure mode this file exists
-    to prevent.
-    """
-    source = (
-        "import contextlib\n"
-        "def probe(x):\n"
-        "    for cs in (1, contextlib.suppress(AssertionError)):\n"
-        "        pass\n"
-        "    with cs:\n"
-        "        assert x != 1\n"
-    )
-    tree = ast.parse(source)
-    probe = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "probe"
-    )
-    target = next(node for node in ast.walk(probe) if isinstance(node, ast.Assert))
-    namespace: dict = {}
-    exec(compile(source, "#434-gap", "exec"), namespace)  # noqa: S102
-    try:
-        namespace["probe"](1)
-    except AssertionError:
-        fires = True
-    except (TypeError, UnboundLocalError, NameError):
-        fires = True
-    else:
-        fires = False
-    assert _is_enforced(probe, target, tree) is True, (
-        "#434 has been fixed: the after-loop suppressor is now read correctly. "
-        "Move this shape into AFTER_LOOP_FOR_TARGET_SHAPES with enforced=False "
-        "and delete this test. Executed CPython raises for x=1: "
-        f"fires={fires}."
-    )
 
 
 NONLOCAL_REBIND_REGRESSIONS = (
@@ -5405,6 +5840,91 @@ def test_nonlocal_scope_and_rebinding_match_executed_calls(label, source, enforc
     )
     assertion = next(node for node in ast.walk(inner) if isinstance(node, ast.Assert))
     assert _is_enforced(inner, assertion, tree) is enforced, label
+
+
+def test_a_self_alias_excludes_its_own_store_and_not_an_earlier_one():
+    """The self-alias tie is broken by excluding the *walrus*, not any store.
+
+    A self-alias shares a binding order with the loop target it follows, so
+    every position-based test ties and #367's tie branch declines it. Excluding
+    the entry whose statement is the store being resolved breaks that tie in
+    favour of the loop element -- which is what the interpreter reads.
+
+    The row is here to pin *which* entry gets excluded. The other self-alias
+    tests in this file all start from a loop whose element is the first
+    binding of the name, so excluding "the first entry with a value" and
+    excluding "the self-alias store" are indistinguishable there: the loop
+    element is the same entry either way. That mutant survives all 446 tests
+    in this module.
+
+    Giving the name a prior store separates them. The loop element retires the
+    suppressor, so the assert is live and must stay ``enforced``; the mutant
+    excludes the loop element instead, the retired suppressor is adopted, and
+    the live assert is reported as defeated -- the damaging direction.
+    """
+    source = (
+        "def probe(x):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.suppress(AssertionError)\n"
+        "    for cs in (contextlib.nullcontext(),):\n"
+        "        with (cs := cs):\n"
+        '            assert x != 1, "A1"\n'
+    )
+    tree = ast.parse(source)
+    probe = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "probe"
+    )
+    target = next(node for node in ast.walk(probe) if isinstance(node, ast.Assert))
+    assert _is_enforced(probe, target, tree), (
+        "the self-alias tie was broken by excluding the loop's own element "
+        "rather than the walrus, so a retired suppressor was adopted and a "
+        "live assert was reported as defeated"
+    )
+
+
+@pytest.mark.parametrize(
+    ("elements", "header", "live"),
+    [
+        ("contextlib.nullcontext(), contextlib.suppress(AssertionError)", "cs", True),
+        ("contextlib.nullcontext(), 1", "cs", True),
+        ("contextlib.suppress(AssertionError), contextlib.nullcontext()", "cs", True),
+        ("contextlib.nullcontext(), contextlib.suppress(AssertionError)", "(cs := cs)", True),
+        ("contextlib.nullcontext(), contextlib.suppress(AssertionError)", "alias", True),
+        ("contextlib.nullcontext()", "cs", True),
+        ("contextlib.suppress(AssertionError)", "cs", False),
+        (
+            "contextlib.suppress(AssertionError), contextlib.suppress(AssertionError)",
+            "cs",
+            False,
+        ),
+        ("contextlib.nullcontext(), contextlib.nullcontext()", "cs", True),
+        (
+            "contextlib.suppress(AssertionError), contextlib.suppress(ValueError)",
+            "cs",
+            True,
+        ),
+    ],
+)
+def test_loop_body_header_reads_current_iteration_not_final_element(elements, header, live):
+    alias = "        alias = cs\n" if header == "alias" else ""
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        f"    for cs in ({elements},):\n"
+        + alias
+        + f"        with {header}:\n            assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<loop-body-position>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        fired = True
+    assert fired is live
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
 
 
 @pytest.mark.parametrize(
