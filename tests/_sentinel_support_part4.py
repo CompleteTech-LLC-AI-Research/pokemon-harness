@@ -640,7 +640,9 @@ def _bindings_before(
                     # because `own` is keyed by position in `function.body` and
                     # a store in a loop's `else` arm has no index of its own --
                     # it is filed under the loop, so `own` alone never sees it.
-                    in_block = _block_store_bindings(block_body, header, raw_values, bound)
+                    in_block = _block_store_bindings(
+                        block_body, header, raw_values, bound, function
+                    )
                     if in_block:
                         return {**bound_so_far, **in_block}
                     return {**bound_so_far, **loop_bindings}
@@ -658,7 +660,7 @@ def _bindings_before(
     return bound_so_far
 
 
-def _block_store_bindings(block_body, header, raw_values, bound):
+def _block_store_bindings(block_body, header, raw_values, bound, function=None):
     """Bindings written by a store that precedes ``header`` in ``block_body``.
 
     #370b. The ``own`` map this function otherwise reads is keyed by position in
@@ -681,7 +683,7 @@ def _block_store_bindings(block_body, header, raw_values, bound):
         for entry_statement, value in entries:
             if entry_statement not in block_body or block_body.index(entry_statement) >= cutoff:
                 continue
-            if not _is_store_statement(entry_statement):
+            if not _is_store_statement(entry_statement, function):
                 continue
             targets = (
                 entry_statement.targets
@@ -907,7 +909,7 @@ def _loop_target_names(block):
     return frozenset(_store_target_names([block.target]))
 
 
-def _is_store_statement(node):
+def _is_store_statement(node, function=None):
     """Does reaching this point in a block mean the block's stores have run?
 
     #359: this list was ``ast.Assign``/``ast.AnnAssign`` only, so a ``for``
@@ -944,14 +946,26 @@ def _is_store_statement(node):
     answers ``enforced`` here, which is correct, so counting every loop was a
     regression rather than a pre-existing gap.
 
-    The test is `_is_empty_literal_iterable`, the same helper the ``for``-defeat
-    rule already uses, so the two agree on what a decidable empty iterable is.
-    A call such as ``range(0)`` is deliberately still counted as having run:
-    settling that means reasoning about builtins, and guessing wrong here
+    The test is `_loop_iterable_is_provably_empty`, the same helper the
+    ``for``-defeat rule already uses, so the two agree on what a decidable
+    empty iterable is. #450 widened it from the container literals to the
+    empty builtin calls and the empty ``range`` shapes, which is what let
+    ``for _ in range(0):`` stop counting as a store that ran. A call the
+    module still cannot decide -- ``helper.items()``, ``set(items)``,
+    ``range(n)`` -- is counted as having run, because guessing wrong here
     drops a live contract, which is the more damaging error.
+
+    ``function`` is the scope the statement appears in, and is needed for the
+    same reason :func:`_condition_is_never_true` takes it: ``set()`` is only
+    the empty builtin while the name still reaches it, so a function that
+    rebinds ``set`` -- or ``range`` -- makes the call a different one whose
+    body really is reached. It is optional only so the pre-existing callers
+    that have no scope to hand keep working; without it the empty *call*
+    shapes are declined and the rule falls back to counting the loop as run,
+    which is the conservative direction.
     """
     if isinstance(node, (ast.For, ast.AsyncFor)):
-        return not _is_empty_literal_iterable(node.iter)
+        return not _loop_iterable_is_provably_empty(node.iter, function)
     return isinstance(node, ast.Assign) or (
         isinstance(node, ast.AnnAssign) and node.value is not None
     )

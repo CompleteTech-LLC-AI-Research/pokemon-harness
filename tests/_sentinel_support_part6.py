@@ -1165,13 +1165,15 @@ def _statement_never_runs(statement, function):
             # `while False:` is the loop spelling of `if False:` -- the body
             # never runs, so it is never the last element either.
             return True
-        if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(
-            enclosing.iter
+        if isinstance(enclosing, (ast.For, ast.AsyncFor)) and _loop_iterable_is_provably_empty(
+            enclosing.iter, function
         ):
             return True
     for node in ast.walk(statement):
         if isinstance(node, ast.If) and _condition_is_never_true(node.test, function):
             return True
-        if isinstance(node, (ast.For, ast.AsyncFor)) and _is_empty_literal_iterable(node.iter):
+        if isinstance(node, (ast.For, ast.AsyncFor)) and _loop_iterable_is_provably_empty(
+            node.iter, function
+        ):
             return True
     return False
