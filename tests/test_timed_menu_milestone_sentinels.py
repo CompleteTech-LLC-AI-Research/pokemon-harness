@@ -7464,6 +7464,102 @@ def test_a_conditional_store_superseding_a_local_carrier_is_declined(label, carr
     )
 
 
+#: #429. An `elif` is not a top-level statement: it is an `ast.If` nested in
+#: the *previous* `if`'s `orelse`. So the store below is reached through TWO
+#: enclosing blocks, and the inner one carries a literal-`True` test. The
+#: always-true-branch rule read that inner block on its own and settled the
+#: name -- but the link is entered only when `if x:` is *false*, and `x` is a
+#: parameter. That dropped the earlier `nullcontext()` from the store table
+#: and reported a header CPython enters as DEAD.
+#:
+#: This is the damaging direction (#308 criterion 1): a contract that really
+#: fires is certified as unreachable. The regression entered at `b90f985`, a
+#: commit whose own message says three of its four fixes were false-deads, and
+#: then survived six further review rounds and every later CI run.
+#:
+#: The controls matter as much as the row. `if True:` as the *first* link is
+#: genuinely unconditional and must keep its answer, and the repair is not
+#: allowed to generalise into "any nested `if True:` is conditional".
+ELIF_LINK_ARMS_SHAPES = (
+    (
+        "an elif link with a literal-true test",
+        "    if x:\n        pass\n    elif True:\n        cs = list()",
+        True,
+    ),
+    (
+        "CONTROL a first-link if True: is still unconditional",
+        "    if True:\n        cs = list()",
+        False,
+    ),
+    (
+        "CONTROL an elif link binding a real context manager",
+        "    if x:\n        pass\n    elif True:\n        cs = nullcontext()",
+        True,
+    ),
+    (
+        "CONTROL a nested if True: inside a conditional if",
+        "    if x:\n        cs = list()\n    else:\n        cs = nullcontext()",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "chain", "second_assert_live"),
+    ELIF_LINK_ARMS_SHAPES,
+    ids=[row[0] for row in ELIF_LINK_ARMS_SHAPES],
+)
+def test_an_elif_link_is_reached_only_when_every_test_above_failed(
+    label, chain, second_assert_live
+):
+    """A literal-true ``elif`` test does not make its arm unconditional.
+
+    This is #429. The rule that lets a store inside an always-true branch count
+    as an unconditional store exists so that ``if True:`` settles a name -- a
+    shape ``b90f985`` needed for module-scope shadowing. An ``elif True:`` arm
+    has a literal-true test too, but it is a *later link* of a chain: it is
+    entered only when every test above it failed. When the test above is a
+    parameter, the arm settles the name on some calls and not others, so the
+    earlier store stays in force on the rest -- and the header is enterable
+    there.
+
+    Executed on CPython 3.12.14, with ``x=1``:
+
+    * ``if x: pass elif True: cs = list()`` -- the ``if x:`` arm runs, the
+      ``elif`` body never does, ``cs`` is still the ``nullcontext()``, and
+      ``with cs:`` enters. The assert **fires**. Ground truth is live.
+    * ``if True: cs = list()`` -- the arm runs on every call, ``cs`` is a
+      ``list``, and ``with cs:`` raises ``TypeError`` before the body.
+      Ground truth is dead.
+
+    The repair distinguishes the two by asking whether the literal-true block
+    is itself a later link of a chain, not by reading its own test in
+    isolation. Every row here is executed by ``_assert_entry_contract``, so a
+    control that disagreed with the interpreter would fail rather than be
+    asserted into the table.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n" + chain + "\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(label, source, False, second_assert_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [second_assert_live], (
+        f"{label}: expected verdicts [{second_assert_live}], got {results}. An "
+        f"`elif` arm runs only when every test above it failed, so a store in "
+        f"it settles the name on some calls only. A literal-true *first* `if` "
+        f"is a different case and stays unconditional."
+    )
+
+
 @pytest.mark.parametrize(
     ("label", "carrier", "conditional"),
     DEAD_CONDITION_AFTER_CARRIER_SHAPES,
