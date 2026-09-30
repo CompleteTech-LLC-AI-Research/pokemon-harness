@@ -8571,6 +8571,215 @@ def test_an_elif_link_is_reached_only_when_every_test_above_failed(
     )
 
 
+#: #441. `ELIF_LINK_ARMS_SHAPES` above settles the *entry* question: every row
+#: binds a `list()` or a `nullcontext()`, so what CPython does on entry
+#: distinguishes "the header is enterable" from "the header raises before the
+#: body". #441 needs the other question. Its header is perfectly enterable on
+#: every call -- the damage was that the assert inside it was reported
+#: *swallowed* when one of the two paths really does swallow it and the other
+#: really fires.
+#:
+#: That needs a different oracle, and reusing `_assert_entry_contract` would
+#: have been wrong rather than merely imprecise. It treats "returned normally"
+#: as a *stale row*, on the grounds that a swallowed assert means the row no
+#: longer describes anything. But swallowed is precisely the correct
+#: ground truth for a defeated contract: a live call that raises
+#: `AssertionError` and a swallowed call that returns cleanly are both real
+#: outcomes, and the row's claim is about which of them can happen. So
+#: `_assert_suppression_contract` below runs the fixture across the whole
+#: argument domain and asks whether the assert fires on *any* call.
+#:
+#: The rows are executed, not asserted into the table, and each one is checked
+#: against what CPython does rather than against the analyzer.
+ELIF_LINK_SUPPRESSOR_SHAPES = (
+    # The filed shape. The preamble's `cs = nullcontext()` is the binding in
+    # force on the call that takes the `if` arm; the `elif` arm overwrites it
+    # with a real suppressor, but only on the other call.
+    #
+    #     cs = contextlib.nullcontext()
+    #     if x:
+    #         pass
+    #     elif True:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x=1` the `if` arm runs, `elif` never does, `cs` is still the
+    # `nullcontext`, and the assert **fires**. At `x=0` the `elif` runs and the
+    # failure is swallowed. So the assert is not enforced on every call, and
+    # the header is live.
+    (
+        "an elif link binding a suppressor over a plain manager is live",
+        (
+            "    if x:\n        pass\n    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        True,
+    ),
+    # The mirror control, and the one that decides whether the repair is
+    # correct or merely cautious. When the binding in force on the call that
+    # *skips* the `elif` arm is a suppressor too, then every call swallows the
+    # assert and the header really is defeated. Answering `live` here would
+    # certify a disarmed contract as load-bearing -- a false-LIVE, which stops
+    # the mutation matrix from ever reporting a real defeat.
+    #
+    # This row cannot be written against the shared preamble, which always
+    # binds a `nullcontext`; it rebinds `cs` in the first link instead.
+    (
+        "CONTROL an elif link binding a suppressor over a suppressor is dead",
+        (
+            "    cs = contextlib.suppress(AssertionError)\n"  # override preamble
+            "    if x:\n        pass\n"
+            "    elif True:\n"
+            "        cs = contextlib.suppress(AssertionError)"
+        ),
+        False,
+    ),
+    # A suppressor that does not name `AssertionError` never disarms the
+    # contract on either path, so no call swallows the failure and the header
+    # is live for the ordinary reason. This is what keeps the new branch from
+    # generalising into "an `elif` arm is always undecidable".
+    (
+        "CONTROL an elif link binding suppress(ValueError) stays live",
+        ("    if x:\n        pass\n    elif True:\n        cs = contextlib.suppress(ValueError)"),
+        True,
+    ),
+    # The `elif` link is the only shape that gets the new treatment. A
+    # first-link `if` runs or does not, and when it runs it *does* replace the
+    # preamble -- so this call is swallowed and the header is defeated, which
+    # is what master already answers and what this row pins.
+    (
+        "CONTROL a first-link if binding a suppressor stays dead",
+        "    if x:\n        cs = contextlib.suppress(AssertionError)",
+        False,
+    ),
+)
+
+
+def _assert_suppression_contract(label, source, assert_is_live):
+    """Run the fixture over its whole domain and hold CPython to the row.
+
+    This is the counterpart to :func:`_assert_entry_contract`, and the two ask
+    different questions on purpose.
+
+    ``_assert_entry_contract`` calls the fixture once and reads a single call's
+    outcome, because the rows it guards differ in whether ``with cs:`` raises
+    before the body. A row that returns normally is rejected as stale, which
+    is right for that family: an enterable header that returns cleanly can
+    only be a swallowed assert, and the family has nothing to say about it.
+
+    The ``#441`` family is entirely about swallowed asserts, so that convention
+    is inverted here. A defeat is a *legitimate* answer, and returning cleanly
+    is the ground truth for it.
+
+    So the fixture is swept over every value of its `x` parameter and the row
+    is judged on whether the assert fires anywhere at all:
+
+    * **live** -- some call raises `AssertionError`. The contract really is
+      reachable, so the rule must report it enforced.
+    * **dead** -- no call raises `AssertionError`; each either returns cleanly
+      (swallowed) or raises something else before the body (unreachable
+      entry). Either way the assert is not enforced on any call.
+
+    Sweeping rather than sampling matters for the rows that are defeated: a
+    single call that happens to return cleanly would prove nothing, because
+    the *other* arm might still fire. The live row only needs one firing call,
+    but taking the same measurement for both keeps the two verdicts
+    commensurable and stops a row from passing on an argument value that no
+    longer reaches the assert at all.
+    """
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outer = namespace["outer"]
+    # A bare `except BaseException` is too wide to be worth stating: a
+    # `KeyboardInterrupt` in a fixture would otherwise be recorded as "the row
+    # is defeated" rather than failing the test. The tuple is the same one
+    # `_assert_entry_contract` uses to mean "the header raised before the body".
+    not_enterable = (TypeError, UnboundLocalError, NameError, AttributeError)
+    fired = False
+    outcomes = []
+    for value in (0, 1):
+        try:
+            outer(value, True, None)
+        except AssertionError:
+            fired = True
+            outcomes.append(f"x={value}: AssertionError")
+        except not_enterable as exc:
+            outcomes.append(f"x={value}: {type(exc).__name__}")
+        else:
+            outcomes.append(f"x={value}: returned")
+    assert fired is assert_is_live, (
+        f"{label}: CPython {'fired' if fired else 'never fired'} the assert across "
+        f"the swept domain ({'; '.join(outcomes)}), which is "
+        f"{'live' if assert_is_live else 'dead'}; the row claims the header is "
+        f"{'live' if assert_is_live else 'defeated'}."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "chain", "assert_is_live"),
+    ELIF_LINK_SUPPRESSOR_SHAPES,
+    ids=[row[0] for row in ELIF_LINK_SUPPRESSOR_SHAPES],
+)
+def test_an_elif_link_suppressor_is_live_when_the_carried_store_is_not(
+    label, chain, assert_is_live
+):
+    """A suppressor reached through an `elif` link does not defeat the assert alone.
+
+    This is #441. #429's repair correctly demoted a store in an `elif` arm
+    inside :func:`_stores_of`, but that is the table the *entry* rule reads.
+    The suppression rule takes a different path: `_aliased_suppressions`
+    resolves a ``with`` header against the raw binding table, where the `elif`
+    arm was still recorded as an unconditional store. So the header resolved to
+    the suppressor and the assert came back defeated on every call:
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        elif True:
+            cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert x != 1
+
+    At ``x=1`` the ``if`` arm is taken, the ``elif`` never runs, ``cs`` is still
+    the ``nullcontext``, and the assert **fires**. Reporting that as swallowed
+    is a false-DEAD -- #308 criterion 1's damaging direction, where a contract
+    that really enforces is certified as unreachable.
+
+    The resolution is narrow. An `elif` arm is not a branch of its own: it runs
+    only when *every* test above it failed, so the calls that skip it keep the
+    earlier binding. The header is therefore defeated only when that earlier
+    binding is itself a suppressor. When the arm's store swallows
+    `AssertionError` and the store it supersedes provably does not, the name
+    holds a suppressor on some calls and a plain manager on others, and the
+    assert is not enforced on every call -- so the header stays live.
+
+    Every row is executed across the fixture's argument domain by
+    :func:`_assert_suppression_contract` before the analyzer's verdict is
+    compared, so a row cannot claim "live" unless CPython agrees, nor "defeated"
+    unless CPython really does swallow on every call.
+    """
+    source = (
+        "import contextlib\n"
+        "from contextlib import suppress, nullcontext\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n" + chain + "\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. An "
+        f"`elif` arm runs only on the calls where every test above it failed, "
+        f"so the binding it supersedes still holds on the rest. The header is "
+        f"defeated only when that earlier binding is a suppressor too."
+    )
+
+
 #: #435. #429 made an `elif` link's *own* literal-true test stop implying an
 #: unconditional store, but it only looked one link deep. A store nested under
 #: a further `if True:` -- or under a third `elif True:` -- is reached through

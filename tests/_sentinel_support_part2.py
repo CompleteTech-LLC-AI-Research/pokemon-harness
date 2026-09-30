@@ -10,6 +10,128 @@ if __name__ == "tests._sentinel_support_part2":
     )
 
 
+def _store_is_in_an_elif_link(statement, function=None):
+    """Is this store written in an ``elif`` arm rather than a first-link ``if``?
+
+    An ``elif`` is not a branch of its own. It is a continuation of the chain
+    above it and runs only when *every* test before it failed, so a store in an
+    ``elif`` arm cannot be read as the value in force on every call:
+
+        cs = contextlib.nullcontext()
+        if x:
+            pass
+        elif True:
+            cs = contextlib.suppress(AssertionError)
+
+    At ``x == 1`` the first arm is taken and ``cs`` still holds the
+    ``nullcontext``; at ``x == 0`` the ``elif`` runs. Which store a later
+    ``with cs:`` enters therefore depends on the call, and no single verdict
+    about the header is right.
+
+    The test is structural: an enclosing ``ast.If`` whose ``orelse`` contains
+    the store's own block. A first-link ``if``, an ``else`` arm and an
+    ``if True:`` body all fail it, which is what keeps them on their existing
+    answers -- an ``else`` arm genuinely does run whenever its ``if`` does not,
+    so together the two cover every call and the later store really is
+    decisive there.
+    """
+    if function is None:
+        return False
+    for block in _enclosing_blocks(statement, function):
+        if not isinstance(block, ast.If):
+            continue
+        for outer in _enclosing_blocks(block, function):
+            if isinstance(outer, ast.If) and any(child is block for child in outer.orelse):
+                return True
+    return False
+
+
+def _entry_suppresses_assertion_errors(entry, bound=None):
+    """Does this store's recorded value provably swallow ``AssertionError``?
+
+    The ambiguity rule treats a name bound on two paths as a possible
+    suppressor, because it cannot tell which one the call took. That is only
+    the safe reading when *every* candidate actually suppresses: if any of
+    them holds a plain context manager, there is a call on which the assert
+    fires, and reporting the header defeated would be a false-DEAD.
+
+    So this asks the narrow question the ambiguity rule needs: is this value a
+    *readable* suppression call that names ``AssertionError``? The
+    ``_is_readable_suppressor`` gate is load-bearing rather than a re-test,
+    because :func:`_suppression_names` deliberately answers ``["BaseException"]``
+    for any call it cannot read -- and ``BaseException`` does catch
+    ``AssertionError``, so dropping the gate would classify ``nullcontext()``
+    as swallowing. A zero-argument manager, an unreadable call, or a name with
+    no recorded value all answer False, which is the direction that keeps the
+    assert load-bearing.
+    """
+    value = entry[1] if isinstance(entry, tuple) else None
+    if value is None or not isinstance(value, ast.Call):
+        return False
+    if bound is None:
+        # Without the scope's bindings the call cannot be resolved, so it is
+        # not a *readable* suppressor. Answering False keeps the assert live,
+        # which is the direction #441 needs when the reader cannot prove the
+        # contract is disarmed.
+        return False
+    if not _is_readable_suppressor(value, bound):
+        return False
+    names = _suppression_names(value)
+    return bool(names) and any(_name_catches_assertion_error(name) for name in names)
+
+
+def _superseded_entry_suppresses_assertion_errors(entries, orders, competing, bound=None):
+    """Does every store the competitor supersede also swallow ``AssertionError``?
+
+    An `elif` arm only runs on the calls where every test above it failed. The
+    calls that skipped it keep whatever the name held before, so the header is
+    only *partly* defeated: it is defeated exactly when that earlier binding
+    is itself a suppressor -- or when there was no earlier binding at all, in
+    which case the skipped calls raise `NameError` on entry instead of
+    running the body.
+
+    Both bindings suppressing is therefore the fully-defeated case and must
+    stay reported as defeated -- `cs = suppress(...)` followed by an `elif` arm
+    storing another suppressor really does swallow the assert on every call,
+    and treating it as partly live would report a disarmed contract as
+    load-bearing.
+
+    *Latest* is the operative word, and reading "was in force at some point
+    during the skipped call" as the answer would get the rows backwards. A
+    skipped call walks straight past every store, so the name ends on whatever
+    the **last** one set -- not on whichever one is a suppressor:
+
+        cs = contextlib.suppress(AssertionError)     # x=0: still the suppressor
+        cs = contextlib.nullcontext()                # x=1: the nullcontext
+        if x:
+            pass
+        elif True:
+            cs = contextlib.suppress(AssertionError)  # x=0 only
+        with cs:
+            assert x != 1
+
+    At ``x=1`` the header enters the ``nullcontext`` and the assert fires, so
+    the contract is live. Asking "did *any* superseded store suppress?" would
+    answer yes on the strength of the first line and report this as defeated
+    -- the same false-DEAD #441 is about, reached by a different route.
+    """
+    competing_orders = {id(entry[0]) for entry in competing}
+    newest = max(competing_orders)
+    prior = [
+        entry
+        for entry in entries
+        if id(entry[0]) not in competing_orders and orders[id(entry[0])] < newest
+    ]
+    if not prior:
+        # Nothing was in force before the arm, so the arm's own store decides
+        # every call: it runs when the arm is reached, and on the calls where
+        # it is not reached the name is unbound, so `with cs:` raises rather
+        # than running the body. The header is defeated outright.
+        return True
+    latest_prior = max(prior, key=lambda entry: orders[id(entry[0])])
+    return _entry_suppresses_assertion_errors(latest_prior, bound)
+
+
 def _entry_may_be_an_unrun_capture(entry):
     """Is this entry a ``match`` capture that is not guaranteed to have bound?
 
@@ -138,7 +260,22 @@ def _assigned_suppressors(function, bound, query=None):
             if not seen:
                 continue
             value = _resolve_bindings(seen, bound, orders, index, function)
-            if value is not None:
+            # #441. `_NOT_A_SUPPRESSOR` is a *record* that the name is bound
+            # and what it carries is not a suppressor, not a value to hand
+            # downstream. It has always been dropped here, which was correct
+            # when only `None` reached this point; `_resolve_bindings` can now
+            # return the marker itself to say "bound on two paths, and the one
+            # reached without a suppressor provably does not swallow
+            # `AssertionError`" -- a live header. Recording it would carry the
+            # marker forward, and the two consumers of this table would each
+            # misread it: `_aliased_suppressions` looks names up to append
+            # them to a header's argument list, where a marker is not a
+            # suppression, and `_bindings_before` advances a carried set from
+            # it, where a stale suppressor must not survive. Both already
+            # handle the marker correctly when it is absent -- that is what
+            # #367's `_NOT_A_SUPPRESSOR` is for -- so the value is simply not
+            # recorded, and the name reads as carrying nothing here.
+            if value is not None and value is not _NOT_A_SUPPRESSOR:
                 assigned.setdefault(index, {})[name] = value
             elif index and name in assigned.get(index - 1, {}):
                 # #367. The name is still bound here, and what it carries is
@@ -525,6 +662,55 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None):
     collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
     if collapsed:
         competing = collapsed_entries
+    # #441. A single competing store is normally decisive, and deliberately so:
+    # a plain `if flag: cs = nullcontext()` really does supersede whatever the
+    # name held before it, on the one path that matters, and the shipped rows
+    # pin that assert as live. An `elif` link is a different question, because
+    # the arm runs only when *every* test above it failed:
+    #
+    #     cs = contextlib.nullcontext()
+    #     if x:
+    #         pass
+    #     elif True:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x == 1` the `if` arm is taken, the `elif` never runs, `cs` is still
+    # the `nullcontext`, and the assert really fires. So the name holds the
+    # suppressor on *some* calls and a live manager on others: which store is
+    # in force is not decidable from the source. Letting the later store win
+    # outright reads the header as swallowed on *every* call, which is a
+    # false-DEAD -- #308 criterion 1's damaging direction -- because the path
+    # that skipped the arm really does enter the plain manager.
+    #
+    # `AMBIGUOUS_SUPPRESSOR` is not the answer either: it means "possibly any
+    # suppressor", and the rule that reads it reports the assert defeated.
+    # That is sound only while every candidate really does swallow
+    # `AssertionError`. Here the *other* path provably does not, so the header
+    # has to stay live, and `_NOT_A_SUPPRESSOR` records exactly that: the name
+    # *is* bound, but not in a way that disarms the contract on every call.
+    # #367's marker is the one to reuse rather than a new sentinel. It already
+    # separates "bound and carries no suppressor" from "not bound at all", and
+    # `_aliased_suppressions` already filters it out of the header walk, so a
+    # second marker would be a second spelling of the same record.
+    #
+    # Scoped strictly to an `elif` link. A first-link `if`, an `else` arm and
+    # an `if True:` body all keep the existing single-competitor answer, and
+    # #403's `if False: ... elif True:` arm is settled upstream by
+    # `_statement_always_runs` and so never reaches this as a competitor at all.
+    if (
+        len(competing) == 1
+        and not any(_entry_may_be_an_unrun_capture(entry) for entry in competing)
+        and _store_is_in_an_elif_link(competing[0][0], function)
+        and _entry_suppresses_assertion_errors(competing[0], bound)
+        and not _superseded_entry_suppresses_assertion_errors(entries, orders, competing, bound)
+    ):
+        # The arm itself swallows `AssertionError`, so the call that takes
+        # it is defeated; the call that skips it keeps the earlier binding
+        # and still fires. Both outcomes occur, so the contract is not
+        # enforced on every call and the header has to stay live.
+        return _NOT_A_SUPPRESSOR
     if len(competing) > 1 or any(_entry_may_be_an_unrun_capture(entry) for entry in competing):
         # More than one conditional binding can reach this `with` on different
         # paths, so which suppressor is live is undecidable. Recorded as an
