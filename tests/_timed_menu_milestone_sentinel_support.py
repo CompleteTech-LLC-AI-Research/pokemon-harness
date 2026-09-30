@@ -4121,7 +4121,85 @@ def _is_after_control_transfer(function, target):
         for body in _statement_lists_holding(node, holder):
             if _is_terminated_before(body, holder):
                 return True
+            for sibling in body:
+                if sibling is holder:
+                    break
+                if _cannot_fall_through(sibling):
+                    return True
     return False
+
+
+def _cannot_fall_through(node):
+    """Does a try statement have no path to the following statement?
+
+    Normal completion, exception handling, and finally are separate paths.
+    A body ending in return can still raise *before* it returns; an else arm
+    runs only when the body completes normally. A falling-through handler
+    must therefore keep the following assert live on either spelling.
+
+    The effect model deliberately includes exceptions from opaque expressions.
+    It proves absence of normal completion; it does not predict whether a call
+    raises or whether a particular handler matches an exception.
+    """
+    return isinstance(node, (ast.Try, ast.TryStar)) and "normal" not in _statement_exits(node)
+
+
+def _block_exits(body):
+    """Possible exits from a sequential block, including exceptions."""
+    exits = {"normal"}
+    for statement in body:
+        if "normal" not in exits:
+            break
+        exits = (exits - {"normal"}) | _statement_exits(statement)
+    return exits
+
+
+def _statement_exits(node):
+    """A conservative set of normal and control-transfer exits."""
+    if isinstance(node, ast.Return):
+        # Evaluating a return value can raise before the return is committed.
+        return {"return"} if _expression_cannot_raise(node.value) else {"return", "raise"}
+    if isinstance(node, ast.Raise):
+        return {"raise"}
+    if isinstance(node, ast.Break):
+        return {"break"}
+    if isinstance(node, ast.Continue):
+        return {"continue"}
+    if isinstance(node, ast.Pass) or (
+        isinstance(node, ast.Expr) and _expression_cannot_raise(node.value)
+    ):
+        return {"normal"}
+    if isinstance(node, ast.If):
+        exits = _block_exits(node.body) | _block_exits(node.orelse)
+        if not _expression_cannot_raise(node.test):
+            exits.add("raise")
+        return exits
+    if not isinstance(node, (ast.Try, ast.TryStar)):
+        # Calls, assignments, imports, with headers and loops can all complete
+        # or raise. Nested scopes' transfers do not transfer from this block.
+        return {"normal", "raise"}
+
+    body = _block_exits(node.body)
+    exits = body - {"normal", "raise"}
+    if "normal" in body:
+        exits |= _block_exits(node.orelse)
+    if "raise" in body:
+        # Include unhandled exceptions and every possible handler. Matching
+        # exception types is intentionally not guessed from their spelling.
+        exits.add("raise")
+        for handler in node.handlers:
+            exits |= _block_exits(handler.body)
+    if node.finalbody:
+        final = _block_exits(node.finalbody)
+        # A finalizer transfer replaces pending return/raise/break/continue;
+        # falling through preserves the exit which entered the finalizer.
+        exits = (exits if "normal" in final else set()) | (final - {"normal"})
+    return exits
+
+
+def _expression_cannot_raise(node):
+    """Only literal values have a statically guaranteed evaluation here."""
+    return node is None or isinstance(node, ast.Constant)
 
 
 def _statement_lists_holding(node, target):
