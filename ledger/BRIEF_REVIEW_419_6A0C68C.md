@@ -150,3 +150,35 @@ To be answered:
 
 Verdict line to write at the end of your report:
 `VERDICT: APPROVE` / `VERDICT: REJECT` / `VERDICT: INCONCLUSIVE`
+
+---
+
+## Dependency note for reviewers (added by the lead)
+
+While validating this, the lead found that the **non-starred** counterpart of
+this defect — `cs, other = (contextlib.suppress(...), 2)`, where the name
+receives a swallowing element — is a false-live on `master` `6b72bf6` but is
+**already fixed by #405** (`d89616d9`). Measured on four trees, 4 shapes:
+
+| tree | 4 false-live shapes | 2 controls |
+|---|---|---|
+| `master` `6b72bf6` | 4 wrong | correct |
+| #412 `6f388cf1` | 4 wrong | correct |
+| #419 `6a0c68c` | 4 wrong | correct |
+| #405 `d89616d9` | **0 — fixed** | correct |
+
+So no new issue is needed, and this **confirms the #418 fix was correctly
+scoped**: leaving the non-starred decline untouched does not abandon the family,
+because #405 owns it.
+
+One reviewer obligation follows. `git merge-base --is-ancestor d89616d9
+6a0c68c` is **false** — #419 is based on `master` alone and does not contain
+#405. Please confirm specifically that:
+
+- the change under review introduces no regression in the non-starred
+  element path, and
+- it is genuinely orthogonal to `_value_bound_by` / `_element_for_target`, so
+  the two repairs compose rather than conflict.
+
+Both repairs should be reviewed independently; the union should be re-run
+before either is called complete.
