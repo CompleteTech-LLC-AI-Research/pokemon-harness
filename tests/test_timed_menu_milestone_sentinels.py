@@ -6968,6 +6968,110 @@ LOOP_ELEMENT_LIVE_SHAPES = (
         False,
         True,
     ),
+    # #450. A loop over an iterable that provably yields nothing reaches its
+    # body zero times, so the store in that body never ran and the carrier is
+    # still the one in force. These are the three spellings the rule had
+    # declined: two builtin calls and a literal-false `while` test. Each is a
+    # false-DEAD on master -- the live assert was reported defeated.
+    (
+        "a zero-iteration builtin-constructor loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in set():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '        assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "a zero-iteration range loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(0):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "a literal-false while loop does not count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    while False:\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    # The controls for the three rows above, one per decision the widening
+    # makes. Without them a rule that answered "empty" for *every* loop, or
+    # that read only the first `range` argument, would pass all three.
+    #
+    # `range(5, 0)` and `range(0, 5, -1)` are empty but do not read as zero in
+    # their leading argument, so they are the rows that separate the fold from
+    # a first-argument test. `range(0, 5)` is the opposite: a leading zero and
+    # a non-empty range, so reading the first argument would defeat a live
+    # header here.
+    (
+        "CONTROL a descending range with an empty span is still empty",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(5, 0):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        True,
+        False,
+    ),
+    (
+        "CONTROL a non-empty range with a leading zero does count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(0, 5):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    (
+        "CONTROL a range of one element does count as having run",
+        (
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in range(1):\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
+    # The unreadable-argument control the issue calls for by name: a builtin
+    # name that is not the builtin yields, so its body really does run. This
+    # is the row that keeps the widening from reading `set`/`range` as the
+    # builtins unconditionally.
+    (
+        "CONTROL a shadowed constructor does count as having run",
+        (
+            "    def set():\n"
+            "        return [0]\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    for item in set():\n"
+            "        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n"
+            '            assert x != 1, "A1"'
+        ),
+        False,
+        True,
+    ),
 )
 
 

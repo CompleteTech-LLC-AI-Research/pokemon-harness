@@ -328,11 +328,7 @@ def _block_never_runs(block, function):
     if isinstance(block, ast.While):
         return _condition_is_never_true(block.test, function)
     if isinstance(block, (ast.For, ast.AsyncFor)):
-        return (
-            _is_empty_literal_iterable(block.iter)
-            or _is_empty_literal_string(block.iter)
-            or _is_zero_argument_empty_container(block.iter, function)
-        )
+        return _loop_iterable_is_provably_empty(block.iter, function)
     return False
 
 

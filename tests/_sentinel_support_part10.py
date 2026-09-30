@@ -176,7 +176,7 @@ def _is_enforced(function, target, tree=None):
             return False
         elif (
             isinstance(ancestor, (ast.For, ast.AsyncFor))
-            and _is_empty_literal_iterable(ancestor.iter)
+            and _loop_iterable_is_provably_empty(ancestor.iter, function)
             and _in_body(ancestor, target)
         ):
             # `for _ in []:` -- the loop body never runs, so an assert inside it
@@ -904,15 +904,21 @@ def _is_provably_unreached_store(entry, orders, function):
     really is in force -- retiring a live ``nullcontext`` and letting a
     swallowed assert be reported as swallowed when it is in fact live.
 
-    The test is deliberately narrow: only a *provably* empty literal iterable
-    answers yes. ``helper.items()`` may yield nothing, but it may not, so a
-    store in that body keeps competing and the ordinary ambiguity handling
-    applies. ``range(0)`` and ``set()`` are excluded for the same reason
-    `_is_empty_literal_iterable` excludes them -- deciding them means
-    reasoning about builtins rather than reading a literal.
+    The test is deliberately narrow: only a *provably* empty iterable answers
+    yes. ``helper.items()`` may yield nothing, but it may not, so a store in
+    that body keeps competing and the ordinary ambiguity handling applies.
+    #450 widened the question from the container literals to
+    :func:`_loop_iterable_is_provably_empty`, which also settles the empty
+    builtin calls and the empty ``range`` shapes. Each of those is decided
+    from its own arguments, and each declines when an argument is unreadable
+    -- ``set(items)`` and ``range(n)`` keep competing exactly as
+    ``helper.items()`` does.
 
-    A ``while True:`` loop, or one whose test is merely truthy, is not
-    provably empty and so is not matched.
+    A ``while`` loop is asked the same question through its test, and only a
+    test that is false for every binding answers yes: ``while False:`` is the
+    loop spelling of ``if False:``. A ``while True:`` loop, or one whose test
+    is merely truthy or unreadable, is not provably empty and so is not
+    matched.
 
     The ``For`` branch is gated on :func:`_in_body`, and that gate is the
     whole difference between a correct answer and a regression. ``For.body``
@@ -971,7 +977,13 @@ def _is_provably_unreached_store(entry, orders, function):
         # Keep scanning unless this particular body contains the store.
         if (
             isinstance(ancestor, (ast.For, ast.AsyncFor))
-            and _is_empty_literal_iterable(ancestor.iter)
+            and _loop_iterable_is_provably_empty(ancestor.iter, function)
+            and _in_body(ancestor, statement)
+        ):
+            return True
+        if (
+            isinstance(ancestor, ast.While)
+            and _condition_is_never_true(ancestor.test, function)
             and _in_body(ancestor, statement)
         ):
             return True
