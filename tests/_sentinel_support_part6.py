@@ -47,8 +47,6 @@ def _module_rebinds_name(function, name, call=None):
         for node in _module_level_bindings(statement):
             if _is_canonical_module_import(node, name):
                 continue
-            if at_module_scope and _node_precedes_call(statement, node, call):
-                continue
             if any(_names_bound_by_statement(node, name)):
                 return True
     return False
@@ -107,31 +105,6 @@ def _module_statement_precedes_call(statement, function, call):
         # reaching the `def` means the call has already been evaluated.
         return True
     return _contains(statement, call)
-
-
-def _node_precedes_call(statement, node, call):
-    """Has execution reached ``call`` before ``node`` inside ``statement``?
-
-    ``node`` is a binding found *inside* ``statement`` by the block descent,
-    so the two are ordered within that one statement rather than across the
-    module. Only the path the descent actually took is walked, and a nested
-    ``def``/``class`` body -- a separate scope -- stops the walk rather than
-    being scanned, because nothing there has run.
-    """
-    if node is statement:
-        return False
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-        return False
-    if not _contains(statement, call):
-        # The call is not in this statement at all, so every binding in it
-        # runs before the call does.
-        return False
-    for inner in _module_level_bindings_in_order(statement):
-        if inner is node:
-            return True
-        if _contains(inner, call):
-            return False
-    return False
 
 
 def _module_statement_binds_name_before_call(statement, call, name):
