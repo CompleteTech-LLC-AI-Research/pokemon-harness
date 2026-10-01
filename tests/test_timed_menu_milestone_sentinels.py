@@ -3649,37 +3649,17 @@ def test_an_unenterable_nested_container_is_not_read_as_a_defeat():
     )
 
 
-#: #422 residual. Both of these headers enter a real
-#: ``contextlib.suppress(AssertionError)`` -- executed, the assert is swallowed
-#: -- and both are declined by the resolver, so they are still certified
-#: ``enforced``. They are recorded as measured open residuals rather than
-#: folded into the table above: that table's rows assert a verdict the analyzer
-#: reaches, and pinning an unreached false-LIVE as an expected answer would
-#: encode the defect as correct.
-#:
-#: Each is a genuinely harder read, not a spelling left out by accident:
-#:
-#: * ``holder[-len(holder)]`` needs arithmetic over a container, which this
-#:   analyzer does not evaluate -- the same reason ``holder[len(h)]`` declines.
-#: * ``type("H", (), dict(b=...))`` builds its namespace through a ``dict``
-#:   call rather than a literal, so there is no literal mapping to read.
-#:
-#: Both stay filed on #422 rather than fixed here: closing them means either
-#: evaluating expressions or interpreting a stdlib constructor's keyword
-#: arguments, and each is a wider rule than the dereference gap this PR
-#: repairs. Until they are resolved they are false-LIVEs in the damaging
-#: direction, which is why they are written down rather than left implicit in
-#: an unexercised branch.
+#: Previously measured #422 residuals, now covered by scoped source proofs.
 SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS = (
     (
-        "422 residual a suppressor under a computed index stays a false-LIVE",
+        "422 signed literal-container length reaches the suppressor",
         (
             "    holder = [contextlib.suppress(AssertionError)]\n"
             "    with holder[-len(holder)]:\n        assert x != 1\n"
         ),
     ),
     (
-        "422 residual a suppressor under a type() call namespace stays a false-LIVE",
+        "422 keyword dict type namespace reaches the suppressor",
         (
             "    Box = type('H', (), dict(b=contextlib.suppress(AssertionError)))\n"
             "    with Box.b:\n        assert x != 1\n"
@@ -3693,20 +3673,8 @@ SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS = (
     SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS,
     ids=[row[0] for row in SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS],
 )
-def test_an_unreadable_step_leaves_the_swallowed_assert_reported_as_live(label, body):
-    """#422: measure the residual, and prove the analyzer has not reached it.
-
-    The first half executes each fixture, so the swallow is measured rather
-    than assumed. The second half then requires the analyzer to report
-    ``enforced`` -- the known-wrong answer. When a later repair teaches the
-    resolver to read one of these steps, this test fails and the row is
-    promoted into the table above, which is how a residual stops being carried
-    silently.
-
-    A test asserting ``False`` here would be the dangerous shape: it would pass
-    only while the defect persists, and would then block the very fix it is
-    meant to track.
-    """
+def test_previously_unreadable_steps_match_executed_suppression(label, body):
+    """The original residual inputs remain unchanged and now agree with execution."""
     source = "import contextlib\ndef outer(x, flag):\n" + body
     namespace = {}
     exec(compile(source, "<422-residual>", "exec"), namespace)  # noqa: S102
@@ -3724,11 +3692,7 @@ def test_an_unreadable_step_leaves_the_swallowed_assert_reported_as_live(label, 
     function = tree.body[-1]
     asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
     results = [_is_enforced(function, node, tree) for node in asserts]
-    assert results == [True], (
-        f"{label}: the resolver now reads this step, so the assert is correctly "
-        f"reported defeated and the row belongs in "
-        f"SUBSCRIPT_ATTRIBUTE_SUPPRESSOR_ROWS instead -- got {results}"
-    )
+    assert results == [False], f"{label}: executed swallow must be reported defeated: {results}"
 
 
 def test_a_block_nested_module_carrier_is_still_declined():
