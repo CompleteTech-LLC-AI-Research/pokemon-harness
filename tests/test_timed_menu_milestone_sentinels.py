@@ -317,7 +317,7 @@ def test_the_production_entry_point_is_what_actually_reports_a_bypass():
     temporarily pointed at a tree carrying a real bypass: the entry point must
     report it. Combined with the ``== []`` assertion already in
     ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
-    that pins the entry point from both directions — it must fire, and it must
+    that pins the entry point from both directions â€” it must fire, and it must
     not fire spuriously.
     """
     site = next(iter(RETENTION_COUNT_SITES))
@@ -5623,7 +5623,7 @@ def test_a_nonlocal_capture_binds_the_enclosing_function(label, nested, verdict,
 #: The capture and that store share one top-level `match` statement, so
 #: `_binding_order` gives them the same key and the capture was counted as a
 #: competing binding. The name was recorded `AMBIGUOUS`, which downstream reads
-#: as "may be a suppressor" — so a header CPython enters happily was reported
+#: as "may be a suppressor" â€” so a header CPython enters happily was reported
 #: defeated. That is the damaging direction under #308 criterion 1.
 #:
 #: Rows are executed. `verdict` is the analyzer's answer; `runtime_live` is
@@ -5645,7 +5645,7 @@ MATCH_CAPTURE_SHADOWED_ROWS = (
         True,
     ),
     # Same defect with the shadowing store nested one level down. The store is
-    # conditional, so the `flag=False` path still reads the captured `1` — but
+    # conditional, so the `flag=False` path still reads the captured `1` â€” but
     # the *contract* is live because CPython can reach a firing call, and the
     # analyzer returns one verdict per AST, so the ambiguity marker is the only
     # answer available and it is the one that drops the contract.
@@ -5721,7 +5721,7 @@ def test_a_capture_shadowed_by_a_later_store_is_not_the_value_in_force(
     construction and cannot separate them; a store in a clause body is written
     after the `match` that owns the capture, which line and column can see.
 
-    Two captures of one name keep the ambiguity marker — which clause ran is a
+    Two captures of one name keep the ambiguity marker â€” which clause ran is a
     runtime fact, so the value stays undecidable. The control rows pin that the
     `AMBIGUOUS` answer survives everywhere it is still correct.
     """
@@ -15355,7 +15355,9 @@ def test_a_loop_else_witness_declines_an_import_that_shadows_its_root(label, pre
     which one the header sees depends on the order of the statements, and
     `_binding_order` keys by top-level statement, so it cannot separate them.
 
-    So these shapes decline. A decline reports the assert as defeated when it
+    The source-inert try store later overwritten by nullcontext is now proved
+    by #361's structured witness and checked by execution. Other shapes decline.
+    A decline reports the assert as defeated when it
     fires, which is the false-DEAD direction -- but the alternative is claiming
     a resolution the source does not determine, and that is how this module has
     historically produced false-LIVEs. The narrow witness is the safe error.
@@ -15382,7 +15384,15 @@ def test_a_loop_else_witness_declines_an_import_that_shadows_its_root(label, pre
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
-    assert _is_enforced(function, target, tree) is False, (
+    expected = label == "a try that rebinds the carried manager"
+    if expected:
+        # #361 now proves this inert normal try path and later overwrite.
+        # Execute its complete source independently of the analyzer.
+        namespace = {}
+        exec(source, namespace)  # noqa: S102 - independent runtime oracle
+        with pytest.raises(AssertionError):
+            namespace["outer"](1, False, None)
+    assert _is_enforced(function, target, tree) is expected, (
         f"{label}: the witness fired on an import that rebinds the module root "
         f"it resolved through. Which of two bindings of one name is in force "
         f"depends on statement order, so the witness must decline rather than "

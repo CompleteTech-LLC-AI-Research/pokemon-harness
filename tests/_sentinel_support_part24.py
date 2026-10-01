@@ -7,7 +7,7 @@ if __name__ == "tests._sentinel_support_part24":
 _ALIAS_WITNESS_UNKNOWN = object()
 
 
-def _primitive_alias_failure_path(function, query, owning):
+def _primitive_alias_failure_path(function, query, owning, *, structured=False, defeated=False):
     """A manager reached by an executed primitive failure path, or no proof.
 
     #366: an ordinary boolean parameter can leave a previous nullcontext in
@@ -45,7 +45,10 @@ def _primitive_alias_failure_path(function, query, owning):
         for statement in function.body[:-1]
         if not isinstance(statement, (ast.Import, ast.Pass))
     ]
-    if (
+    if structured:
+        if not any(isinstance(statement, (ast.If, ast.For, ast.Try)) for statement in prefix):
+            return None
+    elif (
         not prefix
         or not isinstance(prefix[0], ast.Assign)
         or not isinstance(prefix[0].value, ast.Call)
@@ -72,12 +75,17 @@ def _primitive_alias_failure_path(function, query, owning):
     loaded = {
         n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
     }
+    if defeated and ordinary & loaded:
+        return None
     free = sorted((ordinary & loaded) - base.keys())
     if len(free) > 2:
         return None
     bound = _bound_names(owning, function)
+    if structured and _structured_alias_retains_ambiguous_suppressors(function, bound):
+        return None
     for values in _primitive_alias_environments(free, base):
-        if not _primitive_alias_block(function.body[:-1], values, function):
+        block = _structured_alias_block if structured else _primitive_alias_block
+        if not block(function.body[:-1], values, function):
             continue
         manager = values.get(expression.id, _ALIAS_WITNESS_UNKNOWN)
         if not isinstance(manager, ast.Call) or not _literal_subject_element_is_safe(
@@ -89,12 +97,16 @@ def _primitive_alias_failure_path(function, query, owning):
         if _primitive_alias_condition(query.test, values, function) is not False:
             continue
         if _resolves_to(manager.func, "contextlib.nullcontext", bound):
-            return True
-        if _is_readable_suppressor(manager, bound) and not any(
-            _name_catches_assertion_error(name)
-            for name in _suppression_names(manager, bound, function)
-        ):
-            return True
+            if not defeated:
+                return True
+            continue
+        if _is_readable_suppressor(manager, bound):
+            suppresses = any(
+                _name_catches_assertion_error(name)
+                for name in _suppression_names(manager, bound, function)
+            )
+            if suppresses is defeated:
+                return True
     return None
 
 

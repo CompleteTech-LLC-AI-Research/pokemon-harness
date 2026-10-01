@@ -148,6 +148,10 @@ def _is_enforced(function, target, tree=None):
         return False
     if _primitive_alias_failure_path(function, target, owning):
         return True
+    if _primitive_alias_failure_path(function, target, owning, structured=True):
+        return True
+    if _primitive_alias_failure_path(function, target, owning, structured=True, defeated=True):
+        return False
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
@@ -189,11 +193,6 @@ def _is_enforced(function, target, tree=None):
             # is never evaluated. The loop spelling of the `if False:` defeat.
             return False
     return True
-
-
-def _contains(statement, target):
-    """True if ``target`` is ``statement`` or lies anywhere beneath it."""
-    return statement is target or any(node is target for node in ast.walk(statement))
 
 
 _CONTROL_TRANSFERS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
