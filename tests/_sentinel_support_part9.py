@@ -511,29 +511,8 @@ def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
         return False
     for item in node.items:
         call = item.context_expr
-        # #422. The header may reach the suppressor through a container or a
-        # class attribute rather than naming it:
-        #
-        #     holder = [contextlib.suppress(AssertionError)]
-        #     with holder[0]:
-        #
-        #     class Box:
-        #         ctx = contextlib.suppress(AssertionError)
-        #     with Box.ctx:
-        #
-        # Both enter a real suppressor while naming no `ast.Call` at all, so
-        # the `isinstance` gate below skipped them and the assert was certified
-        # `enforced` -- a disarmed contract reported load-bearing. Dereference
-        # first and decide the value that is actually entered; every predicate
-        # after that point is the ordinary one, which is what keeps a
-        # `nullcontext` or a wrong-exception suppressor carried through the same
-        # shape correctly `enforced`.
+        # Resolve readable containers/classes before deciding the entered value.
         if not isinstance(call, ast.Call):
-            # `owning` is the tree the assert actually lives in. It must be
-            # used here rather than `_module_tree()`, which parses the
-            # milestones module and so contains neither this function's
-            # assignments nor its class bodies -- passing it silently
-            # dereferences nothing and leaves the false-LIVE in place.
             carried = _dereferenced_header_value(call, bound, owning, function)
             if (
                 isinstance(carried, ast.Call)
