@@ -1013,6 +1013,10 @@ def _elif_failure_predicate(test, values):
         left, right = resolved
         operator = type(test.ops[0])
         try:
+            if operator is ast.Is:
+                return left is right
+            if operator is ast.IsNot:
+                return left is not right
             if operator is ast.Eq:
                 return left == right
             if operator is ast.NotEq:

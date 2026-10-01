@@ -13880,3 +13880,93 @@ def test_a_loop_else_witness_declines_a_guard_that_raises(guard, assert_is_live)
         f"and the else cannot be installed. Treating it as possibly-reachable "
         f"certifies a header that can never run."
     )
+
+
+#: Identity guards decide as cleanly as equality and never raise, so the loop
+#: ``else`` witness must read them as decided rather than fall back to
+#: "possibly reachable".
+#:
+#: ``if x is None: break`` against ``assert x != 1`` is the trap. ``None`` is
+#: never in the swept domain, so at every swept value the guard is False, the
+#: break is not taken, the loop completes, the ``else`` installs the suppressor,
+#: and the assert is swallowed: the header is defeated. Reading the unreadable
+#: guard as "the break might be reachable" instead reports it live, which
+#: certifies a defeated sentinel as load-bearing.
+#:
+#: The mirror ``x is not None`` holds at every swept value, so the break *is*
+#: taken, the ``else`` never runs, and the assert really does fire. That is the
+#: conservative answer and it is correct, which is why the pair is pinned
+#: together: a repair that declined identity guards wholesale would turn the
+#: second row into a false-DEAD.
+LOOP_ELSE_IDENTITY_GUARDS = (
+    ("x is None", False),
+    ("x is not None", True),
+)
+
+
+@pytest.mark.parametrize(
+    ("guard", "assert_is_live"),
+    LOOP_ELSE_IDENTITY_GUARDS,
+    ids=[f"guard {row[0]}" for row in LOOP_ELSE_IDENTITY_GUARDS],
+)
+def test_a_loop_else_witness_reads_an_identity_guard_it_can_resolve(guard, assert_is_live):
+    """#451: `is` resolves to a bool for every operand pair, so decide it.
+
+    `_elif_failure_predicate` resolves both operands of a single-operator
+    comparison and then returned `None` for `Is`/`IsNot`, exactly as it once did
+    for the ordering operators. `None` reads as "possibly true" in the #451
+    witness, so an identity guard was treated as a reachable break: the loop
+    `else` was assumed skipped, the suppressor was assumed absent, and a
+    swallowed assert came back live.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n"
+        f"        if {guard}:\n"
+        "            break\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(f"451 identity guard {guard}", source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    results = _is_enforced(function, target, tree)
+    assert results is assert_is_live, (
+        f"451 identity guard {guard}: expected {assert_is_live}, got {results}. "
+        f"`is` never raises and is fully determined once both operands resolve, "
+        f"so declining it as unreadable reports a defeated header as live."
+    )
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    (
+        ("x is None", False),
+        ("x is not None", True),
+        ("x is 0", True),
+        ("x is not 0", False),
+    ),
+)
+def test_the_failure_predicate_resolves_an_identity_guard(expression, expected):
+    """Pin the predicate directly: `is` must answer, not decline.
+
+    This is the unit-level counterpart to the executed rows above, and it
+    isolates the repair. Before it, both calls returned `None` -- the sentinel
+    for "cannot decide" -- which the #451 witness then read as a reachable
+    break.
+    """
+    guard = ast.parse(expression, mode="eval").body
+    values = {"x": 0}
+    result = support._elif_failure_predicate(guard, values)
+    assert result is expected, (
+        f"{expression} at x=0: expected {expected}, got {result!r}. "
+        f"`is` is defined for every pair of objects, so a resolved operand pair "
+        f"must produce a decision rather than a decline."
+    )
