@@ -2969,6 +2969,96 @@ def test_a_context_manager_instance_stays_enterable():
     )
 
 
+def test_a_local_class_with_an_enterable_metaclass_enters_the_bare_header():
+    """#468. The *class-carrier* path must consult the metatype, not identity.
+
+    #457 repaired the ``cs = CM`` store spelling, and this is deliberately the
+    other spelling. A bare ``with CM:`` header reaches a different rule: the
+    local ``class CM`` is recorded by ``_carrier_runtime_kinds`` as the kind
+    ``"type"``, and ``"type"`` is unconditionally unenterable, so an enterable
+    metaclass was never consulted and a firing assert was reported defeated --
+
+        def probe(x):
+            class Meta(type):
+                def __enter__(cls): return cls
+                def __exit__(cls, *exc): return False
+            class CM(metaclass=Meta): pass
+            with CM:
+                assert x != 1        # fires at x=1
+
+    ``with CM:`` performs the protocol lookup on ``type(CM)``, which is
+    ``Meta``, and ``Meta`` defines both dunders, so entry succeeds and the body
+    runs. The two spellings are the same program with different verdicts, and
+    both are live at runtime.
+
+    Executed, so the row cannot pass by the checker and the claim being wrong
+    together: at ``x=1`` the assert must fire.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    class Meta(type):\n"
+        "        def __enter__(cls):\n"
+        "            return cls\n"
+        "        def __exit__(cls, *exc):\n"
+        "            return False\n"
+        "    class CM(metaclass=Meta):\n"
+        "        pass\n"
+        "    with CM:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract("a local class with an enterable metaclass", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True] -- `with CM:` looks the dunder up on `type(CM)`, "
+        f"which is `Meta`, and `Meta` implements the protocol -- got {results}. "
+        f"Recording every local `class` as the unconditionally-unenterable kind "
+        f'`"type"` drops a genuinely live contract.'
+    )
+
+
+def test_a_local_class_whose_metaclass_is_unreadable_is_declined():
+    """The undecidable metaclass keeps the assert live rather than guessing.
+
+    ``class CM(metaclass=Meta)`` may or may not implement the protocol
+    depending on what ``Meta`` evaluates to, and the analyzer cannot run the
+    definition to find out. Deciding either way invents a verdict it does not
+    have: ``"type"`` would report a live assert dead, and the same class behind
+    an unenterable metaclass *is* dead.
+
+    The first two rows are decidable from the syntax -- a class with no bases
+    and one inheriting ``type`` both take ``type`` as their metaclass, which
+    does not implement the protocol -- so both are reported dead, and both
+    raise ``TypeError`` before the assert, which is what they claim.
+
+    The third names its metaclass explicitly. Whether ``type`` here is the
+    builtin is not something the syntax settles, so the rule declines and the
+    assert is reported live. That is the deliberate residual: the fixture is
+    UNEXECUTABLE either way, so neither verdict drops a real contract, and
+    declining keeps a live `class CM(metaclass=Enterable)` from being called
+    dead.
+    """
+    for label, body, expected in (
+        ("a plain local class", "    class CM: pass\n", False),
+        ("a local class inheriting type", "    class CM(type): pass\n", False),
+        ("an explicit metaclass keyword", "    class CM(metaclass=type): pass\n", True),
+    ):
+        source = f"def outer(x, flag, helper):\n{body}    with CM:\n        assert x != 1\n"
+        tree = ast.parse(source)
+        function = tree.body[-1]
+        asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert results == [expected], (
+            f"{label}: expected {[expected]} -- got {results}. A class with no "
+            f"bases, or one inheriting `type`, has metatype `type`, which does "
+            f"not implement the protocol, so entering raises `TypeError` "
+            f"before the assert. An explicit `metaclass=` keyword is not "
+            f"decidable from the syntax and is declined."
+        )
+
+
 def test_a_class_with_an_enterable_metaclass_is_enterable():
     """The discriminating row a "classes are never enterable" rule gets wrong.
 

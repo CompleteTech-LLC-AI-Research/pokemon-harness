@@ -629,6 +629,18 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
             # raises `TypeError` before the assert is evaluated. The kind is a
             # plain string rather than a synthesised AST node, so the store
             # stays attached to the real statement it came from.
+            #
+            # #468. `_carrier_runtime_kinds` declines a `ClassDef` whose
+            # metaclass cannot be read off the syntax -- `class CM(metaclass=
+            # Meta)` may or may not implement the protocol, and `with CM:`
+            # succeeds when it does. A declined carrier arrives here as a
+            # non-string value and must NOT be read as "this store has no
+            # readable right-hand side", which is the `value is None` branch
+            # above and would pin `"NoneType"` -- declaring the header dead
+            # for a class that really does enter. It is declined instead, so
+            # the assert keeps its verdict.
+            if value is _UNDECIDED_CARRIER:
+                return False
             kinds.add(value)
             continue
         if _unbound_local_class_constructor(value, function, module):

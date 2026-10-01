@@ -792,6 +792,60 @@ def _match_capture_names(function):
     return owners
 
 
+#: #468. A ``class`` whose metaclass cannot be read off the syntax records
+#: this instead of a kind string. It is a distinct object rather than ``None``
+#: because ``None`` already means "this store has no readable right-hand side"
+#: to :func:`_entry_is_dead`, and conflating the two would declare a header
+#: dead for a class that really does enter.
+_UNDECIDED_CARRIER = "type?"
+
+
+def _classdef_runtime_kind(statement, function):
+    """What runtime kind does this local ``class`` definition bind?
+
+    #468. ``with CM:`` enters by looking the dunder up on ``type(CM)``, so
+    whether the header succeeds is a question about the *metaclass*, not about
+    the class. A class that declares an enterable metaclass supports the
+    protocol and the body runs, so answering `"type"` for every ``ClassDef``
+    reports a firing assert as defeated.
+
+    The metaclass is whatever the ``metaclass=`` keyword names, or the first
+    base when that keyword is absent, or ``type`` when neither appears. Only
+    the last of those is decidable from the syntax alone:
+
+    * no keyword and no bases -- ``class CM: ...`` -- the metaclass is
+      ``type``, which does not implement the protocol, so `"type"` stands;
+    * a keyword or a base -- the metaclass is whatever that expression
+      evaluates to, which the analyzer cannot execute. Those return ``None``.
+
+    :data:`_UNDECIDED_CARRIER` means *undecided*, and the consumer declines it
+    rather than reading it as a kind. That is the safe error: a class whose
+    metaclass cannot be entered would then be reported live rather than dead,
+    but inventing that deadness is how a real pinned contract gets dropped.
+
+    The bases that are decidable are the ones the language itself makes
+    unambiguous: a base that is a name spelled ``type``, or the bare builtin
+    lookup ``type``. Anything else -- another local class, an attribute, a call
+    -- is declined.
+    """
+    keywords = {keyword.arg: keyword.value for keyword in statement.keywords}
+    if "metaclass" in keywords:
+        # The metaclass is named explicitly. Whether it implements the
+        # protocol is not decidable from the syntax, so decline rather than
+        # guess "type" -- the default only applies when no keyword is given.
+        return _UNDECIDED_CARRIER
+    if not statement.bases:
+        return "type"
+    first_base = statement.bases[0]
+    # `class CM(type): ...` names `type` as its only base, so the metaclass is
+    # `type` itself. A name spelled `type` in this scope could be something
+    # else, but the ordinary store rules already decide what a bare `type`
+    # resolves to; here it is enough that the base is the `type` object.
+    if isinstance(first_base, ast.Name) and first_base.id == "type":
+        return "type"
+    return _UNDECIDED_CARRIER
+
+
 def _carrier_runtime_kinds(function):
     """Every ``(name, (owning statement, runtime kind))`` from a string field.
 
@@ -877,7 +931,25 @@ def _carrier_runtime_kinds(function):
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             carriers.append((statement.name, "function"))
         elif isinstance(statement, ast.ClassDef):
-            carriers.append((statement.name, "type"))
+            # #468. `"type"` says the *value* is a class, but `with CM:`
+            # performs the protocol lookup on `type(CM)` -- the metaclass --
+            # and a class whose metaclass implements `__enter__`/`__exit__`
+            # really is enterable:
+            #
+            #     class Meta(type):
+            #         def __enter__(cls): return cls
+            #         def __exit__(cls, *exc): return False
+            #     class CM(metaclass=Meta): pass
+            #     with CM:      # enters and binds CM itself
+            #         assert x != 1
+            #
+            # Recording that as `"type"` made the header unconditionally
+            # unenterable and reported a firing assert as defeated -- the
+            # false-DEAD direction. #457 already answers this question for the
+            # `from`-import path by consulting the metatype; this asks the same
+            # question of the syntax, and declines when it cannot be decided,
+            # which keeps the assert live rather than inventing a dead one.
+            carriers.append((statement.name, _classdef_runtime_kind(statement, function)))
         for name, kind in carriers:
             owners.setdefault(name, (statement, kind))
     return owners
