@@ -119,6 +119,8 @@ def _alias_definition_metadata_is_safe(statement, function):
             any(node is statement for node in ast.walk(expression)) for expression in expressions
         ):
             continue
+        if not _alias_metadata_module_creation_is_inert(_module_for_function(function)):
+            return False
         if not _alias_definition_prefix_is_safe(function):
             return False
         decorators = getattr(definition, "decorator_list", ())
@@ -380,6 +382,49 @@ def _alias_metadata_setup_call_is_inert(call, function):
                 _alias_metadata_expression_is_inert(value, function)
                 for value in _alias_definition_expressions(statement)
             )
+        ):
+            continue
+        return False
+    return True
+
+
+def _alias_metadata_module_creation_is_inert(module):
+    if module is None:
+        return False
+    for statement in module.body:
+        if isinstance(statement, ast.Import) and all(
+            alias.name == "contextlib" for alias in statement.names
+        ):
+            continue
+        if (
+            isinstance(statement, ast.ImportFrom)
+            and statement.level == 0
+            and (
+                (
+                    statement.module == "contextlib"
+                    and all(alias.name in ("suppress", "nullcontext") for alias in statement.names)
+                )
+                or (
+                    statement.module == "__future__"
+                    and all(alias.name == "annotations" for alias in statement.names)
+                )
+            )
+        ):
+            continue
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not statement.decorator_list
+            and not getattr(statement, "type_params", ())
+            and all(
+                isinstance(expression, ast.Constant)
+                for expression in _alias_definition_expressions(statement)
+            )
+        ):
+            continue
+        if isinstance(statement, ast.Pass) or (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
         ):
             continue
         return False

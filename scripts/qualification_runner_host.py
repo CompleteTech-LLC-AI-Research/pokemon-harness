@@ -121,8 +121,14 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         # Visibility is restricted, but the pid still exists; a zombie check
         # needs /proc/<pid>/stat, which may itself be unreadable.
-        return not _entry._pid_is_zombie(pid)
-    return not _entry._pid_is_zombie(pid)
+        pass
+    if _entry._pid_is_zombie(pid):
+        return False
+    # kill(0) can succeed for a zombie that is reaped before the stat read.
+    # _pid_is_zombie then sees ENOENT and returns False, which is not proof
+    # that the process is alive. Recheck existence after that observation;
+    # restricted visibility still counts as existing and fails closed.
+    return _entry._pid_exists(pid)
 
 
 def _pid_is_zombie(pid: int) -> bool:
