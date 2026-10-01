@@ -241,7 +241,7 @@ def _replayable_turn_plan(plan) -> bool:
 
 def _active_moves(session) -> list:
     """The live combatant's ``(move, pp)`` pairs, or ``[]`` when unreadable."""
-    from tests.test_pyboy_link_session_roms import _read_active_battle_moves
+    from tests._pyboy_link_session_roms_support import _read_active_battle_moves
 
     try:
         return list(_read_active_battle_moves(session))
@@ -799,7 +799,7 @@ def _drive_next_turn(
     return value is ignored: the boundary it is offered is always a live
     both-command pair, because step 1 waits for exactly that geometry.
     """
-    from tests.test_pyboy_link_session_roms import _read_active_battle_moves
+    from tests._pyboy_link_session_roms_support import _read_active_battle_moves
 
     select_enemy = counters["MainInBattleLoop.selectEnemyMove"]
     spent = 0
@@ -919,5 +919,3 @@ def _drive_next_turn(
 # ---------------------------------------------------------------------------
 # Fixture capture and reload validation
 # ---------------------------------------------------------------------------
-
-

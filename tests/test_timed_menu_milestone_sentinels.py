@@ -12274,6 +12274,105 @@ LOOP_ELSE_SUPPRESSOR_SHAPES = (
         "        if not x:\n            break",
         False,
     ),
+    # -- #479. `Is` and `IsNot` were the operators #471 left declined, so they
+    #    reached `_condition_can_hold` as "not readable" -- which that function
+    #    counts as *possibly true*, the damaging direction. `x is None` decides
+    #    False at the failing value `x == 1`, the `if` body is skipped, the loop
+    #    completes normally, the `else` installs the suppressor, and the assert
+    #    is swallowed on every call. Master certified it enforced: a false-LIVE
+    #    live on `origin/master`, not a draft-only artifact.
+    #
+    #    `None` is not in the swept domain, so the identity guard is False at
+    #    every value the oracle calls, which is exactly what makes the row a
+    #    false-LIVE rather than a live contract.
+    (
+        "479 filed: an identity guard excludes every failing call",
+        "for item in (1,):",
+        "        if x is None:\n            break",
+        False,
+    ),
+    # -- The mirror, and the reason a wholesale refusal of identity guards
+    #    would be a regression rather than a fix: `x is not None` HOLDS at the
+    #    failing value, so there really is a call that both breaks and fails,
+    #    and the assert is live. Answering "unreadable" for every identity
+    #    guard would flip this row to a false-DEAD.
+    (
+        "479 live: an inverted identity guard holds on a failing call",
+        "for item in (1,):",
+        "        if x is not None:\n            break",
+        True,
+    ),
+    # -- Identity against a literal the domain can actually hold, so this is
+    #    decided rather than constant. `x is 0` is False at `x == 1` for small
+    #    ints under CPython's interning, which makes it a second excluded-failure
+    #    row in the damaging direction.
+    (
+        "479 control: identity against a literal the domain holds",
+        "for item in (1,):",
+        "        if x is 0:\n            break",
+        False,
+    ),
+    # -- #479 residual. Membership was declined for the same reason identity
+    #    was: `None` reached `_condition_can_hold` as "possibly true". `x in [0]`
+    #    decides False at the failing value `x == 1`, so the loop completes
+    #    normally, the `else` installs the suppressor, and the assert is
+    #    swallowed on every call.
+    (
+        "479 residual: a membership guard excludes every failing call",
+        "for item in (1,):",
+        "        if x in [0]:\n            break",
+        False,
+    ),
+    # -- A membership guard the failing value satisfies, and the reason
+    #    membership cannot be read as always-false. `x in (0, 1)` HOLDS at
+    #    `x == 1`, so there is a call that both breaks and fails, the `else` is
+    #    skipped, and the carried `nullcontext` is what the header enters.
+    #
+    #    The *inverted* spelling is the opposite and is deliberately absent:
+    #    `x not in (0, 1)` is False at `x == 1`, so the `else` runs and the
+    #    assert is swallowed -- it is the excluded-failure case, not a live one.
+    (
+        "479 residual live: a satisfied membership guard holds on a failing call",
+        "for item in (1,):",
+        "        if x in (0, 1):\n            break",
+        True,
+    ),
+    # -- A container the guard holds on, for the damaging direction from the
+    #    other side: `x in (0, 1)` is True at `x == 1`, so the break is reached
+    #    on the failing call and the `else` is skipped. Live, and a repair that
+    #    read membership as always-false would call this dead.
+    (
+        "479 residual live: membership against a tuple holds on a failing call",
+        "for item in (1,):",
+        "        if x in (0, 1, 2):\n            break",
+        True,
+    ),
+    # -- #479 residual. `and`/`or` were declined as a whole, so a guard built
+    #    from one read as "possibly true" even where a single operand settles it.
+    #    `x is None` is False at `x == 1` and that false operand settles `and`
+    #    on its own -- Python short-circuits there and never reads `y` at all --
+    #    so the loop completes normally and the `else` installs the suppressor.
+    (
+        "479 residual: a short-circuited conjunction excludes every failing call",
+        "for item in (1,):",
+        "        if x is None and y:\n            break",
+        False,
+    ),
+    # -- The mirror on the other side, and the reason the operator cannot be
+    #    read as always-false. A false *first* operand does not settle `or`, so
+    #    the second operand decides it; at `x == 1` the guard holds, the break
+    #    is reached on the failing call, and the contract is live.
+    #
+    #    Both operands have to be pinned by the failing assert for this to be
+    #    decidable, which is why the row reads the same parameter the assert
+    #    reads. A guard naming a *different* parameter is caller-dependent --
+    #    see `WALRUS`-style declines elsewhere in this module.
+    (
+        "479 residual live: a disjunction decides on its second operand",
+        "for item in (1,):",
+        "        if x == 0 or x:\n            break",
+        True,
+    ),
 )
 
 
@@ -14137,6 +14236,37 @@ LOOP_ELSE_IMPORT_SPELLINGS = (
         "contextlib.suppress(AssertionError)",
         True,
     ),
+    # -- #481. A nested `def` binds its own name and does nothing else at this
+    #    point: its body is not run, no value is produced, and nothing the
+    #    header enters can come from it. The pre-chain scan rejected the
+    #    *statement* -- it is neither a `Pass`, an `Assign`, nor an import --
+    #    so the witness never fired and this live assert was certified dead.
+    (
+        "481 a nested def before the header is transparent",
+        "    def inner():\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- The filed spelling, where the definition's body is itself an import.
+    #    That import is not what makes the row live; the definition is. It
+    #    matters because "the nested def contains an import" is the shape the
+    #    issue filed, and a fix that only handled the empty body would miss it.
+    (
+        "481 a nested def containing an import is transparent",
+        "    def inner():\n        import contextlib\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- This empty class body executes only `pass`, so creation is inert.
+    (
+        "481 a nested class before the header is transparent",
+        "    class Inner:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
     # -- #485. A `try`/`except` above the loop is transparent for the same
     #    reason an import is: it binds names and swallows an exception, but a
     #    `try` that binds nothing the witness reads cannot change what the
@@ -14203,6 +14333,16 @@ LOOP_ELSE_IMPORT_SHADOWS = (
         "    import contextlib\n    import contextlib.nullcontext as contextlib\n",
     ),
     ("a relative import of the root", "    from . import contextlib\n"),
+    # -- #481's boundary. A nested definition is transparent precisely because
+    #    it binds a *local* name, but a definition spelled with a walked root's
+    #    own name is a shadow wearing a definition's clothes: it rebinds
+    #    `contextlib` to a function object, so `contextlib.nullcontext()` in the
+    #    header raises and the witness must decline rather than resolve through
+    #    a root that is no longer the module.
+    (
+        "a nested def shadowing the walked root",
+        "    def contextlib():\n        pass\n",
+    ),
     # -- #485's boundary. A `try` is admitted only because it binds nothing
     #    the witness reads and its body cannot exit the function before the
     #    header. Each of these breaks exactly one of those two conditions, and
@@ -14417,3 +14557,470 @@ def test_a_loop_else_witness_declines_a_guard_that_raises(guard, assert_is_live)
         f"and the else cannot be installed. Treating it as possibly-reachable "
         f"certifies a header that can never run."
     )
+
+
+#: #464. A ``with`` header whose walrus value is a bare ``Name`` enters
+#: whatever that name holds. #390 fixed the ``ast.Lambda`` spelling by reading
+#: the entered value's own runtime type, but ``_literal_runtime_type`` declines
+#: a plain ``Name``, so every name-valued walrus header kept the assert live.
+#: When the name holds a function object the header raises ``TypeError`` while
+#: it is being evaluated -- before the body is entered -- so the assert under it
+#: never runs at all. Reporting that *enforced* is the damaging direction.
+#:
+#: Every row below is executed across the swept domain by
+#: :func:`_assert_suppression_contract` before the analyzer's answer is
+#: compared, so CPython decides each verdict rather than this table. The rows
+#: that reach CPython's ``True``-shaped outcome are the controls: a repair that
+#: swept the whole ``NamedExpr`` family into "dead" would fail them.
+#:
+#: The two rows that stay **live** are the deliberate declines, and they are
+#: what keeps the repair honest:
+#:
+#: * a *parameter* is chosen by the caller. ``def outer(x, helper)`` enters
+#:   ``helper``, which is live when the caller passes ``nullcontext()`` and
+#:   raises when it passes ``1``. The function body does not determine the
+#:   answer, so declining is the only honest verdict -- and answering dead
+#:   would drop a real contract.
+#: * a genuinely *unbound* name is a ``NameError`` on entry. Master already
+#:   pins that as a live header (``bare name in the header``), and a fix that
+#:   flipped it would contradict that row.
+#:
+#: The repair resolves only what the scope can actually determine: a local
+#: store, an alias chain through local stores, a module-level store, and a
+#: ``def``/``class`` carrier. Everything else declines.
+WALRUS_NAME_ENTRY_SHAPES = (
+    # -- The filed defect, reached through a local alias rather than a
+    #    parameter: `h = _h` binds the *same* function object the header enters.
+    (
+        "464 local alias to a function",
+        "def _maker():\n    return None\n",
+        "    h = _maker\n",
+        "h",
+        False,
+    ),
+    # -- A module-level store whose value is a literal.
+    (
+        "464 module constant bound to an int",
+        "CS = 1\n",
+        "",
+        "CS",
+        False,
+    ),
+    # -- A module-level store whose value is an alias of a `def`. Two hops from
+    #    the header: module store -> module `def` carrier.
+    (
+        "464 module constant aliased to a def",
+        "def _maker():\n    return None\nCS = _maker\n",
+        "",
+        "CS",
+        False,
+    ),
+    # -- A local `def` carrier reached by name rather than through a lambda.
+    (
+        "464 local def carrier",
+        "",
+        "    def _maker():\n        pass\n",
+        "_maker",
+        False,
+    ),
+    # -- Controls. These really are enterable, so a repair that answered "dead"
+    #    for any name it could resolve would fail them.
+    (
+        "464 control: a real context manager is live",
+        "",
+        "",
+        "contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "464 control: a suppressor swallows, so the header is defeated",
+        "",
+        "",
+        "contextlib.suppress(AssertionError)",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "module_preamble", "local_preamble", "value", "assert_is_live"),
+    WALRUS_NAME_ENTRY_SHAPES,
+    ids=[row[0] for row in WALRUS_NAME_ENTRY_SHAPES],
+)
+def test_a_walrus_header_named_to_an_unenterable_value_is_not_a_live_assert(
+    label, module_preamble, local_preamble, value, assert_is_live
+):
+    """#464: resolve the name the walrus enters, or decline -- never assume live.
+
+    The entered object is whatever the walrus *value* names, exactly as in the
+    ``ast.Lambda`` case #390 already handles. Reading only literal shapes left
+    every name-valued header reporting `enforced`, which for a function object
+    is a contract the interpreter never evaluates.
+
+    Resolution goes through the store machinery this module already trusts
+    (`_stores_of`, `_module_stores`, `_carrier_runtime_kinds`) rather than a
+    parallel walk, so a name bound by a caller or by nothing at all still
+    declines -- and declining keeps the assert live, the safe direction.
+    """
+    source = (
+        "import contextlib\n"
+        f"{module_preamble}"
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"{local_preamble}"
+        f"    with (cs := {value}):\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. A walrus "
+        f"header enters the value it names, so a name bound to a function, an "
+        f"int or any other non-manager raises before the body and the assert is "
+        f"unreachable. A name the scope does not determine -- a parameter, or "
+        f"one bound nowhere -- must stay live rather than be called dead."
+    )
+
+
+#: #464, the two shapes that must NOT be swept into the repair. Neither can be
+#: judged by executing the fixture, which is exactly why they need pinning:
+#:
+#: * a *parameter* is chosen by the caller. ``def outer(x, helper)`` enters
+#:   ``helper``; with ``nullcontext()`` the assert is live, with ``1`` the header
+#:   raises ``TypeError``. The body determines neither, so the only honest
+#:   verdict is the decline, and a "dead" answer would drop a real contract.
+#: * a genuinely *unbound* name raises ``NameError`` on entry. Master already
+#:   pins that header as live (``bare name in the header``), so flipping it
+#:   would contradict a row that is already green.
+#:
+#: They are therefore asserted directly against `_is_enforced`, with the
+#: executed outcome recorded in the message, because a widened rule that
+#: resolved either name would make them dead -- the damaging direction for the
+#: first and a regression for the second.
+WALRUS_NAME_ENTRY_DECLINES = (
+    ("a parameter is chosen by the caller", "helper", "live or TypeError, per call site"),
+    ("a genuinely unbound name", "mystery", "NameError on entry"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "executed"),
+    WALRUS_NAME_ENTRY_DECLINES,
+    ids=[row[0] for row in WALRUS_NAME_ENTRY_DECLINES],
+)
+def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, executed):
+    """#464: the conservative fallback must not be inverted.
+
+    #308 criterion 1 makes a false-LIVE the damaging direction, but a repair
+    that answered "dead" for every name it could not resolve would trade these
+    two false-LIVEs for false-DEADs on real pinned contracts -- the opposite
+    error, and the one #308 also names. A name the scope genuinely does not
+    determine stays live.
+
+    CPython cannot adjudicate either row (``executed`` records why: the caller
+    picks the parameter's value, and an unbound name raises before the body),
+    so the verdict is asserted directly rather than through the swept oracle.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"    with (cs := {value}):\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outcome = "returned"
+    try:
+        namespace["outer"](0, True, None)
+    except AssertionError:
+        outcome = "AssertionError"
+    except BaseException as error:  # noqa: BLE001 - the outcome is the datum
+        outcome = type(error).__name__
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is True, (
+        f"{label}: the analyzer must decline this name and keep the assert live. "
+        f"CPython gives `{outcome}` here ({executed}), so this row is pinned "
+        f"against the analyzer directly rather than through the swept oracle."
+    )
+
+
+@pytest.mark.parametrize(
+    "module_preamble,prefix,parameter,live",
+    (
+        ("h = 1\n", "", "h", True),
+        ("h = 1\n", "    h = contextlib.nullcontext()\n", "", True),
+        ("", "    a = contextlib.nullcontext()\n    h = a\n    a = 1\n", "", True),
+        ("", "    a = 1\n    h = a\n    a = contextlib.nullcontext()\n", "", False),
+        ("a = 1\nh = a\na = contextlib.nullcontext()\n", "", "", False),
+        ("", "    def h(): pass\n    h = contextlib.nullcontext()\n", "", True),
+        ("h = 1\n", "    h = 1\n    if flag: h = contextlib.nullcontext()\n", "", True),
+    ),
+)
+def test_walrus_name_uses_lexical_store_and_alias_snapshot(
+    module_preamble, prefix, parameter, live
+):
+    source = (
+        "import contextlib\n"
+        + module_preamble
+        + "def outer(x, flag"
+        + (", h" if parameter else "")
+        + "):\n"
+        + prefix
+        + "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-lexical-snapshot>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    outcomes = []
+    for flag in (False, True):
+        try:
+            namespace["outer"](1, flag, contextlib.nullcontext()) if parameter else namespace[
+                "outer"
+            ](1, flag)
+        except AssertionError:
+            outcomes.append(True)
+        except TypeError:
+            outcomes.append(False)
+        else:
+            outcomes.append(False)
+    assert any(outcomes) is live
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
+
+
+def test_walrus_name_declines_module_binding_shadowed_by_closure():
+    source = (
+        "import contextlib\nh = 1\ndef parent(h):\n"
+        "    def outer(x):\n        with (cs := h):\n            assert x != 1\n"
+        "    return outer\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-closure-shadow>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    with pytest.raises(AssertionError):
+        namespace["parent"](contextlib.nullcontext())(1)
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_assume_decorated_definition_is_function():
+    source = (
+        "import contextlib\ndef decorate(function):\n    return contextlib.nullcontext()\n"
+        "def outer(x):\n    @decorate\n    def h(): pass\n"
+        "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<decorated-walrus-carrier>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_assume_class_metaclass_is_unenterable():
+    source = (
+        "class Meta(type):\n    def __enter__(cls): return cls\n"
+        "    def __exit__(cls, *args): return False\n"
+        "def outer(x):\n    class h(metaclass=Meta): pass\n"
+        "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<metaclass-walrus-carrier>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_read_module_future_store_into_earlier_invocation():
+    source = (
+        "import contextlib\nhelper = contextlib.nullcontext()\n"
+        "def outer(x):\n    with (cs := helper):\n        assert x != 1\n"
+        "outer(1)\nhelper = 1\n"
+    )
+    namespace = {}
+    with pytest.raises(AssertionError):
+        exec(compile(source, "<early-module-walrus-invocation>", "exec"), namespace)  # noqa: S102
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_module_snapshot_declines_implicit_decorator_invocation():
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+def invoke(function):
+    outer(1)
+    return function
+@invoke
+def marker():
+    pass
+helper = 1
+"""
+    with pytest.raises(AssertionError):
+        exec(source, {})  # noqa: S102
+    module = ast.parse(source)
+    function = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_walrus_module_snapshot_declines_implicit_truthiness_invocation():
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+if trigger:
+    pass
+helper = 1
+"""
+    namespace = {}
+
+    class Trigger:
+        def __bool__(self):
+            namespace["outer"](1)
+            return True
+
+    namespace["trigger"] = Trigger()
+    with pytest.raises(AssertionError):
+        exec(source, namespace)  # noqa: S102
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_walrus_module_snapshot_declines_late_import_callback(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+from sentinel_walrus_import_fixture import trigger
+helper = 1
+"""
+    namespace = {}
+    fixture = ModuleType("sentinel_walrus_import_fixture")
+
+    def lookup(name):
+        if name == "trigger":
+            namespace["outer"](1)
+        raise AttributeError(name)
+
+    fixture.__getattr__ = lookup
+    monkeypatch.setitem(sys.modules, fixture.__name__, fixture)
+    with pytest.raises(AssertionError):
+        exec(source, namespace)  # noqa: S102
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+@pytest.mark.parametrize("guard,literal", (("x is 1000", 1000), ("x is True", 1)))
+def test_loop_else_identity_uses_runtime_object_not_ast_object(guard, literal):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n        if " + guard + ": break\n"
+        "    else: cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != " + str(literal) + "\n"
+    )
+    namespace = {}
+    exec(compile(source, "<runtime-identity-witness>", "exec"), namespace)  # noqa: S102
+    function = namespace["outer"]
+    value = (
+        next(value for value in function.__code__.co_consts if type(value) is int and value == 1000)
+        if literal == 1000
+        else True
+    )
+    with pytest.raises(AssertionError):
+        function(value)
+    tree = ast.parse(source)
+    outer = tree.body[1]
+    target = next(node for node in ast.walk(outer) if isinstance(node, ast.Assert))
+    assert _is_enforced(outer, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    "definition,error",
+    (
+        ("    class Inner:\n        raise ValueError\n", ValueError),
+        ("    def inner(value=missing()): pass\n", NameError),
+        ("    @missing()\n    def inner(): pass\n", NameError),
+        ("    class Inner(missing()): pass\n", NameError),
+        ("    def inner(value: missing()): pass\n", NameError),
+    ),
+)
+def test_loop_else_witness_declines_effectful_definition_creation(definition, error):
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        + definition
+        + "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+        + "    else: cs = contextlib.suppress(AssertionError)\n"
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<effectful-definition>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+def test_loop_else_witness_declines_definition_overwriting_failure_parameter():
+    source = (
+        "import contextlib\ndef outer(x):\n    def x(): pass\n"
+        "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+        "    else: cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<definition-overwrites-witness>", "exec"), namespace)  # noqa: S102
+    namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
