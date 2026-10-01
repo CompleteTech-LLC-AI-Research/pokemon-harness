@@ -576,23 +576,24 @@ def _suppression_names(call):
     families must be told apart, and the difference is measured rather than
     assumed:
 
-    * ``contextlib.suppress()`` is legal, and the no-argument reading here is
-      ``BaseException`` -- but that is *stricter than the interpreter*, not a
-      description of it. Measured: ``contextlib.suppress()`` stores
-      ``_exceptions == ()``, and ``issubclass(AssertionError, ())`` is
-      ``False``, so it suppresses **nothing** and an assert inside it fails
-      loudly. Reading it as universal therefore over-reports.
-      That direction is chosen on purpose: the argument the check *can* read
-      is absent, and an absent argument is not evidence of a harmless one.
-      The cost is a false alarm on a spelling the pinned file does not use; the
-      alternative would be to treat "no argument" as "no suppression", which
-      cannot be told apart here from a call whose arguments are simply
-      unreadable.
+    * ``contextlib.suppress()`` suppresses **nothing**. Measured:
+      ``contextlib.suppress()`` stores ``_exceptions == ()``, and
+      ``__exit__`` returns ``issubclass(exctype, ())``, which is ``False`` for
+      every exception -- so an assert inside it fails loudly. #500: this used
+      to answer ``["BaseException"]`` here, which described the *function*
+      rather than the runtime behaviour of the *call*, and reported a live
+      contract as disarmed. The two are now told apart, because they are
+      decidably different: a bare ``suppress()`` has a statically empty
+      ``args`` list, while an unreadable argument list is never empty -- it
+      carries at least the node that could not be read. ``suppress(*excs)``
+      holds a :class:`ast.Starred`, so it still answers universal.
     * ``pytest.raises()`` with no expected type raises ``ValueError: You must
       specify at least one parameter`` while the context object is being
       constructed -- before the body is entered at all. The test fails loudly
       and no assert is ever evaluated, so calling it a defeat would report a
-      live contract as dead.
+      live contract as dead. That case is settled by
+      :func:`_raises_without_an_expected_type` before the names are read, so
+      the empty-answer below is reachable only for a suppression context.
 
     ``pytest.raises(match=...)`` stays universal on purpose; see
     ``_raises_without_an_expected_type`` for why that case is undecidable
@@ -607,7 +608,20 @@ def _suppression_names(call):
             )
         else:
             names.append(argument.id if isinstance(argument, ast.Name) else "BaseException")
-    return names or ["BaseException"]
+    if names:
+        return names
+    # #500. An empty list is a *measured* answer, not a missing one. A bare
+    # `suppress()` binds `_exceptions = ()`, so it catches nothing and the
+    # assert inside it is live. Returning no names makes every consumer's
+    # `any(_name_catches_assertion_error(name) ...)` answer False, which is
+    # exactly "enforced" -- the direction that keeps the contract load-bearing.
+    #
+    # It cannot swallow the unreadable case, because an argument list this
+    # check cannot read is never empty: it has at least the node that could
+    # not be read, and that node has already contributed "BaseException"
+    # above. `suppress(*excs)` arrives as a single `ast.Starred`, so the
+    # genuinely-unknown call still answers universal.
+    return []
 
 
 def _suppressed_by_dunder(call, bound):
