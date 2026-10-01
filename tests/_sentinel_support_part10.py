@@ -1251,6 +1251,79 @@ def _enclosing_conditions(node, loop):
     return conditions
 
 
+def _import_binds(node, name):
+    """The local names this import statement binds."""
+    if isinstance(node, ast.ImportFrom):
+        return {alias.asname or alias.name for alias in node.names}
+    return {alias.asname or alias.name.split(".")[0] for alias in node.names}
+
+
+def _import_is_equivalent(left, right):
+    """Do these two imports bind the same names to the same modules?
+
+    Only ``import contextlib`` written twice qualifies. The comparison is on
+    the module path, not the text, so ``import contextlib`` and
+    ``import contextlib as contextlib`` agree. Anything that reaches a
+    submodule (``import contextlib.nullcontext``), mixes in a ``from`` form, or
+    carries a level does not: those bind a different object, or one this
+    cannot name, and the walk declines them rather than assume.
+    """
+    if isinstance(left, ast.ImportFrom) or isinstance(right, ast.ImportFrom):
+        return False
+
+    def bindings(node):
+        # `import contextlib` and `import contextlib as contextlib` bind the
+        # same module object to the same local name, so the `asname` is only
+        # compared when it is present; an absent one means "bind it under its
+        # own name", which is what the dotted root already is.
+        return {alias.name: alias.asname or alias.name for alias in node.names}
+
+    return bindings(left) == bindings(right)
+
+
+def _import_leaves_the_witness_root_alone(node, root_name, function):
+    """Is this import the one that binds the module root the witness resolved?
+
+    An import is not an effect the witness has to model -- it binds names and
+    cannot raise on, or skip past, the header -- so it is safe to have one in
+    the pre-chain scan. It is only unsafe when it *rebinds the root the
+    witness resolved through*, because which of two bindings of the same name
+    is in force then depends on the call:
+
+    * ``import contextlib`` -- binds the root. Accepted, and it is the filed
+      #451 spelling.
+    * ``import json as _j`` -- binds an unrelated name. Accepted; it cannot
+      change what the header enters.
+    * ``import contextlib`` twice -- the same binding twice. Accepted, because
+      re-importing the same module is the same program, and declining it would
+      report a live assert defeated for no reason.
+    * a ``from x import y as contextlib`` *alongside* ``import contextlib`` --
+      two different objects bound to one name, and which is in force depends
+      on the statement order. Declined, because the walk cannot settle that.
+
+    A relative ``from ... import`` is declined outright: it binds whatever the
+    enclosing package provides, which is not knowable here.
+    """
+    if isinstance(node, ast.ImportFrom) and node.level:
+        return False
+    bound_names = _import_binds(node, root_name.id)
+    if root_name.id not in bound_names:
+        return True
+    # This statement binds the root. It is only sound when nothing else in the
+    # scope binds that name to something *different*; re-importing the same
+    # module is a no-op and cannot change the value.
+    for statement in _scope_body_nodes(function):
+        if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+            continue
+        if statement is node:
+            continue
+        if root_name.id in _import_binds(statement, root_name.id) and not _import_is_equivalent(
+            node, statement
+        ):
+            return False
+    return True
+
+
 def _import_only_binds_the_resolved_root(node, function, bound):
     """Is this a plain import of the module root the witness reads through?
 
@@ -1418,7 +1491,9 @@ def _elif_witness_reaches_header(function, chain, query, bound, witness_root=Non
         # import can rebind the very name the header resolves through.  Only an
         # import that binds exactly the module root the witness already reads
         # is transparent, so that is what is admitted here.
-        if _import_only_binds_the_resolved_root(node, function, bound):
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and _import_leaves_the_witness_root_alone(
+            node, witness_root, function
+        ):
             continue
         # #445. The carried binding may arrive through a `with` header's
         # assignment expression rather than a plain assignment:
