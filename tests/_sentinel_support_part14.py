@@ -573,6 +573,8 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         # is transparent, so that is what is admitted here.
         if _import_only_binds_the_resolved_root(node, function, bound):
             continue
+        if _try_only_binds_names_the_witness_ignores(node, function, bound):
+            continue
         # #445. The carried binding may arrive through a `with` header's
         # assignment expression rather than a plain assignment:
         #
