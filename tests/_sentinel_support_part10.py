@@ -144,6 +144,8 @@ def _is_enforced(function, target, tree=None):
     # built by a test is classified against the tree the caller passed, not
     # against whichever module happens to be importable.
     _remember_module_for_function(function, owning)
+    if _known_with_target_cannot_unpack(function, target, owning):
+        return False
     if _primitive_alias_failure_path(function, target, owning):
         return True
     if _primitive_alias_failure_path(function, target, owning, structured=True):
