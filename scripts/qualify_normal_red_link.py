@@ -127,6 +127,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--transport", choices=("local", "tcp"), required=True)
     parser.add_argument("--kind", choices=("trade", "battle"), default="trade")
+    parser.add_argument(
+        "--diagnostic-timing",
+        action="store_true",
+        help="opt-in wall timing; no CPU or root-cause qualification",
+    )
     args = parser.parse_args()
     if os.environ.get("POKERED_SKIP_SHA1"):
         raise ValueError("hash bypass is forbidden")
@@ -158,7 +163,7 @@ def main() -> int:
     }
     args.output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
-    timing = TimingLedger()
+    timing = TimingLedger() if args.diagnostic_timing else None
     receipt = {
         "status": "FAILED",
         "scenario": SCENARIO,
@@ -169,23 +174,28 @@ def main() -> int:
         "loaded_source_footprint": footprint,
         "runtime_identity": runtime,
     }
+    failure = None
     try:
         row = trade_row if args.kind == "trade" else battle_row
         with (args.output / "pair-operations.jsonl").open("x") as journal:
-            receipt.update(
-                asyncio.run(
-                    asyncio.wait_for(row(args.output, asset, args.transport, journal, timing), 1200)
-                )
-            )
+            arguments = (args.output, asset, args.transport, journal)
+            invocation = row(*arguments) if timing is None else row(*arguments, timing)
+            receipt.update(asyncio.run(asyncio.wait_for(invocation, 1200)))
         receipt["status"] = "PASS"
     except BaseException as exc:
+        failure = exc
         receipt["error"] = repr(exc)
         raise
     finally:
-        receipt["seconds"] = time.monotonic() - started
-        # Optional diagnostic field; absent from receipts written before it existed.
-        receipt["timing"] = timing.summary()
-        (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        try:
+            receipt["seconds"] = time.monotonic() - started
+            if timing is not None:
+                receipt["timing"] = timing.summary()
+            (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        except Exception as evidence_error:
+            if failure is None:
+                raise
+            failure.add_note(f"receipt evidence failed: {type(evidence_error).__name__}")
     return 0
 
 

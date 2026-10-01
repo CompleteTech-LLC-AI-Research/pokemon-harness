@@ -401,7 +401,8 @@ def test_markers_past_the_cap_are_not_journaled():
     for index in range(MAX_PHASE_MARKS + 5):
         pair.mark(f"p{index}")
     phase_rows = [row for row in rows_of(stream) if row["event"] == "phase"]
-    assert len(phase_rows) == MAX_PHASE_MARKS
+    assert phase_rows == []
+    assert len(ledger.summary()["phases"]) == MAX_PHASE_MARKS
     assert ledger.summary()["phases_dropped"] == 5
 
 
@@ -419,7 +420,7 @@ async def test_untimed_rows_are_literally_the_pre_patch_bytes():
     )
 
 
-def run_main(monkeypatch, tmp_path, row):
+def run_main(monkeypatch, tmp_path, row, *, diagnostic=True):
     asset = {
         "pins": {"expected_pyboy_version": "2.7.0", "expected_pyboy_revision": "rev"},
         "provenance": {"registry": {"sha256": "f" * 64}},
@@ -449,6 +450,8 @@ def run_main(monkeypatch, tmp_path, row):
             "battle",
         ],
     )
+    if diagnostic:
+        sys.argv.append("--diagnostic-timing")
     return output
 
 
@@ -496,3 +499,131 @@ def test_main_receipt_keeps_existing_fields_when_timing_is_added(monkeypatch, tm
     ):
         assert key in receipt
     assert receipt["status"] == "PASS" and receipt["timing"]["interrupted"] is None
+
+
+def test_default_cli_leaves_timing_and_journal_schema_unchanged(monkeypatch, tmp_path):
+    async def row(output, asset, transport, journal):
+        class Pair:
+            async def step(self, count):
+                return {"ok": True}
+
+        pair = JournalPair(Pair(), journal)
+        pair.mark("ignored")
+        await pair.step(4)
+        return {}
+
+    output = run_main(monkeypatch, tmp_path, row, diagnostic=False)
+    monkeypatch.setattr(
+        qualify, "TimingLedger", lambda: pytest.fail("default must not enable timing")
+    )
+    assert qualify.main() == 0
+    assert "timing" not in json.loads((output / "receipt.json").read_text())
+    rows = [
+        json.loads(line) for line in (output / "pair-operations.jsonl").read_text().splitlines()
+    ]
+    assert [row["event"] for row in rows] == ["intent", "completion"]
+    assert all("seconds" not in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_timed_phases_preserve_strict_operation_pairing():
+    class Pair:
+        async def step(self, count):
+            return {"ok": True}
+
+    stream = io.StringIO()
+    ledger = TimingLedger(FakeClock())
+    pair = JournalPair(Pair(), stream, ledger)
+    pair.mark("start")
+    await pair.step(1)
+    pair.mark("middle")
+    await pair.step(2)
+    pair.mark("end")
+    rows = rows_of(stream)
+    assert len(rows) == 4
+    for index in range(0, len(rows), 2):
+        intent, completion = rows[index : index + 2]
+        assert intent["event"] == "intent" and completion["event"] == "completion"
+        assert intent["sequence"] == completion["sequence"] == index // 2 + 1
+    assert [row["phase"] for row in ledger.summary()["phases"]] == ["start", "middle", "end"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_are_detected_without_serializing_or_summing():
+    ready = asyncio.Event()
+    finish = asyncio.Event()
+    entered = 0
+
+    class Pair:
+        async def step(self, count):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                ready.set()
+            await finish.wait()
+
+    ledger = TimingLedger(FakeClock())
+    pair = JournalPair(Pair(), io.StringIO(), ledger)
+    first = asyncio.create_task(pair.step(1))
+    second = asyncio.create_task(pair.step(2))
+    await asyncio.wait_for(ready.wait(), 1)
+    assert entered == 2
+    finish.set()
+    await asyncio.gather(first, second)
+    assert ledger.summary()["overlap_detected"] is True
+    assert ledger.summary()["buckets_additive"] is False
+    assert ledger._active_intervals == 0
+
+
+@pytest.mark.parametrize("diagnostic", [False, True])
+def test_receipt_failure_preserves_original_row_exception(monkeypatch, tmp_path, diagnostic):
+    failure = RuntimeError("original row")
+
+    async def row(output, asset, transport, journal, timing=None):
+        raise failure
+
+    run_main(monkeypatch, tmp_path, row, diagnostic=diagnostic)
+    original_write = qualify.Path.write_text
+
+    def write(path, *args, **kwargs):
+        if path.name == "receipt.json":
+            raise OSError("receipt disk")
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(qualify.Path, "write_text", write)
+    with pytest.raises(RuntimeError) as caught:
+        qualify.main()
+    assert caught.value is failure
+    assert "receipt evidence failed: OSError" in failure.__notes__
+
+
+def test_receipt_failure_after_success_is_not_silently_accepted(monkeypatch, tmp_path):
+    async def row(output, asset, transport, journal, timing=None):
+        return {}
+
+    run_main(monkeypatch, tmp_path, row)
+    failure = OSError("receipt disk")
+    monkeypatch.setattr(
+        qualify.Path, "write_text", lambda *args, **kwargs: (_ for _ in ()).throw(failure)
+    )
+    with pytest.raises(OSError) as caught:
+        qualify.main()
+    assert caught.value is failure
+
+
+@pytest.mark.parametrize("diagnostic", [False, True])
+def test_default_and_timed_cli_keep_original_1200_timeout(monkeypatch, tmp_path, diagnostic):
+    async def row(output, asset, transport, journal, timing=None):
+        return {}
+
+    run_main(monkeypatch, tmp_path, row, diagnostic=diagnostic)
+    original_wait = qualify.asyncio.wait_for
+    seen = []
+
+    async def wait(invocation, timeout):
+        seen.append(timeout)
+        return await original_wait(invocation, timeout)
+
+    monkeypatch.setattr(qualify.asyncio, "wait_for", wait)
+    assert qualify.main() == 0
+    assert seen == [1200]

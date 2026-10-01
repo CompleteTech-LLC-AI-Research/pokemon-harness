@@ -36,7 +36,8 @@ class TimingLedger:
 
     Diagnostic only: it never feeds a decision, and it shows where wall time
     accrues, not why. Durations are clamped to be nonnegative. Buckets are
-    exclusive and may be summed:
+    exclusive for sequential wrapped stages. Concurrent overlapping stages are
+    detected and set ``buckets_additive=False``; do not sum those buckets:
 
     - one bucket per wrapped pair operation: only the awaited underlying call;
     - ``operation_journal_io``: building/redacting a journal row, serializing
@@ -58,9 +59,19 @@ class TimingLedger:
         self._phases = []
         self._phases_dropped = 0
         self._interrupted = None
+        self._active_intervals = 0
+        self._overlap_detected = False
 
     def now(self):
         return self._clock()
+
+    def begin_interval(self):
+        self._active_intervals += 1
+        self._overlap_detected |= self._active_intervals > 1
+        return self.now()
+
+    def end_interval(self):
+        self._active_intervals -= 1
 
     def elapsed(self):
         return max(0.0, self._clock() - self._start)
@@ -93,6 +104,8 @@ class TimingLedger:
         return {
             "schema": TIMING_SCHEMA,
             "clock": "monotonic",
+            "buckets_additive": not self._overlap_detected,
+            "overlap_detected": self._overlap_detected,
             "elapsed_seconds": self.elapsed(),
             "operations": {
                 name: {"count": count, "total_seconds": total, "max_seconds": longest}
@@ -113,14 +126,16 @@ class TimedStream:
         self._bucket = bucket
 
     def _timed(self, stage, call, *args):
-        started = self._ledger.now()
+        started = self._ledger.begin_interval()
         try:
             result = call(*args)
         except BaseException as exc:
             seconds = max(0.0, self._ledger.now() - started)
+            self._ledger.end_interval()
             self._ledger.add(self._bucket, seconds)
             self._ledger.interrupted(self._bucket, seconds, exc, stage)
             raise
+        self._ledger.end_interval()
         self._ledger.add(self._bucket, self._ledger.now() - started)
         return result
 
@@ -145,31 +160,19 @@ class JournalPair:
         self._timing = timing
 
     def mark(self, name):
-        """Add an optional phase marker; no effect without a timing ledger.
-
-        Markers beyond the ledger cap are counted there and not journaled. A
-        marker row reuses the current operation sequence number.
-        """
-        if self._timing is None or not self._timing.mark(name):
-            return
-        self._write(
-            lambda: {
-                "sequence": self._sequence,
-                "event": "phase",
-                "phase": name,
-                "seconds_since_start": self._timing.elapsed(),
-            },
-            "phase",
-        )
+        """Retain bounded phases in the receipt without changing journal events."""
+        if self._timing is not None:
+            self._timing.mark(name)
 
     def _begin(self):
-        return None if self._timing is None else self._timing.now()
+        return None if self._timing is None else self._timing.begin_interval()
 
     def _finish(self, bucket, started, error=None, stage=None):
         """Return the nonnegative duration, or None when untimed."""
         if started is None:
             return None
         seconds = max(0.0, self._timing.now() - started)
+        self._timing.end_interval()
         self._timing.add(bucket, seconds)
         if error is not None:
             self._timing.interrupted(bucket, seconds, error, stage)
