@@ -256,6 +256,7 @@ UNIT_MODULES = frozenset(
         "test_sentinel_literal_import_provenance.py",
         "test_sentinel_primitive_alias_paths.py",
         "test_sentinel_builtin_entry_identity.py",
+        "test_sentinel_completed_instance_loops.py",
         "test_sentinel_with_target_unpacking.py",
         "test_sentinel_match_store_dominance.py",
         "test_timed_menu_milestones.py",

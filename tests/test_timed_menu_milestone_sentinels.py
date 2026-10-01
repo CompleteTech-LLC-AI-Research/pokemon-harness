@@ -17185,3 +17185,17 @@ def test_module_definition_metadata_cannot_install_a_fake_nullcontext(creation):
     function = module.body[-1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize("container", ("tuple", "list"))
+@pytest.mark.parametrize("exit_value", ("True", "False"))
+def test_completed_user_instance_loop_last_element_has_executed_protocol(container, exit_value):
+    """#417: removing after-loop instance resolution must kill these rows."""
+    from tests.test_sentinel_completed_instance_loops import (
+        execute_and_classify,
+        instance_loop_source,
+    )
+
+    outcome, enforced = execute_and_classify(instance_loop_source(exit_value, container))
+    assert outcome == ("RETURN" if exit_value == "True" else "AssertionError")
+    assert enforced is (exit_value == "False")
