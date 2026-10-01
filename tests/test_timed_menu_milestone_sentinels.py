@@ -16037,3 +16037,92 @@ def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
     # Original CPython fixtures are live; arbitrary initialization is unproved.
     assert runtime_live is True
     assert _is_enforced(function, target, module) is False
+
+
+#: #358. A ``match`` clause the subject cannot select does not run, so a store
+#: written in that clause's body is a store that never executes. Each row is
+#: judged on an **execution sweep** of its own subject: the fixture is run and
+#: the assert is watched, and only then is ``_is_enforced`` consulted. ``fires``
+#: and ``enforced`` are two independent measurements and the test asserts
+#: both, so a row cannot pass by agreeing with the implementation.
+#:
+#: The ``unselected`` rows are the defect. A sequence pattern cannot select a
+#: string subject -- ``match`` deliberately excludes ``str`` from structural
+#: sequence matching -- so the carried suppressor stays in force, the assert is
+#: swallowed on every input, and reporting it ``enforced`` certifies a disarmed
+#: contract. That is the damaging direction.
+#:
+#: The ``selected`` rows are the guard: the same store, in a clause the subject
+#: really selects, does run and does retire the suppressor, so the assert fires
+#: and must keep reading ``enforced``.
+UNSELECTED_MATCH_CASE_STORE_ROWS = (
+    (
+        "358 a `case ['nope']:` body store does not retire the carried suppressor",
+        "    flag = 'subject'\n    match flag:\n        case ['nope']:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        False,
+    ),
+    (
+        "358 a `case {'k': 1}:` body store against a str subject does not retire it",
+        "    flag = 'subject'\n    match flag:\n        case {'k': 1}:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        False,
+    ),
+    (
+        "358 a `case 'nope':` value-pattern body store that cannot match does not retire it",
+        "    flag = 'subject'\n    match flag:\n        case 'nope':\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        False,
+    ),
+    # --- controls: these clauses really are selected, so the store runs ---
+    (
+        "358 control a selected `case ['nope']:` on a list subject still supersedes",
+        "    flag = ['nope']\n    match flag:\n        case ['nope']:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        True,
+    ),
+    (
+        "358 control a selected `case 'nope':` on the matching str still supersedes",
+        "    flag = 'nope'\n    match flag:\n        case 'nope':\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        True,
+    ),
+    (
+        "358 control a selected capture-pattern clause still supersedes",
+        "    flag = ['captured']\n    match flag:\n        case ['captured']:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "match_block", "fires"), UNSELECTED_MATCH_CASE_STORE_ROWS)
+def test_a_store_in_an_unselected_match_case_does_not_retire_a_carried_suppressor(
+    label, match_block, fires
+):
+    """#358. Only a clause the subject really selects may supersede the value.
+
+    The sweep runs the fixture and records whether the assert raises, so a row
+    is a claim about CPython *and* about the rule; neither can be satisfied by
+    the other.
+    """
+    source = (
+        "import contextlib\ndef probe():\n"
+        "    x = 1\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
+        + match_block
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    raised = False
+    try:
+        namespace["probe"]()
+    except AssertionError:
+        raised = True
+    assert raised is fires, label
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # `enforced` must track the runtime: True exactly when the assert fires.
+    assert _is_enforced(function, target, module) is fires, label

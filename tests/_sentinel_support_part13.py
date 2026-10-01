@@ -711,7 +711,8 @@ def _is_provably_unreached_store(entry, orders, function):
     # `_ancestors` runs outermost-first and ends with ``target`` itself, so
     # the last element is dropped: the question is which *containers* the
     # store sits inside.
-    for ancestor in list(_ancestors(function, statement))[:-1]:
+    chain = list(_ancestors(function, statement))[:-1]
+    for ancestor in chain:
         # `ast.AsyncFor` is included for symmetry with `_is_store_statement`,
         # but it is deliberately untested here: an `async for` over a *literal*
         # container cannot execute, because a literal is not an async
@@ -734,7 +735,38 @@ def _is_provably_unreached_store(entry, orders, function):
             and _in_body(ancestor, statement)
         ):
             return True
+        # #358. A ``match`` clause the literal subject cannot select does not
+        # run, so a store in that clause's body is a store that never executes
+        # -- the same question this helper answers for an empty loop body and a
+        # falsy ``if`` body. The filed row is a sequence pattern against a
+        # string subject, which ``match`` deliberately does not select, so the
+        # carried suppressor stays in force and the assert under it is
+        # swallowed while the analyzer reported it ``enforced``.
+        #
+        # The gate is the same :func:`_in_body` the clauses above use, and for
+        # a ``match_case`` it is exactly "the store is in this clause's body".
+        # A later case in the same ``match`` is an AST *sibling*, not a
+        # descendant, so a store in a selected sibling clause is not caught by
+        # an unselected one: the walk only reaches the case that actually
+        # encloses the store.
+        if (
+            isinstance(ancestor, ast.match_case)
+            and _match_case_is_provably_unselected(
+                function, _enclosing_match(chain, ancestor), ancestor
+            )
+            and _in_body(ancestor, statement)
+        ):
+            return True
     return False
+
+
+def _enclosing_match(chain, case):
+    """The ``ast.Match`` that owns ``case`` within an ancestor ``chain``."""
+    index = chain.index(case)
+    for candidate in reversed(chain[:index]):
+        if isinstance(candidate, ast.Match):
+            return candidate
+    return None
 
 
 def _carried_suppressor_has_unshadowed_arguments(value, function):

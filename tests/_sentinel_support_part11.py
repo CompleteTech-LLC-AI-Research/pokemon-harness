@@ -313,6 +313,145 @@ def _sequence_element_matches(pattern, element):
     return None
 
 
+def _match_case_is_provably_unselected(function, match, case):
+    """Can ``case``'s pattern never be selected against ``match``'s subject?
+
+    #358. A ``match`` clause the subject cannot select does not run, so a
+    store written in that clause's body is a store that never executes -- the
+    same question :func:`_is_provably_unreached_store` answers for an empty
+    loop body or a falsy ``if`` body. The filed shape is
+
+        flag = "subject"
+        match flag:
+            case ["nope"]:            # a sequence pattern; a str is not a sequence
+                cs = contextlib.nullcontext()
+            case _:
+                pass
+        with cs:                      # still the carried suppressor
+            assert x != 1             # swallowed, but reported `enforced`
+
+    A **sequence** pattern (and a mapping/class pattern) can only be selected
+    by a subject of the corresponding runtime kind. Executed on CPython
+    3.12.14, ``"subject"`` is not a sequence, so ``case ["subject"]`` does not
+    match it either -- the element text is irrelevant. That single fact
+    decides the filed row, and the same kind test settles ``case {"k": 1}:``
+    against a scalar.
+
+    The subject has to be a *literal* to answer at all. ``match flag:`` where
+    ``flag`` is a name is declined unless :func:`_resolve_simple_literal_subject`
+    can trace it back to a container literal written earlier in the same
+    function body -- the same restriction the capture rules already impose.
+    A name bound by a call, a parameter, or any opaque value is not decided, so
+    its clauses keep competing exactly as before.
+
+    Only provable *non*-selection is answered. A pattern that could select --
+    a bare capture, a wildcard, a value pattern equal to the subject, or a
+    class/capture pattern -- returns ``False`` and leaves the store competing.
+    """
+    if case.guard is not None:
+        # A guard is a runtime condition. Even a constant-``False`` guard is
+        # declined here rather than decided, so a case the guard might admit
+        # is never treated as unselected on the strength of a guess.
+        return False
+    subject = _literal_subject_value(function, match)
+    if subject is None:
+        return False
+    return _pattern_cannot_select(case.pattern, subject)
+
+
+def _literal_subject_value(function, match):
+    """The subject's literal value, or ``None`` when it is not decidable.
+
+    Two shapes answer. The first is a subject written inline as a constant:
+    ``match "subject":``. The second is a plain scalar binding in the same
+    function body, before the ``match``, with nothing in between that could
+    rebind or mutate it -- ``flag = "subject"`` then ``match flag:``. That
+    second shape is the one #358 files, and it is a scalar on purpose:
+    :func:`_resolve_simple_literal_subject` follows only *container* literals,
+    so a string subject has to be resolved here rather than there.
+
+    A parameter, a call, a subscript, a conditional store, a walrus, a
+    destructuring target, or any intervening statement that binds the subject
+    name all yield ``None``. Declining is the safe direction: the store keeps
+    competing, so a possibly-live assert is reported defeated rather than a
+    live suppressor being retired.
+    """
+    for node in (match.subject, *_assigned_literal_subject_value(function, match)):
+        if isinstance(node, ast.Constant):
+            return node.value
+    resolved = _resolve_simple_scalar_subject(function, match)
+    if resolved is not None:
+        return resolved
+    return None
+
+
+def _resolve_simple_scalar_subject(function, match):
+    """A plain ``name = <constant>`` binding before ``match``, or ``None``."""
+    if not isinstance(match.subject, ast.Name):
+        return None
+    subject_name = match.subject.id
+    body = function.body if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+    if body is None:
+        return None
+    if subject_name in {argument.arg for argument in _all_args(function) if argument is not None}:
+        return None
+    try:
+        match_index = body.index(match)
+    except ValueError:
+        return None
+    for statement in reversed(body[:match_index]):
+        if _statement_leaves_subject_alone(statement, subject_name):
+            continue
+        if not isinstance(statement, ast.Assign):
+            return None
+        if not _assign_targets_exactly(statement, subject_name):
+            return None
+        if len(statement.targets) != 1:
+            return None
+        if not isinstance(statement.value, ast.Constant):
+            return None
+        return statement.value.value
+    return None
+
+
+def _pattern_cannot_select(pattern, subject):
+    """Can ``pattern`` be selected by the literal ``subject``? Conservative.
+
+    Answers ``True`` only when the pattern is *provably* incompatible with the
+    subject's runtime kind or value, and ``False`` for every other shape --
+    including any pattern that could select. Callers treat ``True`` as "this
+    clause never runs" and ``False`` as "it might, so keep the store".
+    """
+    if isinstance(pattern, ast.MatchSequence) and not _value_is_sequence(subject):
+        # `case ["nope"]:` against a scalar/str subject can never select.
+        return True
+    if isinstance(pattern, ast.MatchMapping) and not isinstance(subject, (dict,)):
+        return True
+    if isinstance(pattern, ast.MatchValue) and isinstance(pattern.value, ast.Constant):
+        # A value pattern compares with `==`. A constant that cannot equal the
+        # subject's constant settles the clause; anything not comparable
+        # (different runtime kinds that can still be `==` False) is refused.
+        return pattern.value.value != subject
+    if isinstance(pattern, ast.MatchSingleton):
+        return pattern.value is not subject
+    # A bare capture / wildcard / class / mapping-with-rest / star / or-pattern
+    # is not settled here; the store keeps competing.
+    return False
+
+
+def _value_is_sequence(value):
+    """Is a literal ``value`` a sequence the runtime would match with ``[...]``?
+
+    ``list``, ``tuple`` and ``bytes`` are matched by a sequence pattern. A
+    ``str`` is a sequence to Python's ``isinstance`` but **not** one a
+    ``match`` sequence pattern selects, because structural pattern matching
+    deliberately excludes it -- that exclusion is the whole reason the #358
+    row does not select. So this asks the match-level question, not the
+    ``isinstance`` one.
+    """
+    return isinstance(value, (list, tuple, bytes))
+
+
 def _literal_match_capture_value(function, match, name):
     """Read the element bound by a decided bare sequence capture."""
     if _capture_is_decidable_from_a_literal_subject(function, match, name) is not True:
