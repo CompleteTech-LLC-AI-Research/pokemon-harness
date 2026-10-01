@@ -125,6 +125,31 @@ def _assigned_suppressors(function, bound, query=None, owning=None):
             seen = [
                 entry for entry in seen if not _is_provably_unreached_store(entry, orders, function)
             ]
+            # #334. A store written in a nested `def`/`lambda`/`class` body
+            # binds *that* scope's name, so it is not one of `function`'s own
+            # stores and cannot be the value a read at this index sees. Left
+            # in, it wins on order and retires a carried walrus suppressor
+            # that is still in force:
+            #
+            #     with (cs := contextlib.suppress(AssertionError)):
+            #         pass
+            #     def inner():
+            #         cs = contextlib.nullcontext()   # binds inner's local
+            #     inner()
+            #     with cs:                          # still the suppressor
+            #         assert x != 1                 # swallowed -> `enforced`
+            #
+            # The scope predicate distinguishes evaluated definition metadata
+            # from nested bodies, and the namespace named by `nonlocal`
+            # does rebind the enclosing function's binding and is kept, while
+            # `global` writes the module and leaves a function-local carrier
+            # untouched. So this filter does not re-decide either case -- it
+            # retains the declaration distinction and readable metadata proof.
+            seen = [
+                entry
+                for entry in seen
+                if _assigned_alias_store_is_in_scope(entry[0], function, name, owning)
+            ]
             if not seen:
                 continue
             value = _resolve_bindings(seen, bound, orders, index, function, query, owning)
