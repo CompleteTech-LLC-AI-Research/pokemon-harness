@@ -741,6 +741,14 @@ def _is_provably_unreached_store(entry, orders, function):
         # Restrict the test to AST constants/empty literal containers: the
         # shared falsy predicate also accepts constructor calls, whose callee
         # may be an enclosing parameter. Such calls are not proven here.
+        # #358: only a case body proven incompatible with a readable subject
+        # can discard its store; sibling cases remain independent.
+        if isinstance(ancestor, ast.match_case) and _in_body(ancestor, statement):
+            chain = list(_ancestors(function, statement))[:-1]
+            if _match_case_is_provably_unselected(
+                function, _enclosing_match(chain, ancestor), ancestor
+            ):
+                return True
     return _literal_if_store_is_unreached(entry, function)
 
 

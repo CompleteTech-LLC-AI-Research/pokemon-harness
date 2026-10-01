@@ -119,6 +119,8 @@ def _is_enforced(function, target, tree=None):
     """
     owning = tree if tree is not None else _owning_module(function)
     bound = _bound_names(owning, function)
+    if _witness_header_root_has_unknown_import(function, target):
+        return False
     if _is_after_control_transfer(function, target):
         # #400. A statement that follows `return` / `raise` / `break` /
         # `continue` in the SAME block is dead -- control can never reach it --
@@ -329,11 +331,6 @@ def _statement_exits(node):
         # falling through preserves the exit which entered the finalizer.
         exits = (exits if "normal" in final else set()) | (final - {"normal"})
     return exits
-
-
-def _expression_cannot_raise(node):
-    """Only literal values have a statically guaranteed evaluation here."""
-    return node is None or isinstance(node, ast.Constant)
 
 
 def _statement_lists_holding(node, target):

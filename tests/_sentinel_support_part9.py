@@ -498,6 +498,8 @@ def _entered_name_is_dead(header, function, bound, module=None):
 
 def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
     """Is this ``with`` a suppression context that can eat an assertion failure?"""
+    if _global_module_capture_defeats_assertion(node, function, owning, target):
+        return True
     if isinstance(node, ast.AsyncWith):
         # `async with` demands an *asynchronous* context manager. Neither
         # `contextlib.suppress` nor `pytest.raises` provides one -- each returns
