@@ -9,7 +9,7 @@ description = "Memory-first automation harness for Pokémon Red via PyBoy, expos
 requires-python = ">=3.11"
 readme = "README.md"
 license = "LGPL-3.0-only"
-license-files = ["vendor/pyboy-src/LICENSE.md"]
+license-files = ["LICENSE", "vendor/pyboy-src/LICENSE.md"]
 dependencies = [
     # These are the versions used by the certified gate. Bump them as a
     # tested set; open-ended requirements can silently change the emulator
