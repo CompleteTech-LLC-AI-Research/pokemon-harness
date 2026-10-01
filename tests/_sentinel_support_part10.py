@@ -146,8 +146,16 @@ def _is_enforced(function, target, tree=None):
     _remember_module_for_function(function, owning)
     if _known_with_target_cannot_unpack(function, target, owning):
         return False
+    if _known_starred_binding_blocks_query(function, target, owning):
+        return False
+    if _starred_binding_has_failure_witness(function, target, owning):
+        return True
     if _primitive_alias_failure_path(function, target, owning):
         return True
+    if _primitive_alias_failure_path(function, target, owning, structured=True):
+        return True
+    if _primitive_alias_failure_path(function, target, owning, structured=True, defeated=True):
+        return False
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
@@ -189,11 +197,6 @@ def _is_enforced(function, target, tree=None):
             # is never evaluated. The loop spelling of the `if False:` defeat.
             return False
     return True
-
-
-def _contains(statement, target):
-    """True if ``target`` is ``statement`` or lies anywhere beneath it."""
-    return statement is target or any(node is target for node in ast.walk(statement))
 
 
 _CONTROL_TRANSFERS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
@@ -378,17 +381,6 @@ def _is_bare_transfer(node):
     return isinstance(node, _CONTROL_TRANSFERS) and not isinstance(
         node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     )
-
-
-def _contains_any(statements, target):
-    """True if ``target`` is one of ``statements`` or lies beneath any of them.
-
-    :func:`_contains` answers the same question for a single node, but the
-    ``if``/``else`` split is a pair of *statement lists*, and asking a list for
-    its ``_fields`` raised inside a decision function. A branch membership test
-    is the question several rules ask of one of those lists.
-    """
-    return any(_contains(statement, target) for statement in statements or ())
 
 
 def guard_rejects_the_deadline_terminal_state():

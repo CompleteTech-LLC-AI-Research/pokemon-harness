@@ -49,19 +49,6 @@ def _runtime_kind_can_enter(kind):
 #: the enterability question is answered by the interpreter rather than by a
 #: maintained list of type names. `function` is the #390 case: a lambda object
 #: has no `__enter__`.
-_PROBE_FOR_RUNTIME_KIND = {
-    "function": lambda: None,
-    "module": types.ModuleType("probe"),
-    "list": [],
-    "tuple": (),
-    "set": set(),
-    "dict": {},
-    "int": 0,
-    "str": "",
-    "float": 0.0,
-    "bytes": b"",
-    "NoneType": None,
-}
 
 
 def _header_expression_raises(header, function, module):

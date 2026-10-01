@@ -317,7 +317,7 @@ def test_the_production_entry_point_is_what_actually_reports_a_bypass():
     temporarily pointed at a tree carrying a real bypass: the entry point must
     report it. Combined with the ``== []`` assertion already in
     ``test_the_pinned_counts_are_reached_with_the_261_precondition_active``,
-    that pins the entry point from both directions — it must fire, and it must
+    that pins the entry point from both directions â€” it must fire, and it must
     not fire spuriously.
     """
     site = next(iter(RETENTION_COUNT_SITES))
@@ -5623,7 +5623,7 @@ def test_a_nonlocal_capture_binds_the_enclosing_function(label, nested, verdict,
 #: The capture and that store share one top-level `match` statement, so
 #: `_binding_order` gives them the same key and the capture was counted as a
 #: competing binding. The name was recorded `AMBIGUOUS`, which downstream reads
-#: as "may be a suppressor" — so a header CPython enters happily was reported
+#: as "may be a suppressor" â€” so a header CPython enters happily was reported
 #: defeated. That is the damaging direction under #308 criterion 1.
 #:
 #: Rows are executed. `verdict` is the analyzer's answer; `runtime_live` is
@@ -5645,7 +5645,7 @@ MATCH_CAPTURE_SHADOWED_ROWS = (
         True,
     ),
     # Same defect with the shadowing store nested one level down. The store is
-    # conditional, so the `flag=False` path still reads the captured `1` — but
+    # conditional, so the `flag=False` path still reads the captured `1` â€” but
     # the *contract* is live because CPython can reach a firing call, and the
     # analyzer returns one verdict per AST, so the ambiguity marker is the only
     # answer available and it is the one that drops the contract.
@@ -5721,7 +5721,7 @@ def test_a_capture_shadowed_by_a_later_store_is_not_the_value_in_force(
     construction and cannot separate them; a store in a clause body is written
     after the `match` that owns the capture, which line and column can see.
 
-    Two captures of one name keep the ambiguity marker — which clause ran is a
+    Two captures of one name keep the ambiguity marker â€” which clause ran is a
     runtime fact, so the value stays undecidable. The control rows pin that the
     `AMBIGUOUS` answer survives everywhere it is still correct.
     """
@@ -15355,7 +15355,9 @@ def test_a_loop_else_witness_declines_an_import_that_shadows_its_root(label, pre
     which one the header sees depends on the order of the statements, and
     `_binding_order` keys by top-level statement, so it cannot separate them.
 
-    So these shapes decline. A decline reports the assert as defeated when it
+    The source-inert try store later overwritten by nullcontext is now proved
+    by #361's structured witness and checked by execution. Other shapes decline.
+    A decline reports the assert as defeated when it
     fires, which is the false-DEAD direction -- but the alternative is claiming
     a resolution the source does not determine, and that is how this module has
     historically produced false-LIVEs. The narrow witness is the safe error.
@@ -15382,7 +15384,15 @@ def test_a_loop_else_witness_declines_an_import_that_shadows_its_root(label, pre
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
     )
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
-    assert _is_enforced(function, target, tree) is False, (
+    expected = label == "a try that rebinds the carried manager"
+    if expected:
+        # #361 now proves this inert normal try path and later overwrite.
+        # Execute its complete source independently of the analyzer.
+        namespace = {}
+        exec(source, namespace)  # noqa: S102 - independent runtime oracle
+        with pytest.raises(AssertionError):
+            namespace["outer"](1, False, None)
+    assert _is_enforced(function, target, tree) is expected, (
         f"{label}: the witness fired on an import that rebinds the module root "
         f"it resolved through. Which of two bindings of one name is in force "
         f"depends on statement order, so the witness must decline rather than "
@@ -15541,6 +15551,93 @@ WALRUS_NAME_ENTRY_SHAPES = (
         "contextlib.suppress(AssertionError)",
         False,
     ),
+    # -- #464 residual. The repair above resolves a name through the store
+    #    machinery, but the *value* that store binds was still unreadable for
+    #    two whole families, so each of these stayed a false-LIVE:
+    #
+    #    * a zero-argument builtin constructor -- `m = list()`. The callee
+    #      fixes the result, exactly as it does for `cs = list()`.
+    #    * a bare builtin *name* -- `m = int`, `m = len`. The name is the
+    #      object; there is no call to be opaque.
+    (
+        "464 residual: a local alias to a builtin constructor call",
+        "",
+        "    m = list()\n",
+        "m",
+        False,
+    ),
+    (
+        "464 residual: a local alias to a bare builtin class",
+        "",
+        "    m = int\n",
+        "m",
+        False,
+    ),
+    (
+        "464 residual: a local alias to a bare builtin function",
+        "",
+        "    m = len\n",
+        "m",
+        False,
+    ),
+    (
+        "464 residual: a local alias to object()",
+        "",
+        "    m = object()\n",
+        "m",
+        False,
+    ),
+    # -- A shadowed constructor must NOT be read as the builtin. This is the
+    #    control that keeps the repair from inventing false-DEADs: `list` here
+    #    returns a real context manager, so the assert is live and a repair
+    #    that read the callee as the builtin would report it defeated.
+    (
+        "464 control: a shadowed constructor stays live",
+        "",
+        "    def list():\n        return contextlib.nullcontext()\n    m = list()\n",
+        "m",
+        True,
+    ),
+    # -- The *bare name* spelling has no live control, and that is the point:
+    #    `m = int` binds whatever the name denotes, never its result, so it is
+    #    a function object here and a class object for the real builtin. Both
+    #    are unenterable and both are reported dead. Only the *call* spelling
+    #    can return a context manager, which is why the shadowing control
+    #    above is the one that matters.
+    # -- #464 residual, second pass. Entering a *class object* is decided by
+    #    its metaclass, not by the class, and `memoryview` is the one exported
+    #    builtin whose class object carries `__enter__`:
+    #
+    #        >>> hasattr(memoryview, "__enter__")     # True -- an INSTANCE method
+    #        >>> hasattr(type(memoryview), "__enter__")  # False -- metaclass `type`
+    #        >>> with memoryview as v: ...
+    #        TypeError: 'type' object does not support the context manager protocol
+    #
+    #    So the header raises before the body and the assert is unreachable,
+    #    while the *instance* spelling in the control below really is
+    #    enterable. Reading `hasattr(obj, "__enter__")` off the name's own
+    #    value cannot separate the two and declined both, so this row was a
+    #    false-LIVE. It runs on the executed oracle precisely because CPython
+    #    *can* adjudicate it -- which is what the previous pin, asserted
+    #    directly against the analyzer, failed to establish.
+    (
+        "464 residual: a bare builtin class object is entered by its metaclass",
+        "",
+        "    m = memoryview\n",
+        "m",
+        False,
+    ),
+    # -- The control that decides the repair above is *narrow*: only the
+    #    class-object spelling is unenterable. An instance of the same class
+    #    implements the protocol and CPython enters it, so the assert is live.
+    #    A rule that asked the metaclass for both would report this defeated.
+    (
+        "464 control: a memoryview instance is genuinely enterable",
+        "",
+        "    m = memoryview(b'xy')\n",
+        "m",
+        True,
+    ),
 )
 
 
@@ -15608,15 +15705,48 @@ def test_a_walrus_header_named_to_an_unenterable_value_is_not_a_live_assert(
 WALRUS_NAME_ENTRY_DECLINES = (
     ("a parameter is chosen by the caller", "helper", "live or TypeError, per call site"),
     ("a genuinely unbound name", "mystery", "NameError on entry"),
+    # #464 residual. A *parameter* named for a builtin is the other way a
+    # bare name stops being the builtin, and it is the one a body-only walk
+    # cannot see -- the signature binds the name for the whole call:
+    #
+    #     def outer(x, int=None):
+    #         m = int        # the caller's object, not the class object
+    #
+    # The caller decides, so the honest verdict is the decline. Reading it as
+    # the builtin reported the header dead, which is a false-DEAD whenever the
+    # caller passes a context manager -- the opposite error from the one this
+    # repair exists to remove.
+    (
+        "a parameter named for a builtin",
+        "m",
+        "the caller's object; per call site",
+    ),
 )
 
 
 @pytest.mark.parametrize(
-    ("label", "value", "executed"),
-    WALRUS_NAME_ENTRY_DECLINES,
+    ("label", "value", "executed", "signature", "local_preamble"),
+    [
+        (label, value, executed, "x, flag, helper", "")
+        for label, value, executed in WALRUS_NAME_ENTRY_DECLINES[:2]
+    ]
+    + [
+        # A parameter named `int` binds the name for the whole call, so the
+        # body's `m = int` reads the caller's object. Nothing in the body
+        # rebinds it, which is exactly the case a body-only shadow walk misses.
+        (
+            WALRUS_NAME_ENTRY_DECLINES[2][0],
+            "m",
+            WALRUS_NAME_ENTRY_DECLINES[2][2],
+            "x, flag, helper, int=None",
+            "    m = int\n",
+        ),
+    ],
     ids=[row[0] for row in WALRUS_NAME_ENTRY_DECLINES],
 )
-def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, executed):
+def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(
+    label, value, executed, signature, local_preamble
+):
     """#464: the conservative fallback must not be inverted.
 
     #308 criterion 1 makes a false-LIVE the damaging direction, but a repair
@@ -15631,8 +15761,9 @@ def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, execu
     """
     source = (
         "import contextlib\n"
-        "def outer(x, flag, helper):\n"
+        f"def outer({signature}):\n"
         "    import contextlib\n"
+        f"{local_preamble}"
         f"    with (cs := {value}):\n"
         "        assert x != 1\n"
     )
@@ -15640,7 +15771,12 @@ def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, execu
     exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
     outcome = "returned"
     try:
-        namespace["outer"](0, True, None)
+        # The fourth row's signature takes a fourth argument; the rest take
+        # exactly `(x, flag, helper)`, so the call is sized from the signature.
+        if signature.endswith("int=None"):
+            namespace["outer"](0, True, None, contextlib.nullcontext())
+        else:
+            namespace["outer"](0, True, None)
     except AssertionError:
         outcome = "AssertionError"
     except BaseException as error:  # noqa: BLE001 - the outcome is the datum
@@ -17059,3 +17195,17 @@ def test_module_definition_metadata_cannot_install_a_fake_nullcontext(creation):
     function = module.body[-1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize("container", ("tuple", "list"))
+@pytest.mark.parametrize("exit_value", ("True", "False"))
+def test_completed_user_instance_loop_last_element_has_executed_protocol(container, exit_value):
+    """#417: removing after-loop instance resolution must kill these rows."""
+    from tests.test_sentinel_completed_instance_loops import (
+        execute_and_classify,
+        instance_loop_source,
+    )
+
+    outcome, enforced = execute_and_classify(instance_loop_source(exit_value, container))
+    assert outcome == ("RETURN" if exit_value == "True" else "AssertionError")
+    assert enforced is (exit_value == "False")

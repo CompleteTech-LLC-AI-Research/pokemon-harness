@@ -217,72 +217,6 @@ def _constructed_class_of(expression, tree, function=None):
     return _locally_defined_classes(tree, function, value).get(value.func.id)
 
 
-def _assigned_value(name, scope, before=None):
-    """The right-hand side ``name`` is assigned in ``scope``, or ``None``.
-
-    The last assignment before the read wins in source order, and a
-    function-scope lookup is offered before a module one by the caller so an
-    inner binding shadows an outer one of the same name.
-
-    ``ast.walk`` is deliberately *not* used on a module: it descends into every
-    function body, so a module lookup would silently find a function-local
-    assignment and the two scopes would not be distinguishable. The module
-    scope is therefore its own top-level statement list, which is what makes
-    the function-first lookup in :func:`_constructed_class_of` meaningful.
-
-    A ``for`` target is a store too, and it is the one this used to miss. #370
-    taught the module to record a loop target's element for the *suppression*
-    question; :func:`_constructed_class_of` asks the same "what does this name
-    hold" question, so the same answer has to be readable here:
-
-        for cs in [Suppressor()]:      # `__exit__` returns True for AssertionError
-            with cs:
-                assert x != 1          # swallowed; was reported enforced
-
-    Read by :func:`_single_loop_element`, so the limit is #370's already-measured
-    one rather than a second, looser rule: only a single-element literal
-    iterable contributes, and a multi-element or non-literal iterable stays
-    ``None`` and keeps the assert ``enforced`` -- the safe direction, since a
-    guessed value would read a suppressor that is not the one in force.
-
-    Only an ``ast.Name`` target is followed, matching the ``Assign`` arm: a
-    tuple target (``for a, b in ...``) unpacks and is not read here.
-    """
-    if scope is None:
-        return None
-    if isinstance(scope, ast.Module):
-        nodes = iter(scope.body)
-    elif isinstance(scope, ast.AST):
-        nodes = _scope_body_nodes(scope)
-    else:
-        nodes = iter(())
-    value = None
-
-    def position(node):
-        return node.lineno, node.col_offset
-
-    nodes = [node for node in nodes if isinstance(node, (ast.For, ast.Assign))]
-    for node in sorted(nodes, key=position):
-        if before is not None and position(node) >= position(before):
-            continue
-        if isinstance(node, ast.For):
-            if not (isinstance(node.target, ast.Name) and node.target.id == name):
-                continue
-            element = _single_loop_element(node.iter)
-            if element is None:
-                # Undecidable: leave any earlier `Assign` in force rather than
-                # overwrite it with a guess. #385 measured the alternative.
-                continue
-            value = element
-            continue
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
-            continue
-        value = node.value
-    return value
-
-
 def _dotted_class_name(expression):
     """The dotted name of a class reference, or ``None`` if it is not one.
 
@@ -656,6 +590,10 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
         "frozenset",
         "range",
         "bytearray",
+        # #464. `object` joins the constructors for the same reason: a plain
+        # instance has no `__enter__`, so a name bound to `object()` is as
+        # unenterable as one bound to `list()`.
+        "object",
     }
 )
 
@@ -672,21 +610,6 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
 #: user-shadowed ``int`` is a different binding entirely -- shadowing is not
 #: modelled here, so the conservative direction is taken for a name this
 #: module cannot prove is the builtin.
-_BUILTIN_CONSTRUCTOR_TYPES = {
-    "int": "int",
-    "float": "float",
-    "complex": "complex",
-    "str": "str",
-    "bytes": "bytes",
-    "bool": "bool",
-    "list": "list",
-    "tuple": "tuple",
-    "set": "set",
-    "frozenset": "frozenset",
-    "dict": "dict",
-    "bytearray": "bytearray",
-    "range": "range",
-}
 
 #: Marker for a constructor call that *raises* for the arguments given, so the
 #: store it appears in never happens. ``range()`` with no argument is a
@@ -759,9 +682,20 @@ def _name_is_shadowed_in(func, function):
     Nested scopes bind their own names, so a ``def range(...)`` inside another
     ``def`` inside this function does not shadow the builtin's meaning *here*;
     those are skipped, matching :func:`_own_imports`' scope discipline.
+
+    ``function`` may be ``None`` when a caller has no enclosing scope to
+    offer. That is answered as *shadowed*, the same conservative way
+    :func:`_callee_is_shadowed` answers it: a caller that cannot prove the
+    name is the builtin is not entitled to read it as one. Returning ``False``
+    there would be an assertion the scope does not support, and the walk below
+    needs a real node to iterate.
     """
     if not isinstance(func, ast.Name):
         return False
+    if function is None or not isinstance(
+        function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module, ast.ClassDef)
+    ):
+        return True
     name = func.id
     for node in _own_scope_bindings(function):
         if node is name:
