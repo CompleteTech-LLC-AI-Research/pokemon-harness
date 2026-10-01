@@ -934,6 +934,44 @@ def _elif_skipped_path_walks(
     )
     if chain is None or not _elif_witness_reaches_header(function, chain, query, bound, root_name):
         return False
+    # #452. A trailing `else` reached through an `elif` link is a weaker
+    # question than the one this walk below answers, and the walk below cannot
+    # reach it.
+    #
+    # The walk below needs the *failure value* to decide every link above the
+    # arm: for an `elif` link that is the only way to show a call both fails the
+    # assert and lands on an arm that does not install the suppressor. A
+    # trailing `else` does not need that. It merely has to be *skippable* --
+    # some call has to take one of the links above it, leaving the preamble's
+    # manager in force. So a link whose test `assert x != 1` says nothing about
+    # blocks the walk below (decision is None) but not this one: such a link may
+    # simply be the link that is true.
+    #
+    #     cs = contextlib.nullcontext()
+    #     if False:
+    #         pass
+    #     elif flag:          # nothing in the assert constrains `flag`
+    #         pass
+    #     else:
+    #         cs = contextlib.suppress(AssertionError)
+    #     with cs:
+    #         assert x != 1
+    #
+    # At `x == 1, flag == True` the leading link is decided-false and `flag` is
+    # true, so *no* arm runs, `cs` is still the `nullcontext`, and the assert
+    # fires. The header is live, and the analyzer reported defeated.
+    #
+    # Soundness, all of which the controls pin: a link that no call can make
+    # true does not skip anything, so `if False: ... else: <suppressor>` keeps
+    # its existing answer; and no arm above may rebind the name, because then a
+    # skipping call would not enter the carried manager. That last one is the
+    # both-arms-bind shape, which the caller already resolves on its own.
+    #
+    # The helper declines when there is no link above the `else`, so the
+    # single-`if` form -- which the walk below already decides from the failure
+    # value -- keeps that walk's answer and is not re-litigated here.
+    if _trailing_else_is_skippable(function, chain, competitor):
+        return True
     while isinstance(chain, ast.If):
         if _contains_any(chain.body, competitor[0]):
             return False
@@ -1095,6 +1133,58 @@ def _elif_witness_reaches_header(function, chain, query, bound, witness_root=Non
     return True
 
 
+def _trailing_else_is_skippable(function, chain, competitor):
+    """Can some call take a link of the chain and so skip the trailing `else`?
+
+    The ``else`` arm holding ``competitor`` runs only when *every* test above it
+    failed, so a call skips that arm -- and reaches the header still holding the
+    preamble's manager -- as soon as *one* link above it is true. That is the
+    whole of the question, and it is the opposite direction from the walk in
+    :func:`_elif_failure_predicate`, which has to show that every link above is
+    false at the one proven failure value. So a link the assert says nothing
+    about does not block this walk; it may simply be the link that is true.
+
+        cs = contextlib.nullcontext()
+        if False:
+            pass
+        elif flag:          # nothing in `assert x != 1` constrains `flag`
+            pass
+        else:
+            cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert x != 1
+
+    At ``x == 1, flag == True`` the leading link is decided-false, ``flag`` is
+    true, so no arm binds and the assert fires. The header is live.
+
+    Two links are rejected as *not* possibly-true, and both are decided by
+    syntax rather than by argument:
+
+    * a literal-false test, which no call can make true -- so
+      ``if False: ... else: <store>`` runs its ``else`` on every call and the
+      store really does settle the name;
+    * a test reading a name this scope binds to a falsy constant, which is the
+      same thing spelled as a name.
+
+    Everything else is left to the ordinary resolution, because a name the
+    caller supplies may be anything and an expression this cannot read may be
+    anything. A link that rebinds the competitor's name is refused for the
+    separate reason that a skipping call would then enter *that* manager rather
+    than the carried one -- the both-arms-bind shape the caller owns.
+    """
+    if function is None or not isinstance(chain, ast.If):
+        return False
+    links = _links_above_a_trailing_else(chain, competitor[0])
+    if not links:
+        return False
+    for above in links:
+        if _contains_any(above.body, competitor[0]):
+            return False
+        if _condition_can_be_true(above.test, function):
+            return True
+    return False
+
+
 def _break_skipped_loop_else_can_fail(
     entries, orders, competitor, bound, function, query, owning=None
 ):
@@ -1252,6 +1342,14 @@ def _break_reachable_with_failure(loop, values, function):
     under it is still reachable. That is the conservative direction and matches
     the rest of this module: an unreadable test may hold, and the analyzer must
     not assume the ``else`` ran.
+
+    A condition that *raises* is the one exception, and it is not a judgement
+    call. ``1 < "a"`` raises ``TypeError`` in CPython, so the ``if`` never
+    decides and the loop body never completes normally: the ``else`` is
+    unreachable, whatever the analyzer managed to read. Reporting that header
+    live because the guard was unreadable certified a contract CPython defeats
+    on every call -- the false-LIVE direction, and the reason the predicate's
+    decline is split into two kinds rather than one.
     """
     for node in ast.walk(loop):
         if not isinstance(node, ast.Break):
@@ -1320,6 +1418,89 @@ def _condition_raises(test, values):
         evaluates[operator]()
     except TypeError:
         return True
+    return False
+
+
+def _links_above_a_trailing_else(chain, store):
+    """Every `ast.If` link from ``chain`` down to the arm holding ``store``.
+
+    The returned list includes the final link -- the one whose ``orelse`` *is*
+    the trailing ``else`` -- because that link is exactly the one that may be
+    true to skip the arm. It is empty when the ``else`` belongs to a link that
+    is not reachable as a chain member, and when the store is not in a trailing
+    ``else`` at all.
+    """
+    links = []
+    link = chain
+    while isinstance(link, ast.If):
+        orelse = link.orelse
+        if not orelse:
+            return []
+        # A trailing `else` holds statements, never a single `ast.If`: an
+        # `elif` link is exactly an `orelse` whose one element is an `ast.If`,
+        # so that is what tells the two apart. Reading "not an `ast.If`" as
+        # enough made every `elif` look like a trailing `else` and the descent
+        # stopped at the first link.
+        is_trailing_else = len(orelse) >= 1 and not (
+            len(orelse) == 1 and isinstance(orelse[0], ast.If)
+        )
+        if is_trailing_else:
+            if _contains_any(orelse, store):
+                links.append(link)
+            return links if links else []
+        if len(orelse) != 1 or not isinstance(orelse[0], ast.If):
+            return []
+        links.append(link)
+        link = orelse[0]
+    return []
+
+
+def _condition_can_be_true(node, function=None):
+    """May this condition hold on some call of ``function``?
+
+    Only the two shapes that no argument can change are answered False: a
+    literal-false test, and a test reading a name this scope pins to a falsy
+    constant. Everything else is left as "may be true", which is the
+    conservative direction here -- this question is whether a *skipping call
+    exists*, so an unreadable test is treated as one the caller can satisfy.
+    """
+    if _condition_is_never_true(node, function):
+        return False
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Name):
+            continue
+        pinned = _falsy_constant_pinned_to(child.id, function)
+        if pinned:
+            return False
+    return True
+
+
+def _falsy_constant_pinned_to(name, function):
+    """Is ``name`` bound in ``function``'s scope to a constant that is falsy?
+
+        local = 0
+        if False:
+            pass
+        elif local:            # never true, so the `else` always runs
+            pass
+        else:
+            cs = contextlib.suppress(AssertionError)
+
+    Reading ``elif local`` as possibly-true reported that header live while
+    CPython swallows the assert on every call -- a FALSE-LIVE, and the
+    damaging direction. The pin is what makes the link decided rather than
+    merely unknown.
+    """
+    for statement in _scope_body_nodes(function):
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            continue
+        value = statement.value
+        if isinstance(value, ast.Constant):
+            return not value.value
+        # A non-constant binding is a rebinding, not a pin; keep looking.
     return False
 
 
