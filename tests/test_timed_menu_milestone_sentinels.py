@@ -16267,73 +16267,6 @@ def test_try_unknown_import_above_the_loop_else_is_transparent(
     assert _is_enforced(function, target, module) is False
 
 
-#: #334. A store written in a nested scope binds *that* scope's name, so it
-#: cannot retire a value the enclosing function still holds. Each row is judged
-#: on an **execution sweep**: the fixture is run, the assert is watched, and
-#: only then is ``_is_enforced`` consulted, so a row cannot pass by agreeing
-#: with the implementation.
-#:
-#: The ``rebind`` rows are the defect. The nested store wins on order and
-#: retires the carried suppressor, so the analyzer reports ``enforced`` on an
-#: assert CPython swallows -- the damaging direction.
-#:
-#: The ``nonlocal`` row is the guard on the other side: ``nonlocal`` is the one
-#: declaration that *does* rebind the enclosing binding, so that store must
-#: keep retiring the carrier and the assert is genuinely live.
-NESTED_SCOPE_REBIND_ROWS = (
-    (
-        "334 a nested plain rebind does not retire the carried suppressor",
-        "    def inner():\n        cs = contextlib.nullcontext()\n    inner()\n",
-        False,
-    ),
-    (
-        "334 a nested `global` rebind does not retire it either",
-        "    def inner():\n        global cs\n        cs = contextlib.nullcontext()\n    inner()\n",
-        False,
-    ),
-    (
-        "334 CONTROL a nested `nonlocal` rebind does retire it (the assert is live)",
-        "    def inner():\n        nonlocal cs\n        cs = contextlib.nullcontext()\n    inner()\n",
-        True,
-    ),
-    (
-        "334 CONTROL a nested class-body store does not retire it either",
-        "    class Inner:\n        cs = contextlib.nullcontext()\n",
-        False,
-    ),
-)
-
-
-@pytest.mark.parametrize(("label", "rebind", "fires"), NESTED_SCOPE_REBIND_ROWS)
-def test_a_nested_scope_store_does_not_retire_a_carried_suppressor(label, rebind, fires):
-    """#334. Only a store that can reach this binding may supersede it.
-
-    ``_store_is_in_scope`` draws the boundary and already separates ``nonlocal``
-    (rebinds the enclosing function's binding) from ``global`` (writes the
-    module), so this row pins the *use* of that rule at the resolution site
-    rather than restating it.
-    """
-    source = (
-        "import contextlib\ndef outer(x, helper, flag=True):\n"
-        "    from contextlib import suppress, nullcontext\n"
-        "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
-        + rebind
-        + "    with cs:\n        assert x != 1\n"
-    )
-    namespace = {}
-    exec(source, namespace)  # noqa: S102
-    raised = False
-    try:
-        namespace["outer"](1, None, True)
-    except AssertionError:
-        raised = True
-    assert raised is fires, label
-    module = ast.parse(source)
-    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
-    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
-    assert _is_enforced(function, target, module) is fires, label
-
-
 #: #485. Preserve all author import inputs and measured runtime outcomes.
 #: Unknown initializer effects are not proven by their import binding names;
 #: the portable checker declines these rows separately from their execution.
@@ -16853,3 +16786,276 @@ def test_match_subject_store_proof_refuses_context_enter_callback():
     function = module.body[1]
     target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
     assert _is_enforced(function, target, module) is True
+
+
+#: #334. A store written in a nested scope binds *that* scope's name, so it
+#: cannot retire a value the enclosing function still holds. Each row is judged
+#: on an **execution sweep**: the fixture is run, the assert is watched, and
+#: only then is ``_is_enforced`` consulted, so a row cannot pass by agreeing
+#: with the implementation.
+#:
+#: The ``rebind`` rows are the defect. The nested store wins on order and
+#: retires the carried suppressor, so the analyzer reports ``enforced`` on an
+#: assert CPython swallows -- the damaging direction.
+#:
+#: The ``nonlocal`` row is the guard on the other side: ``nonlocal`` is the one
+#: declaration that *does* rebind the enclosing binding, so that store must
+#: keep retiring the carrier and the assert is genuinely live.
+NESTED_SCOPE_REBIND_ROWS = (
+    (
+        "334 a nested plain rebind does not retire the carried suppressor",
+        "    def inner():\n        cs = contextlib.nullcontext()\n    inner()\n",
+        False,
+    ),
+    (
+        "334 a nested `global` rebind does not retire it either",
+        "    def inner():\n        global cs\n        cs = contextlib.nullcontext()\n    inner()\n",
+        False,
+    ),
+    (
+        "334 CONTROL a nested `nonlocal` rebind does retire it (the assert is live)",
+        "    def inner():\n        nonlocal cs\n        cs = contextlib.nullcontext()\n    inner()\n",
+        True,
+    ),
+    (
+        "334 CONTROL a nested class-body store does not retire it either",
+        "    class Inner:\n        cs = contextlib.nullcontext()\n",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "rebind", "fires"), NESTED_SCOPE_REBIND_ROWS)
+def test_a_nested_scope_store_does_not_retire_a_carried_suppressor(label, rebind, fires):
+    """#334. Only a store that can reach this binding may supersede it.
+
+    ``_store_is_in_scope`` draws the boundary and already separates ``nonlocal``
+    (rebinds the enclosing function's binding) from ``global`` (writes the
+    module), so this row pins the *use* of that rule at the resolution site
+    rather than restating it.
+    """
+    source = (
+        "import contextlib\ndef outer(x, helper, flag=True):\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
+        + rebind
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    raised = False
+    try:
+        namespace["outer"](1, None, True)
+    except AssertionError:
+        raised = True
+    assert raised is fires, label
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is fires, label
+
+
+DEFINITION_TIME_REBIND_ROWS = (
+    (
+        "known inert source setup",
+        "    def before():return None\n    before()\n    def inner(arg=(cs:=contextlib.nullcontext())):pass\n",
+    ),
+    (
+        "default with filed imports",
+        "    from contextlib import suppress,nullcontext\n    def inner(arg=(cs:=nullcontext())):pass\n",
+    ),
+    ("function positional default", "    def inner(arg=(cs:=contextlib.nullcontext())):pass\n"),
+    ("function keyword default", "    def inner(*,arg=(cs:=contextlib.nullcontext())):pass\n"),
+    ("lambda default", "    inner=lambda arg=(cs:=contextlib.nullcontext()):None\n"),
+    ("class base", "    class Inner((cs:=contextlib.nullcontext()).__class__):pass\n"),
+    (
+        "function decorator",
+        "    def identity(value):return value\n    @((cs:=contextlib.nullcontext()) and identity)\n    def inner():pass\n",
+    ),
+    (
+        "class decorator",
+        "    def identity(value):return value\n    @((cs:=contextlib.nullcontext()) and identity)\n    class Inner:pass\n",
+    ),
+    ("eager argument annotation", "    def inner(arg:(cs:=contextlib.nullcontext())):pass\n"),
+    ("eager return annotation", "    def inner()->(cs:=contextlib.nullcontext()):pass\n"),
+)
+
+
+@pytest.mark.parametrize(
+    "label,rebind", DEFINITION_TIME_REBIND_ROWS, ids=[row[0] for row in DEFINITION_TIME_REBIND_ROWS]
+)
+def test_definition_metadata_rebinds_the_containing_carrier(label, rebind):
+    """These Python3.12 definitions evaluate metadata in the enclosing scope."""
+    source = (
+        "import contextlib\ndef outer(x):\n    with(cs:=contextlib.suppress(AssertionError)):pass\n"
+        + rebind
+        + "    with cs:assert x!=1\n"
+    )
+    namespace = {}
+    if label.startswith("eager") and sys.version_info >= (3, 14):
+        # Python3.14 annotation scopes prohibit assignment expressions.
+        with pytest.raises(SyntaxError):
+            exec(source, namespace)  # noqa: S102
+        return
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module)
+
+
+NESTED_DECLARATION_SCOPE_ROWS = (
+    (
+        "return before metadata",
+        "    def inner():\n        nonlocal cs\n        return\n        def nested(arg=(cs:=contextlib.nullcontext())):pass\n    inner()\n",
+        False,
+    ),
+    (
+        "uncalled nonlocal",
+        "    def inner():\n        nonlocal cs\n        cs=contextlib.nullcontext()\n",
+        False,
+    ),
+    (
+        "nearest nonlocal belongs to middle",
+        "    def middle():\n        cs=contextlib.suppress(AssertionError)\n        def inner():\n            nonlocal cs\n            cs=contextlib.nullcontext()\n        inner()\n    middle()\n",
+        False,
+    ),
+    ("lambda body local", "    inner=lambda:(cs:=contextlib.nullcontext())\n    inner()\n", False),
+    (
+        "metadata in called nonlocal function",
+        "    def inner():\n        nonlocal cs\n        def nested(arg=(cs:=contextlib.nullcontext())):pass\n    inner()\n",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "label,rebind,fires",
+    NESTED_DECLARATION_SCOPE_ROWS,
+    ids=[row[0] for row in NESTED_DECLARATION_SCOPE_ROWS],
+)
+def test_nested_store_reaches_only_its_actual_binding(label, rebind, fires):
+    source = (
+        "import contextlib\ndef outer(x):\n    with(cs:=contextlib.suppress(AssertionError)):pass\n"
+        + rebind
+        + "    with cs:assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    try:
+        namespace["outer"](1)
+    except AssertionError:
+        actual = True
+    else:
+        actual = False
+    assert actual is fires
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is fires
+
+
+@pytest.mark.parametrize("future", (False, True), ids=("eager", "postponed"))
+def test_annotation_reads_do_not_retire_a_carrier(future):
+    source = (
+        ("from __future__ import annotations\n" if future else "")
+        + "import contextlib\ndef outer(x):\n    with(cs:=contextlib.suppress(AssertionError)):pass\n    def inner(arg:cs)->cs:pass\n    with cs:assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    namespace["outer"](1)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+def test_a_nested_global_rebind_reaches_a_global_carrier():
+    source = "import contextlib\ndef outer(x):\n    global cs\n    with(cs:=contextlib.suppress(AssertionError)):pass\n    def inner():\n        global cs\n        cs=contextlib.nullcontext()\n    inner()\n    with cs:assert x!=1\n"
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module)
+
+
+@pytest.mark.parametrize(
+    "definition,error",
+    (
+        ("    def inner(arg=((cs:=contextlib.nullcontext()),missing())[0]):pass\n", NameError),
+        ("    def inner(arg=(cs:=contextlib.nullcontext()),other=1/0):pass\n", ZeroDivisionError),
+        ("    @missing\n    def inner(arg=(cs:=contextlib.nullcontext())):pass\n", NameError),
+        (
+            "    class Inner((cs:=contextlib.nullcontext()).__class__):\n        raise RuntimeError('blocked')\n",
+            RuntimeError,
+        ),
+    ),
+)
+def test_failing_definition_metadata_does_not_create_a_live_assertion(definition, error):
+    source = (
+        "import contextlib\ndef outer(x):\n    with(cs:=contextlib.suppress(AssertionError)):pass\n"
+        + definition
+        + "    with cs:assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize(
+    "setup",
+    (
+        "    callback()\n",
+        "    def prior(arg=missing()):pass\n",
+    ),
+)
+def test_opaque_setup_before_metadata_keeps_the_known_decline(setup):
+    source = (
+        "import contextlib\ndef outer(x,callback):\n    with(cs:=contextlib.suppress(AssertionError)):pass\n"
+        + setup
+        + "    def inner(arg=(cs:=contextlib.nullcontext())):pass\n    with cs:assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+
+    def callback():
+        raise NameError("opaque setup")
+
+    with pytest.raises(NameError):
+        namespace["outer"](1, callback)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize(
+    "creation",
+    (
+        "def corrupt(arg=(contextlib:=type('Fake',(),{'nullcontext':staticmethod(lambda:real.suppress(AssertionError)),'suppress':staticmethod(real.suppress)}))):pass\n",
+        "def corrupt(*,arg=(contextlib:=type('Fake',(),{'nullcontext':staticmethod(lambda:real.suppress(AssertionError)),'suppress':staticmethod(real.suppress)}))):pass\n",
+    ),
+)
+def test_module_definition_metadata_cannot_install_a_fake_nullcontext(creation):
+    source = (
+        "import contextlib\nimport contextlib as real\n"
+        + creation
+        + "def outer(x):\n    with(cs:=contextlib.suppress(AssertionError)):pass\n    def inner(arg=(cs:=contextlib.nullcontext())):pass\n    with cs:assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[-1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
