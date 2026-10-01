@@ -643,7 +643,7 @@ def _store_retires(statement, name, function=None):
 
 
 def _is_provably_unreached_store(entry, orders, function):
-    """Is this conditional store inside a loop body that can never run?
+    """Is this store in a loop or literal branch body that never runs?
 
     #378. A ``for`` over a literal empty iterable has no iterations, so every
     statement in its body is unreachable. A store written there is recorded,
@@ -711,8 +711,7 @@ def _is_provably_unreached_store(entry, orders, function):
     # `_ancestors` runs outermost-first and ends with ``target`` itself, so
     # the last element is dropped: the question is which *containers* the
     # store sits inside.
-    chain = list(_ancestors(function, statement))[:-1]
-    for ancestor in chain:
+    for ancestor in list(_ancestors(function, statement))[:-1]:
         # `ast.AsyncFor` is included for symmetry with `_is_store_statement`,
         # but it is deliberately untested here: an `async for` over a *literal*
         # container cannot execute, because a literal is not an async
@@ -735,38 +734,34 @@ def _is_provably_unreached_store(entry, orders, function):
             and _in_body(ancestor, statement)
         ):
             return True
-        # #358. A ``match`` clause the literal subject cannot select does not
-        # run, so a store in that clause's body is a store that never executes
-        # -- the same question this helper answers for an empty loop body and a
-        # falsy ``if`` body. The filed row is a sequence pattern against a
-        # string subject, which ``match`` deliberately does not select, so the
-        # carried suppressor stays in force and the assert under it is
-        # swallowed while the analyzer reported it ``enforced``.
-        #
-        # The gate is the same :func:`_in_body` the clauses above use, and for
-        # a ``match_case`` it is exactly "the store is in this clause's body".
-        # A later case in the same ``match`` is an AST *sibling*, not a
-        # descendant, so a store in a selected sibling clause is not caught by
-        # an unselected one: the walk only reaches the case that actually
-        # encloses the store.
-        if (
-            isinstance(ancestor, ast.match_case)
-            and _match_case_is_provably_unselected(
+        # #365: a literal-false If body never stores its replacement manager.
+        # Keep the previously carried suppressor rather than certifying a
+        # swallowed assertion as enforced. The else is a sibling that DOES
+        # execute, so containment must specifically select the body.
+        # Restrict the test to AST constants/empty literal containers: the
+        # shared falsy predicate also accepts constructor calls, whose callee
+        # may be an enclosing parameter. Such calls are not proven here.
+        # #358: only a case body proven incompatible with a readable subject
+        # can discard its store; sibling cases remain independent.
+        if isinstance(ancestor, ast.match_case) and _in_body(ancestor, statement):
+            chain = list(_ancestors(function, statement))[:-1]
+            if _match_case_is_provably_unselected(
                 function, _enclosing_match(chain, ancestor), ancestor
-            )
-            and _in_body(ancestor, statement)
-        ):
-            return True
-    return False
+            ):
+                return True
+    return _literal_if_store_is_unreached(entry, function)
 
 
-def _enclosing_match(chain, case):
-    """The ``ast.Match`` that owns ``case`` within an ancestor ``chain``."""
-    index = chain.index(case)
-    for candidate in reversed(chain[:index]):
-        if isinstance(candidate, ast.Match):
-            return candidate
-    return None
+def _literal_if_store_is_unreached(entry, function):
+    """The literal If proof, without widening existing loop-call decisions."""
+    statement = entry[0]
+    return any(
+        isinstance(ancestor, ast.If)
+        and isinstance(ancestor.test, (ast.Constant, ast.Tuple, ast.List, ast.Set, ast.Dict))
+        and _falsy_literal(ancestor.test, function)
+        and _in_body(ancestor, statement)
+        for ancestor in _ancestors(function, statement)
+    )
 
 
 def _carried_suppressor_has_unshadowed_arguments(value, function):

@@ -348,19 +348,21 @@ def _match_case_is_provably_unselected(function, match, case):
     a bare capture, a wildcard, a value pattern equal to the subject, or a
     class/capture pattern -- returns ``False`` and leaves the store competing.
     """
+    if not _match_store_prefix_is_safe(function, match):
+        return False
     if case.guard is not None:
         # A guard is a runtime condition. Even a constant-``False`` guard is
         # declined here rather than decided, so a case the guard might admit
         # is never treated as unselected on the strength of a guess.
         return False
     subject = _literal_subject_value(function, match)
-    if subject is None:
+    if subject is UNREADABLE_VALUE:
         return False
     return _pattern_cannot_select(case.pattern, subject)
 
 
 def _literal_subject_value(function, match):
-    """The subject's literal value, or ``None`` when it is not decidable.
+    """The subject's literal value, or ``UNREADABLE_VALUE`` when not decidable.
 
     Two shapes answer. The first is a subject written inline as a constant:
     ``match "subject":``. The second is a plain scalar binding in the same
@@ -372,7 +374,7 @@ def _literal_subject_value(function, match):
 
     A parameter, a call, a subscript, a conditional store, a walrus, a
     destructuring target, or any intervening statement that binds the subject
-    name all yield ``None``. Declining is the safe direction: the store keeps
+    name all yield ``UNREADABLE_VALUE``. Declining is the safe direction: the store keeps
     competing, so a possibly-live assert is reported defeated rather than a
     live suppressor being retired.
     """
@@ -380,38 +382,38 @@ def _literal_subject_value(function, match):
         if isinstance(node, ast.Constant):
             return node.value
     resolved = _resolve_simple_scalar_subject(function, match)
-    if resolved is not None:
+    if resolved is not UNREADABLE_VALUE:
         return resolved
-    return None
+    return UNREADABLE_VALUE
 
 
 def _resolve_simple_scalar_subject(function, match):
-    """A plain ``name = <constant>`` binding before ``match``, or ``None``."""
+    """A plain ``name = <constant>`` binding before ``match``, or ``UNREADABLE_VALUE``."""
     if not isinstance(match.subject, ast.Name):
-        return None
+        return UNREADABLE_VALUE
     subject_name = match.subject.id
     body = function.body if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
     if body is None:
-        return None
+        return UNREADABLE_VALUE
     if subject_name in {argument.arg for argument in _all_args(function) if argument is not None}:
-        return None
+        return UNREADABLE_VALUE
     try:
         match_index = body.index(match)
     except ValueError:
-        return None
+        return UNREADABLE_VALUE
     for statement in reversed(body[:match_index]):
         if _statement_leaves_subject_alone(statement, subject_name):
             continue
         if not isinstance(statement, ast.Assign):
-            return None
+            return UNREADABLE_VALUE
         if not _assign_targets_exactly(statement, subject_name):
-            return None
+            return UNREADABLE_VALUE
         if len(statement.targets) != 1:
-            return None
+            return UNREADABLE_VALUE
         if not isinstance(statement.value, ast.Constant):
-            return None
+            return UNREADABLE_VALUE
         return statement.value.value
-    return None
+    return UNREADABLE_VALUE
 
 
 def _pattern_cannot_select(pattern, subject):
@@ -442,14 +444,14 @@ def _pattern_cannot_select(pattern, subject):
 def _value_is_sequence(value):
     """Is a literal ``value`` a sequence the runtime would match with ``[...]``?
 
-    ``list``, ``tuple`` and ``bytes`` are matched by a sequence pattern. A
+    Only ``list`` and ``tuple`` here are matched by a sequence pattern. A
     ``str`` is a sequence to Python's ``isinstance`` but **not** one a
     ``match`` sequence pattern selects, because structural pattern matching
     deliberately excludes it -- that exclusion is the whole reason the #358
     row does not select. So this asks the match-level question, not the
     ``isinstance`` one.
     """
-    return isinstance(value, (list, tuple, bytes))
+    return isinstance(value, (list, tuple))
 
 
 def _literal_match_capture_value(function, match, name):
@@ -759,3 +761,150 @@ def _literal_match_has_failure_witness(function, match, assertion):
         ):
             return False
     return True
+
+
+def _enclosing_match(chain, case):
+    """The ``ast.Match`` that owns ``case`` within an ancestor ``chain``."""
+    index = chain.index(case)
+    for candidate in reversed(chain[:index]):
+        if isinstance(candidate, ast.Match):
+            return candidate
+    return None
+
+
+def _match_store_prefix_is_safe(function, match):
+    """Prove the literal subject and carried managers survive setup unchanged.
+
+    The scalar reader's skipped-With name check is not a purity proof. This
+    companion permits only canonical managers with pass bodies and inert
+    source setup. Unknown context callbacks/imports never establish a subject.
+    """
+    if (
+        not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        or match not in function.body
+    ):
+        return False
+    module = _module_for_function(function)
+    if module is None:
+        return False
+    for statement in module.body:
+        if isinstance(statement, ast.Import) and all(
+            a.name == "contextlib" for a in statement.names
+        ):
+            continue
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = statement.args
+            annotated = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+            if (
+                statement.decorator_list
+                or statement.returns
+                or getattr(statement, "type_params", [])
+                or any(a is not None and a.annotation is not None for a in annotated)
+                or any(
+                    not isinstance(v, ast.Constant)
+                    for v in [*args.defaults, *args.kw_defaults]
+                    if v is not None
+                )
+            ):
+                return False
+            continue
+        if (
+            isinstance(statement, ast.Pass)
+            or (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            )
+            or (
+                isinstance(statement, ast.Assign)
+                and isinstance(statement.value, ast.Constant)
+                and all(isinstance(t, ast.Name) for t in statement.targets)
+            )
+        ):
+            continue
+        return False
+    values = {
+        a.arg: ast.Name(id=a.arg, ctx=ast.Load()) for a in _all_args(function) if a is not None
+    }
+    for statement in function.body[: function.body.index(match)]:
+        if isinstance(statement, ast.Pass):
+            continue
+        if isinstance(statement, ast.Import) and all(
+            a.name == "contextlib" for a in statement.names
+        ):
+            continue
+        if isinstance(statement, ast.Assign) and all(
+            isinstance(t, ast.Name) for t in statement.targets
+        ):
+            value = _match_store_safe_value(statement.value, values, function)
+            if value is UNREADABLE_VALUE:
+                return False
+            values.update({t.id: value for t in statement.targets})
+            continue
+        if isinstance(statement, ast.With) and all(isinstance(n, ast.Pass) for n in statement.body):
+            for item in statement.items:
+                if item.optional_vars is not None:
+                    return False
+                value = item.context_expr
+                target = None
+                if isinstance(value, ast.NamedExpr) and isinstance(value.target, ast.Name):
+                    target = value.target.id
+                    value = value.value
+                value = _match_store_safe_value(value, values, function)
+                if not isinstance(value, ast.Call) or not _literal_subject_element_is_safe(
+                    value, function
+                ):
+                    return False
+                if target is not None:
+                    values[target] = value
+            continue
+        return False
+    for case in match.cases:
+        if case.guard is not None or any(
+            isinstance(n, (ast.MatchClass, ast.Attribute)) for n in ast.walk(case.pattern)
+        ):
+            return False
+        for statement in case.body:
+            if isinstance(statement, ast.Pass):
+                continue
+            if not isinstance(statement, ast.Assign) or not all(
+                isinstance(t, ast.Name) for t in statement.targets
+            ):
+                return False
+            if _match_store_safe_value(statement.value, values, function) is UNREADABLE_VALUE:
+                return False
+    following = [
+        n for n in function.body[function.body.index(match) + 1 :] if not isinstance(n, ast.Pass)
+    ]
+    if len(following) != 1 or not isinstance(following[0], ast.With):
+        return False
+    header = following[0]
+    return (
+        len(header.items) == 1
+        and isinstance(header.items[0].context_expr, ast.Name)
+        and header.items[0].optional_vars is None
+        and all(isinstance(n, (ast.Pass, ast.Assert)) for n in header.body)
+        and all(
+            n.msg is None or isinstance(n.msg, ast.Constant)
+            for n in header.body
+            if isinstance(n, ast.Assert)
+        )
+    )
+
+
+def _match_store_safe_value(value, values, function):
+    if isinstance(value, ast.Name):
+        return values.get(value.id, UNREADABLE_VALUE)
+    if isinstance(value, ast.Constant):
+        return value
+    if isinstance(value, ast.Call) and _literal_subject_element_is_safe(value, function):
+        return value
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)) and all(
+        isinstance(v, ast.Constant) for v in value.elts
+    ):
+        return value
+    if isinstance(value, ast.Dict) and all(
+        isinstance(v, ast.Constant) for v in [*value.keys, *value.values]
+    ):
+        return value
+    return UNREADABLE_VALUE
