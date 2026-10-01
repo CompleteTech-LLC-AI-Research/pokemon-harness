@@ -205,3 +205,87 @@ def outer(x):
     exec(source, namespace)  # noqa: S102
     namespace["outer"](1)
     assert verdict(source) is False
+
+
+@pytest.mark.parametrize(
+    "setup,header,outcome,live",
+    [
+        (" h=[contextlib.suppress(AssertionError)]\n", "h[-len(h)]", "swallowed", False),
+        (" h=(contextlib.suppress(AssertionError),)\n", "h[-len(h)]", "swallowed", False),
+        (" h=[contextlib.nullcontext()]\n", "h[-len(h)]", "AssertionError", True),
+        (" h=[contextlib.suppress(ValueError)]\n", "h[-len(h)]", "AssertionError", True),
+        (
+            " h=[contextlib.suppress(AssertionError),contextlib.nullcontext()]\n len=lambda _:1\n",
+            "h[-len(h)]",
+            "AssertionError",
+            True,
+        ),
+        (
+            " h=[contextlib.suppress(AssertionError),contextlib.nullcontext()]\n other=[1]\n",
+            "h[-len(other)]",
+            "AssertionError",
+            True,
+        ),
+        (
+            " h=[contextlib.suppress(AssertionError)]\n h[0]=contextlib.nullcontext()\n",
+            "h[-len(h)]",
+            "AssertionError",
+            True,
+        ),
+        (" h=[]\n", "h[-len(h)]", "IndexError", True),
+        (
+            " Box=type('H',(),dict(b=contextlib.suppress(AssertionError)))\n",
+            "Box.b",
+            "swallowed",
+            False,
+        ),
+        (" Box=type('H',(),dict(b=contextlib.nullcontext()))\n", "Box.b", "AssertionError", True),
+        (
+            " Box=type('H',(),dict(b=contextlib.suppress(ValueError)))\n",
+            "Box.b",
+            "AssertionError",
+            True,
+        ),
+        (
+            " dict=lambda **kw:{'b':contextlib.nullcontext()}\n Box=type('H',(),dict(b=contextlib.suppress(AssertionError)))\n",
+            "Box.b",
+            "AssertionError",
+            True,
+        ),
+        (
+            " Box=type('H',(),dict(b=contextlib.suppress(AssertionError),other=missing()))\n",
+            "Box.b",
+            "NameError",
+            True,
+        ),
+        (
+            " Box=type('H',(),dict(b=contextlib.suppress(AssertionError)))\n Box.b=contextlib.nullcontext()\n",
+            "Box.b",
+            "AssertionError",
+            True,
+        ),
+        (
+            " Box=type('H',(),dict(b=contextlib.suppress(AssertionError),__slots__=42))\n",
+            "Box.b",
+            "TypeError",
+            True,
+        ),
+        (
+            " Box=type('H',(),dict(b=contextlib.suppress(AssertionError),__classcell__=None))\n",
+            "Box.b",
+            "TypeError",
+            True,
+        ),
+    ],
+)
+def test_scoped_residual_proofs_match_execution(setup, header, outcome, live):
+    source = "import contextlib\ndef outer(x):\n" + setup + f" with {header}: assert x!=1\n"
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    measured = "swallowed"
+    try:
+        namespace["outer"](1)
+    except (AssertionError, NameError, IndexError, TypeError) as error:
+        measured = type(error).__name__
+    assert measured == outcome
+    assert verdict(source) is live
