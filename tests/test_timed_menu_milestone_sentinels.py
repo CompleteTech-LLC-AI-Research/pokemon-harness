@@ -3123,6 +3123,412 @@ def test_a_module_scope_carrier_defeats_the_assert_below_it(label, prelude, live
     )
 
 
+#: #422. A ``with`` header that reaches the suppressor *through* a container
+#: or a class attribute enters a real ``contextlib.suppress(AssertionError)``
+#: while naming no call at all. Executed, the assert is swallowed; the
+#: analyzer certified it ``enforced``, which is a disarmed contract reported
+#: load-bearing -- the damaging direction #308 criterion 1 names.
+#:
+#: Each row is executed before it is judged, so the table cannot drift away
+#: from CPython: the swallow is *measured*, not asserted, and the analyzer is
+#: required to agree with the measurement. The rows carrying a value that does
+#: **not** swallow must stay live -- they are what stops a blanket "a
+#: subscript or attribute is defeated" rule, which would drop real contracts.
+SUBSCRIPT_ATTRIBUTE_SUPPRESSOR_ROWS = (
+    (
+        "422 a suppressor reached through a list subscript",
+        False,
+        "",
+        (
+            "    holder = [contextlib.suppress(AssertionError)]\n"
+            "    with holder[0]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a tuple subscript",
+        False,
+        "",
+        (
+            "    holder = (contextlib.suppress(AssertionError),)\n"
+            "    with holder[0]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a dict subscript",
+        False,
+        "",
+        (
+            "    holder = {'k': contextlib.suppress(AssertionError)}\n"
+            "    with holder['k']:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a class attribute",
+        False,
+        "class Box:\n    ctx = contextlib.suppress(AssertionError)\n",
+        "    with Box.ctx:\n        assert x != 1\n",
+        True,
+    ),
+    # The attribute may be attached from outside the class body, and from the
+    # enclosing function. Both are the same readable store one level out.
+    (
+        "422 a suppressor assigned onto the class after its body",
+        False,
+        "class Late:\n    pass\nLate.ctx = contextlib.suppress(AssertionError)\n",
+        "    with Late.ctx:\n        assert x != 1\n",
+        True,
+    ),
+    (
+        "422 a suppressor assigned onto the class inside the function",
+        False,
+        "class Local:\n    pass\n",
+        (
+            "    Local.ctx = contextlib.suppress(AssertionError)\n"
+            "    with Local.ctx:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    # Chains. The filed shapes are one dereference deep, but nothing about the
+    # defect stops there: an *unfollowed step* is the same false-LIVE one
+    # level out, so each chain is pinned to the value its final step selects.
+    (
+        "422 a suppressor reached through a nested list subscript",
+        False,
+        "",
+        (
+            "    holder = [[contextlib.suppress(AssertionError)]]\n"
+            "    with holder[0][0]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a nested dict subscript",
+        False,
+        "",
+        (
+            "    holder = {'a': {'b': contextlib.suppress(AssertionError)}}\n"
+            "    with holder['a']['b']:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a negative index",
+        False,
+        "",
+        (
+            "    holder = [1, contextlib.suppress(AssertionError)]\n"
+            "    with holder[-1]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a subscript of a class attribute",
+        False,
+        "",
+        (
+            "    Box = type('H', (), {'b': [contextlib.suppress(AssertionError)]})\n"
+            "    with Box.b[0]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor reached through a nested type-built class",
+        False,
+        "",
+        (
+            "    Box = type('H', (), "
+            "{'b': type('I', (), {'c': contextlib.suppress(AssertionError)})})\n"
+            "    with Box.b.c:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a suppressor assigned onto a class attribute with an annotation",
+        False,
+        "class Ann:\n    ctx: object = contextlib.suppress(AssertionError)\n",
+        "    with Ann.ctx:\n        assert x != 1\n",
+        True,
+    ),
+    # --- the boundary: the same shapes carrying a value that is not a
+    # --- suppression. Reading any subscript as a defeat would drop these.
+    (
+        "422 a nullcontext reached through a subscript stays live",
+        False,
+        "",
+        ("    holder = [contextlib.nullcontext()]\n    with holder[0]:\n        assert x != 1\n"),
+        False,
+    ),
+    (
+        "422 a wrong-exception suppressor reached through a subscript stays live",
+        False,
+        "",
+        (
+            "    holder = [contextlib.suppress(ValueError)]\n"
+            "    with holder[0]:\n        assert x != 1\n"
+        ),
+        False,
+    ),
+    (
+        "422 a nullcontext reached through a class attribute stays live",
+        False,
+        "class Dead:\n    ctx = contextlib.nullcontext()\n",
+        "    with Dead.ctx:\n        assert x != 1\n",
+        False,
+    ),
+    (
+        "422 a plain value reached through a chained subscript stays live",
+        False,
+        "",
+        (
+            "    Box = type('H', (), {'b': [contextlib.nullcontext()]})\n"
+            "    with Box.b[0]:\n        assert x != 1\n"
+        ),
+        False,
+    ),
+    # --- declines: unreadable, so the header raises or does not suppress and
+    # --- the assert stays live.
+    (
+        "422 a computed subscript key stays live",
+        True,
+        "",
+        (
+            "    holder = {'k': contextlib.suppress(AssertionError)}\n"
+            "    i = 0\n"
+            "    with holder[i]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 a factory-built container stays live",
+        True,
+        "",
+        ("    holder = make_holders()\n    with holder[0]:\n        assert x != 1\n"),
+        True,
+    ),
+    (
+        "422 a dict key that is absent stays live",
+        True,
+        "",
+        (
+            "    holder = {'j': contextlib.suppress(AssertionError)}\n"
+            "    with holder['k']:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 an out-of-range index stays live",
+        True,
+        "",
+        (
+            "    holder = [contextlib.suppress(AssertionError)]\n"
+            "    with holder[5]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+    (
+        "422 an attribute of a name that is not a local class stays live",
+        True,
+        "",
+        "    with box.ctx:\n        assert x != 1\n",
+        True,
+    ),
+    (
+        "422 a set literal is not indexable and stays live",
+        True,
+        "",
+        (
+            "    holder = {contextlib.suppress(AssertionError)}\n"
+            "    with holder[0]:\n        assert x != 1\n"
+        ),
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "unenterable", "preamble", "body", "suppressed"),
+    SUBSCRIPT_ATTRIBUTE_SUPPRESSOR_ROWS,
+    ids=[row[0] for row in SUBSCRIPT_ATTRIBUTE_SUPPRESSOR_ROWS],
+)
+def test_a_suppressor_reached_through_a_subscript_or_attribute_is_read(
+    label, unenterable, preamble, body, suppressed
+):
+    """#422: the header enters a value; read the value, not its spelling.
+
+    Two things are pinned per row, in this order, and the order matters: the
+    fixture is **executed** first so the expected verdict is a measurement,
+    and only then is the analyzer required to match it. A row whose fixture
+    stopped swallowing would fail on the execution half rather than silently
+    teaching the analyzer a stale answer.
+
+    ``unenterable`` marks the rows whose header raises before the assert -- a
+    computed key, a factory container, an absent key, an out-of-range index,
+    an attribute of a name that is not a local class, an unindexable set. For
+    those the body never runs, so there is no assert to judge, and the row
+    asserts only that the analyzer does not claim a defeat it cannot justify.
+    That is the safe error: reporting them ``enforced`` costs nothing,
+    whereas resolving them would mean guessing a value.
+    """
+    source = "import contextlib\n" + preamble + "def outer(x, flag):\n" + body
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert asserts, f"{label}: fixture declared no assert to check"
+
+    if unenterable:
+        namespace = {}
+        exec(compile(source, "<422-unenterable>", "exec"), namespace)  # noqa: S102
+        raised = None
+        try:
+            namespace["outer"](1, True)
+        except BaseException as error:  # noqa: BLE001 - the point is which one
+            raised = type(error).__name__
+        assert raised is not None, (
+            f"{label}: this row is filed as an unenterable header, but the "
+            f"fixture ran to completion"
+        )
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert results == [True], (
+            f"{label}: an unreadable subscript must leave the assert enforced, got {results}"
+        )
+        return
+
+    namespace = {}
+    exec(compile(source, "<422-executed>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1, True)
+    except AssertionError:
+        fired = True
+    measured_swallowed = not fired
+    assert measured_swallowed is suppressed, (
+        f"{label}: CPython disagrees with this row -- the assert "
+        f"{'fired' if fired else 'was swallowed'}"
+    )
+
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [not suppressed], (
+        f"{label}: expected the assert to be "
+        f"{'unenforced' if suppressed else 'enforced'}, got {results}"
+    )
+
+
+def test_an_unenterable_nested_container_is_not_read_as_a_defeat():
+    """#422 over-reach guard: every step is followed, none is invented.
+
+    ``holder[0]`` here is a *list*, so entering it raises ``TypeError`` before
+    the assert runs. A rule that followed the chain far enough to reach the
+    nested suppressor would report a defeat for a body that never executed.
+
+    This is the counterpart to the chained rows in the table above, which pin
+    ``holder[0][0]`` as a defeat: the chain is walked to its end in both
+    cases, and what each step *lands on* decides the verdict. One step deeper
+    than the runtime enters is the over-reach, so the table and this test are
+    pinned together.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag):\n"
+        "    holder = [[contextlib.suppress(AssertionError)]]\n"
+        "    with holder[0]:\n        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"a container of a container raises TypeError on entry, so the header "
+        f"is not a defeat -- got {results}"
+    )
+
+
+#: #422 residual. Both of these headers enter a real
+#: ``contextlib.suppress(AssertionError)`` -- executed, the assert is swallowed
+#: -- and both are declined by the resolver, so they are still certified
+#: ``enforced``. They are recorded as measured open residuals rather than
+#: folded into the table above: that table's rows assert a verdict the analyzer
+#: reaches, and pinning an unreached false-LIVE as an expected answer would
+#: encode the defect as correct.
+#:
+#: Each is a genuinely harder read, not a spelling left out by accident:
+#:
+#: * ``holder[-len(holder)]`` needs arithmetic over a container, which this
+#:   analyzer does not evaluate -- the same reason ``holder[len(h)]`` declines.
+#: * ``type("H", (), dict(b=...))`` builds its namespace through a ``dict``
+#:   call rather than a literal, so there is no literal mapping to read.
+#:
+#: Both stay filed on #422 rather than fixed here: closing them means either
+#: evaluating expressions or interpreting a stdlib constructor's keyword
+#: arguments, and each is a wider rule than the dereference gap this PR
+#: repairs. Until they are resolved they are false-LIVEs in the damaging
+#: direction, which is why they are written down rather than left implicit in
+#: an unexercised branch.
+SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS = (
+    (
+        "422 residual a suppressor under a computed index stays a false-LIVE",
+        (
+            "    holder = [contextlib.suppress(AssertionError)]\n"
+            "    with holder[-len(holder)]:\n        assert x != 1\n"
+        ),
+    ),
+    (
+        "422 residual a suppressor under a type() call namespace stays a false-LIVE",
+        (
+            "    Box = type('H', (), dict(b=contextlib.suppress(AssertionError)))\n"
+            "    with Box.b:\n        assert x != 1\n"
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS,
+    ids=[row[0] for row in SUPPRESSOR_REACHED_THROUGH_AN_UNREADABLE_STEP_ROWS],
+)
+def test_an_unreadable_step_leaves_the_swallowed_assert_reported_as_live(label, body):
+    """#422: measure the residual, and prove the analyzer has not reached it.
+
+    The first half executes each fixture, so the swallow is measured rather
+    than assumed. The second half then requires the analyzer to report
+    ``enforced`` -- the known-wrong answer. When a later repair teaches the
+    resolver to read one of these steps, this test fails and the row is
+    promoted into the table above, which is how a residual stops being carried
+    silently.
+
+    A test asserting ``False`` here would be the dangerous shape: it would pass
+    only while the defect persists, and would then block the very fix it is
+    meant to track.
+    """
+    source = "import contextlib\ndef outer(x, flag):\n" + body
+    namespace = {}
+    exec(compile(source, "<422-residual>", "exec"), namespace)  # noqa: S102
+    fired = False
+    try:
+        namespace["outer"](1, True)
+    except AssertionError:
+        fired = True
+    assert not fired, (
+        f"{label}: CPython swallowed this assert, so the fixture is not the "
+        f"residual it claims to be"
+    )
+
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"{label}: the resolver now reads this step, so the assert is correctly "
+        f"reported defeated and the row belongs in "
+        f"SUBSCRIPT_ATTRIBUTE_SUPPRESSOR_ROWS instead -- got {results}"
+    )
+
+
 def test_a_block_nested_module_carrier_is_still_declined():
     """Pin the *known* limit of the module-scope rule, so it cannot widen silently.
 
