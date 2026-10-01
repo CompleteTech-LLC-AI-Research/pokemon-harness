@@ -5500,6 +5500,122 @@ def test_a_capture_binds_only_the_namespace_it_was_written_in(label, nested, ver
     )
 
 
+#: #383 author fixtures are retained. Opaque helper results do not establish
+#: a universally live captured manager: both first rows execute with a chosen
+#: nullcontext callback but deliberately pin a known proof decline (False).
+#: Literal, source-proved cases are covered by test_sentinel_nonlocal_captures.
+NONLOCAL_CAPTURE_SCOPE_ROWS = (
+    # The filed shape. The capture binds `outer`'s `cs`, so it holds a real
+    # `nullcontext` and `with cs:` is entered: the assert FIRES -> `True`.
+    (
+        "a nonlocal capture in a class body binds the enclosing function",
+        (
+            "    class C:\n"
+            "        nonlocal cs\n"
+            "        match [helper()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+        ),
+        False,
+        True,
+    ),
+    # Same defect reached through a nested `def` rather than a class. #383
+    # measured the class spelling; the walk that missed it is scope-agnostic,
+    # so the function spelling was damaging on every tree tested too.
+    (
+        "a nonlocal capture in a nested function binds the enclosing function",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        match [helper()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+            "    inner()\n"
+        ),
+        False,
+        True,
+    ),
+    # Controls that must NOT change. The `nonlocal` is what makes the capture
+    # reach outward; without it the class body has its own namespace and the
+    # carried suppressor is still in force, so the assert is swallowed. These
+    # are #350's pinned rows restated beside the new ones, because a repair
+    # that simply stopped resolving captures anywhere would pass every `True`
+    # row above while breaking them.
+    (
+        "CONTROL a capture in a class body without nonlocal binds the class",
+        ("    class C:\n        match [helper()]:\n            case [cs]:\n                pass\n"),
+        False,
+        False,
+    ),
+    (
+        "CONTROL a capture in a nested function without nonlocal binds that function",
+        (
+            "    def inner():\n"
+            "        match [helper()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+            "    inner()\n"
+        ),
+        False,
+        False,
+    ),
+    # A capture in the function's OWN scope already retired the suppressor and
+    # is unchanged. It is here as the no-nested-scope control, and it uses the
+    # same irrefutable `case cs:` spelling as the two rows above: a refutable
+    # capture over an opaque `helper()` is declined by #369, which would make
+    # the row pass for the wrong reason.
+    (
+        "CONTROL a capture in the function body does retire the suppressor",
+        ("    match helper():\n        case cs:\n            pass\n"),
+        True,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "nested", "verdict", "runtime_live"),
+    NONLOCAL_CAPTURE_SCOPE_ROWS,
+    ids=[row[0] for row in NONLOCAL_CAPTURE_SCOPE_ROWS],
+)
+def test_a_nonlocal_capture_binds_the_enclosing_function(label, nested, verdict, runtime_live):
+    """Retain original runtime inputs while distinguishing opaque proof declines."""
+    source = (
+        "def outer(x, flag, items, helper):\n"
+        "    import contextlib\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + nested + "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    from contextlib import nullcontext
+
+    try:
+        namespace["outer"](1, None, [1], nullcontext)
+    except AssertionError:
+        ran = True
+    except (TypeError, UnboundLocalError, NameError):
+        ran = False
+    else:
+        ran = False
+    assert ran is runtime_live, (
+        f"{label}: CPython says the second assert "
+        f"{'ran' if ran else 'did not run'}, but the row's measured ground "
+        f"truth says it should "
+        f"{'run' if runtime_live else 'not run'}."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [verdict], (
+        f"{label}: expected verdicts {[verdict]}, got {results}. A `nonlocal` "
+        f"capture retires the enclosing function's carried suppressor."
+    )
+
+
 #: #359: the binding forms whose right-hand side is an *element* of a
 #: container, or a loop's next element, rather than the whole value.
 #:

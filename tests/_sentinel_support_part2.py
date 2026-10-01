@@ -446,6 +446,11 @@ def _store_bindings(function, bound, query=None):
         bindings.setdefault(name, []).append(
             (statement, _literal_match_capture_value(function, statement, name), conditional)
         )
+    # #383: only a reached, source-proved capture updates the enclosing value.
+    for name, owner, value in _nonlocal_match_captures(
+        function, query
+    ) + _global_function_capture_effects(function, query):
+        bindings.setdefault(name, []).append((owner, value, False))
     # #359. The four string-field carriers (`import os as cs`, `def cs`,
     # `class cs`, ...) bind a name the loop above never sees, because their
     # name is a string field of a node rather than a target. They are recorded
