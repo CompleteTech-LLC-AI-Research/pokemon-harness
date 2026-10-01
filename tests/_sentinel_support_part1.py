@@ -792,6 +792,75 @@ def _match_capture_names(function):
     return owners
 
 
+def _nonlocal_match_captures(function):
+    """Every ``(name, capture statement, owning statement)`` a ``nonlocal`` moves.
+
+    A ``nonlocal`` declaration is the one place the source states outright that
+    a name belongs to an enclosing function rather than to the nested body that
+    contains it. :func:`_nonlocal_declared` reads exactly that for a single
+    scope; this extends the read to the ``match`` captures those nested scopes
+    write, which :func:`_match_capture_names` cannot reach because
+    :func:`_scope_body_nodes` stops at the class boundary.
+
+    Both boundaries stay. A capture with no ``nonlocal`` for its name still
+    binds the nested namespace and is still invisible here -- that is #350's
+    rule and it is correct on its own. What is added is only the case where the
+    language says the binding lands one scope out:
+
+        def outer(x):
+            with (cs := contextlib.suppress(AssertionError)):
+                pass
+            class C:
+                match [contextlib.nullcontext()]:
+                    case [cs]:      # binds C.cs -- outer's cs is untouched
+                        pass
+
+    The returned owner is the *top-level* statement of `function` that
+    contains the nested scope, because that is the sort key
+    :func:`_binding_order` assigns and the position every caller compares
+    stores by. Returning the inner ``ast.Match`` would order a store by a
+    statement that lives in a different scope.
+
+    Only ``nonlocal`` is followed. ``global`` names a *module* binding, which is
+    a different question with its own machinery, and a name declared in
+    neither is this scope's own.
+    """
+    if function is None:
+        return []
+    captured = []
+    for statement in _scope_body_nodes(function):
+        for nested in _nested_scope_bodies(statement):
+            declared = _nonlocal_declared(nested)
+            if not declared:
+                continue
+            for match in _own_match_statements(nested):
+                for name in _match_capture_names_for(match):
+                    if name in declared:
+                        captured.append((name, match, statement))
+    return captured
+
+
+def _nested_scope_bodies(statement):
+    """The ``def``/``class`` bodies written directly in ``statement``.
+
+    Nested scopes are not walked transitively: a ``nonlocal`` in the innermost
+    body binds *its* enclosing function, which may itself be a nested one. The
+    callers of this helper resolve one level at a time, and a deeper body is
+    reachable when the caller walks that intermediate scope in turn.
+    """
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        yield statement
+        return
+    for node in ast.iter_child_nodes(statement):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield node
+
+
+def _own_match_statements(scope):
+    """Every ``ast.Match`` written directly in ``scope``'s own body."""
+    return [node for node in _scope_body_nodes(scope) if isinstance(node, ast.Match)]
+
+
 def _carrier_runtime_kinds(function):
     """Every ``(name, (owning statement, runtime kind))`` from a string field.
 
