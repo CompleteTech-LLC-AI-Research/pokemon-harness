@@ -8,6 +8,27 @@ from tests import _timed_menu_milestone_sentinel_support as support
 
 ROWS = (
     (
+        "same-name class replacement",
+        "class Box:\n ctx=contextlib.suppress(AssertionError)\nBox.ctx=contextlib.suppress(AssertionError)\nclass Box:\n ctx=contextlib.nullcontext()\n",
+        "",
+        "Box.ctx",
+        "AssertionError",
+    ),
+    (
+        "type assignment then class replacement",
+        "Box=type('First',(),{'ctx':contextlib.suppress(AssertionError)})\nclass Box:\n ctx=contextlib.nullcontext()\n",
+        "",
+        "Box.ctx",
+        "AssertionError",
+    ),
+    (
+        "annotated class overwrite",
+        "class Box:\n ctx=contextlib.suppress(AssertionError)\n",
+        " Box.ctx: object=contextlib.nullcontext()\n",
+        "Box.ctx",
+        "AssertionError",
+    ),
+    (
         "element overwrite",
         "",
         " h=[contextlib.suppress(AssertionError)]\n h[0]=contextlib.nullcontext()\n",
@@ -149,3 +170,38 @@ def test_early_invocation_cannot_read_future_module_container():
     with pytest.raises(AssertionError):
         exec(source, {})  # noqa: S102
     assert verdict(source) is True
+
+
+@pytest.mark.parametrize(
+    "construction",
+    [
+        "class Box:\n ctx=contextlib.suppress(AssertionError)\n",
+        "Box=type('DifferentName',(),{'ctx':contextlib.suppress(AssertionError)})\n",
+    ],
+)
+def test_module_final_attribute_store_runs_before_external_invocation(construction):
+    source = (
+        "import contextlib\n"
+        + construction
+        + "def outer(x):\n with Box.ctx: assert x!=1\nBox.ctx=contextlib.nullcontext()\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    assert verdict(source) is True
+
+
+def test_namespace_class_name_does_not_bind_an_unrelated_module_class():
+    source = """import contextlib
+class SameName:
+ ctx=contextlib.nullcontext()
+SameName.ctx=contextlib.nullcontext()
+def outer(x):
+ Box=type('SameName',(),{'ctx':contextlib.suppress(AssertionError)})
+ with Box.ctx: assert x!=1
+"""
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    namespace["outer"](1)
+    assert verdict(source) is False

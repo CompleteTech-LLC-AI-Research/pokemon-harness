@@ -109,53 +109,44 @@ def _dereferenced_header_value(expression, bound, tree, function):
 
 
 def _header_base_value(name, module, function, header):
-    """The value ``name`` holds at ``header``, or ``None``.
-
-    A chain may root in either kind of readable base, so both are tried:
-
-    * an assigned literal -- ``holder = [suppress(AssertionError)]``, whose
-      value is the container the first step indexes;
-    * a class this file defines -- ``Box``, whose value is the class the
-      first attribute step reads from.
-
-    The enclosing function is offered before the module so an inner binding
-    shadows an outer one of the same spelling, the same order the rest of
-    this module uses. A module-level store is read without a position cutoff
-    because a function body is only reached after module initialization.
-
-    An assignment is offered first because a rebinding of the name is what
-    the header actually reads at that point; a class definition is the
-    fallback for the common case where nothing rebinds it. Neither ordering
-    is a guess about a value: both come from a store visible at ``header``,
-    and a name that resolves to neither returns ``None``.
-    """
+    """Read the nearest scope's last binding, retaining class object identity."""
     for scope in reversed(_class_lookup_scopes(module, function)):
+        if isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and name in _signature_bound_names(scope):
+            return None
+        bindings = [
+            statement for statement in scope.body if any(_names_bound_by_statement(statement, name))
+        ]
+        if not bindings:
+            continue
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if name in _signature_bound_names(scope):
+            if scope is not function:
+                return None
+            if any(
+                any(_names_bound_by_statement(node, name)) and node not in scope.body
+                for node in _own_scope_bindings(scope)
+            ):
                 return None
             bindings = [
-                node
-                for node in _own_scope_bindings(scope)
-                if any(_names_bound_by_statement(node, name))
+                statement
+                for statement in bindings
+                if (statement.lineno, statement.col_offset) < (header.lineno, header.col_offset)
             ]
-            if bindings and any(node not in scope.body for node in bindings):
+            if not bindings:
                 return None
-            if bindings and scope is not function:
+        selected = max(bindings, key=lambda node: (node.lineno, node.col_offset))
+        if isinstance(selected, ast.ClassDef):
+            if _contains(function, selected) and _contains(selected, header):
                 return None
-            if bindings and not any(
-                (node.lineno, node.col_offset) < (header.lineno, header.col_offset)
-                for node in bindings
-            ):
-                return None
-            if bindings and not any(
-                isinstance(node, (ast.Assign, ast.ClassDef)) for node in bindings
-            ):
-                return None
-        before = header if not isinstance(scope, ast.Module) else None
-        value = _assigned_value(name, scope, before)
-        if value is not None:
-            return _header_attribute_value(value, function)
-    return _locally_defined_classes(module, function, header).get(name)
+            return selected
+        if not isinstance(selected, (ast.Assign, ast.AnnAssign)) or selected.value is None:
+            return None
+        value = _header_attribute_value(selected.value, function)
+        if isinstance(value, ast.ClassDef) and getattr(value, "_header_synthetic", False):
+            value._header_binding_name = name
+        return value
+    return None
 
 
 def _class_from_type_call(value, function=None):
@@ -203,6 +194,7 @@ def _class_from_type_call(value, function=None):
         decorator_list=[],
         type_params=[],
     )
+    built._header_synthetic = True
     ast.copy_location(built, namespace)
     for key, item in zip(namespace.keys, namespace.values):
         if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
@@ -245,20 +237,22 @@ def _read_attribute(value, attr, module, function, header):
             found = child.value
         else:
             continue
-        if header is not None and (child.lineno, child.col_offset) >= (
-            header.lineno,
-            header.col_offset,
-        ):
-            continue
         in_body = found
+    binding_name = (
+        getattr(value, "_header_binding_name", None)
+        if getattr(value, "_header_synthetic", False)
+        else value.name
+    )
     for store in _class_attribute_stores(module, header, function):
         last = store[-1]
+        if (last.lineno, last.col_offset) < (value.lineno, value.col_offset):
+            continue
         if any(
             isinstance(target, ast.Attribute)
             and target.attr == attr
             and isinstance(target.value, ast.Name)
-            and target.value.id == value.name
-            for target in getattr(last, "targets", ())
+            and target.value.id == binding_name
+            for target in getattr(last, "targets", [getattr(last, "target", None)])
         ):
             # An outside store of the same attribute shadows the class-body
             # one: it is later in the program and is what the header reads.
@@ -291,17 +285,22 @@ def _class_attribute_stores(module, before, function=None):
         nodes = scope.body if isinstance(scope, ast.Module) else _scope_body_nodes(scope)
         grouped = {}
         for statement in sorted(
-            (node for node in nodes if isinstance(node, ast.Assign)),
+            (node for node in nodes if isinstance(node, (ast.Assign, ast.AnnAssign))),
             key=lambda node: (node.lineno, node.col_offset),
         ):
-            if not isinstance(statement, ast.Assign):
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)) or statement.value is None:
                 continue
-            if before is not None and (statement.lineno, statement.col_offset) >= (
-                before.lineno,
-                before.col_offset,
+            if (
+                not isinstance(scope, ast.Module)
+                and before is not None
+                and (statement.lineno, statement.col_offset)
+                >= (
+                    before.lineno,
+                    before.col_offset,
+                )
             ):
                 continue
-            for target in statement.targets:
+            for target in getattr(statement, "targets", [getattr(statement, "target", None)]):
                 if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)):
                     continue
                 grouped.setdefault((target.value.id, target.attr), []).append(statement)
@@ -367,7 +366,27 @@ def _header_reference_setup_is_inert(module, function, bound, expression):
         for target in node.targets
         if isinstance(target, ast.Name)
     )
+    allowed_attribute_targets = {
+        target
+        for scope in (module, function)
+        for statement in scope.body
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        for target in getattr(statement, "targets", [getattr(statement, "target", None)])
+        if isinstance(target, ast.Attribute)
+    }
     for node in ast.walk(module):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and (
+                node not in allowed_attribute_targets
+                or not isinstance(node.value, ast.Name)
+                or not isinstance(
+                    _header_base_value(node.value.id, module, function, node), ast.ClassDef
+                )
+            )
+        ):
+            return False
         if isinstance(node, ast.Expr) and not (
             isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
         ):
