@@ -972,7 +972,27 @@ def _is_store_statement(node, function=None):
 
 
 def _elif_failure_predicate(test, values):
-    """Evaluate only a literal/name predicate at the proven assertion failure."""
+    """Evaluate only a literal/name predicate at the proven assertion failure.
+
+    #471. This used to answer ``Eq`` and ``NotEq`` and decline every other
+    comparison operator, so ``x < 0`` returned ``None`` -- "not readable".
+
+    That was safe for its original caller, which reads ``None`` as *decline the
+    claim*. It is not safe for a caller that reads ``None`` as *possibly true*,
+    which is what ``_break_reachable_with_failure`` does when it asks whether
+    a ``break`` under a guard can be reached at the failing value. A loop whose
+    only ``break`` sits under ``if x < 0:`` was then reported as skipping its
+    ``else`` at ``x == 1``, and a contract CPython swallows on every call was
+    certified enforced.
+
+    So the ordering operators are evaluated here rather than left to the caller's
+    interpretation. The operands are already resolved to concrete values above,
+    so this is the same comparison Python would perform, on the same values.
+
+    Mixed-type operands stay declined rather than raising: a ``TypeError`` from
+    ``1 < "a"`` is not a truth value, and guessing one would be worse than
+    declining.
+    """
     if isinstance(test, ast.Constant):
         return bool(test.value)
     if isinstance(test, ast.Name) and test.id in values:
@@ -991,8 +1011,22 @@ def _elif_failure_predicate(test, values):
             else:
                 return None
         left, right = resolved
-        if isinstance(test.ops[0], ast.Eq):
-            return left == right
-        if isinstance(test.ops[0], ast.NotEq):
-            return left != right
+        operator = type(test.ops[0])
+        try:
+            if operator is ast.Eq:
+                return left == right
+            if operator is ast.NotEq:
+                return left != right
+            if operator is ast.Lt:
+                return left < right
+            if operator is ast.LtE:
+                return left <= right
+            if operator is ast.Gt:
+                return left > right
+            if operator is ast.GtE:
+                return left >= right
+        except TypeError:
+            # An unorderable pair has no truth value Python would compute, and
+            # the assert under test cannot be evaluated against it either.
+            return None
     return None

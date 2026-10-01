@@ -12087,6 +12087,21 @@ def test_a_decided_inner_arm_still_depends_on_a_conditional_outer_else(inner_arm
         ("cs = contextlib.nullcontext()", "x == 1", True),
         ("cs = contextlib.nullcontext()", "not x", False),
         ("cs = contextlib.nullcontext()", "x != 1", False),
+        # #471. The ordering operators. These were declined outright, which was
+        # safe while `None` only ever meant "decline the claim" -- and stopped
+        # being safe once a caller read `None` as "possibly true". The pairs
+        # below are the ones that disagree with each other, so a repair that
+        # simply declined every ordering comparison would fail half of them:
+        # at the failing value `x == 1`, `x < 2` holds and skips the suppressor
+        # (live), while `x > 2` does not and swallows it (dead).
+        ("cs = contextlib.nullcontext()", "x < 2", True),
+        ("cs = contextlib.nullcontext()", "x > 2", False),
+        ("cs = contextlib.nullcontext()", "x <= 1", True),
+        ("cs = contextlib.nullcontext()", "x > 1", False),
+        ("cs = contextlib.nullcontext()", "x >= 1", True),
+        ("cs = contextlib.nullcontext()", "x < 1", False),
+        ("cs = contextlib.nullcontext()", "x <= 0", False),
+        ("cs = contextlib.nullcontext()", "x >= 0", True),
         ("", "x", False),
         ("cs = None", "x", False),
         ("cs = 1", "x", False),
@@ -12095,6 +12110,11 @@ def test_a_decided_inner_arm_still_depends_on_a_conditional_outer_else(inner_arm
         ("cs = contextlib.nullcontext(1, 2)", "x", False),
         ("cs = contextlib.suppress(AssertionError)\n    cs = contextlib.nullcontext()", "x", True),
         ("cs = contextlib.nullcontext()\n    cs = contextlib.suppress(AssertionError)", "x", False),
+        # An ordering comparison Python itself cannot evaluate has no truth
+        # value to report, and the assert under test cannot be evaluated against
+        # one either. Declining is the only honest answer, and it must not
+        # raise out of the predicate.
+        ("cs = contextlib.nullcontext()", 'x < "a"', False),
     ),
 )
 def test_elif_suppression_resolution_requires_an_enterable_failing_skipped_path(
