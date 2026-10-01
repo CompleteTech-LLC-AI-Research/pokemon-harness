@@ -12149,6 +12149,68 @@ LOOP_ELSE_SUPPRESSOR_SHAPES = (
 )
 
 
+#: #451 as the issue *filed* it: the module is imported **inside the
+#: function**, not at module scope.  The first version of this repair pinned
+#: only the module-level spelling, so the filed fixture kept reporting dead
+#: and the issue stayed open -- the exact hazard this repository's ground-truth
+#: rule exists to catch.  These rows use the filed spelling verbatim.
+#:
+#: `import contextlib` is transparent to the witness: it binds the same module
+#: root `_resolves_to` already follows, and introduces no value, branch, or
+#: ordering that could settle `cs`.  The witnesses accept it; the rows below
+#: pin that, in both the live and the declined direction, so the acceptance
+#: cannot quietly widen into a false-LIVE.
+FUNCTION_LOCAL_IMPORT_SHAPES = (
+    # -- The filed fixture. `break` is unconditional, so the `else` never runs
+    #    and the carried `nullcontext` is what the header enters.
+    (
+        "451 filed: function-local import, a break skips the loop else",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    (
+        "451 filed: function-local import, while/else",
+        "while True:",
+        "        break",
+        True,
+    ),
+    # -- The live correlation under the filed spelling: the break's guard and
+    #    the assert's condition are the same predicate, but a call needs only
+    #    one of them, so the break is still reachable where the assert fails.
+    (
+        "451 filed: local import, the break guard matches the failure",
+        "for item in (1,):",
+        "        if x:\n            break",
+        True,
+    ),
+    # -- Declined under the filed spelling. The guard names the assert's own
+    #    condition, so the `else` binds precisely the failing calls and
+    #    swallows every one. Answering live here would be a false-LIVE, and
+    #    this row is what stops the import acceptance from becoming one.
+    (
+        "451 control: local import, guard naming the assert is exclusive",
+        "for item in (1,):",
+        "        if x != 1:\n            break",
+        False,
+    ),
+    (
+        "451 control: local import, the break excludes every failing call",
+        "for item in (1,):",
+        "        if x == 0:\n            break",
+        False,
+    ),
+    # -- No `break`: the loop completes normally, so the `else` always runs and
+    #    the suppressor really is installed on every call.
+    (
+        "451 control: local import, no break so the else always runs",
+        "for item in (1,):",
+        "        pass",
+        False,
+    ),
+)
+
+
 @pytest.mark.parametrize(
     ("label", "loop", "body", "assert_is_live"),
     LOOP_ELSE_SUPPRESSOR_SHAPES,
@@ -12214,6 +12276,72 @@ def test_a_loop_else_suppressor_is_live_when_a_break_skips_it(label, loop, body,
         f"`else` runs only when the loop completes without a `break`, so a "
         f"suppressor bound there is installed on the calls that break and not "
         f"on the rest."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "loop", "body", "assert_is_live"),
+    FUNCTION_LOCAL_IMPORT_SHAPES,
+    ids=[row[0] for row in FUNCTION_LOCAL_IMPORT_SHAPES],
+)
+def test_a_loop_else_suppressor_is_live_under_a_function_local_import(
+    label, loop, body, assert_is_live
+):
+    """#451 as filed: `import contextlib` is **inside** the function.
+
+    The filed fixture is
+
+        def outer(x):
+            import contextlib
+            cs = contextlib.nullcontext()
+            for item in (1,):
+                break
+            else:
+                cs = contextlib.suppress(AssertionError)   # SKIPPED
+            with cs:
+                assert x != 1
+
+    Executed on CPython 3.12 the assert **fires**, so the correct verdict is
+    live.  This spelling is the reason the issue was filed, and a repair that
+    pins only the module-level import leaves it dead -- a false-DEAD in the
+    damaging direction, on the exact fixture the issue names.
+
+    A function-local import is transparent to the witness: it binds the same
+    module root the witness already resolves through, and it introduces no
+    value, branch, or ordering that could settle `cs`.  The repair therefore
+    admits an import that binds exactly that root, and only that root -- an
+    alias, a dotted import of a different root, or a `from ... import` of the
+    leaf all still decline, because each of those rebinds something other than
+    the name the witness reads.
+
+    Every row is executed across `x in (0, 1)` before the analyzer's verdict is
+    compared, so CPython decides the row.  The declined rows are what stop this
+    acceptance from widening into a false-LIVE.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        f"    {loop}\n"
+        f"{body}\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. The filed "
+        f"fixture imports contextlib inside the function; that import binds the "
+        f"same root the witness resolves through and must not defeat the "
+        f"correlated loop-else witness."
     )
 
 
