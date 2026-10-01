@@ -15486,9 +15486,30 @@ TRY_UNKNOWN_IMPORT_RUNTIME_ROWS = (
 @pytest.mark.parametrize(
     ("label", "preamble", "carrier", "arm", "runtime_live"), TRY_UNKNOWN_IMPORT_RUNTIME_ROWS
 )
-def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
+def test_try_unknown_import_above_the_loop_else_is_transparent(
     label, preamble, carrier, arm, runtime_live
 ):
+    """#485. The filed case is a *live* contract, not a recorded decline.
+
+    These three rows previously asserted ``_is_enforced(...) is False`` and were
+    carried as "known declines" by #491, on the reasoning that whether the
+    import succeeds is not a source question. The execution was retained and
+    always said otherwise: ``nope_missing_xyz`` raises
+    ``ModuleNotFoundError``, the handler catches it, control continues past the
+    ``try``, the ``break`` skips the ``else`` that would have installed the
+    suppressor, and the assert fires. So the decline certified a contract that
+    really enforces as defeated, which is #308 criterion 1's damaging
+    direction.
+
+    The repair drops the ambient-importability probe and keeps the
+    source-level guards that are actually load-bearing:
+    :func:`_import_only_binds_the_resolved_root` (the statement binds no name
+    the witness resolves through) plus a handler whose type is a real,
+    unshadowed builtin covering ``ImportError``, with every handler, ``else``
+    and ``finally`` arm inert. ``test_try_witness_requires_every_reachable_arm_
+    to_resume`` and ``test_try_witness_declines_opaque_helper_even_when_one_
+    call_is_harmless`` are the controls that hold that line.
+    """
     source = (
         "import contextlib\ndef outer(x, flag, helper):\n"
         + preamble
@@ -15501,6 +15522,199 @@ def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
     module = ast.parse(source)
     function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
-    # Original CPython fixtures are live; arbitrary initialization is unproved.
+    # The execution sweep above is the ground truth: the assert really does
+    # fire, so the rule must agree rather than record a decline.
     assert runtime_live is True
-    assert _is_enforced(function, target, module) is False
+    assert _is_enforced(function, target, module) is True
+
+
+#: #485. The boundary of the repair. Each row is a ``try`` placed above the
+#: loop-else witness, and each is judged on *executed* ground truth swept over
+#: the fixture's whole domain -- ``fires`` is whether any input raises
+#: ``AssertionError``, and ``enforced`` is what the rule must answer.
+#:
+#: The five ``reached`` rows are the ones the repair newly admits. The seven
+#: ``stopped`` rows are the controls that keep it honest: in every one of them
+#: control genuinely does *not* reach the header, so the assert really is
+#: defeated and the rule must keep saying so. Admitting any of those would be
+#: certifying a swallowed assert as enforced, which is the false-LIVE direction
+#: #491 was right to be cautious about.
+TRY_ABOVE_LOOP_ELSE_BOUNDARY_ROWS = (
+    # --- newly admitted: the failure is caught and control resumes ---
+    (
+        "reached a missing import caught by ImportError",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import caught by a bare except",
+        "    try:\n        import nope_missing_xyz\n    except:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import caught by a superset handler",
+        "    try:\n        import nope_missing_xyz\n    except BaseException:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a from-import of an unrelated module",
+        "    try:\n        from json import loads\n    except ImportError:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import behind a nested admitted try",
+        (
+            "    try:\n        try:\n            import nope_missing_xyz\n"
+            "        except ImportError:\n            pass\n"
+            "    except Exception:\n        pass\n"
+        ),
+        True,
+    ),
+    # --- controls: control does not reach the header, so the assert is dead ---
+    (
+        "stopped an uncaught missing import",
+        "    try:\n        import nope_missing_xyz\n    except ValueError:\n        pass\n",
+        False,
+    ),
+    (
+        "stopped a handler that returns",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        return\n",
+        False,
+    ),
+    (
+        "stopped a handler that re-raises",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        raise ValueError\n",
+        False,
+    ),
+    (
+        "stopped a finally that returns",
+        (
+            "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n"
+            "    finally:\n        return\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "preamble", "enforced"), TRY_ABOVE_LOOP_ELSE_BOUNDARY_ROWS)
+def test_try_above_loop_else_boundary(label, preamble, enforced):
+    """#485. Only a ``try`` that really lets control reach the header is admitted.
+
+    Each row is executed over the fixture's whole domain before the rule is
+    consulted, so the expectation is a measurement rather than a restatement
+    of the implementation. A ``reached`` row fires the assert on some input
+    and must be reported enforced; a ``stopped`` row never fires -- it raises
+    something else, returns before the header, or is swallowed -- and must be
+    reported defeated.
+    """
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    fired, other = [], []
+    for value in (0, 1, 2, -1):
+        try:
+            namespace["outer"](value, True, None)
+        except AssertionError:
+            fired.append(value)
+        except BaseException as error:  # noqa: BLE001 - any failure is recorded
+            other.append((value, type(error).__name__))
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is enforced, label
+    # Admitting a row is only sound while the assert genuinely fires, and
+    # declining one only while the header is not reached with a live assert.
+    assert bool(fired) is enforced, f"{label}: fired={fired} other={other}"
+    # A `stopped` row has to be stopped for a reason the row describes. Every
+    # one of them stops by raising something else or by returning, never by
+    # returning cleanly past a suppressor that is actually installed.
+    if not enforced:
+        assert fired == [], f"{label}: fired={fired}"
+
+
+#: #485. Forms that sit just outside the repair and are **not** resolved by it.
+#: Each is recorded with its executed ground truth and the verdict the rule
+#: actually returns on unfixed master, so the boundary is documented rather
+#: than assumed. Two of them are false-DEAD and one is a tolerated false-LIVE;
+#: none is introduced or worsened by this repair, and
+#: ``test_485_does_not_change_these_neighbouring_forms`` proves that by running
+#: the identical table against the pre-repair rule.
+TRY_ABOVE_LOOP_ELSE_NEIGHBOURING_ROWS = (
+    (
+        "a named handler target is not yet admitted",
+        "    try:\n        import nope_missing_xyz\n    except ImportError as exc:\n        pass\n",
+        False,
+        True,
+    ),
+    (
+        "an import shadowing the walked root is refused, and the fixture never runs",
+        "    try:\n        import fake as contextlib\n    except ImportError:\n        pass\n",
+        True,
+        False,
+    ),
+    (
+        "an opaque helper call is not admitted",
+        "    try:\n        helper()\n    except Exception:\n        pass\n",
+        False,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "enforced", "fires"), TRY_ABOVE_LOOP_ELSE_NEIGHBOURING_ROWS
+)
+def test_485_records_neighbouring_forms_without_claiming_them(label, preamble, enforced, fires):
+    """#485. Neighbouring forms this repair does not resolve, stated as rows.
+
+    The repair is scoped to the filed missing-import case, where a caught
+    failed import demonstrably lets control reach the header. Three nearby
+    forms are *not* resolved, and each of them is a real divergence in one
+    direction or the other:
+
+    * a named handler target (``except ImportError as exc``) really does let
+      control continue, so refusing it is a false-DEAD;
+    * an import that shadows the walked ``contextlib`` root is correctly
+      refused, but the fixture then raises ``UnboundLocalError`` before the
+      header, so the rule answers "enforced" for a body it never reaches;
+    * an opaque ``helper()`` call really does let control continue when the
+      callback is harmless, so refusing it is a false-DEAD -- the row #491
+      kept for exactly that reason.
+
+    They are pinned here so the repair cannot quietly widen past the case it
+    was filed for, and so the next lane starts from measurements rather than
+    from the absence of a table.
+    """
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    fired, other = [], []
+    for value in (0, 1, 2, -1):
+        try:
+            namespace["outer"](value, True, None)
+        except AssertionError:
+            fired.append(value)
+        except BaseException as error:  # noqa: BLE001 - any failure is recorded
+            other.append((value, type(error).__name__))
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is enforced, label
+    assert bool(fired) is fires, f"{label}: fired={fired} other={other}"

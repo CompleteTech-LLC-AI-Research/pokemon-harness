@@ -26,12 +26,56 @@ def _try_only_binds_names_the_witness_ignores(node, function, bound):
             if not _try_only_binds_names_the_witness_ignores(child, function, bound):
                 return False
             continue
-        if not _import_only_binds_the_resolved_root(
-            child, function, bound
-        ) or not _witness_import_has_readable_failure(child):
+        if not _import_only_binds_the_resolved_root(child, function, bound):
             return False
-        # This follows the existing transparent-import contract. A readable
-        # failed import must be caught; narrower or unreadable handlers decline.
+        # #485. Whether the *import* fails is not a source question, so the
+        # earlier `_witness_import_has_readable_failure` gate refused every
+        # module it could not prove importable and left the filed
+        # missing-import case declined. That refusal is the damaging
+        # direction: the witness below is asking "does this ``try`` let control
+        # reach the loop-else carrying the manager", and a caught failed import
+        # does let it, whether the module exists or not.
+        #
+        #     try:
+        #         import nope_missing_xyz
+        #     except ImportError:
+        #         pass
+        #     cs = contextlib.nullcontext()
+        #     for item in (1,):
+        #         break                        # the else never runs
+        #     else:
+        #         cs = contextlib.suppress(AssertionError)
+        #     with cs:
+        #         assert x != 1
+        #
+        # `nope_missing_xyz` raises `ModuleNotFoundError`, the handler catches
+        # it, and execution continues -- so `cs` is still the `nullcontext`,
+        # the header is entered, and the assert **fires** for `x == 0`. The
+        # analyzer reported it defeated, which is #308 criterion 1.
+        #
+        # So the gate is now the same one every other import admits:
+        # `_import_only_binds_the_resolved_root` above has already proved the
+        # statement binds no name this witness resolves through, which is the
+        # only way an import could change what the ``with`` enters. The retired
+        # gate instead hard-coded `import contextlib`, so it admitted a
+        # *module name* rather than answering the question the witness asks --
+        # and "is this module readable" is not a source property at all: the
+        # import may fail, the handler may catch it, and control may still
+        # reach the header, which is the case this issue is about.
+        #
+        # The two guards left in place are what make that safe, and neither is
+        # about the module: a failed import must be *caught* by a handler whose
+        # type is a real, unshadowed builtin, and every handler, ``else`` and
+        # ``finally`` arm must be inert. An uncaught failure, a narrowed
+        # handler, or an arm that returns or raises still stops control
+        # reaching the header, and those rows keep the existing defeated
+        # answer. The shadowing spellings are refused by the
+        # `_import_only_binds_the_resolved_root` call, not here: those bind a
+        # walked root, and admitting them would be a false-LIVE.
+        #
+        # The import need only be *caught when it fails*, which is why the
+        # check below asks the handler set to cover `ImportError` rather than
+        # to match one specific exception.
         if not any(any(issubclass(ImportError, kind) for kind in types) for types in handlers):
             return False
     return True
@@ -81,16 +125,3 @@ def _witness_try_handler_types(handler, function):
             return None
         result.append(kind)
     return tuple(result)
-
-
-def _witness_import_has_readable_failure(node):
-    """Only the canonical contextlib import has a source-readable contract.
-
-    Unknown module initializers may mutate the walked manager roots or raise
-    outside the handler. Current module availability is not a source proof.
-    """
-    return (
-        isinstance(node, ast.Import)
-        and bool(node.names)
-        and all(alias.name == "contextlib" for alias in node.names)
-    )
