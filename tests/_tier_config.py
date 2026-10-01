@@ -252,6 +252,7 @@ UNIT_MODULES = frozenset(
         "test_sentinel_nonlocal_captures.py",
         "test_sentinel_exception_exit_backlog.py",
         "test_sentinel_literal_import_provenance.py",
+        "test_sentinel_match_store_dominance.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_remote_facade.py",

@@ -5616,6 +5616,148 @@ def test_a_nonlocal_capture_binds_the_enclosing_function(label, nested, verdict,
     )
 
 
+#: #399. A `match` capture is only a binding while it is the most recent
+#: write. A store written below it in the same clause overwrites it, so the
+#: capture cannot be the value a later `with` header reads.
+#:
+#: The capture and that store share one top-level `match` statement, so
+#: `_binding_order` gives them the same key and the capture was counted as a
+#: competing binding. The name was recorded `AMBIGUOUS`, which downstream reads
+#: as "may be a suppressor" — so a header CPython enters happily was reported
+#: defeated. That is the damaging direction under #308 criterion 1.
+#:
+#: Rows are executed. `verdict` is the analyzer's answer; `runtime_live` is
+#: what CPython did, so no row can be satisfied by a static expectation.
+MATCH_CAPTURE_SHADOWED_ROWS = (
+    # The filed shape. The capture binds the literal `1`, the store below it
+    # rebinds to a real `nullcontext`, and `with cs:` is entered, so the assert
+    # FIRES and the header is live.
+    (
+        "a capture shadowed by a later store is not the value in force",
+        (
+            "    match [1]:\n"
+            "        case [cs]:\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+        True,
+    ),
+    # Same defect with the shadowing store nested one level down. The store is
+    # conditional, so the `flag=False` path still reads the captured `1` — but
+    # the *contract* is live because CPython can reach a firing call, and the
+    # analyzer returns one verdict per AST, so the ambiguity marker is the only
+    # answer available and it is the one that drops the contract.
+    (
+        "a capture shadowed by a later store inside a branch",
+        (
+            "    match [1]:\n"
+            "        case [cs]:\n"
+            "            if flag:\n"
+            "                cs = contextlib.nullcontext()\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+        True,
+    ),
+    # Controls. These must NOT change: the capture is still the value in
+    # force, and both are genuinely swallowed.
+    (
+        "CONTROL an unshadowed capture of a suppressor is still swallowed",
+        (
+            "    match [contextlib.suppress(AssertionError)]:\n"
+            "        case [cs]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        False,
+        False,
+    ),
+    (
+        "CONTROL a capture shadowed by a suppressor is still swallowed",
+        (
+            "    match [1]:\n"
+            "        case [cs]:\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        False,
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "clause", "verdict", "runtime_live"),
+    MATCH_CAPTURE_SHADOWED_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_SHADOWED_ROWS],
+)
+def test_a_capture_shadowed_by_a_later_store_is_not_the_value_in_force(
+    label, clause, verdict, runtime_live
+):
+    """A `match` capture that a later store overwrites cannot bind the header.
+
+    This is #399. A capture is a write like any other, so it holds the name
+    only until the next write. Once a store below it in the same clause has run,
+    the captured value is gone and the `with` header reads the store's value:
+
+        match [1]:
+            case [cs]:
+                cs = contextlib.nullcontext()   # overwrites the capture
+                with cs:                      # `cs` is the nullcontext
+                    assert x != 1             # fires
+
+    Measured on unfixed master `a5cece2`, analyzer `False` against runtime
+    **live**. `False` here is the damaging direction: the sentinel suite stops
+    counting an assert that still holds, so a defeated contract and a live one
+    become indistinguishable in the enforced set.
+
+    The fix compares the *source position* of the binding statements rather
+    than :func:`_binding_order`. The capture and the store that shadows it live
+    inside the same top-level `match` statement, so the order key ties by
+    construction and cannot separate them; a store in a clause body is written
+    after the `match` that owns the capture, which line and column can see.
+
+    Two captures of one name keep the ambiguity marker — which clause ran is a
+    runtime fact, so the value stays undecidable. The control rows pin that the
+    `AMBIGUOUS` answer survives everywhere it is still correct.
+    """
+    source = "def outer(x, flag, helper):\n    import contextlib\n" + clause
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+
+    live = False
+    for probe_x in (0, 1, 2, -1):
+        for probe_flag in (True, False):
+            try:
+                namespace["outer"](probe_x, probe_flag, None)
+            except AssertionError:
+                live = True
+                break
+            except (TypeError, UnboundLocalError, NameError):
+                continue
+            else:
+                continue
+        if live:
+            break
+    assert live is runtime_live, (
+        f"{label}: CPython fires the assert on some input "
+        f"{'and the row says it should' if live else 'and the row says it should not'}"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [verdict], (
+        f"{label}: expected verdicts {[verdict]}, got {results}. A capture that a "
+        f"later store overwrites cannot be the value the header reads."
+    )
+
+
 #: #359: the binding forms whose right-hand side is an *element* of a
 #: container, or a loop's next element, rather than the whole value.
 #:
