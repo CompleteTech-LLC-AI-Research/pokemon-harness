@@ -18,6 +18,13 @@ def _exit_return_is_known_truthy_for_failure(function, owner=None):
     proof requires a plain module-owned class with no constructors, protocol
     writes, decorated members or opaque evaluated expressions in the supplied
     module, exactly one assertion and only owned context-manager entries.
+
+    This is a source proof with stable protocol function code during execution,
+    rather than a proof against external callers rewriting Python function
+    objects. A caller-supplied comparison object can replace the cached exit's
+    __code__ during the assertion; that unmodeled external mutation can turn a
+    predicted swallow into a firing assertion. The budget excludes that case
+    and does not claim universal soundness for arbitrary external objects.
     """
     if (
         function.decorator_list
