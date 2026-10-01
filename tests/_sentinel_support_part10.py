@@ -1341,6 +1341,7 @@ def _witness_module_roots(function, bound):
                 roots.add(head.id)
     return roots
 
+
 def _elif_witness_is_binding_header(node):
     """A ``with`` header whose only effect is binding the name it enters.
 
