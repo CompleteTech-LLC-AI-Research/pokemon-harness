@@ -250,6 +250,7 @@ UNIT_MODULES = frozenset(
         "test_sentinel_header_references.py",
         "test_sentinel_exception_exit_backlog.py",
         "test_sentinel_literal_import_provenance.py",
+        "test_sentinel_primitive_alias_paths.py",
         "test_timed_menu_milestones.py",
         "test_timed_remote.py",
         "test_timed_remote_facade.py",
