@@ -6,7 +6,6 @@ import pytest
 
 from tests import _timed_menu_milestone_sentinel_support as support
 
-
 CONTROLS = [
     (
         "builtins_list_before_other_if_binding",
