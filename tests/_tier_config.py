@@ -257,6 +257,7 @@ UNIT_MODULES = frozenset(
         "test_sentinel_primitive_alias_paths.py",
         "test_sentinel_builtin_entry_identity.py",
         "test_sentinel_starred_sibling_paths.py",
+        "test_sentinel_source_generator_paths.py",
         "test_sentinel_with_target_unpacking.py",
         "test_sentinel_entry_guard_contracts.py",
         "test_sentinel_structured_alias_paths.py",

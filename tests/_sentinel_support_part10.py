@@ -148,6 +148,8 @@ def _is_enforced(function, target, tree=None):
         return False
     if _known_starred_binding_blocks_query(function, target, owning):
         return False
+    if _known_generator_swallows_query(function, target, owning):
+        return False
     if _starred_binding_has_failure_witness(function, target, owning):
         return True
     if _primitive_alias_failure_path(function, target, owning):
