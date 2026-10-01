@@ -584,11 +584,11 @@ def _literal_runtime_type(value, function=None):
     #
     # The question is asked of the real ``builtins`` module rather than of a
     # kept list of names, for the reason the probe table is: a list would have
-    # to be right about all 157 exported names, and a miss is a wrong verdict
+    # to be right about every exported name, and a miss is a wrong verdict
     # about a real contract. Nothing here enumerates them; the interpreter
-    # answers "does this object have ``__enter__``" and the name is recorded
-    # under the *type of the object it names*, so a kind the probe table has
-    # never seen still declines through `_runtime_kind_can_enter`.
+    # answers "what is this object's type, and can *that* be entered" and the
+    # name is recorded under the *type of the object it names*, so a kind the
+    # probe table has never seen still declines through `_runtime_kind_can_enter`.
     if isinstance(value, ast.Name) and not _callee_is_shadowed(value, function):
         return _bare_builtin_object_kind(value.id)
     return None
@@ -616,11 +616,6 @@ def _bare_builtin_object_kind(name):
         obj = getattr(builtins, name)
     except (AttributeError, ImportError):
         return None
-    if hasattr(obj, "__enter__"):
-        # `memoryview` is the sole bare builtin that *can* be entered. Naming
-        # the kind here would route a genuinely-enterable header through the
-        # dead path, so it is declined and the assert stays live.
-        return None
     if isinstance(obj, type):
         # A *class object* is reported under a kind of its own rather than as
         # ``type``. Whether a class can be entered is decided by its
@@ -631,7 +626,33 @@ def _bare_builtin_object_kind(name):
         # already proves the locally-defined half separately, and collapsing
         # both onto one ``type`` kind would let a probed builtin class answer
         # for a local class that has a live metaclass protocol.
+        #
+        # So the enterability question is asked of ``type(obj)`` and not of
+        # ``obj``. Asking it of ``obj`` was wrong in the damaging direction:
+        # ``memoryview`` is the one exported builtin whose *class object*
+        # carries ``__enter__``, because ``memoryview.__enter__`` is the
+        # instance-level context-manager method. CPython entered the *class*
+        # and raised before the body --
+        #
+        #     >>> with memoryview as v: ...
+        #     TypeError: 'type' object does not support the context manager protocol
+        #
+        # -- so the assert under the header is unreachable, while the
+        # instance spelling ``m = memoryview(b"xy")`` really is enterable and
+        # must stay live. The old ``hasattr(obj, "__enter__")`` gate could not
+        # tell those two apart and declined both, reporting the unreachable
+        # one as enforced. Every bare builtin class has the builtin ``type``
+        # as its metaclass, so asking ``type`` settles all 95 of them at once.
+        if hasattr(type(obj), "__enter__"):
+            return None
         return "builtin_class"
+    # A non-class builtin is entered as itself, so this object *is* the one
+    # ``__enter__`` is looked up on. Nothing currently exported answers this
+    # branch, and asking the interpreter rather than keeping a list is what
+    # keeps that from being an assumption: a future singleton that does
+    # implement the protocol still declines, and its header stays live.
+    if hasattr(obj, "__enter__"):
+        return None
     return type(obj).__name__
 
 

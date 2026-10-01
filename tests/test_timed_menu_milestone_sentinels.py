@@ -15594,6 +15594,40 @@ WALRUS_NAME_ENTRY_SHAPES = (
     #    are unenterable and both are reported dead. Only the *call* spelling
     #    can return a context manager, which is why the shadowing control
     #    above is the one that matters.
+    # -- #464 residual, second pass. Entering a *class object* is decided by
+    #    its metaclass, not by the class, and `memoryview` is the one exported
+    #    builtin whose class object carries `__enter__`:
+    #
+    #        >>> hasattr(memoryview, "__enter__")     # True -- an INSTANCE method
+    #        >>> hasattr(type(memoryview), "__enter__")  # False -- metaclass `type`
+    #        >>> with memoryview as v: ...
+    #        TypeError: 'type' object does not support the context manager protocol
+    #
+    #    So the header raises before the body and the assert is unreachable,
+    #    while the *instance* spelling in the control below really is
+    #    enterable. Reading `hasattr(obj, "__enter__")` off the name's own
+    #    value cannot separate the two and declined both, so this row was a
+    #    false-LIVE. It runs on the executed oracle precisely because CPython
+    #    *can* adjudicate it -- which is what the previous pin, asserted
+    #    directly against the analyzer, failed to establish.
+    (
+        "464 residual: a bare builtin class object is entered by its metaclass",
+        "",
+        "    m = memoryview\n",
+        "m",
+        False,
+    ),
+    # -- The control that decides the repair above is *narrow*: only the
+    #    class-object spelling is unenterable. An instance of the same class
+    #    implements the protocol and CPython enters it, so the assert is live.
+    #    A rule that asked the metaclass for both would report this defeated.
+    (
+        "464 control: a memoryview instance is genuinely enterable",
+        "",
+        "    m = memoryview(b'xy')\n",
+        "m",
+        True,
+    ),
 )
 
 
@@ -15661,17 +15695,6 @@ def test_a_walrus_header_named_to_an_unenterable_value_is_not_a_live_assert(
 WALRUS_NAME_ENTRY_DECLINES = (
     ("a parameter is chosen by the caller", "helper", "live or TypeError, per call site"),
     ("a genuinely unbound name", "mystery", "NameError on entry"),
-    # #464 residual. `memoryview` is the *only* bare builtin that implements
-    # `__enter__` -- checked across all 157 exported names -- so the repair
-    # declines it rather than routing an enterable header through the dead
-    # path. It is pinned here rather than swept because it needs a store to
-    # be reached, and a swept fixture would need a value CPython cannot choose
-    # on this row's behalf.
-    (
-        "the one bare builtin that can be entered",
-        "m",  # bound by the local store below
-        "memoryview enters; the assert is live",
-    ),
     # #464 residual. A *parameter* named for a builtin is the other way a
     # bare name stops being the builtin, and it is the one a body-only walk
     # cannot see -- the signature binds the name for the whole call:
@@ -15698,22 +15721,13 @@ WALRUS_NAME_ENTRY_DECLINES = (
         for label, value, executed in WALRUS_NAME_ENTRY_DECLINES[:2]
     ]
     + [
-        # `memoryview` is bound by a real local store, so the name resolves and
-        # the *value* decides: the header is entered and the assert is live.
-        (
-            WALRUS_NAME_ENTRY_DECLINES[2][0],
-            "m",
-            WALRUS_NAME_ENTRY_DECLINES[2][2],
-            "x, flag, helper",
-            "    m = memoryview\n",
-        ),
         # A parameter named `int` binds the name for the whole call, so the
         # body's `m = int` reads the caller's object. Nothing in the body
         # rebinds it, which is exactly the case a body-only shadow walk misses.
         (
-            WALRUS_NAME_ENTRY_DECLINES[3][0],
+            WALRUS_NAME_ENTRY_DECLINES[2][0],
             "m",
-            WALRUS_NAME_ENTRY_DECLINES[3][2],
+            WALRUS_NAME_ENTRY_DECLINES[2][2],
             "x, flag, helper, int=None",
             "    m = int\n",
         ),
