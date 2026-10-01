@@ -1006,6 +1006,14 @@ def _elif_failure_predicate(test, values):
     objects, including mixed types -- so it is fully determined once both
     operands resolve and needs no ``TypeError`` arm of its own. ``is not`` is
     its complement, not ``not is``.
+
+    #479 residual. ``In`` and ``NotIn`` join for the same reason. Membership is
+    #total over a literal container of resolved values -- ``1 in [0]`` is
+    #``False`` rather than an error -- so once the left operand and the
+    #container's elements are known the answer is decided. It is *not* total
+    #for an arbitrary container (``in`` can raise from a custom ``__contains__``
+    #or from a missing key on a ``dict``), so only a container the analyzer can
+    #read element by element is answered; anything else still declines.
     """
     if isinstance(test, ast.Constant):
         return bool(test.value)
@@ -1014,7 +1022,11 @@ def _elif_failure_predicate(test, values):
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         value = _elif_failure_predicate(test.operand, values)
         return None if value is None else not value
-    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and type(test.ops[0]) not in (ast.In, ast.NotIn)
+    ):
         operands = [test.left, test.comparators[0]]
         resolved = []
         for operand in operands:
@@ -1047,4 +1059,28 @@ def _elif_failure_predicate(test, values):
             # An unorderable pair has no truth value Python would compute, and
             # the assert under test cannot be evaluated against it either.
             return None
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        operator = type(test.ops[0])
+        if operator not in (ast.In, ast.NotIn):
+            return None
+        container = test.comparators[0]
+        if isinstance(container, (ast.List, ast.Tuple, ast.Set)):
+            elements = container.elts
+        else:
+            return None
+        member = test.left
+        if isinstance(member, ast.Constant):
+            member_value = member.value
+        elif isinstance(member, ast.Name) and member.id in values:
+            member_value = values[member.id]
+        else:
+            return None
+        if not all(isinstance(element, ast.Constant) for element in elements):
+            return None
+        # Element-wise rather than `in`: this evaluates the same question Python
+        # would, without inheriting `__eq__` from any operand, and it cannot
+        # raise the way a custom `__contains__` can -- which is why an
+        # unreadable container still declines above rather than guessing here.
+        contained = any(member_value == element.value for element in elements)
+        return contained if operator is ast.In else not contained
     return None

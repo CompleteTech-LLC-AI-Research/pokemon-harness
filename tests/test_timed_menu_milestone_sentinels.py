@@ -12312,6 +12312,41 @@ LOOP_ELSE_SUPPRESSOR_SHAPES = (
         "        if x is 0:\n            break",
         False,
     ),
+    # -- #479 residual. Membership was declined for the same reason identity
+    #    was: `None` reached `_condition_can_hold` as "possibly true". `x in [0]`
+    #    decides False at the failing value `x == 1`, so the loop completes
+    #    normally, the `else` installs the suppressor, and the assert is
+    #    swallowed on every call.
+    (
+        "479 residual: a membership guard excludes every failing call",
+        "for item in (1,):",
+        "        if x in [0]:\n            break",
+        False,
+    ),
+    # -- A membership guard the failing value satisfies, and the reason
+    #    membership cannot be read as always-false. `x in (0, 1)` HOLDS at
+    #    `x == 1`, so there is a call that both breaks and fails, the `else` is
+    #    skipped, and the carried `nullcontext` is what the header enters.
+    #
+    #    The *inverted* spelling is the opposite and is deliberately absent:
+    #    `x not in (0, 1)` is False at `x == 1`, so the `else` runs and the
+    #    assert is swallowed -- it is the excluded-failure case, not a live one.
+    (
+        "479 residual live: a satisfied membership guard holds on a failing call",
+        "for item in (1,):",
+        "        if x in (0, 1):\n            break",
+        True,
+    ),
+    # -- A container the guard holds on, for the damaging direction from the
+    #    other side: `x in (0, 1)` is True at `x == 1`, so the break is reached
+    #    on the failing call and the `else` is skipped. Live, and a repair that
+    #    read membership as always-false would call this dead.
+    (
+        "479 residual live: membership against a tuple holds on a failing call",
+        "for item in (1,):",
+        "        if x in (0, 1, 2):\n            break",
+        True,
+    ),
 )
 
 
