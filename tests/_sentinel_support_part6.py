@@ -394,6 +394,161 @@ def _builtin_constructor_arguments_are_ignorable(func, call):
     return None
 
 
+def _walrus_name_entry_is_dead(value, by_index, index, function, bound, module):
+    """Is a walrus value that is a bare ``Name`` bound to something unenterable?
+
+    #464. ``with (cs := helper):`` enters whatever ``helper`` holds. When that
+    is a function object the header raises ``TypeError`` while it is being
+    evaluated -- before the body is entered -- so the assert under it never
+    runs. #390 fixed exactly this for the ``ast.Lambda`` spelling by reading
+    the entered value's own runtime type, but a bare ``ast.Name`` declines in
+    ``_literal_runtime_type`` and so kept the assert live. The entered object
+    is the same function object either way; only the spelling differs.
+
+    The name is resolved through the machinery this module already trusts for
+    every other store -- ``_stores_of`` for the function scope and
+    ``_module_stores`` for the module scope -- so a *parameter*, a *local
+    alias* and a *module constant* all answer from the binding actually in
+    force rather than declining. Each is then read for its runtime kind, which
+    is what decides entry.
+
+    The conservative direction is preserved in two places, and both matter:
+
+    * a name with no settled store here answers ``False``, keeping the assert
+      live. ``_stores_of`` also returns ``None`` for a name bound only
+      conditionally, and for one a later conditional store may have
+      superseded; those are all genuinely undecidable and stay live.
+    * a kind the interpreter cannot produce is refused by
+      :func:`_runtime_kind_can_enter`, which also declines.
+
+    Inverting either would trade this false-LIVE for false-DEADs, which is the
+    more damaging direction under #308 criterion 1 -- an unreadable name is
+    not evidence of an unenterable one.
+    """
+    if not isinstance(value, ast.Name):
+        return False
+    kind = _name_runtime_kind(value.id, by_index, index, function, module)
+    if kind is None:
+        # Unresolved, conditionally settled, or a spelling this cannot read.
+        # Declining keeps the assert live, which is the safe direction.
+        return False
+    return not _runtime_kind_can_enter(kind)
+
+
+def _name_runtime_kind(name, by_index, index, function, module, depth=0):
+    """The runtime kind ``name`` holds here, or ``None`` to decline.
+
+    Resolution walks the store the name is bound to and, when that store is
+    itself a plain ``Name`` (``h = helper``), follows the alias once more. The
+    walk is bounded by ``depth`` because an alias cycle -- two names each
+    bound to the other -- is undecidable rather than readable, and a cycle
+    must not be able to spin.
+
+    The parameter case declines. A parameter's value is chosen by the *caller*,
+    so the function body genuinely does not determine whether it is enterable,
+    and the filed ``def outer(x, helper)`` fixture is a caller-dependent
+    question. #464's rows that a parameter can answer are answered instead by
+    the caller-side rows below, which bind the value the parameter receives.
+    """
+    if depth > 4:
+        return None
+    if module is not None:
+        kind = _entry_kind_of_stores(_module_stores(name, module))
+        if kind is not None:
+            return kind
+        carriers = _carrier_runtime_kinds(module)
+        if name in carriers:
+            return carriers[name][1]
+        # `CS = _h` at module scope: follow the alias against the same module.
+        for entry in _settled_module_stores_of(name, module):
+            value = entry[1]
+            if isinstance(value, ast.Name):
+                followed = _name_runtime_kind(
+                    value.id, by_index, index, function, module, depth + 1
+                )
+                if followed is not None:
+                    return followed
+        # A local store may still shadow or rebind the name, so the module
+        # answer is a *fallback*, not a gate: `def outer(): cs = nullcontext()`
+        # shadows a module-level `cs` for the whole function body.
+        if _is_parameter_of(function, name):
+            return None
+    if _is_parameter_of(function, name):
+        return None
+    kind = _entry_kind_of_stores(_stores_of(name, by_index, index, function))
+    if kind is not None:
+        return kind
+    # A `def`/`class` in this scope is a carrier with a known kind, even though
+    # `_literal_runtime_type` declines a bare `Name`.
+    carriers = _carrier_runtime_kinds(function)
+    if name in carriers:
+        return carriers[name][1]
+    # `h = helper` -- follow the alias one step, through the same store map.
+    for entry in _settled_stores_of(name, by_index, index, function):
+        value = entry[1]
+        if isinstance(value, ast.Name):
+            return _name_runtime_kind(value.id, by_index, index, function, module, depth + 1)
+    return None
+
+
+def _settled_stores_of(name, by_index, index, function):
+    """The settled store entries binding ``name``, possibly empty."""
+    stores = _stores_of(name, by_index, index, function)
+    if not stores:
+        return []
+    entries = [stores] if isinstance(stores[0], ast.AST) else list(stores)
+    return [entry for entry in entries if isinstance(entry, tuple) and len(entry) == 3]
+
+
+def _settled_module_stores_of(name, module):
+    """The settled module-scope store entries binding ``name``."""
+    stores = _module_stores(name, module)
+    if not stores:
+        return []
+    entries = [stores] if isinstance(stores[0], ast.AST) else list(stores)
+    return [entry for entry in entries if isinstance(entry, tuple) and len(entry) == 3]
+
+
+def _is_parameter_of(function, name):
+    """Is ``name`` one of ``function``'s own parameters?"""
+    arguments = function.args
+    candidates = [
+        *getattr(arguments, "posonlyargs", []),
+        *arguments.args,
+        *arguments.kwonlyargs,
+    ]
+    if arguments.vararg is not None:
+        candidates.append(arguments.vararg)
+    if arguments.kwarg is not None:
+        candidates.append(arguments.kwarg)
+    return any(isinstance(candidate, ast.arg) and candidate.arg == name for candidate in candidates)
+
+
+def _entry_kind_of_stores(stores):
+    """The runtime kind the settled ``stores`` bind, or ``None`` to decline.
+
+    ``_stores_of``/``_module_stores`` answer with ``(statement, value,
+    conditional)`` entries whose value may be an expression, a recorded kind
+    string, or a marker. Anything that is not a single settled entry with a
+    readable runtime kind declines, which keeps the caller on the safe side.
+    """
+    if not stores:
+        return None
+    entries = [stores] if isinstance(stores[0], ast.AST) else list(stores)
+    if len(entries) != 1:
+        return None
+    entry = entries[0]
+    if not (isinstance(entry, tuple) and len(entry) == 3):
+        return None
+    _statement, value, conditional = entry
+    if conditional or value is _NOT_A_SUPPRESSOR or value is _RAISING_CONSTRUCTOR:
+        return None
+    if isinstance(value, str):
+        # A carrier: `_store_bindings` records the kind directly.
+        return value
+    return _literal_runtime_type(value)
+
+
 def _entry_is_dead(expression, by_index, index, function, bound, module=None):
     """Is the value this ``with`` header binds to ``expression`` unenterable?
 
@@ -456,7 +611,9 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         # The value is what is entered here and now; what `cs` holds on a
         # later line is a different store's question, answered by
         # `_stores_of` when that `with` is reached.
-        return _literal_entry_is_dead(expression.value)
+        return _literal_entry_is_dead(expression.value) or _walrus_name_entry_is_dead(
+            expression.value, by_index, index, function, bound, module
+        )
     if not isinstance(expression, ast.Name):
         return False
     name = expression.id
