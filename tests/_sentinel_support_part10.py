@@ -1085,6 +1085,93 @@ def _enclosing_conditions(node, loop):
     return conditions
 
 
+def _import_only_binds_the_resolved_root(node, function, bound):
+    """Is this a plain import of the module root the witness reads through?
+
+    #451. The filed fixture imports `contextlib` inside the function:
+
+        def outer(x):
+            import contextlib
+            cs = contextlib.nullcontext()
+            for item in (1,):
+                break
+            else:
+                cs = contextlib.suppress(AssertionError)
+            with cs:
+                assert x != 1
+
+    `import contextlib` is transparent to the witness: it binds the module
+    root that `_resolves_to` already follows to reach `contextlib.nullcontext`
+    and `contextlib.suppress`, and it introduces no value, no branch, and no
+    ordering that could settle the name under test.
+
+    Everything else stays rejected, because each of these can change what the
+    header actually enters:
+
+    * an alias (`import contextlib as cl`) rebinds a *different* name, so the
+      root the witness resolves through is untouched and the statement says
+      nothing about it -- but it is also not the filed spelling, so declining
+      it only costs coverage, never correctness;
+    * `import contextlib.nullcontext` binds a *different* root than the one
+      the witness resolves through, and would shadow the attribute path;
+    * `from contextlib import nullcontext` binds the leaf, not the root;
+    * any binding of a name that is later stored to, or that shadows the root,
+      is refused by the checks below;
+    * a relative import (`level > 0`) resolves against a package this witness
+      knows nothing about.
+
+    A dotted import whose root matches is the one form that is provably
+    transparent, so only that is admitted.
+    """
+    if not isinstance(node, ast.Import):
+        return False
+    if not node.names:
+        return False
+    roots = []
+    for alias in node.names:
+        if alias.asname is not None:
+            # `import x as y` binds `y`, not the module root.  Not the filed
+            # spelling, and it tells us nothing about the resolved root.
+            return False
+        head, _, _ = alias.name.partition(".")
+        if not head:
+            return False
+        roots.append(head)
+    if len(set(roots)) != 1:
+        return False
+    root = roots[0]
+    # The import must not rebind a name the header or the manager path reads,
+    # and must not collide with a store anywhere in the scope: that would make
+    # the value the witness reasons about a different object at the header.
+    #
+    # The header's own `context_expr` is the *manager name* (`cs`), not the
+    # module root, so it cannot answer this question.  What matters is that
+    # the import does not shadow a name the witness reads: the module roots
+    # behind `contextlib.nullcontext` / `contextlib.suppress` in this scope.
+    # Binding the same root it already resolves through is therefore the
+    # transparent case, and binding anything else -- a different root, or a
+    # leaf -- is not.
+    return root in _witness_module_roots(function, bound)
+
+
+def _witness_module_roots(function, bound):
+    """Module roots the witness resolves `contextlib.*` calls through.
+
+    Anything the witness later has to attribute to the real `contextlib`
+    module is spelled as an attribute path in this scope, so the roots are
+    exactly the `ast.Name` nodes that heads such attribute chains.
+    """
+    roots = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Attribute):
+            head = node
+            while isinstance(head, ast.Attribute):
+                head = head.value
+            if isinstance(head, ast.Name):
+                roots.add(head.id)
+    return roots
+
+
 def _elif_witness_reaches_header(function, chain, query, bound):
     """Keep the small witness proof free of earlier exits or opaque effects."""
     header = next(
@@ -1107,6 +1194,21 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         return False
     for node in function.body[:chain_index]:
         if isinstance(node, ast.Pass):
+            continue
+        # #451's filed fixture binds `contextlib` with a *function-local*
+        # `import contextlib` rather than a module-level one.  That import is
+        # exactly as opaque as the module-level spelling it mirrors -- the
+        # witness resolves `contextlib.nullcontext` through the same root
+        # either way -- but a bare `ast.Import` is neither a `Pass` nor an
+        # `ast.Assign`, so the scan used to reject it and the witness never
+        # fired.  The result was the damaging direction: the filed fixture,
+        # whose assert really does fire, was reported dead.
+        #
+        # Accepting it unconditionally would be too permissive, because an
+        # import can rebind the very name the header resolves through.  Only an
+        # import that binds exactly the module root the witness already reads
+        # is transparent, so that is what is admitted here.
+        if _import_only_binds_the_resolved_root(node, function, bound):
             continue
         if not isinstance(node, ast.Assign) or not all(
             isinstance(target, ast.Name) for target in node.targets
