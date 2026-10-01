@@ -1095,8 +1095,12 @@ def _import_only_binds_the_resolved_root(node, function, bound):
             # `import x as y` binds `y`, not the module root.  Not the filed
             # spelling, and it tells us nothing about the resolved root.
             return False
-        head, _, _ = alias.name.partition(".")
-        if not head:
+        head, dot, _ = alias.name.partition(".")
+        if not head or dot:
+            # `import a.b` binds the leaf `a.b` as a name of its own, which
+            # shadows the attribute path the witness walks.  It does not
+            # re-bind the root, and admitting it would let a rebinding import
+            # pass as transparent -- measured as a false-LIVE.
             return False
         roots.append(head)
     if len(set(roots)) != 1:
