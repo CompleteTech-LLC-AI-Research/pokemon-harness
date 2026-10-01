@@ -76,6 +76,7 @@ _FRAGMENT_FILES = (
     "_sentinel_support_part26",
     "_sentinel_support_part27",
     "_sentinel_support_part28",
+    "_sentinel_support_part29",
 )
 
 # Each fragment is executed against *this* module's dict, so `globals()` inside any
