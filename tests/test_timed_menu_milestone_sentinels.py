@@ -14137,6 +14137,37 @@ LOOP_ELSE_IMPORT_SPELLINGS = (
         "contextlib.suppress(AssertionError)",
         True,
     ),
+    # -- #481. A nested `def` binds its own name and does nothing else at this
+    #    point: its body is not run, no value is produced, and nothing the
+    #    header enters can come from it. The pre-chain scan rejected the
+    #    *statement* -- it is neither a `Pass`, an `Assign`, nor an import --
+    #    so the witness never fired and this live assert was certified dead.
+    (
+        "481 a nested def before the header is transparent",
+        "    def inner():\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- The filed spelling, where the definition's body is itself an import.
+    #    That import is not what makes the row live; the definition is. It
+    #    matters because "the nested def contains an import" is the shape the
+    #    issue filed, and a fix that only handled the empty body would miss it.
+    (
+        "481 a nested def containing an import is transparent",
+        "    def inner():\n        import contextlib\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- A `class` body is not run either, so it is the same statement kind.
+    (
+        "481 a nested class before the header is transparent",
+        "    class Inner:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
 )
 
 
@@ -14163,6 +14194,16 @@ LOOP_ELSE_IMPORT_SHADOWS = (
         "    import contextlib\n    import contextlib.nullcontext as contextlib\n",
     ),
     ("a relative import of the root", "    from . import contextlib\n"),
+    # -- #481's boundary. A nested definition is transparent precisely because
+    #    it binds a *local* name, but a definition spelled with a walked root's
+    #    own name is a shadow wearing a definition's clothes: it rebinds
+    #    `contextlib` to a function object, so `contextlib.nullcontext()` in the
+    #    header raises and the witness must decline rather than resolve through
+    #    a root that is no longer the module.
+    (
+        "a nested def shadowing the walked root",
+        "    def contextlib():\n        pass\n",
+    ),
 )
 
 

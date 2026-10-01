@@ -1588,6 +1588,29 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         if not isinstance(node, ast.Assign) or not all(
             isinstance(target, ast.Name) for target in node.targets
         ):
+            # #481. A nested `def`/`class` binds its own name and does nothing
+            # else at this point: the body is not run, no value is produced, and
+            # nothing the header enters can come from it. It is transparent for
+            # the same reason an import of the resolved root is -- except that
+            # unlike an import it binds a *local* name, so it cannot shadow the
+            # module root the witness walks.
+            #
+            #     def inner():
+            #         import contextlib
+            #     cs = contextlib.nullcontext()
+            #     ...
+            #
+            # Rejecting the statement itself -- it is neither a `Pass`, an
+            # `Assign`, nor an import -- meant the witness never fired and a
+            # live assert was certified dead.
+            #
+            # The name it binds is still required to be one the witness does
+            # not resolve through, so a definition that rebinds `contextlib`
+            # itself would be a shadow rather than a definition in disguise.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (
+                node.name not in _witness_module_roots(function, bound)
+            ):
+                continue
             return False
         value = node.value
         if isinstance(value, ast.Constant):
