@@ -85,6 +85,26 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
     name = _dotted_class_name(expression)
     if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name):
         name = expression.func.id
+    # #422. A header that reaches the suppressor *through* a container or a
+    # class attribute names no class of its own, so the lookups above find
+    # nothing and the assert is left `enforced` while it is in fact swallowed.
+    #
+    #     holder = [contextlib.suppress(AssertionError)]
+    #     with holder[0]:
+    #
+    #     class Box:
+    #         ctx = contextlib.suppress(AssertionError)
+    #     with Box.ctx:
+    #
+    # Dereference the header to the value it actually carries and decide that
+    # instead. This is the same resolution every other rule performs, applied
+    # one step further out: `holder` is a readable name holding a readable
+    # suppressor, and the subscript only chooses an element of it.
+    dereferenced = _dereferenced_header_value(expression, bound, tree, function)
+    if dereferenced is not None:
+        carried = _swallowing_exit_class(dereferenced, bound, tree, function)
+        if carried is not None:
+            return carried
     if name is None:
         return None
     module = tree if tree is not None else _module_tree()

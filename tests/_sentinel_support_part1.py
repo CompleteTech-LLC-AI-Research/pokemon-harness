@@ -556,60 +556,6 @@ def _name_catches_assertion_error(name):
     return True
 
 
-def _suppression_names(call):
-    """The exception names passed to a ``suppress(...)`` call.
-
-    A tuple is flattened, because ``suppress((TypeError, ValueError))`` and
-    ``pytest.raises((KeyError, RuntimeError))`` are both ordinary spellings that
-    name two types. Reading only the tuple node itself would report the
-    unreadable case ``BaseException`` for *every* tuple, and since
-    ``BaseException`` catches ``AssertionError``, that would report the pinned
-    file's four tuple-typed ``pytest.raises`` sites as defeated -- a false alarm
-    on real, live asserts. Measured on ``test_timed_menu_milestones.py``:
-    ``(TypeError, ValueError)``, ``(KeyError, ValueError, RuntimeError)`` and
-    ``(ValueError, RuntimeError)`` all appear.
-
-    An element that is not a plain name is still reported as universal, so an
-    argument the check cannot read is never assumed to be harmless.
-
-    The *no positional argument at all* case is the one place where the two
-    families must be told apart, and the difference is measured rather than
-    assumed:
-
-    * ``contextlib.suppress()`` is legal, and the no-argument reading here is
-      ``BaseException`` -- but that is *stricter than the interpreter*, not a
-      description of it. Measured: ``contextlib.suppress()`` stores
-      ``_exceptions == ()``, and ``issubclass(AssertionError, ())`` is
-      ``False``, so it suppresses **nothing** and an assert inside it fails
-      loudly. Reading it as universal therefore over-reports.
-      That direction is chosen on purpose: the argument the check *can* read
-      is absent, and an absent argument is not evidence of a harmless one.
-      The cost is a false alarm on a spelling the pinned file does not use; the
-      alternative would be to treat "no argument" as "no suppression", which
-      cannot be told apart here from a call whose arguments are simply
-      unreadable.
-    * ``pytest.raises()`` with no expected type raises ``ValueError: You must
-      specify at least one parameter`` while the context object is being
-      constructed -- before the body is entered at all. The test fails loudly
-      and no assert is ever evaluated, so calling it a defeat would report a
-      live contract as dead.
-
-    ``pytest.raises(match=...)`` stays universal on purpose; see
-    ``_raises_without_an_expected_type`` for why that case is undecidable
-    rather than loud.
-    """
-    names = []
-    for argument in call.args:
-        if isinstance(argument, ast.Tuple):
-            names.extend(
-                element.id if isinstance(element, ast.Name) else "BaseException"
-                for element in argument.elts
-            )
-        else:
-            names.append(argument.id if isinstance(argument, ast.Name) else "BaseException")
-    return names or ["BaseException"]
-
-
 def _suppressed_by_dunder(call, bound):
     """Is this ``suppressor.__enter__()`` -- the dunder spelling of the defeat?
 
