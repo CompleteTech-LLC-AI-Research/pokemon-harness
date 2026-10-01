@@ -12451,6 +12451,139 @@ def test_a_loop_else_suppressor_is_live_under_a_function_local_import(
     )
 
 
+#: The repair admits an import that binds exactly the module root the witness
+#: reads.  These rows pin the *other* side of that rule: the import spellings
+#: that must keep declining.  Without them the acceptance can be widened to
+#: "any import is transparent" and the lane still goes green -- measured as
+#: surviving mutant N2 -- which would let a rebinding import talk the witness
+#: into a false-LIVE.
+IMPORT_SHAPE_ROWS = (
+    # -- The filed spelling is admitted.  Kept here so this table and the
+    #    `#451` table cannot drift apart on the live direction.
+    (
+        "451 import accepted: the root the witness reads",
+        "    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- An unrelated module binds a different root.  It says nothing about the
+    #    one the witness resolves through, and the loop still completes
+    #    normally, so the suppressor installs and the header is defeated.
+    (
+        "451 import declined: an unrelated module",
+        "    import json\n    import contextlib\n",
+        "for item in (1,):",
+        "        pass",
+        False,
+    ),
+    # -- `import contextlib as cl` binds `cl`, not the root the witness reads.
+    #    The alias has to keep declining, or an import that genuinely does
+    #    rebind something would be waved through as transparent.
+    (
+        "451 import declined: an alias binds a different name",
+        "    import contextlib as cl\n",
+        "for item in (1,):",
+        "        break",
+        False,
+    ),
+    # -- A dotted import binds the *leaf* `contextlib.nullcontext`, shadowing
+    #    the attribute path the witness walks.  It cannot be pinned as an
+    #    execution row -- CPython rejects the module outright with
+    #    `ModuleNotFoundError: 'contextlib' is not a package`, so the oracle
+    #    never reaches the assert -- so the decline is pinned directly below.
+    (
+        "451 import accepted: two plain imports of the same root",
+        "    import contextlib\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "loop", "body", "assert_is_live"),
+    IMPORT_SHAPE_ROWS,
+    ids=[row[0] for row in IMPORT_SHAPE_ROWS],
+)
+def test_only_the_resolved_root_is_admitted_as_a_transparent_import(
+    label, preamble, loop, body, assert_is_live
+):
+    """An import is transparent only when it binds the witness's own root.
+
+    #451's repair lets a function-local `import contextlib` pass the pre-chain
+    scan that otherwise rejects it.  "Any import is transparent" would be
+    wrong: an alias, a dotted import, or an unrelated module each leave the
+    name the witness resolves through untouched while rebinding something else,
+    and accepting them would turn the correlated witness into a false-LIVE on
+    those shapes.
+
+    Each row is executed first, so CPython decides the expected verdict rather
+    than the author's reasoning about what the import means.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        f"{preamble}"
+        "    cs = contextlib.nullcontext()\n"
+        f"    {loop}\n"
+        f"{body}\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. Only an "
+        f"import binding the module root the witness already resolves through is "
+        f"transparent; an alias or a leaf import rebinds a different name."
+    )
+
+
+def test_a_dotted_import_of_a_leaf_is_not_a_transparent_root():
+    """`import contextlib.nullcontext` binds the leaf, so it must decline.
+
+    This cannot be an execution row: CPython rejects the import outright
+    (`ModuleNotFoundError: 'contextlib' is not a package`), so the shared
+    oracle never reaches an assert and cannot judge a verdict.  The predicate
+    is therefore pinned directly, which is the only honest way to hold it.
+
+    The distinction matters because a dotted import is exactly the shape that
+    *does* shadow the attribute path the witness follows.  Treating it as
+    transparent would let a rebinding import pass the pre-chain scan and talk
+    the correlated witness into a false-LIVE.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib.nullcontext\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n"
+        "        break\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    statement = function.body[0]
+    assert isinstance(statement, ast.Import), "fixture no longer starts with a bare import"
+    assert not support._import_only_binds_the_resolved_root(statement, function, set()), (
+        "a dotted import binds the leaf name, not the root the witness reads, "
+        "so it must not be admitted as a transparent import"
+    )
+
+
 def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_import():
     source = (
         "import contextlib\n"
