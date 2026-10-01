@@ -5500,6 +5500,264 @@ def test_a_capture_binds_only_the_namespace_it_was_written_in(label, nested, ver
     )
 
 
+#: #383 author fixtures are retained. Opaque helper results do not establish
+#: a universally live captured manager: both first rows execute with a chosen
+#: nullcontext callback but deliberately pin a known proof decline (False).
+#: Literal, source-proved cases are covered by test_sentinel_nonlocal_captures.
+NONLOCAL_CAPTURE_SCOPE_ROWS = (
+    # The filed shape. The capture binds `outer`'s `cs`, so it holds a real
+    # `nullcontext` and `with cs:` is entered: the assert FIRES -> `True`.
+    (
+        "a nonlocal capture in a class body binds the enclosing function",
+        (
+            "    class C:\n"
+            "        nonlocal cs\n"
+            "        match [helper()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+        ),
+        False,
+        True,
+    ),
+    # Same defect reached through a nested `def` rather than a class. #383
+    # measured the class spelling; the walk that missed it is scope-agnostic,
+    # so the function spelling was damaging on every tree tested too.
+    (
+        "a nonlocal capture in a nested function binds the enclosing function",
+        (
+            "    def inner():\n"
+            "        nonlocal cs\n"
+            "        match [helper()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+            "    inner()\n"
+        ),
+        False,
+        True,
+    ),
+    # Controls that must NOT change. The `nonlocal` is what makes the capture
+    # reach outward; without it the class body has its own namespace and the
+    # carried suppressor is still in force, so the assert is swallowed. These
+    # are #350's pinned rows restated beside the new ones, because a repair
+    # that simply stopped resolving captures anywhere would pass every `True`
+    # row above while breaking them.
+    (
+        "CONTROL a capture in a class body without nonlocal binds the class",
+        ("    class C:\n        match [helper()]:\n            case [cs]:\n                pass\n"),
+        False,
+        False,
+    ),
+    (
+        "CONTROL a capture in a nested function without nonlocal binds that function",
+        (
+            "    def inner():\n"
+            "        match [helper()]:\n"
+            "            case [cs]:\n"
+            "                pass\n"
+            "    inner()\n"
+        ),
+        False,
+        False,
+    ),
+    # A capture in the function's OWN scope already retired the suppressor and
+    # is unchanged. It is here as the no-nested-scope control, and it uses the
+    # same irrefutable `case cs:` spelling as the two rows above: a refutable
+    # capture over an opaque `helper()` is declined by #369, which would make
+    # the row pass for the wrong reason.
+    (
+        "CONTROL a capture in the function body does retire the suppressor",
+        ("    match helper():\n        case cs:\n            pass\n"),
+        True,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "nested", "verdict", "runtime_live"),
+    NONLOCAL_CAPTURE_SCOPE_ROWS,
+    ids=[row[0] for row in NONLOCAL_CAPTURE_SCOPE_ROWS],
+)
+def test_a_nonlocal_capture_binds_the_enclosing_function(label, nested, verdict, runtime_live):
+    """Retain original runtime inputs while distinguishing opaque proof declines."""
+    source = (
+        "def outer(x, flag, items, helper):\n"
+        "    import contextlib\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n"
+        "        pass\n" + nested + "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    from contextlib import nullcontext
+
+    try:
+        namespace["outer"](1, None, [1], nullcontext)
+    except AssertionError:
+        ran = True
+    except (TypeError, UnboundLocalError, NameError):
+        ran = False
+    else:
+        ran = False
+    assert ran is runtime_live, (
+        f"{label}: CPython says the second assert "
+        f"{'ran' if ran else 'did not run'}, but the row's measured ground "
+        f"truth says it should "
+        f"{'run' if runtime_live else 'not run'}."
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [verdict], (
+        f"{label}: expected verdicts {[verdict]}, got {results}. A `nonlocal` "
+        f"capture retires the enclosing function's carried suppressor."
+    )
+
+
+#: #399. A `match` capture is only a binding while it is the most recent
+#: write. A store written below it in the same clause overwrites it, so the
+#: capture cannot be the value a later `with` header reads.
+#:
+#: The capture and that store share one top-level `match` statement, so
+#: `_binding_order` gives them the same key and the capture was counted as a
+#: competing binding. The name was recorded `AMBIGUOUS`, which downstream reads
+#: as "may be a suppressor" — so a header CPython enters happily was reported
+#: defeated. That is the damaging direction under #308 criterion 1.
+#:
+#: Rows are executed. `verdict` is the analyzer's answer; `runtime_live` is
+#: what CPython did, so no row can be satisfied by a static expectation.
+MATCH_CAPTURE_SHADOWED_ROWS = (
+    # The filed shape. The capture binds the literal `1`, the store below it
+    # rebinds to a real `nullcontext`, and `with cs:` is entered, so the assert
+    # FIRES and the header is live.
+    (
+        "a capture shadowed by a later store is not the value in force",
+        (
+            "    match [1]:\n"
+            "        case [cs]:\n"
+            "            cs = contextlib.nullcontext()\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+        True,
+    ),
+    # Same defect with the shadowing store nested one level down. The store is
+    # conditional, so the `flag=False` path still reads the captured `1` — but
+    # the *contract* is live because CPython can reach a firing call, and the
+    # analyzer returns one verdict per AST, so the ambiguity marker is the only
+    # answer available and it is the one that drops the contract.
+    (
+        "a capture shadowed by a later store inside a branch",
+        (
+            "    match [1]:\n"
+            "        case [cs]:\n"
+            "            if flag:\n"
+            "                cs = contextlib.nullcontext()\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        True,
+        True,
+    ),
+    # Controls. These must NOT change: the capture is still the value in
+    # force, and both are genuinely swallowed.
+    (
+        "CONTROL an unshadowed capture of a suppressor is still swallowed",
+        (
+            "    match [contextlib.suppress(AssertionError)]:\n"
+            "        case [cs]:\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        False,
+        False,
+    ),
+    (
+        "CONTROL a capture shadowed by a suppressor is still swallowed",
+        (
+            "    match [1]:\n"
+            "        case [cs]:\n"
+            "            cs = contextlib.suppress(AssertionError)\n"
+            "            with cs:\n"
+            "                assert x != 1\n"
+        ),
+        False,
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "clause", "verdict", "runtime_live"),
+    MATCH_CAPTURE_SHADOWED_ROWS,
+    ids=[row[0] for row in MATCH_CAPTURE_SHADOWED_ROWS],
+)
+def test_a_capture_shadowed_by_a_later_store_is_not_the_value_in_force(
+    label, clause, verdict, runtime_live
+):
+    """A `match` capture that a later store overwrites cannot bind the header.
+
+    This is #399. A capture is a write like any other, so it holds the name
+    only until the next write. Once a store below it in the same clause has run,
+    the captured value is gone and the `with` header reads the store's value:
+
+        match [1]:
+            case [cs]:
+                cs = contextlib.nullcontext()   # overwrites the capture
+                with cs:                      # `cs` is the nullcontext
+                    assert x != 1             # fires
+
+    Measured on unfixed master `a5cece2`, analyzer `False` against runtime
+    **live**. `False` here is the damaging direction: the sentinel suite stops
+    counting an assert that still holds, so a defeated contract and a live one
+    become indistinguishable in the enforced set.
+
+    The fix compares the *source position* of the binding statements rather
+    than :func:`_binding_order`. The capture and the store that shadows it live
+    inside the same top-level `match` statement, so the order key ties by
+    construction and cannot separate them; a store in a clause body is written
+    after the `match` that owns the capture, which line and column can see.
+
+    Two captures of one name keep the ambiguity marker — which clause ran is a
+    runtime fact, so the value stays undecidable. The control rows pin that the
+    `AMBIGUOUS` answer survives everywhere it is still correct.
+    """
+    source = "def outer(x, flag, helper):\n    import contextlib\n" + clause
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+
+    live = False
+    for probe_x in (0, 1, 2, -1):
+        for probe_flag in (True, False):
+            try:
+                namespace["outer"](probe_x, probe_flag, None)
+            except AssertionError:
+                live = True
+                break
+            except (TypeError, UnboundLocalError, NameError):
+                continue
+            else:
+                continue
+        if live:
+            break
+    assert live is runtime_live, (
+        f"{label}: CPython fires the assert on some input "
+        f"{'and the row says it should' if live else 'and the row says it should not'}"
+    )
+    tree = ast.parse(source)
+    function = tree.body[0]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [verdict], (
+        f"{label}: expected verdicts {[verdict]}, got {results}. A capture that a "
+        f"later store overwrites cannot be the value the header reads."
+    )
+
+
 #: #359: the binding forms whose right-hand side is an *element* of a
 #: container, or a loop's next element, rather than the whole value.
 #:
@@ -16095,9 +16353,15 @@ TRY_UNKNOWN_IMPORT_RUNTIME_ROWS = (
 @pytest.mark.parametrize(
     ("label", "preamble", "carrier", "arm", "runtime_live"), TRY_UNKNOWN_IMPORT_RUNTIME_ROWS
 )
-def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
+def test_try_unknown_import_above_the_loop_else_is_transparent(
     label, preamble, carrier, arm, runtime_live
 ):
+    """Retain actual missing-import outcomes separately from source proof.
+
+    An unknown initializer may raise another exception or mutate contextlib;
+    local importability is not a portable source contract. These remain known
+    proof declines even though the measured absent-module execution is live.
+    """
     source = (
         "import contextlib\ndef outer(x, flag, helper):\n"
         + preamble
@@ -16110,6 +16374,527 @@ def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
     module = ast.parse(source)
     function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
-    # Original CPython fixtures are live; arbitrary initialization is unproved.
+    # Runtime truth and portable source proof are distinct for unknown imports.
     assert runtime_live is True
     assert _is_enforced(function, target, module) is False
+
+
+#: #485. Preserve all author import inputs and measured runtime outcomes.
+#: Unknown initializer effects are not proven by their import binding names;
+#: the portable checker declines these rows separately from their execution.
+TRY_ABOVE_LOOP_ELSE_BOUNDARY_ROWS = (
+    # Runtime reaches the header in this environment; source proof declines.
+    (
+        "reached a missing import caught by ImportError",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import caught by a bare except",
+        "    try:\n        import nope_missing_xyz\n    except:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import caught by a superset handler",
+        "    try:\n        import nope_missing_xyz\n    except BaseException:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a from-import of an unrelated module",
+        "    try:\n        from json import loads\n    except ImportError:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import behind a nested admitted try",
+        (
+            "    try:\n        try:\n            import nope_missing_xyz\n"
+            "        except ImportError:\n            pass\n"
+            "    except Exception:\n        pass\n"
+        ),
+        True,
+    ),
+    # --- controls: control does not reach the header, so the assert is dead ---
+    (
+        "stopped an uncaught missing import",
+        "    try:\n        import nope_missing_xyz\n    except ValueError:\n        pass\n",
+        False,
+    ),
+    (
+        "stopped a handler that returns",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        return\n",
+        False,
+    ),
+    (
+        "stopped a handler that re-raises",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        raise ValueError\n",
+        False,
+    ),
+    (
+        "stopped a finally that returns",
+        (
+            "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n"
+            "    finally:\n        return\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "preamble", "enforced"), TRY_ABOVE_LOOP_ELSE_BOUNDARY_ROWS)
+def test_try_above_loop_else_boundary(label, preamble, enforced):
+    """Unknown import rows retain runtime truth and an explicit proof decline."""
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    fired, other = [], []
+    for value in (0, 1, 2, -1):
+        try:
+            namespace["outer"](value, True, None)
+        except AssertionError:
+            fired.append(value)
+        except BaseException as error:  # noqa: BLE001 - any failure is recorded
+            other.append((value, type(error).__name__))
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False, label
+    # Admitting a row is only sound while the assert genuinely fires, and
+    # declining one only while the header is not reached with a live assert.
+    assert bool(fired) is enforced, f"{label}: fired={fired} other={other}"
+    # A `stopped` row has to be stopped for a reason the row describes. Every
+    # one of them stops by raising something else or by returning, never by
+    # returning cleanly past a suppressor that is actually installed.
+    if not enforced:
+        assert fired == [], f"{label}: fired={fired}"
+
+
+#: #485. Unknown module availability/caller callbacks remain explicit declines.
+#: The shadowing try-import now declines an unknown/unbound local root.
+TRY_ABOVE_LOOP_ELSE_NEIGHBOURING_ROWS = (
+    (
+        "a named handler target is not yet admitted",
+        "    try:\n        import nope_missing_xyz\n    except ImportError as exc:\n        pass\n",
+        False,
+        True,
+    ),
+    (
+        "an import shadowing the walked root is refused, and the fixture never runs",
+        "    try:\n        import fake as contextlib\n    except ImportError:\n        pass\n",
+        False,
+        False,
+    ),
+    (
+        "an opaque helper call is not admitted",
+        "    try:\n        helper()\n    except Exception:\n        pass\n",
+        False,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "enforced", "fires"), TRY_ABOVE_LOOP_ELSE_NEIGHBOURING_ROWS
+)
+def test_485_records_neighbouring_forms_without_claiming_them(label, preamble, enforced, fires):
+    """Record unresolved callbacks/imports and the repaired unknown root decline."""
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    fired, other = [], []
+    for value in (0, 1, 2, -1):
+        try:
+            namespace["outer"](value, True, None)
+        except AssertionError:
+            fired.append(value)
+        except BaseException as error:  # noqa: BLE001 - any failure is recorded
+            other.append((value, type(error).__name__))
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is enforced, label
+    assert bool(fired) is fires, f"{label}: fired={fired} other={other}"
+
+
+#: #358. A ``match`` clause the subject cannot select does not run, so a store
+#: written in that clause's body is a store that never executes. Each row is
+#: judged on an **execution sweep** of its own subject: the fixture is run and
+#: the assert is watched, and only then is ``_is_enforced`` consulted. ``fires``
+#: and ``enforced`` are two independent measurements and the test asserts
+#: both, so a row cannot pass by agreeing with the implementation.
+#:
+#: The ``unselected`` rows are the defect. A sequence pattern cannot select a
+#: string subject -- ``match`` deliberately excludes ``str`` from structural
+#: sequence matching -- so the carried suppressor stays in force, the assert is
+#: swallowed on every input, and reporting it ``enforced`` certifies a disarmed
+#: contract. That is the damaging direction.
+#:
+#: The ``selected`` rows are the guard: the same store, in a clause the subject
+#: really selects, does run and does retire the suppressor, so the assert fires
+#: and must keep reading ``enforced``.
+UNSELECTED_MATCH_CASE_STORE_ROWS = (
+    (
+        "358 a `case ['nope']:` body store does not retire the carried suppressor",
+        "    flag = 'subject'\n    match flag:\n        case ['nope']:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        False,
+    ),
+    (
+        "358 a `case {'k': 1}:` body store against a str subject does not retire it",
+        "    flag = 'subject'\n    match flag:\n        case {'k': 1}:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        False,
+    ),
+    (
+        "358 a `case 'nope':` value-pattern body store that cannot match does not retire it",
+        "    flag = 'subject'\n    match flag:\n        case 'nope':\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        False,
+    ),
+    # --- controls: these clauses really are selected, so the store runs ---
+    (
+        "358 control a selected `case ['nope']:` on a list subject still supersedes",
+        "    flag = ['nope']\n    match flag:\n        case ['nope']:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        True,
+    ),
+    (
+        "358 control a selected `case 'nope':` on the matching str still supersedes",
+        "    flag = 'nope'\n    match flag:\n        case 'nope':\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        True,
+    ),
+    (
+        "358 control a selected capture-pattern clause still supersedes",
+        "    flag = ['captured']\n    match flag:\n        case ['captured']:\n"
+        + "            cs = contextlib.nullcontext()\n        case _:\n            pass\n",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "match_block", "fires"), UNSELECTED_MATCH_CASE_STORE_ROWS)
+def test_a_store_in_an_unselected_match_case_does_not_retire_a_carried_suppressor(
+    label, match_block, fires
+):
+    """#358. Only a clause the subject really selects may supersede the value.
+
+    The sweep runs the fixture and records whether the assert raises, so a row
+    is a claim about CPython *and* about the rule; neither can be satisfied by
+    the other.
+    """
+    source = (
+        "import contextlib\ndef probe():\n"
+        "    x = 1\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
+        + match_block
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    raised = False
+    try:
+        namespace["probe"]()
+    except AssertionError:
+        raised = True
+    assert raised is fires, label
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # `enforced` must track the runtime: True exactly when the assert fires.
+    assert _is_enforced(function, target, module) is fires, label
+
+
+#: #365. A store written in a branch that can never run must not retire the
+#: carried suppressor. Each row is judged on an **execution sweep** of its whole
+#: domain: the fixture is run and the assert is watched, and only then is
+#: ``_is_enforced`` consulted. ``enforced`` and ``fires`` are therefore two
+#: independent measurements, and the test asserts both -- so a row can never
+#: pass by agreeing with the implementation.
+#:
+#: The ``unreachable`` rows are the defect: the assert is swallowed on every
+#: input, so reporting it enforced certifies a disarmed contract.
+#:
+#: The ``reachable`` rows are the guard. ``if flag:`` is not a literal, so
+#: ``_falsy_literal`` declines it and the store keeps competing -- and it
+#: genuinely does supersede on the ``flag`` path, where the assert fires. The
+#: ``else`` row is the guard for the other side: ``If.body`` and ``If.orelse``
+#: are AST siblings, and the ``else`` arm is exactly the one that *does* run
+#: under a falsy test, so that store must keep superseding.
+UNREACHABLE_BRANCH_STORE_ROWS = (
+    (
+        "365 an `if False:` body store does not retire the carried suppressor",
+        "    if False:\n        cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    (
+        "365 an `if ():` body store does not retire it either",
+        "    if ():\n        cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    (
+        "365 an `if {}:` body store does not retire it either",
+        "    if {}:\n        cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    (
+        "365 a nested `if False:` inside a live branch also does not retire it",
+        "    if flag:\n        if False:\n            cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    # --- controls: these stores really do run, so they must keep superseding ---
+    (
+        "control an `if flag:` store still supersedes (the assert fires on that path)",
+        "    if flag:\n        cs = contextlib.nullcontext()\n",
+        True,
+        True,
+    ),
+    (
+        "control the `else` of a falsy `if` still supersedes",
+        "    if False:\n        pass\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
+        True,
+    ),
+)
+
+
+def _unreachable_branch_store_fixture(preamble, signature="def probe(x, flag):\n"):
+    return (
+        "import contextlib\n"
+        + signature
+        + "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
+        + preamble
+        + "    with cs:\n        assert x != 1\n"
+    )
+
+
+@pytest.mark.parametrize(("label", "preamble", "enforced", "fires"), UNREACHABLE_BRANCH_STORE_ROWS)
+def test_a_store_in_a_branch_that_cannot_run_does_not_retire_a_carried_suppressor(
+    label, preamble, enforced, fires
+):
+    """#365. Only a store that can actually run may supersede the carried value.
+
+    The sweep runs the fixture across ``x`` and ``flag`` and records which
+    inputs raise ``AssertionError``. Asserting ``bool(fired) is fires`` and
+    ``_is_enforced(...) is enforced`` together means each row is a claim about
+    CPython *and* about the rule, and neither can be satisfied by the other.
+    """
+    source = _unreachable_branch_store_fixture(preamble)
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    observed = []
+    for value in (0, 1):
+        for flag in (True, False):
+            try:
+                namespace["probe"](value, flag)
+                observed.append((value, flag, None))
+            except AssertionError:
+                observed.append((value, flag, "AssertionError"))
+            except BaseException as error:  # noqa: BLE001 - recorded, not ignored
+                observed.append((value, flag, type(error).__name__))
+    fired = [entry for entry in observed if entry[2] == "AssertionError"]
+    assert bool(fired) is fires, f"{label}: {observed}"
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is enforced, f"{label}: {observed}"
+
+
+@pytest.mark.parametrize("with_else", [False, True])
+def test_issue365_full_two_assertions_keep_carried_suppressor(with_else):
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n        assert x != 1\n"
+        "    if False:\n        cs = contextlib.nullcontext()\n"
+        + ("    else:\n        pass\n" if with_else else "")
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    assert namespace["probe"](1) is None
+    module = ast.parse(source)
+    function = module.body[1]
+    targets = [n for n in ast.walk(function) if isinstance(n, ast.Assert)]
+    assert [_is_enforced(function, n, module) for n in targets] == [False, False]
+
+
+@pytest.mark.parametrize(
+    ("initial", "rebind", "live"),
+    [
+        ("nullcontext()", "suppress(AssertionError)", True),
+        ("suppress(AssertionError)", "nullcontext()", False),
+    ],
+)
+@pytest.mark.parametrize("hops", [0, 1, 2])
+def test_unreachable_literal_branch_does_not_replace_alias_source(initial, rebind, live, hops):
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        f"    first=contextlib.{initial}\n    if False:\n        first=contextlib.{rebind}\n"
+    )
+    name = "first"
+    for index in range(hops):
+        next_name = f"alias{index}"
+        source += f"    {next_name}={name}\n"
+        name = next_name
+    source += f"    with(cs:={name}):\n        assert x != 1\n"
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if live:
+        with pytest.raises(AssertionError):
+            namespace["probe"](1)
+    else:
+        assert namespace["probe"](1) is None
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is live
+
+
+def test_issue365_top_level_retirement_remains_live():
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        "    with(cs:=contextlib.suppress(AssertionError)):\n        pass\n"
+        "    cs=contextlib.nullcontext()\n    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["probe"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+@pytest.mark.parametrize("constructor", ["list", "tuple", "set", "dict", "bytearray"])
+def test_unreachable_if_store_proof_does_not_trust_enclosing_constructor_parameter(constructor):
+    source = (
+        "import contextlib\n"
+        f"def parent({constructor}):\n    def probe(x):\n"
+        "        with(cs:=contextlib.suppress(AssertionError)):\n            pass\n"
+        f"        if {constructor}():\n            cs=contextlib.nullcontext()\n"
+        "        with cs:\n            assert x != 1\n    return probe\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["parent"](lambda: [1])(1)
+    module = ast.parse(source)
+    function = module.body[1].body[0]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+@pytest.mark.parametrize(
+    "loop",
+    [
+        "        while list():\n            first=contextlib.nullcontext()\n            break\n",
+        "        for item in list():\n            first=contextlib.nullcontext()\n",
+    ],
+)
+def test_literal_if_alias_filter_preserves_other_enclosing_loop_callables(loop):
+    source = (
+        "import contextlib\ndef parent(list):\n    def probe(x):\n"
+        "        first=contextlib.suppress(AssertionError)\n"
+        + loop
+        + "        with(cs:=first):\n            assert x != 1\n    return probe\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["parent"](lambda: [1])(1)
+    module = ast.parse(source)
+    function = module.body[1].body[0]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+@pytest.mark.parametrize(
+    ("subject", "pattern", "live"),
+    [
+        ("'subject'", "['nope']", False),
+        ("b'nope'", "[*_]", False),
+        ("None", "[1]", False),
+        ("None", "None", True),
+        ("1", "True", False),
+        ("False", "True", False),
+        ("True", "1", True),
+        ("1.0", "1", True),
+        ("False", "0", True),
+    ],
+)
+def test_unselected_store_literal_pattern_semantics_are_executed(subject, pattern, live):
+    source = (
+        "import contextlib\ndef probe():\n    x=1\n"
+        "    cs=contextlib.suppress(AssertionError)\n"
+        f"    flag={subject}\n    with cs:\n        pass\n    match flag:\n"
+        f"        case {pattern}:\n            cs=contextlib.nullcontext()\n"
+        "        case _:\n            pass\n    with cs:\n        assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if live:
+        with pytest.raises(AssertionError):
+            namespace["probe"]()
+    else:
+        assert namespace["probe"]() is None
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is live
+
+
+def test_match_subject_store_proof_refuses_with_body_import_rebinding():
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        "    with(cs:=contextlib.suppress(AssertionError)):\n        pass\n"
+        "    flag='subject'\n    with contextlib.nullcontext():\n        from sys import path as flag\n"
+        "    match flag:\n        case [*_]:\n            cs=contextlib.nullcontext()\n"
+        "        case _:\n            pass\n    with cs:\n        assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["probe"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_match_subject_store_proof_refuses_context_enter_callback():
+    source = (
+        "import contextlib\ndef probe(x):\n    class Mut:\n"
+        "        def __enter__(self):\n            nonlocal flag\n            flag=['nope']\n            return self\n"
+        "        def __exit__(self,*exc):return False\n"
+        "    cs=contextlib.suppress(AssertionError)\n    flag='subject'\n    with Mut():pass\n"
+        "    match flag:\n        case ['nope']:\n            cs=contextlib.nullcontext()\n"
+        "        case _:\n            pass\n    with cs:\n        assert x!=1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["probe"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True

@@ -39,6 +39,157 @@ def _entry_may_be_an_unrun_capture(entry, function=None):
     )
 
 
+def _drop_captures_shadowed_by_later_stores(competing, entries, orders, function, query=None):
+    """Competing ``match`` captures that a later store writes over.
+
+    #399. A capture binds the name only while it is the most recent write. A
+    store written below it in the same clause overwrites it before the queried
+    ``with`` header is read, so on every path that reaches that header the
+    capture is gone and cannot be the value in force:
+
+        match [1]:
+            case [cs]:
+                cs = contextlib.nullcontext()    # overwrites the capture
+                with cs:                       # `cs` is the nullcontext
+                    assert x != 1              # fires -- the header is live
+
+    Counting the capture as a competing binding made the name ambiguous, and
+    :data:`AMBIGUOUS_SUPPRESSOR` is read downstream as "may be a suppressor",
+    so the assert was reported defeated. That drops a live contract, which is
+    the damaging direction.
+
+    What is compared is **source order of the binding statements**, not
+    :func:`_binding_order`: the capture and the store that shadows it share one
+    top-level ``match`` statement, so the order key ties and cannot separate
+    them. Line and column locate a later store, but do not establish that it
+    ran before the query. The store must also dominate the queried header in
+    the same statement body. Stores in other arms or after the header cannot
+    retire the capture.
+
+    Only a store that is not itself a capture qualifies. Two captures of the
+    same name in one function leave the value genuinely undecidable -- which
+    clause ran is a runtime fact -- so that shape keeps the ambiguity marker.
+    """
+    if not competing or query is None or function is None:
+        return competing
+
+    def dominates_query(store):
+        # A lexical position alone cannot retire a capture: the store may be
+        # after the queried header or in an arm that never runs. Require the
+        # store to precede the query's enclosing statement in the same body.
+        # This also admits an if-arm store when the query is in that same arm.
+        nodes = [function, *_scope_body_nodes(function)]
+        if query not in nodes:
+            return False
+        for node in nodes:
+            for field, body in ast.iter_fields(node):
+                if field not in ("body", "orelse", "finalbody") or not isinstance(body, list):
+                    continue
+                if store not in body:
+                    continue
+                for later in body[body.index(store) + 1 :]:
+                    if later is query or query in ast.walk(later):
+                        return True
+        return False
+
+    def position(node):
+        return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+    def is_capture(entry):
+        return isinstance(entry[0], ast.Match)
+
+    def parameter_arm_can_replace_nonenterable_capture(entry, other):
+        # A non-enterable captured literal cannot execute the assertion on
+        # the skipped path. The filed conditional row has a controllable,
+        # untouched boolean parameter and a single store in its selected arm.
+        # This proves an entering path without assuming every arm ran.
+        match = entry[0]
+        if not isinstance(match, ast.Match) or len(match.cases) != 1:
+            return False
+        case = match.cases[0]
+        if case.guard is not None or match not in function.body:
+            return False
+        for statement in function.body[: function.body.index(match)]:
+            if isinstance(statement, ast.Pass):
+                continue
+            if isinstance(statement, ast.Import) and all(
+                alias.name == "contextlib" and alias.asname is None for alias in statement.names
+            ):
+                continue
+            return False
+        if not isinstance(match.subject, (ast.List, ast.Tuple)) or len(match.subject.elts) != 1:
+            return False
+        if not isinstance(match.subject.elts[0], ast.Constant):
+            return False
+        if _literal_runtime_type(match.subject.elts[0]) not in NON_CONTEXT_MANAGER_TYPES:
+            return False
+        if (
+            not isinstance(case.pattern, ast.MatchSequence)
+            or len(case.pattern.patterns) != 1
+            or not isinstance(case.pattern.patterns[0], ast.MatchAs)
+            or case.pattern.patterns[0].pattern is not None
+            or case.pattern.patterns[0].name is None
+        ):
+            return False
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        parameters = {arg.arg for arg in (*function.args.posonlyargs, *function.args.args)}
+        nodes = [function, *_scope_body_nodes(function)]
+        for candidate in nodes:
+            if candidate is not case:
+                continue
+            body = [node for node in case.body if not isinstance(node, ast.Pass)]
+            if len(body) != 2 or not isinstance(body[0], ast.If):
+                continue
+            header = body[1]
+            if not isinstance(header, ast.With) or header.body != [query]:
+                continue
+            if (
+                len(header.items) != 1
+                or not isinstance(header.items[0].context_expr, ast.Name)
+                or header.items[0].context_expr.id != case.pattern.patterns[0].name
+            ):
+                continue
+            if not isinstance(query, ast.Assert) or not _class_protocol_has_literal_failure(
+                query, parameters
+            ):
+                continue
+            if query.msg is not None and not isinstance(query.msg, ast.Constant):
+                continue
+            branch = body[0]
+            if not isinstance(branch.test, ast.Name) or branch.test.id not in parameters:
+                continue
+            if any(
+                any(_names_bound_by_statement(node, parameter))
+                for node in nodes[1:]
+                for parameter in parameters
+            ):
+                continue
+            selected = [node for node in branch.body if not isinstance(node, ast.Pass)]
+            if selected == [other[0]] and _literal_subject_element_is_safe(other[1], function):
+                return True
+        return False
+
+    kept = []
+    for entry in competing:
+        if not is_capture(entry):
+            kept.append(entry)
+            continue
+        shadowed = any(
+            not is_capture(other)
+            and other is not entry
+            and position(other[0]) > position(entry[0])
+            and (
+                dominates_query(other[0])
+                or parameter_arm_can_replace_nonenterable_capture(entry, other)
+            )
+            for other in entries
+        )
+        if not shadowed:
+            kept.append(entry)
+    return kept
+
+
 def _resolve_simple_literal_subject(function, match):
     """Follow a plain ``name = [literal]`` binding to the container it built.
 
@@ -313,6 +464,147 @@ def _sequence_element_matches(pattern, element):
     return None
 
 
+def _match_case_is_provably_unselected(function, match, case):
+    """Can ``case``'s pattern never be selected against ``match``'s subject?
+
+    #358. A ``match`` clause the subject cannot select does not run, so a
+    store written in that clause's body is a store that never executes -- the
+    same question :func:`_is_provably_unreached_store` answers for an empty
+    loop body or a falsy ``if`` body. The filed shape is
+
+        flag = "subject"
+        match flag:
+            case ["nope"]:            # a sequence pattern; a str is not a sequence
+                cs = contextlib.nullcontext()
+            case _:
+                pass
+        with cs:                      # still the carried suppressor
+            assert x != 1             # swallowed, but reported `enforced`
+
+    A **sequence** pattern (and a mapping/class pattern) can only be selected
+    by a subject of the corresponding runtime kind. Executed on CPython
+    3.12.14, ``"subject"`` is not a sequence, so ``case ["subject"]`` does not
+    match it either -- the element text is irrelevant. That single fact
+    decides the filed row, and the same kind test settles ``case {"k": 1}:``
+    against a scalar.
+
+    The subject has to be a *literal* to answer at all. ``match flag:`` where
+    ``flag`` is a name is declined unless :func:`_resolve_simple_literal_subject`
+    can trace it back to a container literal written earlier in the same
+    function body -- the same restriction the capture rules already impose.
+    A name bound by a call, a parameter, or any opaque value is not decided, so
+    its clauses keep competing exactly as before.
+
+    Only provable *non*-selection is answered. A pattern that could select --
+    a bare capture, a wildcard, a value pattern equal to the subject, or a
+    class/capture pattern -- returns ``False`` and leaves the store competing.
+    """
+    if not _match_store_prefix_is_safe(function, match):
+        return False
+    if case.guard is not None:
+        # A guard is a runtime condition. Even a constant-``False`` guard is
+        # declined here rather than decided, so a case the guard might admit
+        # is never treated as unselected on the strength of a guess.
+        return False
+    subject = _literal_subject_value(function, match)
+    if subject is UNREADABLE_VALUE:
+        return False
+    return _pattern_cannot_select(case.pattern, subject)
+
+
+def _literal_subject_value(function, match):
+    """The subject's literal value, or ``UNREADABLE_VALUE`` when not decidable.
+
+    Two shapes answer. The first is a subject written inline as a constant:
+    ``match "subject":``. The second is a plain scalar binding in the same
+    function body, before the ``match``, with nothing in between that could
+    rebind or mutate it -- ``flag = "subject"`` then ``match flag:``. That
+    second shape is the one #358 files, and it is a scalar on purpose:
+    :func:`_resolve_simple_literal_subject` follows only *container* literals,
+    so a string subject has to be resolved here rather than there.
+
+    A parameter, a call, a subscript, a conditional store, a walrus, a
+    destructuring target, or any intervening statement that binds the subject
+    name all yield ``UNREADABLE_VALUE``. Declining is the safe direction: the store keeps
+    competing, so a possibly-live assert is reported defeated rather than a
+    live suppressor being retired.
+    """
+    for node in (match.subject, *_assigned_literal_subject_value(function, match)):
+        if isinstance(node, ast.Constant):
+            return node.value
+    resolved = _resolve_simple_scalar_subject(function, match)
+    if resolved is not UNREADABLE_VALUE:
+        return resolved
+    return UNREADABLE_VALUE
+
+
+def _resolve_simple_scalar_subject(function, match):
+    """A plain ``name = <constant>`` binding before ``match``, or ``UNREADABLE_VALUE``."""
+    if not isinstance(match.subject, ast.Name):
+        return UNREADABLE_VALUE
+    subject_name = match.subject.id
+    body = function.body if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+    if body is None:
+        return UNREADABLE_VALUE
+    if subject_name in {argument.arg for argument in _all_args(function) if argument is not None}:
+        return UNREADABLE_VALUE
+    try:
+        match_index = body.index(match)
+    except ValueError:
+        return UNREADABLE_VALUE
+    for statement in reversed(body[:match_index]):
+        if _statement_leaves_subject_alone(statement, subject_name):
+            continue
+        if not isinstance(statement, ast.Assign):
+            return UNREADABLE_VALUE
+        if not _assign_targets_exactly(statement, subject_name):
+            return UNREADABLE_VALUE
+        if len(statement.targets) != 1:
+            return UNREADABLE_VALUE
+        if not isinstance(statement.value, ast.Constant):
+            return UNREADABLE_VALUE
+        return statement.value.value
+    return UNREADABLE_VALUE
+
+
+def _pattern_cannot_select(pattern, subject):
+    """Can ``pattern`` be selected by the literal ``subject``? Conservative.
+
+    Answers ``True`` only when the pattern is *provably* incompatible with the
+    subject's runtime kind or value, and ``False`` for every other shape --
+    including any pattern that could select. Callers treat ``True`` as "this
+    clause never runs" and ``False`` as "it might, so keep the store".
+    """
+    if isinstance(pattern, ast.MatchSequence) and not _value_is_sequence(subject):
+        # `case ["nope"]:` against a scalar/str subject can never select.
+        return True
+    if isinstance(pattern, ast.MatchMapping) and not isinstance(subject, (dict,)):
+        return True
+    if isinstance(pattern, ast.MatchValue) and isinstance(pattern.value, ast.Constant):
+        # A value pattern compares with `==`. A constant that cannot equal the
+        # subject's constant settles the clause; anything not comparable
+        # (different runtime kinds that can still be `==` False) is refused.
+        return pattern.value.value != subject
+    if isinstance(pattern, ast.MatchSingleton):
+        return pattern.value is not subject
+    # A bare capture / wildcard / class / mapping-with-rest / star / or-pattern
+    # is not settled here; the store keeps competing.
+    return False
+
+
+def _value_is_sequence(value):
+    """Is a literal ``value`` a sequence the runtime would match with ``[...]``?
+
+    Only ``list`` and ``tuple`` here are matched by a sequence pattern. A
+    ``str`` is a sequence to Python's ``isinstance`` but **not** one a
+    ``match`` sequence pattern selects, because structural pattern matching
+    deliberately excludes it -- that exclusion is the whole reason the #358
+    row does not select. So this asks the match-level question, not the
+    ``isinstance`` one.
+    """
+    return isinstance(value, (list, tuple))
+
+
 def _literal_match_capture_value(function, match, name):
     """Read the element bound by a decided bare sequence capture."""
     if _capture_is_decidable_from_a_literal_subject(function, match, name) is not True:
@@ -372,6 +664,13 @@ def _literal_subject_element_is_safe(element, function):
                 return False
             continue
         if any(isinstance(node, ast.Call) for node in ast.walk(statement)):
+            if (
+                getattr(function, "_allow_literal_module_managers", False)
+                and isinstance(statement, ast.Assign)
+                and all(isinstance(target, ast.Name) for target in statement.targets)
+                and _source_known_manager_value(statement.value, owning, function) is not None
+            ):
+                continue
             return False
     root = element.func
     while isinstance(root, ast.Attribute):

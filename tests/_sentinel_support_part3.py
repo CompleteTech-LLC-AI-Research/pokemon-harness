@@ -212,6 +212,12 @@ def _last_store_before(entries, orders, index, exclude=None, function=None):
     """
     if orders is None or index is None:
         return entries[-1][1]
+    if function is not None:
+        entries = [
+            entry for entry in entries if not _literal_if_store_is_unreached(entry, function)
+        ]
+        if not entries:
+            return AMBIGUOUS_SUPPRESSOR
     visible = [
         entry
         for entry in entries
