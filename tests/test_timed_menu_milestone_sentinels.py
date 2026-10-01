@@ -12347,6 +12347,32 @@ LOOP_ELSE_SUPPRESSOR_SHAPES = (
         "        if x in (0, 1, 2):\n            break",
         True,
     ),
+    # -- #479 residual. `and`/`or` were declined as a whole, so a guard built
+    #    from one read as "possibly true" even where a single operand settles it.
+    #    `x is None` is False at `x == 1` and that false operand settles `and`
+    #    on its own -- Python short-circuits there and never reads `y` at all --
+    #    so the loop completes normally and the `else` installs the suppressor.
+    (
+        "479 residual: a short-circuited conjunction excludes every failing call",
+        "for item in (1,):",
+        "        if x is None and y:\n            break",
+        False,
+    ),
+    # -- The mirror on the other side, and the reason the operator cannot be
+    #    read as always-false. A false *first* operand does not settle `or`, so
+    #    the second operand decides it; at `x == 1` the guard holds, the break
+    #    is reached on the failing call, and the contract is live.
+    #
+    #    Both operands have to be pinned by the failing assert for this to be
+    #    decidable, which is why the row reads the same parameter the assert
+    #    reads. A guard naming a *different* parameter is caller-dependent --
+    #    see `WALRUS`-style declines elsewhere in this module.
+    (
+        "479 residual live: a disjunction decides on its second operand",
+        "for item in (1,):",
+        "        if x == 0 or x:\n            break",
+        True,
+    ),
 )
 
 

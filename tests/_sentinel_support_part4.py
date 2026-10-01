@@ -1014,6 +1014,14 @@ def _elif_failure_predicate(test, values):
     #for an arbitrary container (``in`` can raise from a custom ``__contains__``
     #or from a missing key on a ``dict``), so only a container the analyzer can
     #read element by element is answered; anything else still declines.
+
+    #479 residual. ``ast.BoolOp`` joins too. ``and``/``or`` are total over
+    operands whose truth values are known, and ``bool`` is total on any object,
+    so evaluating the operands in Python's own order -- which is what the
+    loop body would do -- decides the guard without raising. Short-circuit is
+    respected rather than approximated: an operand after the one that already
+    decides the result is not needed, and one that cannot be read makes the
+    whole operator decline rather than guess.
     """
     if isinstance(test, ast.Constant):
         return bool(test.value)
@@ -1083,4 +1091,25 @@ def _elif_failure_predicate(test, values):
         # unreadable container still declines above rather than guessing here.
         contained = any(member_value == element.value for element in elements)
         return contained if operator is ast.In else not contained
+    if isinstance(test, ast.BoolOp):
+        results = []
+        for value in test.values:
+            results.append(_elif_failure_predicate(value, values))
+        if isinstance(test.op, ast.And):
+            if any(result is False for result in results):
+                # One false operand settles `and` outright. Python short-
+                # circuits on it too, so an unreadable operand *after* that
+                # point cannot change the answer or raise.
+                return False
+            if all(result is True for result in results):
+                return True
+        else:
+            if any(result is True for result in results):
+                # The mirror: one true operand settles `or`, and Python stops
+                # evaluating there.
+                return True
+            if all(result is False for result in results):
+                return False
+        # Anything still unreadable leaves the operator genuinely undecided.
+        return None
     return None
