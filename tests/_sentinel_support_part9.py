@@ -179,7 +179,37 @@ def _starred_store_decides_kind(entry, name, orders, index, function, header=Non
                 and not any(isinstance(element, ast.Starred) for element in statement.iter.elts)
             )
     else:
+        # #423/#430/#432. A starred store written in a loop *body* is a
+        # different shape from the loop *target* above: the store is an
+        # `Assign` nested inside the `For`, so `orders` keys it by the
+        # containing top-level statement -- the earliest point at which it can
+        # possibly have run. That is correct as a lower bound, but it is not
+        # this question. What decides a starred store is the *target syntax*
+        # (`*cs, = ...` binds a list whatever the right-hand side held), so it
+        # does not depend on the wrapped element's kind at all. The only thing
+        # still worth asking is whether the store has run by the time this
+        # header is reached, and for a store in a loop body that is the same
+        # question the loop-target branch already answers: has the loop
+        # necessarily completed at least one iteration?
+        #
+        #     for _ in (1,):
+        #         *cs, = (contextlib.suppress(AssertionError),)
+        #     with cs:            # `cs` is a list -> TypeError on entry
+        #         assert x != 1   # never runs
+        #
+        # `_binding_order`'s docstring is explicit that a nested statement is
+        # keyed by its container, so requiring `orders[statement] == index`
+        # could only ever hold when the store and the header share one
+        # top-level statement. That is exactly the row #420 shipped with the
+        # header nested in the loop; moving the header out to a later sibling
+        # silently stopped the promotion and reported the unreachable assert
+        # as load-bearing.
         reached = orders[id(statement)] == index and statement in prior
+        if not reached:
+            # `prior` holds the *top-level* siblings on the header's path, and
+            # a store nested in one of them is not itself in `prior`. The
+            # container is what has to precede the header.
+            reached = _starred_store_in_completed_loop_body(statement, function, prior)
     if not reached:
         return False
     # Even a conditional intervening store can replace the list. Decline it
@@ -193,6 +223,74 @@ def _starred_store_decides_kind(entry, name, orders, index, function, header=Non
         other is not statement and position(statement) < position(other) < position(header)
         for other, _, _ in bindings.get(name, ())
     )
+
+
+def _starred_store_in_completed_loop_body(statement, function, prior):
+    """Has this starred store's enclosing loop body run before ``header``?
+
+    #423. A starred store nested in a loop *body* settles the name by the time
+    a *later sibling* header is reached, provided the loop necessarily ran at
+    least once:
+
+        for _ in (1,):
+            *cs, = (contextlib.suppress(AssertionError),)
+        with cs:
+            assert x != 1
+
+    The loop is a direct earlier sibling of the header, its iterable is a
+    literal with at least one element and no starred element, so the body has
+    run and `cs` holds the list the starred target collected. This reuses the
+    same "completed literal nonempty loop" test the loop-*target* branch above
+    already relies on rather than restating it.
+
+    The store must also be written *directly* in that loop's body. A store
+    nested further down -- inside an `if` inside the loop -- may still be
+    skipped on every iteration, so the loop having iterated does not mean this
+    particular store ran, and the loop's `else` arm runs on a different
+    condition again. Those shapes stay undecidable here, which is the safe
+    direction: the header is reported live rather than a reachable assert
+    certified as swallowed.
+
+    An empty or dynamically sized iterable leaves the previous binding of the
+    name untouched. CPython then raises `UnboundLocalError` when the later
+    header reads the name, which is #334's family (the name is not bound at
+    all) and not this one, so those shapes are excluded rather than answered.
+    """
+    for block in _enclosing_blocks(statement, function):
+        if not isinstance(block, (ast.For, ast.AsyncFor)):
+            continue
+        if not isinstance(block, ast.For):
+            return False
+        if not (
+            isinstance(block.iter, (ast.Tuple, ast.List, ast.Set))
+            and bool(block.iter.elts)
+            and not any(isinstance(element, ast.Starred) for element in block.iter.elts)
+        ):
+            return False
+        if any(child is block for child in prior):
+            # The loop itself must have completed before the header. A `break`
+            # or a `return` inside the body would let the header be reached
+            # without the body finishing an iteration.
+            if _loop_can_be_left_early(block):
+                return False
+            # The store has to be written directly in the loop body, so the
+            # only hop between the loop and the store is the body itself.
+            if statement in block.body:
+                return True
+            for node in block.body:
+                if any(child is statement for child in ast.walk(node)):
+                    return False
+    return False
+
+
+def _loop_can_be_left_early(loop):
+    """Can control reach the header without completing a loop iteration?"""
+    return any(_breaks_own_loop(child) or _leaves_the_function(child) for child in loop.body)
+
+
+def _leaves_the_function(node):
+    """Is there a ``return``/``raise`` in ``node`` that skips later siblings?"""
+    return any(isinstance(child, (ast.Return, ast.Raise)) for child in ast.walk(node))
 
 
 def _statements_before_header(function, header):

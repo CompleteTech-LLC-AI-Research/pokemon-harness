@@ -12369,6 +12369,33 @@ STARRED_LOOP_ENTRY_UNREACHABLE_ROWS = (
         ),
         False,
     ),
+    # #423/#432. The same starred *store* read by a `with` that is a LATER
+    # SIBLING, after the loop has finished, rather than nested inside its body.
+    # #420's rows put the header inside the loop, so they could not cover this
+    # spelling and nothing pinned it.
+    #
+    # `_binding_order` keys a nested store by the top-level statement that
+    # contains it -- the earliest point at which it can possibly have run -- so
+    # the starred `Assign` inside the `for` was ordered `0` while the queried
+    # header sat at index `1`. `_starred_store_decides_kind` required
+    # `orders[statement] == index`, which can only hold when the store and the
+    # header share one top-level statement, so the promotion silently stopped
+    # applying and the header fell back to the conservative "cannot tell"
+    # answer -- reporting the unreachable assert as load-bearing.
+    #
+    # The promotion itself is sound: a starred target's list-wrapping is
+    # decided by the target syntax alone, so it holds whether the store ran,
+    # has not run, or never will. The guard was the wrong *shape* of question.
+    (
+        "a starred store in a for body binds a list at a later sibling with",
+        (
+            "    for _ in (1,):\n"
+            "        *cs, = (contextlib.suppress(AssertionError),)\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        False,
+    ),
     # Controls. Both keep a *narrow* repair honest. A plain loop target binds
     # the next element, which the rule cannot read without running the loop,
     # so #336 declines it and the assert stays live -- CPython agrees, the
@@ -12393,6 +12420,34 @@ STARRED_LOOP_ENTRY_UNREACHABLE_ROWS = (
             "        cs = contextlib.nullcontext()\n"
             "        with cs:\n"
             "            assert x != 1\n"
+        ),
+        True,
+    ),
+    # #423's control: a plain store in a loop body read by a later sibling is
+    # *not* decidable, because the value it binds depends on the wrapped
+    # element rather than the target syntax. The nullcontext really is entered,
+    # so this stays live and the repair must not generalise to it.
+    (
+        "CONTROL a plain store in a for body read by a later sibling with",
+        (
+            "    for _ in (1,):\n"
+            "        cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
+        ),
+        True,
+    ),
+    # A real rebind after the loop settles the name again, so the header is
+    # entered and the assert fires. This keeps the repair from ignoring a
+    # later store of the same name.
+    (
+        "CONTROL a later rebind supersedes the loop's starred store",
+        (
+            "    for _ in (1,):\n"
+            "        *cs, = (contextlib.suppress(AssertionError),)\n"
+            "    cs = contextlib.nullcontext()\n"
+            "    with cs:\n"
+            "        assert x != 1\n"
         ),
         True,
     ),
@@ -12499,6 +12554,60 @@ def test_starred_loop_store_must_remain_in_force_at_entry(body, live):
     header = next(node for node in ast.walk(function) if isinstance(node, ast.With))
     assert support._entered_name_is_dead(header, function, {"contextlib": "contextlib"}, tree) is (
         not live
+    )
+
+
+@pytest.mark.parametrize(
+    "iterable",
+    (
+        "()",
+        "(*(1,),)",
+        "range(0)",
+    ),
+    ids=("empty-literal", "starred-element", "empty-call"),
+)
+def test_a_starred_store_in_a_loop_that_never_iterates_stays_undecidable(iterable):
+    """#423. A loop that cannot be shown to run leaves the name undecided.
+
+    The later-sibling repair reads a starred store in a loop body as settled
+    once the loop has *necessarily* completed an iteration. That guarantee is
+    what keeps the repair narrow: ``for _ in (1,):`` always runs its body, so
+    the list the starred target collected really is in force by the time a
+    later sibling header reads the name.
+
+    These iterables give no such guarantee, and the three fail differently, so
+    the rule must decline all of them rather than answer "dead":
+
+    * ``()`` -- the body never runs, so ``cs`` is never bound and CPython
+      raises ``UnboundLocalError`` on entry. That is #334's family.
+    * ``(*(1,),)`` -- a starred element means the iterable's length is not
+      readable from the syntax, so completion is undecidable.
+    * ``range(0)`` -- a call the rule does not evaluate.
+
+    Declining keeps the header live, which is the safe direction: reporting a
+    reachable contract as swallowed would be the damaging error. The
+    interpreter check below holds each fixture to actually raising before the
+    body rather than taking the analyzer's word for it.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"    for _ in {iterable}:\n"
+        "        *cs, = (contextlib.suppress(AssertionError),)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<starred-empty-loop>", "exec"), namespace)  # noqa: S102
+    with pytest.raises((TypeError, UnboundLocalError, NameError)):
+        namespace["outer"](1, True, None)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True, (
+        f"{iterable}: this loop cannot be shown to run, so the starred store "
+        f"is undecidable. Reporting the header live is the safe direction; "
+        f"answering dead would certify a contract CPython may still reach."
     )
 
 
