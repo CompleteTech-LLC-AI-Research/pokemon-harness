@@ -16037,3 +16037,102 @@ def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
     # Original CPython fixtures are live; arbitrary initialization is unproved.
     assert runtime_live is True
     assert _is_enforced(function, target, module) is False
+
+
+#: #365. A store written in a branch that can never run must not retire the
+#: carried suppressor. Each row is judged on an **execution sweep** of its whole
+#: domain: the fixture is run and the assert is watched, and only then is
+#: ``_is_enforced`` consulted. ``enforced`` and ``fires`` are therefore two
+#: independent measurements, and the test asserts both -- so a row can never
+#: pass by agreeing with the implementation.
+#:
+#: The ``unreachable`` rows are the defect: the assert is swallowed on every
+#: input, so reporting it enforced certifies a disarmed contract.
+#:
+#: The ``reachable`` rows are the guard. ``if flag:`` is not a literal, so
+#: ``_falsy_literal`` declines it and the store keeps competing -- and it
+#: genuinely does supersede on the ``flag`` path, where the assert fires. The
+#: ``else`` row is the guard for the other side: ``If.body`` and ``If.orelse``
+#: are AST siblings, and the ``else`` arm is exactly the one that *does* run
+#: under a falsy test, so that store must keep superseding.
+UNREACHABLE_BRANCH_STORE_ROWS = (
+    (
+        "365 an `if False:` body store does not retire the carried suppressor",
+        "    if False:\n        cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    (
+        "365 an `if ():` body store does not retire it either",
+        "    if ():\n        cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    (
+        "365 an `if {}:` body store does not retire it either",
+        "    if {}:\n        cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    (
+        "365 a nested `if False:` inside a live branch also does not retire it",
+        "    if flag:\n        if False:\n            cs = contextlib.nullcontext()\n",
+        False,
+        False,
+    ),
+    # --- controls: these stores really do run, so they must keep superseding ---
+    (
+        "control an `if flag:` store still supersedes (the assert fires on that path)",
+        "    if flag:\n        cs = contextlib.nullcontext()\n",
+        True,
+        True,
+    ),
+    (
+        "control the `else` of a falsy `if` still supersedes",
+        "    if False:\n        pass\n    else:\n        cs = contextlib.nullcontext()\n",
+        True,
+        True,
+    ),
+)
+
+
+def _unreachable_branch_store_fixture(preamble, signature="def probe(x, flag):\n"):
+    return (
+        "import contextlib\n"
+        + signature
+        + "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
+        + preamble
+        + "    with cs:\n        assert x != 1\n"
+    )
+
+
+@pytest.mark.parametrize(("label", "preamble", "enforced", "fires"), UNREACHABLE_BRANCH_STORE_ROWS)
+def test_a_store_in_a_branch_that_cannot_run_does_not_retire_a_carried_suppressor(
+    label, preamble, enforced, fires
+):
+    """#365. Only a store that can actually run may supersede the carried value.
+
+    The sweep runs the fixture across ``x`` and ``flag`` and records which
+    inputs raise ``AssertionError``. Asserting ``bool(fired) is fires`` and
+    ``_is_enforced(...) is enforced`` together means each row is a claim about
+    CPython *and* about the rule, and neither can be satisfied by the other.
+    """
+    source = _unreachable_branch_store_fixture(preamble)
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    observed = []
+    for value in (0, 1):
+        for flag in (True, False):
+            try:
+                namespace["probe"](value, flag)
+                observed.append((value, flag, None))
+            except AssertionError:
+                observed.append((value, flag, "AssertionError"))
+            except BaseException as error:  # noqa: BLE001 - recorded, not ignored
+                observed.append((value, flag, type(error).__name__))
+    fired = [entry for entry in observed if entry[2] == "AssertionError"]
+    assert bool(fired) is fires, f"{label}: {observed}"
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is enforced, f"{label}: {observed}"
