@@ -1018,3 +1018,82 @@ def _store_is_in_a_skipped_else_arm(statement, function=None):
         if _contains_any(block.orelse, statement):
             return True
     return False
+
+
+def _store_is_in_a_break_skipped_else_clause(statement, function=None):
+    """Is this store written in a loop ``else`` that a ``break`` can skip?
+
+    #451. A ``for``/``else`` or ``while``/``else`` ``else`` clause runs only when
+    the loop finishes *without* executing a ``break``. #378 correctly
+    established the complementary rule -- a zero-iteration loop's ``else``
+    still runs -- but the other side was not modelled, so a suppressor bound in
+    an ``else`` that a ``break`` skips retired the carried ``nullcontext``:
+
+        cs = contextlib.nullcontext()
+        for item in (1,):
+            break                       # the else never runs
+        else:
+            cs = contextlib.suppress(AssertionError)
+        with cs:                       # `cs` is still the nullcontext
+            assert x != 1              # LIVE
+
+    Executed on CPython 3.12.14 the assert **fires**, while the analyzer
+    reported it defeated. That is #308 criterion 1's damaging direction: a
+    contract that really enforces, certified unreachable.
+
+    The loop is the one whose ``orelse`` holds the store, and the ``break`` has
+    to be bound to *that* loop. A ``break`` inside a nested loop belongs to the
+    inner loop, so ``for ...: for ...: break`` still completes the outer loop
+    normally and the outer ``else`` does run. A ``break`` inside a nested
+    ``def``/``lambda``/``class`` body is not executed by this loop at all, and
+    CPython rejects one written directly in a ``def`` as a ``SyntaxError``
+    anyway. :func:`_has_own_break` stops at each of those walls for exactly
+    this reason.
+
+    A loop with no reachable ``break`` always completes normally, so its
+    ``else`` does run and the store really does settle the name; declining
+    there would keep the existing, correct answer rather than invent a new one.
+    """
+    if function is None:
+        return False
+    for block in _enclosing_blocks(statement, function):
+        if not isinstance(block, (ast.For, ast.AsyncFor, ast.While)):
+            continue
+        # `orelse` and `body` are AST *siblings*, and only `body` is skipped by
+        # a `break`. #378's gate on `_in_body` is the same distinction, asked
+        # from the other side: that rule drops stores in a body a zero-iteration
+        # loop never runs, and this one keeps stores in an `orelse` a `break`
+        # can skip. Neither guard covers the other.
+        if _contains_any(block.orelse, statement) and any(
+            _has_own_break(node) for node in block.body
+        ):
+            return True
+    return False
+
+
+#: Nodes that capture their own ``break``, so nothing inside them can break the
+#: loop being asked about. A nested loop binds the ``break`` to itself, and a
+#: nested scope is a body this loop never executes.
+_BREAK_CAPTURING_NODES = (
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+)
+
+
+def _has_own_break(node):
+    """Does a ``break`` in this subtree bind to the loop that encloses it?
+
+    Walks the subtree but stops at anything that captures its own ``break``. A
+    ``break`` reached before such a wall is the enclosing loop's; one found
+    only beyond a wall belongs to that wall and does not count.
+    """
+    if isinstance(node, ast.Break):
+        return True
+    if isinstance(node, _BREAK_CAPTURING_NODES):
+        return False
+    return any(_has_own_break(child) for child in ast.iter_child_nodes(node))
