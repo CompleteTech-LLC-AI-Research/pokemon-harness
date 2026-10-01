@@ -14137,6 +14137,46 @@ LOOP_ELSE_IMPORT_SPELLINGS = (
         "contextlib.suppress(AssertionError)",
         True,
     ),
+    # -- #485. A `try`/`except` above the loop is transparent for the same
+    #    reason an import is: it binds names and swallows an exception, but a
+    #    `try` that binds nothing the witness reads cannot change what the
+    #    header enters, and the caught exception does not skip the header.
+    #    The pre-chain scan rejected the `ast.Try` outright -- it is neither a
+    #    `Pass` nor an `Assign` -- so the witness never fired and this live
+    #    assert was certified dead.
+    (
+        "485 a try/except above the loop is transparent",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- `try*` is the same statement with a different except spelling and
+    #    binds the same names -- here, none.
+    (
+        "485 a try*/except* above the loop is transparent",
+        "    try:\n        import nope_missing_xyz\n    except* ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- The nested body is itself an admitted `try`, so admitting the outer
+    #    one is not a new question. This pins that the rule recurses.
+    (
+        "485 a nested admitted try above the loop is transparent",
+        (
+            "    try:\n"
+            "        try:\n"
+            "            import nope_missing_xyz\n"
+            "        except ImportError:\n"
+            "            pass\n"
+            "    except Exception:\n"
+            "        pass\n"
+        ),
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
 )
 
 
@@ -14163,6 +14203,32 @@ LOOP_ELSE_IMPORT_SHADOWS = (
         "    import contextlib\n    import contextlib.nullcontext as contextlib\n",
     ),
     ("a relative import of the root", "    from . import contextlib\n"),
+    # -- #485's boundary. A `try` is admitted only because it binds nothing
+    #    the witness reads and its body cannot exit the function before the
+    #    header. Each of these breaks exactly one of those two conditions, and
+    #    admitting any of them would let the header enter an object the witness
+    #    never proved -- the damaging direction.
+    #
+    #    A decline reports the assert as defeated when it fires, which is the
+    #    false-DEAD direction. That is the safe error here: the alternative is
+    #    a false-LIVE, and these fixtures are what a false-LIVE would look like.
+    (
+        "a try that rebinds the carried manager",
+        "    try:\n        cs = contextlib.suppress(AssertionError)\n    except Exception:\n        pass\n",
+    ),
+    (
+        "a try whose finally rebinds the carried manager",
+        "    try:\n        import os\n    finally:\n        cs = contextlib.suppress(AssertionError)\n",
+    ),
+    (
+        "a try whose handler binds a name",
+        "    try:\n        helper()\n    except Exception as exc:\n        pass\n",
+    ),
+    (
+        "a try whose body defines a shadowing name",
+        "    try:\n        def cs():\n            pass\n    except Exception:\n        pass\n",
+    ),
+    ("a try whose body returns", "    try:\n        return\n    except Exception:\n        pass\n"),
 )
 
 

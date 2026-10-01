@@ -1289,6 +1289,81 @@ def _bindings_after_import(node, bound):
     return own
 
 
+def _try_only_binds_names_the_witness_ignores(node, function, bound):
+    """Is this a ``try``/``except`` that cannot change what the header enters?
+
+    #485. A ``try`` placed above the loop-``else`` witness used to make the
+    witness decline, which reported a firing assert as unenforced. The scan
+    admits only ``Pass``, an allowed ``Assign``, and a transparent import, and
+    an ``ast.Try`` is none of those.
+
+    A ``try`` is not an effect the walk has to model *provided* it binds
+    nothing and cannot exit the function before the header. Two things can
+    bind inside it:
+
+    * ``except <E> as name`` binds ``name`` until the handler ends, and
+    * an assignment, ``for``, ``with``, or walrus in the body or a handler
+      binds its targets.
+
+    Rather than decide which of those names are safe to rebind -- which would
+    mean resolving them against the carried manager *and* every module root
+    the ``contextlib.*`` calls are spelled through -- this declines if the
+    ``try`` binds anything at all. The filed fixture binds nothing, so it is
+    admitted; every binding shape keeps the pre-#485 decline. A decline
+    reports the assert as defeated, which is the false-DEAD direction, but
+    never a false-LIVE.
+
+    The body may also raise past its handlers, or transfer control away, and
+    either would let the function exit before the header. Rather than reason
+    about which exceptions escape which handlers, this admits only a body that
+    is itself a shape already known to be transparent: a ``Pass``, an import
+    of the resolved root, or a nested admitted ``try``. That covers the filed
+    fixture -- whose body is the import -- while every other body keeps the
+    previous, safe decline.
+    """
+    if not isinstance(node, ast.Try) and not isinstance(node, ast.TryStar):
+        return False
+
+    # -- What this statement could possibly bind. `except E as name` binds
+    #    `name`; an assignment, `for`, `with`, or walrus in the body or a
+    #    handler binds its targets; `del` unbinds. Any of these could hand the
+    #    header a different object than the one the witness proved, so a `try`
+    #    that binds *anything* declines. The filed fixture binds nothing --
+    #    its body is a bare import and its handler is a bare `pass` -- which is
+    #    exactly the shape that is safe to admit, and refusing everything else
+    #    is the pre-#485 behaviour, which cannot produce a false-LIVE.
+    bound_names = set()
+    for statement in [node.body, node.orelse, node.finalbody]:
+        for child in statement:
+            bound_names.update(_store_target_names_of(child))
+            for sub in ast.walk(child):
+                if isinstance(sub, ast.ExceptHandler) and sub.name is not None:
+                    bound_names.add(sub.name)
+    if bound_names:
+        return False
+
+    # -- The body must not be able to exit the function before the header.
+    return not _try_body_can_exit_or_raise(node, function, bound)
+
+
+def _try_body_can_exit_or_raise(node, function, bound):
+    """Can this ``try`` body raise past its handlers, or transfer control away?
+
+    Only shapes already transparent to the pre-chain scan are admitted, so the
+    filed fixture -- whose body is an import -- passes without this having to
+    prove anything about exception flow. Everything else declines, which is
+    the pre-#485 behaviour and cannot introduce a false-LIVE.
+    """
+    for child in node.body:
+        if isinstance(child, ast.Pass):
+            continue
+        if _import_only_binds_the_resolved_root(child, function, bound):
+            continue
+        if not _try_only_binds_names_the_witness_ignores(child, function, bound):
+            return True
+    return False
+
+
 def _import_only_binds_the_resolved_root(node, function, bound):
     """Is this an import that leaves every name the witness reads untouched?
 
@@ -1562,6 +1637,38 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         # import that binds exactly the module root the witness already reads
         # is transparent, so that is what is admitted here.
         if _import_only_binds_the_resolved_root(node, function, bound):
+            continue
+        # #485. A `try`/`except` above the loop is transparent for the same
+        # reason an import is: it binds names and swallows exceptions, but
+        # binding a name the witness never reads is inert, and the swallowed
+        # exception does not skip the header.
+        #
+        #     def outer(x, flag, helper):
+        #         try:
+        #             import nope_missing_xyz
+        #         except ImportError:
+        #             pass
+        #         cs = contextlib.nullcontext()
+        #         for item in (1,):
+        #             break
+        #         else:
+        #             cs = contextlib.suppress(AssertionError)
+        #         with cs:
+        #             assert x != 1
+        #
+        # The `ModuleNotFoundError` is caught, execution continues, the loop
+        # takes its `break`, the `else` is skipped, and the assert fires. The
+        # pre-chain scan rejected the `ast.Try` outright -- it is neither a
+        # `Pass` nor an `ast.Assign` -- so the witness never fired.
+        #
+        # The soundness condition is the same one the import rule uses: the
+        # statement must not bind a name the witness resolves through. An
+        # `except ... as e` binds `e`, and an assignment inside either arm
+        # binds its targets, so those are all checked here rather than
+        # assumed. A `try` whose *body* rebinds the carried name or a walked
+        # root declines, because then the binding the header enters is not
+        # the one the witness proved.
+        if _try_only_binds_names_the_witness_ignores(node, function, bound):
             continue
         # #445. The carried binding may arrive through a `with` header's
         # assignment expression rather than a plain assignment:
