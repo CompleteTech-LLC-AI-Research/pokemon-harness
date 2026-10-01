@@ -91,12 +91,17 @@ async def battle_row(output, asset, transport, journal):
         before_states = [await pair.state(owner) for owner in range(2)]
         with (output / "battle-observations.jsonl").open("x") as observations:
             result = await complete_battle(pair, observations)
-            observations.write(json.dumps({"phase": "terminal_edges_only", "result": result}) + "\n")
+            observations.write(
+                json.dumps({"phase": "terminal_edges_only", "result": result}) + "\n"
+            )
             observations.flush()
             result["post_match_return"] = await finish_battle_return(
                 pair, before_states, [before, peer_before], result["terminal"], result["last_live"]
             )
-            observations.write(json.dumps({"phase": "restored_usable_room", "result": result["post_match_return"]}) + "\n")
+            observations.write(
+                json.dumps({"phase": "restored_usable_room", "result": result["post_match_return"]})
+                + "\n"
+            )
             observations.flush()
         result.update({"scenario": SCENARIO, "runtime_mode": mode, "transport": transport})
         await pair.eof()

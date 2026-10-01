@@ -404,10 +404,12 @@ def returned_snapshot(owner, *, result=0):
         "battle": {"raw_is_in_battle": 0, "kind": 0, "raw_battle_result": result},
         "bag": {"valid": True, "stacks": [{"item_id": 4, "quantity": 5}]},
         "progress": {"money": 100},
-        "party": {"mons": [
-            {"valid": True, "hp": 20, "max_hp": 20, "status": {"raw": 0}, "pp": [35, 0, 0, 0]}
-            for _ in range(6)
-        ]},
+        "party": {
+            "mons": [
+                {"valid": True, "hp": 20, "max_hp": 20, "status": {"raw": 0}, "pp": [35, 0, 0, 0]}
+                for _ in range(6)
+            ]
+        },
     }
 
 
@@ -429,7 +431,9 @@ def test_pinned_red_complementary_results_classify_zero_as_win(winner):
         states.reverse()
         live.reverse()
     assert battle_return.complementary_results(states, live) == {
-        "winner": winner, "loser": 1 - winner, "raw_results": [0, 1] if winner == 0 else [1, 0],
+        "winner": winner,
+        "loser": 1 - winner,
+        "raw_results": [0, 1] if winner == 0 else [1, 0],
     }
 
 
@@ -464,7 +468,9 @@ def test_cached_terminal_snapshot_cannot_replace_live_match_history():
         battle_return.complementary_results(states, live)
 
 
-@pytest.mark.parametrize("field", ["hp", "status", "pp", "bag", "money", "records", "map", "battle"])
+@pytest.mark.parametrize(
+    "field", ["hp", "status", "pp", "bag", "money", "records", "map", "battle"]
+)
 def test_restoration_requires_every_gameplay_component(field):
     states, records, _ = return_case()
     before, after = states[0], copy.deepcopy(states[0])
@@ -486,7 +492,9 @@ def test_restoration_requires_every_gameplay_component(field):
     else:
         after["battle"]["raw_is_in_battle"] = 2
     with pytest.raises(AssertionError):
-        battle_return.assert_restored(before, after, [row["digest"] for row in records], after_records)
+        battle_return.assert_restored(
+            before, after, [row["digest"] for row in records], after_records
+        )
 
 
 @pytest.mark.asyncio
@@ -521,7 +529,9 @@ async def test_return_requires_actual_new_room_control_after_restoration(moves):
 
     pair = Pair()
     if moves:
-        result = await battle_return.finish_battle_return(pair, states, [records, records], states, live)
+        result = await battle_return.finish_battle_return(
+            pair, states, [records, records], states, live
+        )
         assert result["source_defined_result"]["winner"] == 0
         assert pair.calls == ["release", 0, 1, "release"]
     else:

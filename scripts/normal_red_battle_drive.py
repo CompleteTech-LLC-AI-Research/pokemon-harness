@@ -185,7 +185,11 @@ async def _select_colosseum(client):
                 state = await pair.state(owner)
                 if state["overworld"]["map_id"] == 64:
                     menu = state["menu"]
-                    assert (menu["current_item"], menu["max_item"], menu["watched_keys"]) == (1, 2, 3)
+                    assert (menu["current_item"], menu["max_item"], menu["watched_keys"]) == (
+                        1,
+                        2,
+                        3,
+                    )
                     await pair.press(owner, "a", duration=1)
                     await pair.step(2)
         await pair.step(4)

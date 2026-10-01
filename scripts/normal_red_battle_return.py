@@ -18,13 +18,15 @@ def complementary_results(terminals, last_live):
     assert sorted(results) == [0, 1], ("expected complementary Red win/loss", results)
     assert len(last_live) == 2 and all(
         type(state["battle"]["raw_is_in_battle"]) is int
-        and state["battle"]["raw_is_in_battle"] in (1, 2) for state in last_live
+        and state["battle"]["raw_is_in_battle"] in (1, 2)
+        for state in last_live
     ), "missing actual live battle history"
     exhausted = last_live[results.index(1)]["party"]["mons"]
     assert len(exhausted) == 6 and all(
         mon["valid"] is True and type(mon["hp"]) is int and mon["hp"] == 0 for mon in exhausted
     ), (
-        "losing party was not naturally exhausted", exhausted,
+        "losing party was not naturally exhausted",
+        exhausted,
     )
     survivor = last_live[results.index(0)]["party"]["mons"]
     assert len(survivor) == 6 and any(
@@ -38,7 +40,9 @@ def assert_restored(before, after, record_digests, after_records):
     assert after["battle"]["raw_is_in_battle"] == 0, after["battle"]
     assert after["battle"]["kind"] == 0, after["battle"]
     assert after["bag"] == before["bag"] and after["bag"]["valid"] is True, (
-        "inventory changed or unknown", before["bag"], after["bag"],
+        "inventory changed or unknown",
+        before["bag"],
+        after["bag"],
     )
     assert type(before["progress"]["money"]) is int
     assert type(after["progress"]["money"]) is int
@@ -52,7 +56,8 @@ def assert_restored(before, after, record_digests, after_records):
         assert restored["status"]["raw"] == 0
         assert restored["pp"] == original["pp"], ("PP not restored", restored, original)
     assert _digests(_records_from_payload(after_records)) == record_digests, (
-        "full 44-byte party not restored", after_records,
+        "full 44-byte party not restored",
+        after_records,
     )
 
 
@@ -73,7 +78,9 @@ async def finish_battle_return(
         records = [await pair.records(owner) for owner in range(2)]
         try:
             for owner in range(2):
-                assert_restored(before_states[owner], states[owner], expected[owner], records[owner])
+                assert_restored(
+                    before_states[owner], states[owner], expected[owner], records[owner]
+                )
         except AssertionError:
             await pair.step(4)
             continue
@@ -83,7 +90,8 @@ async def finish_battle_return(
     await pair.release_buttons()
     positions = [(state["overworld"]["x"], state["overworld"]["y"]) for state in restored]
     assert positions == [(3, 4), (6, 4)] or positions == [(6, 4), (3, 4)], (
-        "unexpected returned room positions", positions,
+        "unexpected returned room positions",
+        positions,
     )
     # The tile directly below each source-defined spawn is clear Club floor.
     for owner in range(2):
@@ -101,7 +109,9 @@ async def finish_battle_return(
             await pair.release_buttons()
             final_records = [await pair.records(owner) for owner in range(2)]
             for owner in range(2):
-                assert_restored(before_states[owner], states[owner], expected[owner], final_records[owner])
+                assert_restored(
+                    before_states[owner], states[owner], expected[owner], final_records[owner]
+                )
             return {
                 "source_defined_result": outcome,
                 "restored_states": restored,
