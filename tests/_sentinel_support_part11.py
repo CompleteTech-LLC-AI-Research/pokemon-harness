@@ -793,8 +793,6 @@ def _module_rebinds_name_for_any_import(function, name, call=None):
         for node in _module_level_bindings(statement):
             if _binding_is_the_callee_import(node, name):
                 continue
-            if at_module_scope and _node_precedes_call(statement, node, call):
-                continue
             if any(_names_bound_by_statement(node, name)):
                 return True
     return False
