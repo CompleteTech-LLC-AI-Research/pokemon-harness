@@ -16037,3 +16037,70 @@ def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
     # Original CPython fixtures are live; arbitrary initialization is unproved.
     assert runtime_live is True
     assert _is_enforced(function, target, module) is False
+
+
+#: #334. A store written in a nested scope binds *that* scope's name, so it
+#: cannot retire a value the enclosing function still holds. Each row is judged
+#: on an **execution sweep**: the fixture is run, the assert is watched, and
+#: only then is ``_is_enforced`` consulted, so a row cannot pass by agreeing
+#: with the implementation.
+#:
+#: The ``rebind`` rows are the defect. The nested store wins on order and
+#: retires the carried suppressor, so the analyzer reports ``enforced`` on an
+#: assert CPython swallows -- the damaging direction.
+#:
+#: The ``nonlocal`` row is the guard on the other side: ``nonlocal`` is the one
+#: declaration that *does* rebind the enclosing binding, so that store must
+#: keep retiring the carrier and the assert is genuinely live.
+NESTED_SCOPE_REBIND_ROWS = (
+    (
+        "334 a nested plain rebind does not retire the carried suppressor",
+        "    def inner():\n        cs = contextlib.nullcontext()\n    inner()\n",
+        False,
+    ),
+    (
+        "334 a nested `global` rebind does not retire it either",
+        "    def inner():\n        global cs\n        cs = contextlib.nullcontext()\n    inner()\n",
+        False,
+    ),
+    (
+        "334 CONTROL a nested `nonlocal` rebind does retire it (the assert is live)",
+        "    def inner():\n        nonlocal cs\n        cs = contextlib.nullcontext()\n    inner()\n",
+        True,
+    ),
+    (
+        "334 CONTROL a nested class-body store does not retire it either",
+        "    class Inner:\n        cs = contextlib.nullcontext()\n",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "rebind", "fires"), NESTED_SCOPE_REBIND_ROWS)
+def test_a_nested_scope_store_does_not_retire_a_carried_suppressor(label, rebind, fires):
+    """#334. Only a store that can reach this binding may supersede it.
+
+    ``_store_is_in_scope`` draws the boundary and already separates ``nonlocal``
+    (rebinds the enclosing function's binding) from ``global`` (writes the
+    module), so this row pins the *use* of that rule at the resolution site
+    rather than restating it.
+    """
+    source = (
+        "import contextlib\ndef outer(x, helper, flag=True):\n"
+        "    from contextlib import suppress, nullcontext\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n        pass\n"
+        + rebind
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    raised = False
+    try:
+        namespace["outer"](1, None, True)
+    except AssertionError:
+        raised = True
+    assert raised is fires, label
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is fires, label
