@@ -32,7 +32,7 @@ python -m scripts.produce_normal_club_journey \
   --seconds 600
 ```
 
-The expected parent geometry is Route2 map13 `(7,2)`. Every supplied input
+The expected parent geometry is Route2 map13 `(7,3)`. Every supplied input
 must match the current VERSIONS ROM/SYM/runtime pins. Consulted pret files and
 blocksets must match the producer's file hashes for the recorded pinned pret
 revision. Do not supply a battery, RAM snapshot, or sibling state in the ROM

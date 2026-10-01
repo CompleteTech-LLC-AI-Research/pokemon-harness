@@ -535,9 +535,9 @@ def run_club_route(journey):
     if state.battle.active or (state.overworld.map_id, state.overworld.x, state.overworld.y) != (
         13,
         7,
-        2,
+        3,
     ):
-        raise foundation.CaptureRefused("expected ordinary six-party Route2 checkpoint13,7,2")
+        raise foundation.CaptureRefused("expected ordinary six-party Route2 checkpoint13,7,3")
     journey.checkpoint("ordinary_six_party_parent_reloaded")
     journey.navigate((8, 0), 13, transition=2)
     journey.driver.idle(60, render=True)

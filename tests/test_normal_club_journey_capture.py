@@ -279,7 +279,7 @@ def authored_route(*, event_bits=130, bag=True, script=0, misplaced_final=False)
     state = NS(
         party=party,
         battle=NS(active=False),
-        overworld=NS(map_id=13, x=7, y=2),
+        overworld=NS(map_id=13, x=7, y=3),
         menu=NS(watched_keys=3, max_item=1, current_item=0),
         bag=NS(has_item=lambda _: bag),
     )
@@ -386,3 +386,13 @@ def test_committed_source_timeout_refuses(monkeypatch):
     monkeypatch.setattr(club.subprocess, "check_output", timeout)
     with pytest.raises(club.foundation.CaptureRefused, match="identity unavailable"):
         club.committed_source_identity()
+
+
+@pytest.mark.parametrize("map_id,x,y", [(13, 7, 2), (13, 8, 3), (12, 7, 3)])
+def test_parent_geometry_guard_matches_actual_pinned_readback(map_id, x, y):
+    owner, calls, checkpoints = authored_route()
+    state = owner.session.read_game_state()
+    state.overworld.map_id, state.overworld.x, state.overworld.y = map_id, x, y
+    with pytest.raises(club.foundation.CaptureRefused, match="checkpoint13,7,3"):
+        club.run_club_route(owner)
+    assert calls == [] and checkpoints == []
