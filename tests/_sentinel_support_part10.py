@@ -1107,6 +1107,9 @@ def _import_only_binds_the_resolved_root(node, function, bound):
     statement rebinds something this scope never reads and is inert.  If yes,
     it must resolve to the real `contextlib`, or it has genuinely rebound the
     walked root and the witness would be reasoning about a different object.
+    That covers `import a`, `import a.b`, `import a as b`, `from a import b`,
+    and `from a import b as c` alike, because the answer comes from the binding
+    table rather than from the spelling.
 
     That rule is what #475 added, because refusing every non-canonical
     spelling was wrong in the damaging direction.  Each of these binds a name
@@ -1115,7 +1118,9 @@ def _import_only_binds_the_resolved_root(node, function, bound):
     * ``import contextlib as cb`` with ``cb.nullcontext()`` -- `cb` *is* the
       root here, and it resolves to `contextlib`;
     * ``import os.path`` or ``import json`` beside the canonical import;
-    * ``import json as cl`` beside the canonical import.
+    * ``import json as cl`` beside the canonical import;
+    * ``from json import loads`` (or ``... as cl``) beside the canonical
+      import, which binds a leaf of an unrelated module.
 
     Declining them certified a live assert dead, which is the same false-DEAD
     the residue below describes, one import spelling further out.
@@ -1127,7 +1132,8 @@ def _import_only_binds_the_resolved_root(node, function, bound):
       admitting it would certify a genuinely swallowed assert enforced;
     * ``import contextlib.nullcontext`` binds the single name `contextlib` as
       a *package*, shadowing the attribute path the witness walks;
-    * ``from contextlib import nullcontext`` binds the leaf, not the root;
+    * ``from contextlib import nullcontext`` binds the leaf, not the root, so
+      it is only admissible when nothing here reads that name;
     * any binding of a name that is later stored to, or that shadows the root,
       is refused by the checks below;
     * a relative import (``level > 0``) resolves against a package this witness
@@ -1137,10 +1143,37 @@ def _import_only_binds_the_resolved_root(node, function, bound):
     than from a reading of what the import "means", so the admitted and refused
     sets cannot drift apart the way a hand-enumerated list did.
     """
-    if not isinstance(node, ast.Import):
+    if not isinstance(node, (ast.Import, ast.ImportFrom)):
+        return False
+    if isinstance(node, ast.ImportFrom) and node.level:
+        # A relative import resolves against a package this witness knows
+        # nothing about, so the name it binds cannot be resolved to the real
+        # `contextlib` by anything available here.
         return False
     if not node.names:
         return False
+    if isinstance(node, ast.ImportFrom):
+        # #475. `from a import b` binds `b`, and resolves to `a.b`.  That is
+        # the same collision test as every other spelling, read off the binding
+        # table: either the bound name is one the witness never reads, so the
+        # statement is inert -- `from json import loads as cl` beside the
+        # canonical import, which CPython shows still fires -- or it is one it
+        # walks, in which case it has to be the real thing.
+        for alias in node.names:
+            bound_name = alias.asname or alias.name
+            if "." in bound_name:
+                return False
+            if bound_name in _witness_module_roots(function, bound) and not _resolves_to(
+                ast.Attribute(
+                    value=ast.Name(id=bound_name, ctx=ast.Load()),
+                    attr="suppress",
+                    ctx=ast.Load(),
+                ),
+                "contextlib.suppress",
+                bound,
+            ):
+                return False
+        return True
     for alias in node.names:
         head, dot, _leaf = alias.name.partition(".")
         if not head:

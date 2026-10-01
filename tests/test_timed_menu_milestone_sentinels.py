@@ -12524,6 +12524,35 @@ IMPORT_SHAPE_ROWS = (
         "        break",
         True,
     ),
+    # -- `from` spellings bind a leaf, not the root, so the same collision test
+    #    applies: a leaf of an unrelated module binds a name nothing here
+    #    reads and is transparent.  These were false-DEADs on 49b899a and were
+    #    found by the independent review of this change -- the rule it states
+    #    covers every import spelling, so `from` had to be handled rather than
+    #    excluded from the claim.
+    (
+        "475 import accepted: a from-import leaf of an unrelated module",
+        "    from json import loads as cl\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    (
+        "475 import accepted: a plain from-import of an unrelated module",
+        "    from json import loads\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- A leaf of the *real* module, under a name nothing reads.  It is still
+    #    transparent: the header enters `cs`, not `sq`.
+    (
+        "475 import accepted: a from-import leaf of contextlib, unread",
+        "    from contextlib import suppress as sq\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
     # -- Two plain imports of the same root.  Idempotent, so still transparent.
     (
         "451 import accepted: two plain imports of the same root",
@@ -12673,6 +12702,39 @@ def test_an_alias_that_rebinds_the_walked_root_is_not_transparent():
             "`break` is still certified enforced while CPython swallows the assert "
             f"(got {results})."
         )
+        # The same rule has to hold for `from` spellings, which bind a leaf.
+        # `from json import loads as contextlib` puts an unrelated leaf under
+        # the name the witness walks, exactly as `import fake as contextlib`
+        # does, so it must be refused for the same reason.
+        for preamble in (
+            "    from json import loads as contextlib\n    import contextlib\n",
+            "    from contextlib import suppress as contextlib\n    import contextlib\n",
+        ):
+            rebound_from = ast.parse(
+                "def outer(x, flag, helper):\n" + preamble + "    cs = contextlib.nullcontext()\n"
+                "    for item in (1,):\n"
+                "        break\n"
+                "    else:\n"
+                "        cs = contextlib.suppress(AssertionError)\n"
+                "    with cs:\n"
+                "        assert x != 1\n"
+            )
+            from_fn = next(
+                node
+                for node in rebound_from.body
+                if isinstance(node, ast.FunctionDef) and node.name == "outer"
+            )
+            assert (
+                support._import_only_binds_the_resolved_root(
+                    from_fn.body[0],
+                    from_fn,
+                    support._bound_names(rebound_from, from_fn),
+                )
+                is False
+            ), (
+                "a from-import that rebinds the root the witness walks must be "
+                f"refused too, like its `import ... as ...` counterpart: {preamble!r}"
+            )
     finally:
         if previous is None:
             sys.modules.pop("fake", None)
