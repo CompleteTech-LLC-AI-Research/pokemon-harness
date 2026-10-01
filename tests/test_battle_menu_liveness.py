@@ -295,3 +295,33 @@ def test_fixed_wram_bank_0_keeps_its_ordinary_read():
     session = _Session(memory)
     assert producer._wram_byte(session, 0xC123) == 0x5A
     assert symbols is not None
+
+
+def test_fixture_turn_driver_reads_move_helper_after_acceptance_module_split(monkeypatch):
+    from scripts import produce_battle_state_fixtures_drive as drive
+    from tests import _pyboy_link_session_roms_support as support
+
+    first, second = object(), object()
+    calls = []
+
+    def read_moves(session):
+        calls.append(session)
+        return ((33, 12), (45, 0), (0, 0), (0, 0))
+
+    monkeypatch.setattr(support, "_read_active_battle_moves", read_moves)
+    assert drive._active_moves(first) == [(33, 12), (45, 0), (0, 0), (0, 0)]
+    assert calls == [first]
+    # A completed battle must return before issuing another input or step.
+    # This exercises the consumer's lazy helper import after the module split.
+    monkeypatch.setattr(drive, "_battle_menu_input_ready", lambda session: False)
+    monkeypatch.setattr(drive, "_battle_ended", lambda session: True)
+    result = drive._drive_next_turn(
+        object(),
+        first,
+        second,
+        {"MainInBattleLoop.selectEnemyMove": 0},
+        step_frames=20,
+        frame_budget=100,
+        chunk_cycles=4096,
+    )
+    assert result == {"status": "terminal", "spent": 0, "turn": None}
