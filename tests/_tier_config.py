@@ -258,6 +258,7 @@ UNIT_MODULES = frozenset(
         "test_sentinel_builtin_entry_identity.py",
         "test_sentinel_completed_instance_loops.py",
         "test_sentinel_module_binding_order.py",
+        "test_sentinel_global_manager_blocks.py",
         "test_sentinel_starred_sibling_paths.py",
         "test_sentinel_preserved_pr524_cases.py",
         "test_sentinel_branch_acceptance.py",

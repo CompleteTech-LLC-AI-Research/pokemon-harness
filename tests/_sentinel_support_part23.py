@@ -60,6 +60,41 @@ def _source_known_manager_value(value, module, function):
     return _source_known_manager_value(returned, module, helper)
 
 
+def _module_block_only_writes_unused_constants(statement, module, captured_name):
+    """Ignore inert unrelated blocks without projecting their conditional stores."""
+    protected = {captured_name} | set(_bound_names(module))
+    protected.update(
+        node.id
+        for node in ast.walk(module)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    )
+    if isinstance(statement, ast.If) and isinstance(statement.test, ast.Constant):
+        bodies = statement.body + statement.orelse
+    elif isinstance(statement, ast.Try):
+        if any(handler.name is not None for handler in statement.handlers):
+            return False
+        if any(not isinstance(handler.type, ast.Name) for handler in statement.handlers):
+            return False
+        bodies = statement.body + statement.orelse + statement.finalbody
+        bodies += [node for handler in statement.handlers for node in handler.body]
+    else:
+        return False
+    return all(
+        isinstance(node, ast.Pass)
+        or (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and all(
+                isinstance(item, ast.Name)
+                and item.id not in protected
+                and not item.id.startswith("__")
+                for item in node.targets
+            )
+        )
+        for node in bodies
+    )
+
+
 def _global_module_capture_defeats_assertion(header, function, module, target):
     """Read a plain module's global capture after complete inert initialization.
 
@@ -119,6 +154,8 @@ def _global_module_capture_defeats_assertion(header, function, module, target):
         return False
     selected = None
     for statement in module.body:
+        if _module_block_only_writes_unused_constants(statement, module, name):
+            continue
         if isinstance(statement, (ast.Import, ast.ImportFrom, ast.Pass)):
             continue
         if (
