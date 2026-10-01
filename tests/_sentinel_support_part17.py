@@ -196,7 +196,11 @@ def _entry_kind_of_stores(stores, scope=None):
     # parameter and a module-level rebinding both count. It is repeated here
     # because this store map is the path the walrus rule actually walks, and
     # it is the same gate `_literal_runtime_type` applies on the direct route.
-    if isinstance(value, ast.Name) and _callee_is_shadowed(value, scope):
+    if (
+        isinstance(value, ast.Name)
+        and _callee_is_shadowed(value, scope)
+        and not _entered_global_builtin_is_intact(value, scope)
+    ):
         return None
     return _literal_runtime_type(value, scope)
 

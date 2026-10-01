@@ -676,25 +676,6 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
 #: user-shadowed ``int`` is a different binding entirely -- shadowing is not
 #: modelled here, so the conservative direction is taken for a name this
 #: module cannot prove is the builtin.
-_BUILTIN_CONSTRUCTOR_TYPES = {
-    "int": "int",
-    "float": "float",
-    "complex": "complex",
-    "str": "str",
-    "bytes": "bytes",
-    "bool": "bool",
-    "list": "list",
-    "tuple": "tuple",
-    "set": "set",
-    "frozenset": "frozenset",
-    "dict": "dict",
-    "bytearray": "bytearray",
-    "range": "range",
-    # #464. `object()` produces the most unenterable value in the table: a
-    # plain instance with no `__enter__` at all. It is here so `m = object()`
-    # reached through a walrus answers by the same probe path as `m = list()`.
-    "object": "object",
-}
 
 #: Marker for a constructor call that *raises* for the arguments given, so the
 #: store it appears in never happens. ``range()`` with no argument is a
