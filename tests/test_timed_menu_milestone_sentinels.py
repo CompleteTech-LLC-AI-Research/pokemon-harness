@@ -13125,3 +13125,144 @@ def test_walrus_literal_entry_declines_shadowed_module_attributes(value, live):
     function = tree.body[-1]
     assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, assertion, tree) is live
+
+
+#: #445. The rows above settle both polarities of the `elif` link when the
+#: carried binding is spelled as a plain `cs = contextlib.nullcontext()`
+#: assignment. The filed shape for this issue reaches the same walk by a
+#: different route -- the carrier arrives through a `with` header's assignment
+#: expression -- and there the polarity flipped:
+#:
+#:     with (cs := contextlib.suppress(AssertionError)):
+#:         pass
+#:     if x:
+#:         pass
+#:     elif True:
+#:         cs = contextlib.nullcontext()
+#:     with cs:
+#:         assert x != 1
+#:
+#: `assert x != 1` can only fail at `x == 1`, and that is exactly the call that
+#: takes the `if x:` arm, so the `elif` never runs and `cs` is still the
+#: `suppress(AssertionError)` the walrus bound. Executed on CPython 3.12 the
+#: assert never fires on either call, so the header is genuinely defeated --
+#: yet the analyzer reported it *enforced*, which certifies a swallowed sentinel
+#: as load-bearing.
+#:
+#: The reason is symmetric with the live rows above and worth stating plainly:
+#: the `elif` arm is demoted correctly in both directions, because an `elif`
+#: runs only when every test above it failed. What the demotion must not do is
+#: *retire the carried binding* on the calls that skip the arm. In the live
+#: rows the carried value is a plain manager, so declining the arm's suppressor
+#: is enough. Here the carried value is itself a suppressor, and declining the
+#: arm's plain manager has to leave that suppressor standing.
+#:
+#: The last row is the converse of the first and decides whether the repair is
+#: correct rather than merely cautious: a carried `suppress(ValueError)` does
+#: *not* catch `AssertionError`, so a call that skips the suppressing arm lets
+#: the failure escape and the header is live after all.
+#: Every row is executed across the swept domain by
+#: :func:`_assert_suppression_contract` before the analyzer's verdict is
+#: compared, so CPython decides each row rather than this table.
+CARRIED_ELIF_SUPPRESSOR_SHAPES = (
+    (
+        "a carried walrus suppressor survives an elif arm that binds a plain manager",
+        "suppress(AssertionError)",
+        "nullcontext",
+        False,
+    ),
+    (
+        "a carried walrus base-exception suppressor survives an elif binding a plain manager",
+        "suppress(BaseException)",
+        "nullcontext",
+        False,
+    ),
+    (
+        "a carried walrus exception suppressor survives an elif binding a plain manager",
+        "suppress(Exception)",
+        "nullcontext",
+        False,
+    ),
+    # The converse control. The carried value does not swallow, so the call
+    # that skips the suppressing arm really does let the assert fire.
+    (
+        "a carried walrus value-error suppressor leaves the elif header live",
+        "suppress(ValueError)",
+        "suppress(AssertionError)",
+        True,
+    ),
+    (
+        "a carried walrus key-error suppressor leaves the elif header live",
+        "suppress(KeyError)",
+        "nullcontext",
+        True,
+    ),
+    # Both arms swallow: every call that reaches the header is defeated, and
+    # the name holds a suppressor whichever arm ran.
+    (
+        "a carried walrus assertion suppressor plus an elif assertion suppressor is defeated",
+        "suppress(AssertionError)",
+        "suppress(AssertionError)",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "carried", "arm", "assert_is_live"),
+    CARRIED_ELIF_SUPPRESSOR_SHAPES,
+    ids=[row[0] for row in CARRIED_ELIF_SUPPRESSOR_SHAPES],
+)
+def test_an_elif_binding_a_plain_manager_does_not_retire_a_carried_suppressor(
+    label, carried, arm, assert_is_live
+):
+    """#445: the `elif` demotion must not retire the binding it superseded.
+
+    `ELIF_LINK_SUPPRESSOR_SHAPES` above covers the live polarity, where the arm
+    binds the suppressor and the carried manager is a plain one. This is the
+    mirror, and it was the damaging direction: an `elif` arm that binds
+    something harmless must not be read as clearing the name. On the calls that
+    skip the arm -- and the assert's own failing call is one of them -- the name
+    still holds whatever was carried in from before the chain, and that is the
+    value the header enters.
+
+    So the answer follows the carried value, not the arm's spelling:
+
+    * carried `suppress(AssertionError)` / `BaseException` / `Exception`,
+      arm binds a plain manager -- the failing call skips the arm and enters
+      the carried suppressor, so the assert never fires and the header is
+      **defeated**;
+    * carried `suppress(ValueError)` / `KeyError` -- those do not catch
+      `AssertionError`, so the same skip leaves the failure to escape and the
+      header is **live**.
+
+    Reading it the other way -- asking only what the arm binds -- is what made
+    the first family report live and, symmetrically, would make this one report
+    live too. The rows are executed before the verdict is compared so CPython,
+    not this table, decides each of them.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        f"    with (cs := contextlib.{carried}):\n"
+        "        pass\n"
+        "    if x:\n"
+        "        pass\n"
+        "    elif True:\n"
+        f"        cs = contextlib.{arm}()\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. An `elif` "
+        f"arm runs only on the calls where every test above it failed, so the "
+        f"binding it supersedes still holds on the rest. Demoting the arm must "
+        f"not retire that carried binding: the header is defeated whenever the "
+        f"value in force on the skipped path swallows AssertionError."
+    )

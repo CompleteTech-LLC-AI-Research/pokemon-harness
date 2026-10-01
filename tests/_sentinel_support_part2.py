@@ -580,6 +580,39 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
     # this branch: there the suppressor really is installed on every path that
     # reaches the header, and the answer is genuinely ambiguous rather than
     # false-dead.
+    # #445. The mirror of the branch below. Here the arm binds something that
+    # does *not* swallow while the value carried in from before the chain does,
+    # and the failure value takes the earlier arm -- so the assert is defeated
+    # by the carried suppressor, not by the arm. The arm is still correctly
+    # demoted; what must not happen is the demotion *retiring* the carried
+    # binding on the path that skips the arm.
+    #
+    #     with (cs := contextlib.suppress(AssertionError)):
+    #         pass
+    #     if x:
+    #         pass
+    #     elif True:
+    #         cs = contextlib.nullcontext()
+    #     with cs:
+    #         assert x != 1
+    #
+    # `assert x != 1` can only fail at x == 1, and that is the call that takes
+    # `if x:` and therefore enters the carried `suppress(AssertionError)`.
+    # Executed, the assert never fires. Reporting it as enforced certifies a
+    # defeated sentinel as load-bearing.
+    if (
+        len(competing) == 1
+        and not any(_entry_may_be_an_unrun_capture(entry, function) for entry in competing)
+        and (
+            _store_is_in_an_elif_link(competing[0][0], function)
+            or _store_is_in_a_skipped_else_arm(competing[0][0], function)
+        )
+        and not _entry_suppresses_assertion_errors(competing[0], bound)
+        and _elif_skipped_path_carries_defeat(
+            entries, orders, competing[0], bound, function, query, owning
+        )
+    ):
+        return _carried_suppression_value(entries, orders, competing[0], bound)
     if (
         len(competing) == 1
         and not any(_entry_may_be_an_unrun_capture(entry, function) for entry in competing)
