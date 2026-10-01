@@ -61,6 +61,26 @@ _PROBE_FOR_RUNTIME_KIND = {
     "float": 0.0,
     "bytes": b"",
     "NoneType": None,
+    # The other zero-argument builtin constructors #464 reaches through a
+    # walrus: `m = list()` enters a list, and so on. They were already keyed
+    # for the literal forms; naming them again would let the two lists drift.
+    "complex": 0j,
+    "bool": False,
+    "frozenset": frozenset(),
+    "bytearray": bytearray(),
+    "object": object(),
+    # `m = len` binds a builtin *function*, not a class object. The kind is
+    # whatever `type()` says, so the two function kinds are probed here rather
+    # than collapsed into one hand-written label.
+    "builtin_function_or_method": len,
+    "ellipsis": Ellipsis,
+    # #464. `m = int` binds a *bare builtin class object*. Entering one is
+    # decided by its metaclass, and every bare builtin class has the builtin
+    # `type` as its metaclass -- so `int` is the honest witness. This is a
+    # distinct kind from `"type"`, which is what a class *written in the file*
+    # records: that one may carry a metaclass defining `__enter__`, and is
+    # left unprobed so it keeps the conservative verdict.
+    "builtin_class": int,
 }
 
 

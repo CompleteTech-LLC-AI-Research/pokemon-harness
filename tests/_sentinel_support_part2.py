@@ -558,7 +558,13 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
         competing = collapsed_entries
     # A conditional non-enterable value cannot revive a carried suppressor:
     # the skipped path still suppresses, and the taken path fails on entry.
-    if len(competing) == 1 and _literal_runtime_type(competing[0][1]) in NON_CONTEXT_MANAGER_TYPES:
+    if (
+        len(competing) == 1
+        # The scope matters for the #464 bare-name and constructor forms: a
+        # name this function rebinds is not the builtin, and reading it as one
+        # would collapse two competing bindings that are really different.
+        and _literal_runtime_type(competing[0][1], function) in NON_CONTEXT_MANAGER_TYPES
+    ):
         carried = [entry[1] for entry in unconditional if orders[id(entry[0])] == latest]
         if (
             len(carried) == 1

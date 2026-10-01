@@ -656,6 +656,10 @@ NON_CONTEXT_MANAGER_TYPES = frozenset(
         "frozenset",
         "range",
         "bytearray",
+        # #464. `object` joins the constructors for the same reason: a plain
+        # instance has no `__enter__`, so a name bound to `object()` is as
+        # unenterable as one bound to `list()`.
+        "object",
     }
 )
 
@@ -686,6 +690,10 @@ _BUILTIN_CONSTRUCTOR_TYPES = {
     "dict": "dict",
     "bytearray": "bytearray",
     "range": "range",
+    # #464. `object()` produces the most unenterable value in the table: a
+    # plain instance with no `__enter__` at all. It is here so `m = object()`
+    # reached through a walrus answers by the same probe path as `m = list()`.
+    "object": "object",
 }
 
 #: Marker for a constructor call that *raises* for the arguments given, so the
@@ -759,9 +767,20 @@ def _name_is_shadowed_in(func, function):
     Nested scopes bind their own names, so a ``def range(...)`` inside another
     ``def`` inside this function does not shadow the builtin's meaning *here*;
     those are skipped, matching :func:`_own_imports`' scope discipline.
+
+    ``function`` may be ``None`` when a caller has no enclosing scope to
+    offer. That is answered as *shadowed*, the same conservative way
+    :func:`_callee_is_shadowed` answers it: a caller that cannot prove the
+    name is the builtin is not entitled to read it as one. Returning ``False``
+    there would be an assertion the scope does not support, and the walk below
+    needs a real node to iterate.
     """
     if not isinstance(func, ast.Name):
         return False
+    if function is None or not isinstance(
+        function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module, ast.ClassDef)
+    ):
+        return True
     name = func.id
     for node in _own_scope_bindings(function):
         if node is name:
