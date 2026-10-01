@@ -16136,3 +16136,112 @@ def test_a_store_in_a_branch_that_cannot_run_does_not_retire_a_carried_suppresso
     function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, module) is enforced, f"{label}: {observed}"
+
+
+@pytest.mark.parametrize("with_else", [False, True])
+def test_issue365_full_two_assertions_keep_carried_suppressor(with_else):
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        "    with (cs := contextlib.suppress(AssertionError)):\n        assert x != 1\n"
+        "    if False:\n        cs = contextlib.nullcontext()\n"
+        + ("    else:\n        pass\n" if with_else else "")
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    assert namespace["probe"](1) is None
+    module = ast.parse(source)
+    function = module.body[1]
+    targets = [n for n in ast.walk(function) if isinstance(n, ast.Assert)]
+    assert [_is_enforced(function, n, module) for n in targets] == [False, False]
+
+
+@pytest.mark.parametrize(
+    ("initial", "rebind", "live"),
+    [
+        ("nullcontext()", "suppress(AssertionError)", True),
+        ("suppress(AssertionError)", "nullcontext()", False),
+    ],
+)
+@pytest.mark.parametrize("hops", [0, 1, 2])
+def test_unreachable_literal_branch_does_not_replace_alias_source(initial, rebind, live, hops):
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        f"    first=contextlib.{initial}\n    if False:\n        first=contextlib.{rebind}\n"
+    )
+    name = "first"
+    for index in range(hops):
+        next_name = f"alias{index}"
+        source += f"    {next_name}={name}\n"
+        name = next_name
+    source += f"    with(cs:={name}):\n        assert x != 1\n"
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if live:
+        with pytest.raises(AssertionError):
+            namespace["probe"](1)
+    else:
+        assert namespace["probe"](1) is None
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is live
+
+
+def test_issue365_top_level_retirement_remains_live():
+    source = (
+        "import contextlib\ndef probe(x):\n"
+        "    with(cs:=contextlib.suppress(AssertionError)):\n        pass\n"
+        "    cs=contextlib.nullcontext()\n    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["probe"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+@pytest.mark.parametrize("constructor", ["list", "tuple", "set", "dict", "bytearray"])
+def test_unreachable_if_store_proof_does_not_trust_enclosing_constructor_parameter(constructor):
+    source = (
+        "import contextlib\n"
+        f"def parent({constructor}):\n    def probe(x):\n"
+        "        with(cs:=contextlib.suppress(AssertionError)):\n            pass\n"
+        f"        if {constructor}():\n            cs=contextlib.nullcontext()\n"
+        "        with cs:\n            assert x != 1\n    return probe\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["parent"](lambda: [1])(1)
+    module = ast.parse(source)
+    function = module.body[1].body[0]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+@pytest.mark.parametrize(
+    "loop",
+    [
+        "        while list():\n            first=contextlib.nullcontext()\n            break\n",
+        "        for item in list():\n            first=contextlib.nullcontext()\n",
+    ],
+)
+def test_literal_if_alias_filter_preserves_other_enclosing_loop_callables(loop):
+    source = (
+        "import contextlib\ndef parent(list):\n    def probe(x):\n"
+        "        first=contextlib.suppress(AssertionError)\n"
+        + loop
+        + "        with(cs:=first):\n            assert x != 1\n    return probe\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["parent"](lambda: [1])(1)
+    module = ast.parse(source)
+    function = module.body[1].body[0]
+    target = next(n for n in ast.walk(function) if isinstance(n, ast.Assert))
+    assert _is_enforced(function, target, module) is True

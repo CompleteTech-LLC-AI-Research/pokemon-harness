@@ -643,7 +643,7 @@ def _store_retires(statement, name, function=None):
 
 
 def _is_provably_unreached_store(entry, orders, function):
-    """Is this conditional store inside a loop body that can never run?
+    """Is this store in a loop or literal branch body that never runs?
 
     #378. A ``for`` over a literal empty iterable has no iterations, so every
     statement in its body is unreachable. A store written there is recorded,
@@ -734,50 +734,26 @@ def _is_provably_unreached_store(entry, orders, function):
             and _in_body(ancestor, statement)
         ):
             return True
-        # #365. `if False:` is the same statement as `while False:`, and the
-        # clause above already answers the loop spelling. The branch spelling
-        # was simply missing, so a store written in a body that can never run
-        # was still recorded, still tagged ``conditional``, and still competed
-        # with the store really in force -- retiring a carried
-        # `suppress(AssertionError)` and letting a swallowed assert be reported
-        # as enforced:
-        #
-        #     with (cs := contextlib.suppress(AssertionError)):
-        #         pass
-        #     if False:
-        #         cs = contextlib.nullcontext()     # never executes
-        #     with cs:                              # still the suppressor
-        #         assert x != 1                     # swallowed
-        #
-        # Executed on CPython 3.12.14 the assert never fires, so the analyzer
-        # was wrong in the safe direction. `_falsy_literal` is the predicate
-        # the module already uses for exactly this question elsewhere (it is
-        # what defeats an assert nested in an `if False:` body), and it answers
-        # a superset of the loop spelling: `if ():`, `if {}:`, and the other
-        # empty-literal containers are all false for the same runtime reason
-        # `False` is, so one call covers the whole family.
-        #
-        # The `_in_body` gate is what keeps this from over-reaching, and it is
-        # the same gate the two clauses above use: `If.body` and `If.orelse`
-        # are AST **siblings**, and the `else` arm is precisely the one that
-        # *does* run under a falsy test. So
-        #
-        #     if False:
-        #         pass
-        #     else:
-        #         cs = contextlib.nullcontext()
-        #
-        # keeps superseding, which is correct -- that store really does run.
-        # A test this cannot read is not matched either, because
-        # `_falsy_literal` declines anything that is not a literal, so an
-        # `if flag:` store keeps competing exactly as before.
-        if (
-            isinstance(ancestor, ast.If)
-            and _falsy_literal(ancestor.test, function)
-            and _in_body(ancestor, statement)
-        ):
-            return True
-    return False
+        # #365: a literal-false If body never stores its replacement manager.
+        # Keep the previously carried suppressor rather than certifying a
+        # swallowed assertion as enforced. The else is a sibling that DOES
+        # execute, so containment must specifically select the body.
+        # Restrict the test to AST constants/empty literal containers: the
+        # shared falsy predicate also accepts constructor calls, whose callee
+        # may be an enclosing parameter. Such calls are not proven here.
+    return _literal_if_store_is_unreached(entry, function)
+
+
+def _literal_if_store_is_unreached(entry, function):
+    """The literal If proof, without widening existing loop-call decisions."""
+    statement = entry[0]
+    return any(
+        isinstance(ancestor, ast.If)
+        and isinstance(ancestor.test, (ast.Constant, ast.Tuple, ast.List, ast.Set, ast.Dict))
+        and _falsy_literal(ancestor.test, function)
+        and _in_body(ancestor, statement)
+        for ancestor in _ancestors(function, statement)
+    )
 
 
 def _carried_suppressor_has_unshadowed_arguments(value, function):
