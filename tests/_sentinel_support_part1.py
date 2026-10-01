@@ -877,7 +877,8 @@ def _carrier_runtime_kinds(function):
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             carriers.append((statement.name, "function"))
         elif isinstance(statement, ast.ClassDef):
-            carriers.append((statement.name, "type"))
+            # #468 widens only the source-proven non-suppressing protocol.
+            carriers.append((statement.name, _classdef_runtime_kind(statement, function)))
         for name, kind in carriers:
             owners.setdefault(name, (statement, kind))
     return owners
