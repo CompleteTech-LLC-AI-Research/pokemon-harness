@@ -77,10 +77,7 @@ def _dereferenced_header_value(expression, bound, tree, function):
     # in something that is not a readable name at all.
     while True:
         if isinstance(node, ast.Subscript):
-            key = _literal_subscript_key(node.slice)
-            if key is _UNREADABLE_KEY:
-                return None
-            steps.append(("item", key))
+            steps.append(("item", node.slice))
             node = node.value
             continue
         if isinstance(node, ast.Attribute):
@@ -102,6 +99,9 @@ def _dereferenced_header_value(expression, bound, tree, function):
         if value is None:
             return None
         if kind == "item":
+            key = _header_reference_index(key, value, function, module)
+            if key is _UNREADABLE_KEY:
+                return None
             value = _literal_element(value, key, function, bound)
         else:
             value = _read_attribute(value, key, module, function, expression)
@@ -160,12 +160,13 @@ def _class_from_type_call(value, function=None):
         Box = type("Box", (), {"ctx": contextlib.suppress(AssertionError)})
         with Box.ctx:
 
-    The namespace is a literal dict, so its entries are as readable as a
+    The namespace is a literal mapping, so its entries are as readable as a
     ``class`` body's assignments. Synthesizing a ``ClassDef`` from it lets one
     resolution path serve both spellings, instead of leaving the dynamic
     spelling as a second, separately-maintained gap.
 
-    Only the fully literal spelling qualifies. A computed namespace, a
+    A literal dict or unshadowed builtin dict with explicit keyword entries qualifies.
+    An opaque computed namespace, a
     ``**``-merged or omitted namespace, and a non-``type`` factory all return
     ``None``, so a class assembled at runtime is not guessed at -- the header
     then stays ``enforced``, which is the safe direction. The base classes are
@@ -184,7 +185,8 @@ def _class_from_type_call(value, function=None):
         return None
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return None
-    if not isinstance(namespace, ast.Dict):
+    namespace = _header_keyword_namespace(namespace, function)
+    if namespace is None:
         return None
     built = ast.ClassDef(
         name=name.value,
@@ -197,8 +199,12 @@ def _class_from_type_call(value, function=None):
     built._header_synthetic = True
     ast.copy_location(built, namespace)
     for key, item in zip(namespace.keys, namespace.values):
-        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-            # `**other` contributes attributes this rule cannot see.
+        if not (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and not (key.value.startswith("__") and key.value.endswith("__"))
+        ):
+            # Expansion and special class-construction keys have unproved type semantics.
             return None
         store = ast.Assign(targets=[ast.Name(id=key.value, ctx=ast.Store())], value=item)
         ast.copy_location(store, item)
@@ -323,8 +329,8 @@ def _literal_element(container, key, function=None, bound=None):
 
     A negative index is read through its ``UnaryOp`` spelling, because that is
     how ``holder[-1]`` parses: ``UnaryOp(USub, Constant(1))``, never
-    ``Constant(-1)``. Only a negated literal integer is read, so ``-x`` and
-    ``-len(h)`` still decline.
+    ``Constant(-1)``. Signed builtin ``len`` of the same proved literal container is also read;
+    arbitrary computed expressions still decline.
 
     ``bool`` is excluded from the integer-index arm because :class:`bool` is a
     subclass of :class:`int`: ``holder[True]`` really is ``holder[1]`` in
@@ -484,6 +490,16 @@ def _header_reference_setup_is_inert(module, function, bound, expression):
                 for dotted in ("contextlib.suppress", "contextlib.nullcontext")
             )
             or _class_from_type_call(node, function) is not None
+            or _header_keyword_namespace(node, function) is not None
+            or (
+                _contains(expression, node)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "len"
+                and not _callee_is_shadowed(node.func, function, node)
+                and len(node.args) == 1
+                and not node.keywords
+                and isinstance(node.args[0], ast.Name)
+            )
         ):
             return False
     return True
@@ -517,8 +533,13 @@ def _header_literal_construction_is_safe(value, function, bound):
             for key, item in zip(value.keys, value.values)
         )
     if isinstance(value, ast.Call):
+        namespace = _header_keyword_namespace(value, function)
+        if namespace is not None:
+            return _header_literal_construction_is_safe(namespace, function, bound)
         if _class_from_type_call(value, function) is not None:
-            return _header_literal_construction_is_safe(value.args[2], function, bound)
+            return _header_literal_construction_is_safe(
+                _header_keyword_namespace(value.args[2], function), function, bound
+            )
         return (
             not value.keywords
             and any(
@@ -531,3 +552,51 @@ def _header_literal_construction_is_safe(value, function, bound):
             )
         )
     return False
+
+
+def _header_keyword_namespace(value, function):
+    """Read an unshadowed builtin dict constructor with explicit keyword entries."""
+    if isinstance(value, ast.Dict):
+        return value
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "dict"
+        and function is not None
+        and not _callee_is_shadowed(value.func, function, value)
+        and not value.args
+        and all(keyword.arg is not None for keyword in value.keywords)
+    ):
+        return None
+    result = ast.Dict(
+        keys=[ast.Constant(value=keyword.arg) for keyword in value.keywords],
+        values=[keyword.value for keyword in value.keywords],
+    )
+    return ast.copy_location(result, value)
+
+
+def _header_reference_index(node, container, function, module):
+    """Read literal keys or signed builtin len over a proved literal container."""
+    literal = _literal_subscript_key(node)
+    if literal is not _UNREADABLE_KEY:
+        return literal
+    sign = 1
+    call = node
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign = -1 if isinstance(node.op, ast.USub) else 1
+        call = node.operand
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "len"
+        and not _callee_is_shadowed(call.func, function, call)
+        and len(call.args) == 1
+        and not call.keywords
+        and isinstance(call.args[0], ast.Name)
+        and isinstance(container, (ast.List, ast.Tuple))
+    ):
+        return _UNREADABLE_KEY
+    actual = _header_base_value(call.args[0].id, module, function, call)
+    if actual is not container:
+        return _UNREADABLE_KEY
+    return sign * len(container.elts)
