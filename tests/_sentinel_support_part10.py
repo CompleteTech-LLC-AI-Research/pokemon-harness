@@ -66,9 +66,7 @@ def _may_bypass(expression):
 
 
 def _is_enforced(function, target, tree=None):
-    """Is ``target`` an assert that can actually fail?
-
-    An ``assert`` is defeated, without being removed, if it sits inside a
+    """Can ``target`` fail? An assert is defeated if it sits inside a
     ``try`` whose handler swallows ``AssertionError`` (#280). ``ast.walk`` is
     scope-blind -- it descends into ``try`` bodies -- so presence-based checks
     report such an assert as intact while the owning test can no longer fail.
@@ -146,6 +144,8 @@ def _is_enforced(function, target, tree=None):
     # built by a test is classified against the tree the caller passed, not
     # against whichever module happens to be importable.
     _remember_module_for_function(function, owning)
+    if _primitive_alias_failure_path(function, target, owning):
+        return True
     for ancestor in _ancestors(function, target):
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if ancestor is not function and _is_uncalled_nested_def(function, ancestor):
