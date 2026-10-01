@@ -63,6 +63,7 @@ REAL_ROM_MODULES = frozenset(
 UNIT_MODULES = frozenset(
     {
         "test_agent_sync.py",
+        "test_pyboy_main_components.py",
         "test_battle_coverage_accounting.py",
         "test_battle_coverage_catalog.py",
         "test_battle_coverage_gate_assets.py",
@@ -259,7 +260,14 @@ UNIT_MODULES = frozenset(
         "test_sentinel_primitive_alias_paths.py",
         "test_sentinel_builtin_entry_identity.py",
         "test_sentinel_completed_instance_loops.py",
+        "test_sentinel_module_binding_order.py",
+        "test_sentinel_global_manager_blocks.py",
         "test_sentinel_starred_sibling_paths.py",
+        "test_sentinel_preserved_pr524_cases.py",
+        "test_sentinel_branch_acceptance.py",
+        "test_sentinel_source_generator_paths.py",
+        "test_sentinel_alias_read_site_acceptance.py",
+        "test_sentinel_binding_epoch_acceptance.py",
         "test_sentinel_with_target_unpacking.py",
         "test_sentinel_entry_guard_contracts.py",
         "test_sentinel_structured_alias_paths.py",

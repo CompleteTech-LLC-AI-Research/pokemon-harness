@@ -81,3 +81,36 @@ named row. The new source needs independent review and actual receipt review.
 Other family pairings, source/native combinations not executed, dedicated quiet
 CPU allocation, and the full release gate remain open. This admission does not
 close the full trade/battle or release issues.
+
+## Delivered tooling scope and retained committed observations
+
+This delivers a versioned source-only controller foundation and the settled
+movement retry repair; it does not promise a complete qualification matrix.
+The retry sends DOWN only at the exact original spawn with integer
+`walk_counter == 0`; old coordinates during ongoing movement cannot queue an
+extra pulse. Temporal execution controls retain the old overshoot witness.
+
+Actual rows attributed to signed source `421cebbc84f54fd59e9f1d7681984c1324a4217b`
+completed as follows, under their original 1200-second bounds:
+
+| Runtime | Transport | Trade | Battle |
+|---|---|---|---|
+| Native | LOCAL | PASS | PASS |
+| Native | TCP | PASS | PASS |
+| Source | LOCAL | PASS | FAILED: 1200-second timeout |
+| Source | TCP | PASS | PASS |
+
+These seven successful receipts establish only their exact historical scoped
+rows. The source LOCAL battle timed out while battle remained live, before
+`complete_battle` returned: its flushed `terminal_edges_only` marker is absent,
+so the subsequent return helper was not reached. Last observed battle-driver
+frame counter was 5264; the journal retains the pending step intent. This is
+source call-order and retained observation evidence, not a reconstructed
+invocation counter. No timeout was extended or promoted to PASS.
+
+Controller imports and live OS readback provide runtime evidence, but completed
+trade rows do not contain direct per-owner imported-module origins. The source
+build flag alone does not establish actual loaded runtime. No later source
+commit inherits these historical rows. Full #103/#72, winning-role symmetry,
+forfeit/tie, other family pairings, admitted quiet CPU, and release readiness
+remain open. The original full-qualification PR remains held separately.
