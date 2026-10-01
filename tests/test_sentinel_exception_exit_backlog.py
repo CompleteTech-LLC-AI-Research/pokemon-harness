@@ -332,6 +332,16 @@ def test_new_exit_proof_declines_inherited_metaclass_rewriting_the_exit():
         ("bool(exc[0])", False),
         ("exc[0] is not False", False),
         ("exc[0] in (AssertionError,)", False),
+        ("exc[0] in (AssertionError, ValueError)", False),
+        ("exc[0] in (ValueError, AssertionError)", False),
+        ("exc[0] is not 0", False),
+        ("exc[0] is not ()", False),
+        ("exc", False),
+        ("bool(exc)", False),
+        ("exc is not None", False),
+        ("exc is not False", False),
+        ("exc in (AssertionError,)", True),
+        ("exc[0] not in (AssertionError,)", True),
         ("exc[0] is AssertionError", False),
         ("True", False),
         ("1", False),
@@ -342,14 +352,16 @@ def test_new_exit_proof_declines_inherited_metaclass_rewriting_the_exit():
         ("exc[0] is None", True),
     ],
 )
-def test_exit_predicate_agrees_with_executed_assertion_failure(expression, live):
+@pytest.mark.parametrize("local_instance", (False, True))
+def test_exit_predicate_agrees_with_executed_assertion_failure(expression, live, local_instance):
     source = (
         "class Manager:\n"
         "    def __enter__(self): return self\n"
         f"    def __exit__(self, *exc): return {expression}\n"
-        "manager = Manager()\n"
-        "def probe(x):\n"
-        "    with manager:\n"
+        + ("" if local_instance else "manager = Manager()\n")
+        + "def probe(x):\n"
+        + ("    manager = Manager()\n" if local_instance else "")
+        + "    with manager:\n"
         "        assert x != 1\n"
     )
     namespace = {}
@@ -369,7 +381,13 @@ def test_exit_predicate_agrees_with_executed_assertion_failure(expression, live)
     "prefix,signature,body",
     [
         ("bool = lambda value: False\n", "self, *exc", "return bool(exc[0])"),
+        ("bool = lambda value: False\n", "self, *exc", "return bool(exc)"),
         ("AssertionError = ValueError\n", "self, *exc", "return exc[0] in (AssertionError,)"),
+        (
+            "AssertionError = ValueError\n",
+            "self, *exc",
+            "return exc[0] in (AssertionError, ValueError)",
+        ),
         ("", "self, *exc", "exc = (None,)\n        return exc[0] is not None"),
         (
             "",

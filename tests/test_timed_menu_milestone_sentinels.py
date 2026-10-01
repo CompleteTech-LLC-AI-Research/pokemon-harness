@@ -8306,6 +8306,106 @@ USER_EXIT_SWALLOW_SHAPES = (
         "    helper = Suppressor()\n    with helper:\n        assert x != 1",
         False,
     ),
+    # --- #338: an __exit__ that swallows *every* exception ---
+    #
+    # #316 decided the spellings that say "the failure is an AssertionError".
+    # These four never name `AssertionError` at all, yet every one of them is
+    # *true* whenever `__exit__` is called with an assertion failure -- the only
+    # call this rule asks about -- so all four were false-LIVEs: executed, the
+    # assert was swallowed, and the analyzer reported it `enforced`.
+    #
+    # The shared truth is that `exc[0]` is the raised exception *type*, i.e.
+    # `<class 'AssertionError'>`: a class object. A class object is truthy, is
+    # not `None`, is not `False`, and is a member of a tuple holding exactly
+    # `AssertionError`.
+    (
+        "338: is-not-None swallows every exception",
+        "def __exit__(self, *exc):\n    return exc[0] is not None",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: bool of the exception type swallows every exception",
+        "def __exit__(self, *exc):\n    return bool(exc[0])",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: is-not-False swallows every exception",
+        "def __exit__(self, *exc):\n    return exc[0] is not False",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: membership in a one-element AssertionError tuple swallows",
+        "def __exit__(self, *exc):\n    return exc[0] in (AssertionError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # The same `is not <literal>` truth reached through literals other than the
+    # two filed. Identity against a literal can never hold for a class object,
+    # so these are decided by one rule rather than by a `None`/`False` list --
+    # and `()` is here because the empty tuple parses as a `Tuple`, not a
+    # `Constant`, which is the branch a naive `isinstance(Constant)` misses.
+    (
+        "338: is-not-int-literal swallows",
+        "def __exit__(self, *exc):\n    return exc[0] is not 0",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: is-not-empty-tuple swallows",
+        "def __exit__(self, *exc):\n    return exc[0] is not ()",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # --- #338 loud controls: near misses that must stay enforced ---
+    # The negated membership. `exc[0] not in (AssertionError,)` is false when
+    # an assert *was* swallowed, so this `__exit__` propagates and the assert
+    # stays live. Reading it as a swallow is the damaging direction, and this
+    # row is what makes the `not in` guard non-vacuous.
+    (
+        "338: negated membership stays enforced",
+        "def __exit__(self, *exc):\n    return exc[0] not in (AssertionError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # Membership against a tuple that does not name the builtin.
+    (
+        "338: membership in a foreign tuple stays enforced",
+        "def __exit__(self, *exc):\n    return exc[0] in (ValueError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # Both members are genuine builtin types; the received AssertionError is
+    # a member by identity. Execution, rather than a conservative label, pins
+    # this row as swallowed.
+    (
+        "338: multi-element builtin tuple swallows by identity",
+        "def __exit__(self, *exc):\n    return exc[0] in (AssertionError, ValueError)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # The subscript is load-bearing for the membership spelling. Under `*exc` a
+    # bare `exc` is the whole argument tuple, so `exc in (AssertionError,)` is
+    # false at runtime -- the opposite of `exc[0] in (AssertionError,)`. A
+    # generalized helper that accepted the bare name would report this row
+    # swallowed when it propagates, so the row pins the difference.
+    (
+        "338: bare exception tuple is not the raised type",
+        "def __exit__(self, *exc):\n    return exc in (AssertionError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # The bare name under the `is not` spelling is still a swallow -- a tuple
+    # is likewise not `None` -- so the two directions are deliberately
+    # asymmetric and this row pins that asymmetry from the other side.
+    (
+        "338: bare exception tuple is-not-None still swallows",
+        "def __exit__(self, *exc):\n    return exc is not None",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
     # --- loud controls: an __exit__ that does not swallow ---
     (
         "returns False",

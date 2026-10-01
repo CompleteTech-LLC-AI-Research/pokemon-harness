@@ -12,7 +12,7 @@ def _exit_return_is_known_truthy_for_failure(function, owner=None):
     """Prove #338's straight return for the actual AssertionError type.
 
     Budget: only one unconditional return, actual protocol type parameters,
-    immutable identity tests, a genuine builtin bool, or a singleton membership
+    immutable identity tests, a genuine builtin bool, or builtin-type membership
     test against the genuine AssertionError. No branch, arbitrary expression,
     rebound argument, unknown signature or shadowed builtin is guessed. The new
     proof requires a plain module-owned class with no constructors, protocol
@@ -95,7 +95,7 @@ def _exit_return_is_known_truthy_for_failure(function, owner=None):
                 return False
         instances = {
             target.id
-            for statement in module.body
+            for statement in ast.walk(module)
             if isinstance(statement, ast.Assign)
             and isinstance(statement.value, ast.Call)
             and isinstance(statement.value.func, ast.Name)
@@ -107,7 +107,7 @@ def _exit_return_is_known_truthy_for_failure(function, owner=None):
         }
         instance_targets = {
             target
-            for statement in module.body
+            for statement in ast.walk(module)
             if isinstance(statement, ast.Assign)
             and isinstance(statement.value, ast.Call)
             and isinstance(statement.value.func, ast.Name)
@@ -129,6 +129,10 @@ def _exit_return_is_known_truthy_for_failure(function, owner=None):
             ):
                 return False
             if isinstance(node, ast.arg) and node.arg in instances:
+                return False
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (
+                node.name in instances
+            ):
                 return False
             if (
                 isinstance(node, ast.Name)
@@ -254,29 +258,41 @@ def _exit_return_is_known_truthy_for_failure(function, owner=None):
             )
         return isinstance(node, ast.Name) and node.id == name
 
+    def is_received_tuple(node):
+        return variadic and isinstance(node, ast.Name) and node.id == name
+
+    if is_received_tuple(value):
+        # The protocol supplies all three exception arguments, including None
+        # on normal exit. Its untouched variadic tuple is always nonempty.
+        return True
     if isinstance(value, ast.Call):
         return (
             isinstance(value.func, ast.Name)
             and value.func.id == "bool"
             and len(value.args) == 1
             and not value.keywords
-            and is_received_type(value.args[0])
+            and (is_received_type(value.args[0]) or is_received_tuple(value.args[0]))
             and not _callee_is_shadowed(value.func, function, value)
         )
     if not (
         isinstance(value, ast.Compare)
         and len(value.ops) == len(value.comparators) == 1
-        and is_received_type(value.left)
+        and (is_received_type(value.left) or is_received_tuple(value.left))
     ):
         return False
     other = value.comparators[0]
     if isinstance(value.ops[0], ast.IsNot):
-        return isinstance(other, ast.Constant) and (other.value is None or other.value is False)
-    if isinstance(value.ops[0], ast.In) and isinstance(other, ast.Tuple) and len(other.elts) == 1:
-        member = other.elts[0]
-        return (
+        return isinstance(other, ast.Constant) or isinstance(other, ast.Tuple) and not other.elts
+    if (
+        isinstance(value.ops[0], ast.In)
+        and is_received_type(value.left)
+        and isinstance(other, ast.Tuple)
+        and other.elts
+    ):
+        return all(
             isinstance(member, ast.Name)
-            and member.id == "AssertionError"
+            and member.id in {"AssertionError", "ValueError"}
             and not _callee_is_shadowed(member, function, member)
-        )
+            for member in other.elts
+        ) and any(member.id == "AssertionError" for member in other.elts)
     return False
