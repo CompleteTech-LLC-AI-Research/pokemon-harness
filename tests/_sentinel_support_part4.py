@@ -993,6 +993,19 @@ def _elif_failure_predicate(test, values):
     Mixed-type operands stay declined rather than raising: a ``TypeError`` from
     ``1 < "a"`` is not a truth value, and guessing one would be worse than
     declining.
+
+    #479. ``Is`` and ``IsNot`` join the evaluated set here. #471 closed the
+    ordering gap but left identity declined, and that is the *same* damaging
+    fall-through for the *same* reason: ``_break_reachable_with_failure`` reads
+    ``None`` as "possibly true", so a loop whose only ``break`` sits under
+    ``if x is None:`` was reported as skipping its ``else`` at every value the
+    domain can hold, and a suppressor the loop always installs was certified
+    absent. #479 measured 27 such fixtures live on master.
+
+    ``is`` is total in the same way ``==`` is -- it is defined for every pair of
+    objects, including mixed types -- so it is fully determined once both
+    operands resolve and needs no ``TypeError`` arm of its own. ``is not`` is
+    its complement, not ``not is``.
     """
     if isinstance(test, ast.Constant):
         return bool(test.value)
@@ -1026,6 +1039,10 @@ def _elif_failure_predicate(test, values):
                 return left > right
             if operator is ast.GtE:
                 return left >= right
+            if operator is ast.Is:
+                return left is right
+            if operator is ast.IsNot:
+                return left is not right
         except TypeError:
             # An unorderable pair has no truth value Python would compute, and
             # the assert under test cannot be evaluated against it either.

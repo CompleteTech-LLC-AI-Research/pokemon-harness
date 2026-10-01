@@ -12274,6 +12274,44 @@ LOOP_ELSE_SUPPRESSOR_SHAPES = (
         "        if not x:\n            break",
         False,
     ),
+    # -- #479. `Is` and `IsNot` were the operators #471 left declined, so they
+    #    reached `_condition_can_hold` as "not readable" -- which that function
+    #    counts as *possibly true*, the damaging direction. `x is None` decides
+    #    False at the failing value `x == 1`, the `if` body is skipped, the loop
+    #    completes normally, the `else` installs the suppressor, and the assert
+    #    is swallowed on every call. Master certified it enforced: a false-LIVE
+    #    live on `origin/master`, not a draft-only artifact.
+    #
+    #    `None` is not in the swept domain, so the identity guard is False at
+    #    every value the oracle calls, which is exactly what makes the row a
+    #    false-LIVE rather than a live contract.
+    (
+        "479 filed: an identity guard excludes every failing call",
+        "for item in (1,):",
+        "        if x is None:\n            break",
+        False,
+    ),
+    # -- The mirror, and the reason a wholesale refusal of identity guards
+    #    would be a regression rather than a fix: `x is not None` HOLDS at the
+    #    failing value, so there really is a call that both breaks and fails,
+    #    and the assert is live. Answering "unreadable" for every identity
+    #    guard would flip this row to a false-DEAD.
+    (
+        "479 live: an inverted identity guard holds on a failing call",
+        "for item in (1,):",
+        "        if x is not None:\n            break",
+        True,
+    ),
+    # -- Identity against a literal the domain can actually hold, so this is
+    #    decided rather than constant. `x is 0` is False at `x == 1` for small
+    #    ints under CPython's interning, which makes it a second excluded-failure
+    #    row in the damaging direction.
+    (
+        "479 control: identity against a literal the domain holds",
+        "for item in (1,):",
+        "        if x is 0:\n            break",
+        False,
+    ),
 )
 
 
