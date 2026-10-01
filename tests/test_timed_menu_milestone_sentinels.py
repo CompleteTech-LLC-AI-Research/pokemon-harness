@@ -1262,12 +1262,17 @@ RESIDUAL_DEFEAT_SHAPES = (
         "    with pytest.raises(match='nomatch'):\n        assert x != 1",
         True,
     ),
-    # `contextlib.suppress()` with no argument is legal and suppresses
-    # everything, unlike pytest.raises()'s empty call above.
+    # `contextlib.suppress()` with no argument is legal, and unlike
+    # `pytest.raises()`'s empty call above it is not even loud -- it simply
+    # suppresses *nothing*. Measured: `suppress()` stores `_exceptions == ()`,
+    # and `__exit__` returns `issubclass(exctype, ())`, which is False for
+    # every exception, so an assert inside it fails loudly. #500 corrected
+    # this row, which had it backwards with the comment "suppresses
+    # everything" -- a description of the function, not of the call.
     (
         "suppress with no exception type",
         "    with contextlib.suppress():\n        assert x != 1",
-        False,
+        True,
     ),
     # An unrelated enter_context on the same stack is not a suppression.
     (
@@ -1313,6 +1318,128 @@ RESIDUAL_DEFEAT_SHAPES = (
     # path would put `contextlib` in the set and fire here.
     ("module object as a context manager", "    with contextlib:\n        assert x != 1", True),
 )
+
+
+#: #500. ``contextlib.suppress()`` with no exception argument suppresses
+#: **nothing**: ``__init__`` stores ``_exceptions == ()`` and ``__exit__``
+#: returns ``issubclass(exctype, ())``, which is ``False`` for every
+#: exception. An assert inside it therefore fails loudly and is live.
+#:
+#: The analyzer used to answer universal for this spelling, describing the
+#: *function* rather than the runtime behaviour of the *call*, and reported
+#: the contract as disarmed. Each row below is executed before it is judged,
+#: so the expected verdict is measured rather than asserted.
+#:
+#: The unreadable spelling is the load-bearing neighbour. ``suppress(*excs)``
+#: arrives as a single :class:`ast.Starred`, which is not readable here, so it
+#: must still answer universal -- that is what keeps "an argument list I cannot
+#: read" from being confused with "an argument list that is empty", and the
+#: two are decidably different.
+#:
+#: ``preamble`` sits at module scope and ``body`` inside ``outer``; the
+#: subscript and attribute rows need their binding visible where it is read.
+BARE_SUPPRESS_ROWS = (
+    (
+        "500 a bare suppress() swallows nothing",
+        "",
+        "    with contextlib.suppress():\n        assert x != 1",
+        True,
+    ),
+    (
+        "500 a bare suppress() carried by a subscript swallows nothing",
+        "",
+        ("    holder = [contextlib.suppress()]\n    with holder[0]:\n        assert x != 1"),
+        True,
+    ),
+    (
+        "500 a bare suppress() carried by a class attribute swallows nothing",
+        "class Box:\n    ctx = contextlib.suppress()\n",
+        "    with Box.ctx:\n        assert x != 1",
+        True,
+    ),
+    (
+        "500 a bare suppress() reached through a nested subscript swallows nothing",
+        "",
+        ("    holder = [[contextlib.suppress()]]\n    with holder[0][0]:\n        assert x != 1"),
+        True,
+    ),
+    (
+        "500 a suppress() naming AssertionError is still a defeat",
+        "",
+        "    with contextlib.suppress(AssertionError):\n        assert x != 1",
+        False,
+    ),
+    (
+        "500 a suppress() naming only ValueError stays live",
+        "",
+        "    with contextlib.suppress(ValueError):\n        assert x != 1",
+        True,
+    ),
+    # `*excs` is passed a *non-empty* tuple, so the runtime really does
+    # suppress here. The analyzer cannot see that the star-argument is
+    # non-empty -- it sees one unreadable argument -- so it must answer
+    # universal anyway. That is the row's whole point: an argument list this
+    # check cannot read must never become a licence to call it harmless.
+    (
+        "500 an unreadable star-argued suppress() stays a defeat",
+        "",
+        "    with contextlib.suppress(*excs):\n        assert x != 1",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "body", "live"),
+    BARE_SUPPRESS_ROWS,
+    ids=[row[0] for row in BARE_SUPPRESS_ROWS],
+)
+def test_a_bare_suppress_is_not_read_as_universal(label, preamble, body, live):
+    """#500: an empty argument list is measured, not treated as unreadable.
+
+    Every fixture is executed first, so each row's verdict is CPython's rather
+    than an assumption baked into the table.
+
+    The ``*excs`` row is what stops a blanket "empty means harmless" reading.
+    At runtime an empty ``*excs`` really does suppress nothing, but the
+    analyzer cannot see that it is empty -- it sees one unreadable argument --
+    so the row is filed against the *static* reading and must stay a defeat.
+    Calling a suppressor unreadable must never quietly become a licence to
+    call it harmless, because that is the direction which drops a live
+    contract.
+    """
+    source = "import contextlib\n" + preamble + "def outer(x, excs):\n" + body
+    # The starred row is the only one that reads `excs`; it is given a
+    # non-empty tuple so the runtime swallow is real and the row measures a
+    # defeat the analyzer reaches only by declining to read the argument.
+    excs = (AssertionError,) if "*excs" in body else ()
+    namespace = {"excs": excs}
+    exec(compile(source, "<500-executed>", "exec"), namespace)  # noqa: S102
+    fired = False
+    raised = None
+    try:
+        namespace["outer"](1, excs)
+    except AssertionError:
+        fired = True
+    except BaseException as error:  # noqa: BLE001 - the point is which one
+        raised = type(error).__name__
+    assert raised is None, f"{label}: fixture raised {raised} before the assert"
+
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [live], (
+        f"{label}: CPython fired={fired}, so the expected verdict is "
+        f"{'enforced' if live else 'unenforced'}, got {results}"
+    )
+    assert fired is live, (
+        f"{label}: the fixture's runtime disagrees with its own row -- fired={fired}, live={live}"
+    )
 
 
 @pytest.mark.parametrize(
