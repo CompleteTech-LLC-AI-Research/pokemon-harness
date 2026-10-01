@@ -730,6 +730,14 @@ def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, qu
     chain is what the ``with`` actually enters. A decided ``if False:`` whose
     ``else`` always runs falls out of the walk with ``False``, which keeps it
     DEFEATED.
+
+    #451 asks a neighbouring question of a loop ``else``, and the answer is the
+    # same: the suppressor is not installed on the path that skips its arm, so
+    # the manager carried in from before is what the ``with`` actually enters.
+    # The difference is *which* path skips the arm -- an earlier test succeeding
+    # here, a ``break`` firing there -- so the loop's witness is a separate walk
+    # in :func:`_break_skipped_loop_else_can_fail`, dispatched from the same call
+    # site so the two guards cannot drift apart.
     """
     if not isinstance(query, ast.Assert) or function is None:
         return False
@@ -885,6 +893,289 @@ def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, qu
     return False
 
 
+def _break_skipped_loop_else_can_fail(
+    entries, orders, competitor, bound, function, query, owning=None
+):
+    """Prove the assert still fails when a ``break`` skips a loop ``else``.
+
+    #451. The filed shape is
+
+        cs = contextlib.nullcontext()
+        for item in (1,):
+            break                       # the else never runs
+        else:
+            cs = contextlib.suppress(AssertionError)
+        with cs:                       # `cs` is still the nullcontext
+            assert x != 1
+
+    The suppressor is in the loop's ``else``, and the ``break`` means it never
+    gets installed, so the header really enters the carried ``nullcontext`` and
+    the assert fires. The competitor is unconditional, so
+    :func:`_resolve_bindings` resolves the name to the suppressor and the
+    assert comes back defeated.
+
+    The witness is *correlated*, not symmetric with the elif one. #441 proves
+    that some call's **failure value** selects an arm that skips the
+    suppressor; #451 has to prove that there is a call which both
+
+      * reaches the ``break``, so the ``else`` never runs, and
+      * still fails the assert.
+
+    Note what this does *not* require. With ``if x: break`` against the filed
+    ``assert x != 1`` the break's guard and the assert's condition are the
+    same predicate, which looks like the two are exclusive -- but they are not,
+    because each call needs only one of them. The ``else`` binds the calls
+    where the guard is false, and the assert fails on the calls where it is
+    true, so the suppressor is in force on precisely the calls that cannot
+    fail and the assert fires on the rest. The exclusive shape is the
+    opposite one, ``if x == 0: break``: the guard is false at the failing
+    value, the failing call takes the ``else``, and the assert really is
+    swallowed. Answering live there would be a new false-LIVE, so the walk
+    below requires the failing value to be able to reach the break.
+
+    A ``break`` that is not under any test at all (``for ...: break``) is
+    reached on every call, so the failure value is unconstrained and the
+    witness is immediate.
+    """
+    if not isinstance(query, ast.Assert) or function is None:
+        return False
+    # The same plain `contextlib.nullcontext()` carrier the elif witness
+    # requires. A non-suppressor is not necessarily enterable, so seeing one on
+    # some path is not on its own enough to call the header live.
+    prior = [entry for entry in entries if orders[id(entry[0])] < orders[id(competitor[0])]]
+    if not prior:
+        return False
+    latest_order = max(orders[id(entry[0])] for entry in prior)
+    latest = [entry for entry in prior if orders[id(entry[0])] == latest_order]
+    if len(latest) != 1 or latest[0][2]:
+        return False
+    manager = latest[0][1]
+    if not (
+        isinstance(manager, ast.Call)
+        and not manager.args
+        and not manager.keywords
+        and _resolves_to(manager.func, "contextlib.nullcontext", bound)
+    ):
+        return False
+    root_name = manager.func
+    while isinstance(root_name, ast.Attribute):
+        root_name = root_name.value
+    if not isinstance(root_name, ast.Name):
+        return False
+    if any(
+        argument.arg == root_name.id
+        for argument in ast.walk(function.args)
+        if isinstance(argument, ast.arg)
+    ):
+        return False
+    if any(
+        root_name.id in _store_target_names_of(statement)
+        for statement in _scope_body_nodes(function)
+    ):
+        return False
+    if not isinstance(owning, ast.Module):
+        return False
+    # The failure value, read exactly as `_elif_skipped_path_can_fail` reads
+    # it: a single `!=` against a literal pins `x` to the value that makes the
+    # assert fail, and `values` maps the parameter name to that value.
+    failure = query.test
+    values = None
+    if (
+        isinstance(failure, ast.Compare)
+        and len(failure.ops) == 1
+        and isinstance(failure.ops[0], ast.NotEq)
+    ):
+        left, right = failure.left, failure.comparators[0]
+        if isinstance(left, ast.Constant) and isinstance(right, ast.Name):
+            left, right = right, left
+        if isinstance(left, ast.Name) and isinstance(right, ast.Constant):
+            values = {left.id: right.value}
+    if values is None:
+        return False
+    parameters = {
+        argument.arg
+        for argument in (*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs)
+    }
+    if not set(values) <= parameters:
+        return False
+    # A store to the failure parameter anywhere in the scope means its value at
+    # the header is not the value the assert was written against, so the
+    # correlation proved below would be about the wrong call.
+    for statement in _scope_body_nodes(function):
+        names = _store_target_names_of(statement)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [statement.name]
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            names = [alias.asname or alias.name.split(".")[0] for alias in statement.names]
+        elif isinstance(statement, ast.ExceptHandler) and statement.name is not None:
+            names = [statement.name]
+        if set(values) & set(names):
+            return False
+    loop = next(
+        (
+            node
+            for node in function.body
+            if isinstance(node, (ast.For, ast.While)) and _contains(node, competitor[0])
+        ),
+        None,
+    )
+    if loop is None or not loop.orelse or not _contains_any(loop.orelse, competitor[0]):
+        return False
+    if not _elif_witness_reaches_header(function, loop, query, bound):
+        return False
+    return _break_reachable_with_failure(loop, values, function)
+
+
+def _break_reachable_with_failure(loop, values, function):
+    """Can a call at the failing parameter value also reach a ``break``?
+
+    #451. Walks the loop body for a ``break`` and asks what has to be true for
+    control to arrive at it. An **unconditional** ``break`` -- one not nested
+    inside a test this can read -- is reached on every iteration, so it is
+    reached at the failing value too and the witness holds.
+
+    A ``break`` guarded by a condition this *can* read is different: the
+    condition has to hold at the failing value as well. ``if x == 0: break``
+    against ``assert x != 1`` decides ``False`` there, the ``if`` body is
+    skipped, the loop completes normally, the ``else`` runs, and the assert
+    really is swallowed on that call. Those rows are declined, which is the
+    safe direction.
+
+    The mirror is deliberately *not* declined: ``if x: break`` also holds at
+    the failing value, so the break is reachable there and the header is live.
+    The two guards are mirror images and the loop distinguishes them, which is
+    why the table pins both.
+
+    A condition this cannot read is treated as possibly-true, so a break
+    under it is still reachable. That is the conservative direction and matches
+    the rest of this module: an unreadable test may hold, and the analyzer must
+    not assume the ``else`` ran.
+    """
+    for node in ast.walk(loop):
+        if not isinstance(node, ast.Break):
+            continue
+        test = _enclosing_conditions(node, loop)
+        if all(_elif_failure_predicate(condition, values) is not False for condition in test):
+            return True
+    return False
+
+
+def _enclosing_conditions(node, loop):
+    """The tests guarding ``node``, outermost first, up to ``loop``'s body.
+
+    A ``break`` runs only when every test between it and the loop body is
+    satisfied, so all of them have to be evaluated at the failing value. A
+    decision of ``False`` for any one of them is what makes the break
+    unreachable on that call, and the caller treats that as a decline.
+
+    ``ast.walk`` does not give the ancestor chain, so it is rebuilt from
+    ``loop`` outward through the blocks that contain ``node``.
+    """
+    conditions = []
+    current = node
+    while current is not None and current is not loop:
+        for block in ast.walk(loop):
+            if isinstance(block, (ast.If, ast.While)) and _contains_any(block.body, current):
+                conditions.append(block.test)
+                current = block
+                break
+        else:
+            break
+    conditions.reverse()
+    return conditions
+
+
+def _import_only_binds_the_resolved_root(node, function, bound):
+    """Is this a plain import of the module root the witness reads through?
+
+    #451. The filed fixture imports `contextlib` inside the function:
+
+        def outer(x):
+            import contextlib
+            cs = contextlib.nullcontext()
+            for item in (1,):
+                break
+            else:
+                cs = contextlib.suppress(AssertionError)
+            with cs:
+                assert x != 1
+
+    `import contextlib` is transparent to the witness: it binds the module
+    root that `_resolves_to` already follows to reach `contextlib.nullcontext`
+    and `contextlib.suppress`, and it introduces no value, no branch, and no
+    ordering that could settle the name under test.
+
+    Everything else stays rejected, because each of these can change what the
+    header actually enters:
+
+    * an alias (`import contextlib as cl`) rebinds a *different* name, so the
+      root the witness resolves through is untouched and the statement says
+      nothing about it -- but it is also not the filed spelling, so declining
+      it only costs coverage, never correctness;
+    * `import contextlib.nullcontext` binds a *different* root than the one
+      the witness resolves through, and would shadow the attribute path;
+    * `from contextlib import nullcontext` binds the leaf, not the root;
+    * any binding of a name that is later stored to, or that shadows the root,
+      is refused by the checks below;
+    * a relative import (`level > 0`) resolves against a package this witness
+      knows nothing about.
+
+    A dotted import whose root matches is the one form that is provably
+    transparent, so only that is admitted.
+    """
+    if not isinstance(node, ast.Import):
+        return False
+    if not node.names:
+        return False
+    roots = []
+    for alias in node.names:
+        if alias.asname is not None:
+            # `import x as y` binds `y`, not the module root.  Not the filed
+            # spelling, and it tells us nothing about the resolved root.
+            return False
+        head, dot, _ = alias.name.partition(".")
+        if not head or dot:
+            # `import a.b` binds the leaf `a.b` as a name of its own, which
+            # shadows the attribute path the witness walks.  It does not
+            # re-bind the root, and admitting it would let a rebinding import
+            # pass as transparent -- measured as a false-LIVE.
+            return False
+        roots.append(head)
+    if len(set(roots)) != 1:
+        return False
+    root = roots[0]
+    # The import must not rebind a name the header or the manager path reads,
+    # and must not collide with a store anywhere in the scope: that would make
+    # the value the witness reasons about a different object at the header.
+    #
+    # The header's own `context_expr` is the *manager name* (`cs`), not the
+    # module root, so it cannot answer this question.  What matters is that
+    # the import does not shadow a name the witness reads: the module roots
+    # behind `contextlib.nullcontext` / `contextlib.suppress` in this scope.
+    # Binding the same root it already resolves through is therefore the
+    # transparent case, and binding anything else -- a different root, or a
+    # leaf -- is not.
+    return root in _witness_module_roots(function, bound)
+
+
+def _witness_module_roots(function, bound):
+    """Module roots the witness resolves `contextlib.*` calls through.
+
+    Anything the witness later has to attribute to the real `contextlib`
+    module is spelled as an attribute path in this scope, so the roots are
+    exactly the `ast.Name` nodes that heads such attribute chains.
+    """
+    roots = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Attribute):
+            head = node
+            while isinstance(head, ast.Attribute):
+                head = head.value
+            if isinstance(head, ast.Name):
+                roots.add(head.id)
+    return roots
+
+
 def _elif_witness_reaches_header(function, chain, query, bound):
     """Keep the small witness proof free of earlier exits or opaque effects."""
     header = next(
@@ -907,6 +1198,21 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         return False
     for node in function.body[:chain_index]:
         if isinstance(node, ast.Pass):
+            continue
+        # #451's filed fixture binds `contextlib` with a *function-local*
+        # `import contextlib` rather than a module-level one.  That import is
+        # exactly as opaque as the module-level spelling it mirrors -- the
+        # witness resolves `contextlib.nullcontext` through the same root
+        # either way -- but a bare `ast.Import` is neither a `Pass` nor an
+        # `ast.Assign`, so the scan used to reject it and the witness never
+        # fired.  The result was the damaging direction: the filed fixture,
+        # whose assert really does fire, was reported dead.
+        #
+        # Accepting it unconditionally would be too permissive, because an
+        # import can rebind the very name the header resolves through.  Only an
+        # import that binds exactly the module root the witness already reads
+        # is transparent, so that is what is admitted here.
+        if _import_only_binds_the_resolved_root(node, function, bound):
             continue
         if not isinstance(node, ast.Assign) or not all(
             isinstance(target, ast.Name) for target in node.targets
