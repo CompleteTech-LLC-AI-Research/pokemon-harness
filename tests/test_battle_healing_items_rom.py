@@ -694,3 +694,94 @@ def test_potion_heals_the_active_mon_from_the_battle_item_menu() -> None:
     assert account.applied and account.opponent_actions == 1
     # The heal survives the opponent's action and the returned command boundary.
     assert observed.boundary.mon(observed.slot).hp == CAPTURED_HEALED_HP
+
+
+BLUE_FIXTURE_ID = "blue-color-ordinary-battle-healing"
+BLUE_CAPTURED_HP = 150
+BLUE_CAPTURED_MAX_HP = 152
+
+
+def _admit_blue_healing_bytes(raw: bytes, row: dict) -> bytes:
+    """Admit this capture against its existing size and both immutable pins."""
+    assert row["id"] == BLUE_FIXTURE_ID
+    assert row["version"] == "blue" and row["variant"] == "color"
+    assert len(raw) == row["size_bytes"], "Blue healing fixture size mismatch"
+    assert hashlib.sha1(raw).hexdigest() == row["sha1"], "Blue healing fixture SHA-1 mismatch"
+    assert hashlib.sha256(raw).hexdigest() == row["sha256"], "Blue healing fixture SHA-256 mismatch"
+    return raw
+
+
+@pytest.mark.parametrize("tampered", ("size", "sha1", "sha256"))
+def test_blue_healing_admission_refuses_each_mismatching_pin(tampered: str) -> None:
+    raw = b"admission-control"
+    row = {
+        "id": BLUE_FIXTURE_ID,
+        "version": "blue",
+        "variant": "color",
+        "size_bytes": len(raw),
+        "sha1": hashlib.sha1(raw).hexdigest(),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    assert _admit_blue_healing_bytes(raw, row) == raw
+    row[tampered if tampered != "size" else "size_bytes"] = (
+        len(raw) + 1 if tampered == "size" else "0" * (40 if tampered == "sha1" else 64)
+    )
+    with pytest.raises(AssertionError, match="mismatch"):
+        _admit_blue_healing_bytes(raw, row)
+
+
+def test_blue_potion_caps_healing_and_spends_one_observed_turn() -> None:
+    """Exercise the admitted Blue capture; its Potion heals two HP, not twenty."""
+    fixture = fixture_path("blue", FIXTURE_NAME)
+    rom = rom_path("blue", color=True)
+    symbols = sym_path("blue")
+    missing = [str(path) for path in (fixture, rom, symbols) if not path.is_file()]
+    if missing:
+        pytest.skip("Missing BYO Blue medicine inputs: " + ", ".join(missing))
+    rows = [row for row in _load_evidence()["fixtures"] if row["id"] == BLUE_FIXTURE_ID]
+    assert len(rows) == 1
+    row = rows[0]
+    raw = _admit_blue_healing_bytes(fixture.read_bytes(), row)
+    pins = load_versions(PROJECT_ROOT / "VERSIONS.md")
+    assert pins.sha1_for_path(row["expected_rom"]["path"]) == row["expected_rom"]["sha1"]
+    assert (
+        pins.symbol_sha1_for_path(row["expected_symbols"]["path"])
+        == row["expected_symbols"]["sha1"]
+    )
+    session = Session.from_files(
+        rom,
+        symbols,
+        expected_rom_sha1=row["expected_rom"]["sha1"],
+        expected_symbol_sha1=row["expected_symbols"]["sha1"],
+        expected_pyboy_version=pins.pyboy_version,
+        expected_pyboy_revision=pins.pyboy_revision,
+    )
+    try:
+        session.load_state(raw)
+        session.step(60, render=True)
+        observed = _play_potion_turn(session)
+    finally:
+        session.close(save=False)
+    before, after = observed.before, observed.after
+    assert (before.mon(observed.slot).hp, before.mon(observed.slot).max_hp) == (
+        BLUE_CAPTURED_HP,
+        BLUE_CAPTURED_MAX_HP,
+    )
+    assert before.bag.quantity_of(POTION) == 1
+    assert observed.money_after == observed.money_before
+    outcome = assert_medicine_application(before, after, POTION_RULE, expected_consumed=1)
+    assert outcome.applied and outcome.reason == REASON_APPLIED
+    assert outcome.hp == BLUE_CAPTURED_MAX_HP
+    assert after.mon(observed.slot).hp == BLUE_CAPTURED_MAX_HP
+    assert_last_unit_compaction(before, after, POTION)
+    assert_continuation_idempotent(before, after, observed.continued, POTION)
+    assert observed.opponent_action.after_application and observed.opponent_action.announced
+    assert observed.opponent_action.move_id != ENEMY_MOVE_NONE
+    account = assert_successful_item_turn(
+        observed.timeline,
+        item_id=POTION,
+        target_slot=observed.slot,
+        expected_hp_delta=BLUE_CAPTURED_MAX_HP - BLUE_CAPTURED_HP,
+    )
+    assert account.applied and account.opponent_actions == 1
+    assert 0 < observed.boundary.mon(observed.slot).hp <= BLUE_CAPTURED_MAX_HP
