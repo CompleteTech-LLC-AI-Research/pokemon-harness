@@ -190,5 +190,31 @@
   "version": 1,
   "worktree_clean_at_run": true,
   "worktree_head": "fce42d57248e7b4e21d21561fd6dbc11eb1f9dfe",
-  "worktree_tree": "ccd19d0dee855b6cefe1e972f726da18f664e375"
+  "worktree_tree": "ccd19d0dee855b6cefe1e972f726da18f664e375",
+  "guardrails_scope": "The measured fixture continuation and test runs only. runtime_ram_edits=false does not certify the pinned source milestone ancestors.",
+  "qualification_status": "PARTIAL: input ancestor lineage and quiet CPU-allocated native full-unit condition unverified.",
+  "input_lineage": {
+    "human_valid_ancestor_verified": false,
+    "yellow_source": {
+      "label": "operator-managed walkthrough_yellow/milestones/brock_badge.state",
+      "sha1": "beaa784f0c68f0bae56d1d5f3ff7f31ee97ff062",
+      "producer_snapshot_label": "operator-private scripts/yellow_to_brock.py",
+      "producer_snapshot_sha256": "828ffe5a6351b69242583361e839132119cf2ba6583b822f7010372641f70f30",
+      "known_ram_paths": "option-b boosts level/HP/stats/moves/PP/XP; default target-level path grafts moves/PP, short grind uses boost fallback",
+      "exact_generation_invocation": "unavailable; current ignored script snapshot is not proof of the executed historical version",
+      "diagnostic_artifact_label": "operator-private walkthrough_yellow/milestones/option_b_boost.state",
+      "diagnostic_artifact_sha1": "abdf6f423be2544d50db2f69aee5671311cfd17d"
+    },
+    "related_blue_source": {
+      "measured_in_this_bundle": false,
+      "label": "operator-managed walkthrough_blue/milestones/after_brock.state",
+      "sha1": "63287049a18105ae16433914cc3b3c136fe25db2",
+      "producer_snapshot_label": "operator-private scripts/blue_forest_to_brock.py",
+      "producer_snapshot_sha256": "051de430fb2a2943385d33beb8fa6c5e7bad01519b9d2c54e362063f26478910",
+      "known_ram_path": "optional option-b boost",
+      "selected_mode": "unverified"
+    },
+    "private_archive_readme_sha256": "aa759a3ee75c0c1f8d31ff88fa94a66a783249201c97b77e518ebf39eea38621",
+    "scope": "Actual ROM-driven scoped mechanics observations, not an end-to-end human-valid playthrough. No original asset or fixture pin changed."
+  }
 }
