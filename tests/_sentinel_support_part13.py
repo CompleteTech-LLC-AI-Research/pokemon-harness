@@ -75,6 +75,21 @@ def _header_expression_raises(header, function, module):
     never entered, the assert under it is never evaluated, and the analyzer
     was certifying it as load-bearing. The damaging direction.
 
+    The same question is asked of the statements that *feed* the header, not
+    only of the header itself, because entering a bare name defers the whole
+    question to whoever bound it:
+
+        import contextlib.nullcontext as contextlib
+        with contextlib.nullcontext():
+            assert x != 1
+
+    That import is not a module path at all, so the statement raises
+    ``ModuleNotFoundError`` and the ``with`` is never evaluated. The old
+    resolver skipped the dotted spelling entirely and fell through to the
+    bare ``import contextlib`` further down, resolving the name to the real
+    module and certifying the assert load-bearing on a fixture that cannot
+    run.
+
     The check is deliberately narrow and declines in every case it cannot
     read:
 
@@ -91,6 +106,23 @@ def _header_expression_raises(header, function, module):
     resolved from the source's own ``import`` statements rather than from the
     live interpreter's globals, so a name this module never bound is declined
     even if something else in the process happens to bind it.
+
+    A base bound to something that is **not** a module -- a submodule
+    attribute, a ``from`` leaf -- is the same question answered the other way,
+    and is what makes the two shadow rows above fail. ``_imported_module_name``
+    returns ``None`` for those, which by itself means only "not a module I can
+    read" and is not enough to answer either way. The distinction that matters
+    here is whether an *import this scope can see* bound the name at all: if
+    one did, and it did not bind a real module, then the attribute lookup on
+    it is what raises, and the assert underneath is unreachable.
+
+    Only the header's own expression and the imports that run before it are
+    read. Walking further up the scope -- every earlier attribute call -- was
+    tried and reverted: it read 64 pinned asserts that really do fire as dead,
+    because a carrier the analyzer has not resolved yet looks exactly like a
+    raising one. The header's own expression is the narrow question #394
+    settled, and it is the only one with an answer the rest of the file
+    already agrees with.
     """
     if isinstance(header, ast.AsyncWith):
         return False
@@ -113,6 +145,236 @@ def _header_expression_raises(header, function, module):
     return False
 
 
+def _scope_above_header_raises(function, header):
+    """Does an import in this scope raise before the header is evaluated?
+
+    #451. A header that enters a **bare name** hands the whole question to
+    whoever bound that name, so the header's own expression says nothing:
+
+        import contextlib.nullcontext as contextlib
+        cs = contextlib.nullcontext()
+        with cs:                       # a bare `Name` -- nothing to read here
+            assert x != 1
+
+    The ``import`` is not a module path at all. It raises
+    ``ModuleNotFoundError`` (``contextlib`` is a module, not a package), so
+    nothing after it runs, the ``with`` is never entered and the assert is
+    never evaluated. The analyzer reported it *enforced* -- the damaging
+    direction, on a fixture that cannot even run.
+
+    Two spellings are decidable here, and both are decided from the import
+    statement alone, which is what keeps this narrow:
+
+    * a **dotted** ``import a.b`` whose target is not importable raises at the
+      statement (``import contextlib.nullcontext as contextlib``);
+    * a **``from`` leaf** bound over a name the walk resolves a module root
+      through (``from os import sep as contextlib``) leaves a non-module
+      there, and the next attribute read on it raises ``AttributeError``.
+
+    A bare ``import contextlib`` is the ordinary filed case and is admitted.
+    So is every name no import in this scope rebinds, and a name the witness
+    never reads: neither can change what the header enters.
+
+    Deliberately *not* asked here: whether an arbitrary earlier statement
+    raises. That was tried and reverted -- an unresolved carrier call
+    (``cs = contextlib.nullcontext()`` with a carrier the analyzer has not
+    resolved yet) is indistinguishable from a raising one, and reading it as a
+    raise reported 64 pinned asserts that really do fire as dead. The import
+    statement is the one thing above the header whose failure is decidable
+    from the source alone.
+    """
+    body = getattr(function, "body", None)
+    if not body or header not in body:
+        return False
+    # `importlib` is not in this module's shared namespace -- the fragments
+    # share the sentinel support namespace, which imports `ast`, `copy`,
+    # `inspect`, `sys` and `types` and nothing else. `part1` imports it
+    # locally for the same reason.
+    import importlib.util
+
+    for statement in body[: body.index(header)]:
+        if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in statement.names:
+            bound_name = alias.asname or alias.name
+            if bound_name not in _module_roots_read_below(function, header):
+                continue
+            if isinstance(statement, ast.Import):
+                if "." not in alias.name or alias.name in sys.modules:
+                    continue
+                try:
+                    if importlib.util.find_spec(alias.name) is None:
+                        return True
+                except (ImportError, AttributeError, ValueError):
+                    # `ModuleNotFoundError` and "'X' is not a package" both
+                    # land here, and both mean the statement raises.
+                    return True
+                continue
+            if statement.level or not statement.module:
+                # A relative import resolves against a package this analyzer
+                # knows nothing about, so it cannot be shown to be safe.
+                return True
+            if _from_leaf_is_a_known_value(statement.module, alias.name):
+                # The name resolves to something that exists but is not a
+                # module. Whether that matters depends entirely on *how* the
+                # name is used below, and the two uses are different
+                # questions.
+                #
+                # Entered directly -- `from contextlib import nullcontext as
+                # builtins; builtins.int = contextlib.nullcontext; cs =
+                # builtins.int(); with cs:` -- the scope decides by assignment
+                # whether the value is enterable, and it may well be:
+                #
+                #     builtins.int()               # a real context manager
+                #     with cs:
+                #         assert x != 1           # really fires
+                #
+                # #457 settled that the enterability test is on the metatype,
+                # and this scope answers it by assignment. A leaf that is a
+                # plain value cannot be shown to be a shadow *and* unenterable
+                # at the same time, so the question is declined here rather
+                # than guessed -- the direction that keeps a real pinned
+                # contract.
+                #
+                # Read as a *module root* -- `from os import sep as
+                # contextlib; cs = contextlib.nullcontext()` -- there is no
+                # assignment in between to make it one. A `str` has no
+                # `nullcontext`, so the very next attribute read raises and
+                # the assert is unreachable. That is decided by the use, not
+                # by the value, which is what distinguishes it from the case
+                # above.
+                if bound_name in _roots_read_as_attribute_paths(
+                    function, header
+                ) and not _root_is_built_up_in_scope(function, bound_name):
+                    return True
+                continue
+            if _from_leaf_is_a_module(statement.module, alias.name):
+                # `from os import path as name` binds a real module, so an
+                # attribute read on it is ordinary Python and the raise, if
+                # any, is the header's own question -- #394's rule above.
+                continue
+            # Neither a module nor a value this interpreter can name: the
+            # attribute does not exist, so the next read on the bound name
+            # raises `AttributeError`.
+            return True
+    return False
+
+
+def _from_leaf_is_a_known_value(module_name, attribute):
+    """Does ``from <module_name> import <attribute>`` bind an existing value?
+
+    Checked as an *attribute* of the module rather than as a dotted
+    ``sys.modules`` key. ``from contextlib import nullcontext`` is
+    ``contextlib.nullcontext``, and that leaf is an attribute of the loaded
+    ``contextlib`` -- it is not itself an entry in ``sys.modules``, so asking
+    for the dotted key reports a perfectly ordinary import as unresolvable and
+    produced a false "the scope raises" on a live assert.
+    """
+    module = sys.modules.get(module_name)
+    if module is None or not isinstance(module, types.ModuleType):
+        return False
+    try:
+        getattr(module, attribute)
+    except AttributeError:
+        return False
+    return True
+
+
+def _from_leaf_is_a_module(module_name, attribute):
+    """Does ``from <module_name> import <attribute>`` bind a real module?"""
+    module = sys.modules.get(module_name)
+    if module is None or not isinstance(module, types.ModuleType):
+        return False
+    try:
+        value = getattr(module, attribute)
+    except AttributeError:
+        return False
+    return isinstance(value, types.ModuleType)
+
+
+def _module_roots_read_below(function, header):
+    """The module roots the code under ``header`` resolves attributes through.
+
+    An import that binds a name nothing here reads cannot change what the
+    header enters, so it is not this rule's business -- that is what keeps
+    ``import json as _j`` beside the canonical import admitted.
+    """
+    return _witness_module_roots(function, _bound_names(_owning_module(function), function))
+
+
+def _roots_read_as_attribute_paths(function, header):
+    """Roots below ``header`` that are dereferenced as ``name.something(...)``.
+
+    A root that is only ever passed around as a value (`cs = builtins.int()`)
+    is a different question from one the source *walks into* with an attribute
+    access. Only the second can be settled from the import alone, because it
+    assumes the name is a module -- which is exactly what a `from` leaf
+    contradicts.
+
+    The whole scope is read, not just the statements after the header: the
+    attribute read that raises is usually the *carrier* -- `cs =
+    contextlib.nullcontext()` sits above the `with cs:` that defers to it.
+
+    An attribute on the **callee** of a call is the ordinary spelling of "read
+     something off that root and call it" (`contextlib.nullcontext()`), but an
+     attribute on the *value* a call returns is a different question entirely
+     and is not this one. So a chain rooted at a call is skipped: in
+     `builtins.int()` the root `builtins` is read to produce a manager, which
+     is a legitimate use of a non-module and must not be read as a raise.
+    """
+    roots = set()
+    for statement in getattr(function, "body", ()) or ():
+        for node in ast.walk(statement):
+            if not isinstance(node, ast.Attribute):
+                continue
+            if not isinstance(node.ctx, ast.Load):
+                # `builtins.int = ...` *stores* an attribute; it does not read
+                # one, and it is exactly how the scope makes a non-module root
+                # usable. Only a read assumes the name is a module.
+                continue
+            base = node.value
+            if isinstance(base, ast.Call):
+                # The callee itself is an `ast.Attribute` node and *is*
+                # counted -- what is skipped is any further attribute hanging
+                # off the call's result.
+                continue
+            if isinstance(base, ast.Name):
+                roots.add(base.id)
+    return roots
+
+
+def _root_is_built_up_in_scope(function, name):
+    """Does this scope store an attribute onto ``name`` or rebind it at all?
+
+    ``from contextlib import nullcontext as builtins`` followed by
+    ``builtins.int = contextlib.nullcontext`` is a *working* name, not a
+    broken one: the scope manufactures the very attribute it then reads. That
+    is what separates it from ``from os import sep as contextlib``, where the
+    next read of `nullcontext` has nothing behind it.
+
+    So an import that binds a plain value is only a shadow when the scope does
+    nothing to it. Any write -- an attribute store, a rebinding, a `del` --
+    hands the question back to the rest of the analyzer, which already models
+    the entered value; the safe direction is to decline here rather than
+    report a live pinned assert dead.
+    """
+    for statement in getattr(function, "body", ()) or ():
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                base = node.value
+                while isinstance(base, ast.Attribute):
+                    base = base.value
+                if isinstance(base, ast.Name) and base.id == name:
+                    return True
+            if (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+                and node.id == name
+            ):
+                return True
+    return False
+
+
 def _imported_module_name(name, function, module):
     """The module ``name`` is bound to by an ``import``, or ``None``.
 
@@ -120,6 +382,22 @@ def _imported_module_name(name, function, module):
     so the *last* binding in the innermost scope that mentions the name is
     the one a header in that scope reads. Only the ``asname`` spelling is
     followed for a different name; a bare ``import X`` binds ``X`` itself.
+
+    Every spelling that *binds* ``name`` is read, not just the bare one.
+    Matching only ``asname is None and alias.name == name`` left two shadowing
+    fixtures resolving to the real ``contextlib`` and being reported live while
+    the interpreter raised long before the header:
+
+        from os import sep as contextlib            # AttributeError
+        import contextlib.nullcontext as contextlib # ModuleNotFoundError
+
+    In both, ``alias.asname == name`` but ``alias.name`` is something else, so
+    the old ``alias.asname is None and alias.name == name`` test simply did not
+    match and the resolver walked on to the bare ``import contextlib`` below.
+    The rule that consults this also declines when the dotted target is not a
+    real module, which is correct -- ``contextlib.nullcontext`` is not one --
+    but declining must mean "this scope raises", not "this scope is the real
+    ``contextlib``".
     """
     # The *statement* lists are used, not `_scope_body_nodes`: that helper
     # descends into a statement to find nested bindings, so the module-level
@@ -135,11 +413,21 @@ def _imported_module_name(name, function, module):
             continue
         bound = None
         for statement in scope:
-            if not isinstance(statement, ast.Import):
+            if not isinstance(statement, (ast.Import, ast.ImportFrom)):
                 continue
             for alias in statement.names:
-                if alias.asname == name or (alias.asname is None and alias.name == name):
+                bound_name = alias.asname or alias.name
+                if bound_name != name:
+                    continue
+                if isinstance(statement, ast.Import):
                     bound = alias.name
+                elif statement.module and statement.level == 0:
+                    bound = f"{statement.module}.{alias.name}"
+                else:
+                    # A `from M import a.b` is not valid syntax and a relative
+                    # import resolves against a package this analyzer knows
+                    # nothing about, so neither yields a module we can name.
+                    bound = None
         if bound is not None:
             return bound if isinstance(sys.modules.get(bound), types.ModuleType) else None
     return None

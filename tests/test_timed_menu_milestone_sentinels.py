@@ -14056,6 +14056,90 @@ def test_an_elif_binding_a_plain_manager_does_not_retire_a_carried_suppressor(
 #: cannot claim a verdict the interpreter disagrees with.
 
 
+#: #451, the import spelling of the filed fixture. The witness keeps itself
+#: honest by requiring every statement before the loop to be a `pass` or a
+#: plain, readable assignment -- anything else is an effect it has not
+#: accounted for. A function-local `import contextlib` is neither, so the
+#: witness declined and the assert came back **defeated** on the exact fixture
+#: issue #451 filed, while the module-scope spelling of the same program
+#: passed:
+#:
+#:     def outer(x):
+#:         import contextlib              # <- filed spelling
+#:         cs = contextlib.nullcontext()
+#:         for item in (1,):
+#:             break                       # the else never runs
+#:         else:
+#:             cs = contextlib.suppress(AssertionError)
+#:         with cs:                       # `cs` is still the nullcontext
+#:             assert x != 1             # LIVE
+#:
+#: Executed on CPython 3.12 the assert fires for both spellings. The table
+#: above pins only the module-scope one, so without these rows the gap is
+#: invisible to the lane.
+#:
+#: The rows are the two imports that bind the module root the witness already
+#: resolved through. A *second* binding of the same name inside the scope is
+#: a shadow whose winner depends on the call, so the witness still declines
+#: that -- the conservative direction, and the last row pins it as a control
+#: rather than leaving it untested.
+LOOP_ELSE_IMPORT_SPELLINGS = (
+    # The filed spelling, verbatim.
+    (
+        "451 filed: the import is inside the function",
+        "    import contextlib\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # The same program with the import at module scope, as a control that the
+    # two spellings agree.
+    (
+        "451 control: the import is at module scope",
+        "",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # A `from` import of the same names. The witness resolves through the bare
+    # names here rather than through the module root, so this is a distinct
+    # resolution path and not a re-spelling of the first row.
+    (
+        "451 a local from-import of the same managers",
+        "    from contextlib import nullcontext, suppress\n",
+        "nullcontext()",
+        "suppress(AssertionError)",
+        True,
+    ),
+    # A second import of the same root under a different local name is not a
+    # shadow of it, so the witness still proves the row.
+    (
+        "451 an unrelated second import does not shadow the root",
+        "    import contextlib\n    import json as _j\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # Re-importing the same module is the same program, not a conflict. Both
+    # spellings bind `contextlib` to the same object, so declining either one
+    # would report a live assert defeated for no reason at all.
+    (
+        "451 a redundant re-import of the same module is not a conflict",
+        "    import contextlib\n    import contextlib\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "451 a re-import aliasing the module to its own name is not a conflict",
+        "    import contextlib\n    import contextlib as contextlib\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+)
+
+
 #: The declines that keep the import acceptance above from over-reaching. A
 #: `from` import, a submodule import and a relative import each bind the
 #: witness root to a *different* object than ``import contextlib`` does, or to
@@ -14080,6 +14164,72 @@ LOOP_ELSE_IMPORT_SHADOWS = (
     ),
     ("a relative import of the root", "    from . import contextlib\n"),
 )
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "carrier", "arm", "assert_is_live"),
+    LOOP_ELSE_IMPORT_SPELLINGS,
+    ids=[row[0] for row in LOOP_ELSE_IMPORT_SPELLINGS],
+)
+def test_a_loop_else_witness_survives_the_import_spelling(
+    label, preamble, carrier, arm, assert_is_live
+):
+    """The `break` skips the loop `else` whichever way `contextlib` is imported.
+
+    This is the second half of #451. The module-scope spelling of the filed
+    fixture was already repaired and pinned, but the fixture in the *issue*
+    imports `contextlib` inside the function -- and the two are the same
+    program with different verdicts, which is the damaging direction: a live
+    assert certified unreachable, on the text the issue actually filed.
+
+    The cause is the pre-chain scan in `_elif_witness_reaches_header`, which
+    accepts only `pass` and a plain readable assignment so that no unmodelled
+    effect can sit between the carrier and the loop. A local `import` is a
+    binding and nothing else -- it cannot rebind the manager, cannot raise on
+    a value the assert depends on, and cannot skip the header -- so it is now
+    accepted, but only when it cannot change what the header enters: #475
+    settled that question by asking whether the name the import binds is one
+    the witness resolves `contextlib.nullcontext` / `contextlib.suppress`
+    through, and requiring it to be the real `contextlib` when it is.
+
+    Three of these rows were measured as false-DEADs on `49b899a` and were
+    retired as stale when this branch was first built. #475 then repaired
+    exactly those shapes, so the rows are correct again and the retirement is
+    reverted here; the table is back because the assertions it holds are true
+    again, not because the original text was wrong about the base it was
+    measured on.
+
+    Every row is executed across the swept domain by
+    :func:`_assert_suppression_contract` before the analyzer's verdict is
+    compared, so CPython decides each row rather than this table.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        f"{preamble}"
+        f"    cs = {carrier}\n"
+        "    for item in (1,):\n"
+        "        break\n"
+        "    else:\n"
+        f"        cs = {arm}\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. A `break` "
+        f"skips the loop's `else`, so the suppressor bound there is never "
+        f"installed and the header enters the carried `{carrier}`. Where "
+        f"`contextlib` is imported must not change that: a function-local "
+        f"import is a binding, not an effect the witness has to model."
+    )
 
 
 @pytest.mark.parametrize(

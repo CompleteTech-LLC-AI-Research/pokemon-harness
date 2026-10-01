@@ -484,6 +484,25 @@ def _own_imports(function):
     attributing it to the enclosing function would let a nested helper's alias
     decide whether the outer function's assert counts as suppressed -- a false
     "unenforced" verdict, which is the damaging direction.
+
+    The result is in whatever order the LIFO walk produces, and that is
+    deliberate. Two callers merge it last-wins, and they want opposite
+    answers, so the order is not a shared fact:
+
+    * :func:`_bound_names` merges into one table, where the *earlier*
+      import currently wins -- which is how a `from`-leaf shadow is caught at
+      all, and why `_import_only_binds_the_resolved_root` asks each statement
+      about its own bindings rather than the merged ones.
+    * :func:`_nonlocal_parent_imports` re-sorts into source order, because an
+      enclosing scope's *last* binding is the one in force.
+
+    Sorting here was tried and reverted. It made `_bound_names` answer with
+    the true final binding, which is more accurate in the abstract and less
+    accurate in practice: three live asserts in the adversarial sweep
+    (`import json as contextlib` followed by `import contextlib`, and the
+    multi-alias spellings of it) stopped being certified, because with the
+    shadow no longer visible the shadowing import looked transparent. Those
+    are false-DEADs -- the safe direction, and still wrong.
     """
     found = []
     stack = list(ast.iter_child_nodes(function))

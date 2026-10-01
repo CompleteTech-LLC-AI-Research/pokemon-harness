@@ -411,7 +411,8 @@ def _nonlocal_parent_imports(parent, owning):
         scope = _nonlocal_parent_function(scope, owning)
     bound = _bound_names(owning) if owning is not None else {}
     for scope in reversed(scopes):
-        # _own_imports uses a stack; restore source order for sequential imports.
+        # `_own_imports` returns LIFO order; an enclosing scope's LAST import
+        # is the one in force, so source order is restored here.
         imports = sorted(_own_imports(scope), key=lambda node: (node.lineno, node.col_offset))
         bound.update(_bound_names(ast.Module(body=imports, type_ignores=[])))
     return bound

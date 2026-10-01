@@ -165,6 +165,8 @@ def _is_enforced(function, target, tree=None):
                 return False
             if _header_expression_raises(ancestor, function, owning):
                 return False
+            if function is not None and _scope_above_header_raises(function, ancestor):
+                return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
             and _falsy_literal(ancestor.test, function)
@@ -1251,6 +1253,42 @@ def _enclosing_conditions(node, loop):
     return conditions
 
 
+def _bindings_after_import(node, bound):
+    """The binding table as it stands once ``node`` itself has run.
+
+    The question `_import_only_binds_the_resolved_root` asks is about *this
+    statement*: "does the name I bind coincide with a name the witness walks,
+    and is it the real module?" Answering that from the caller's merged table
+    answers a different question -- what is bound at the *end* of the scope --
+    and the two disagree whenever a later import rebinds the same name.
+
+    In
+
+        from json import loads as contextlib
+        import contextlib
+
+    the merged table says `contextlib` is the real module, because the second
+    import wins. Read that way the first statement looks transparent, and
+    admitting it is a false-LIVE: on the first call `contextlib` really is
+    `json.loads`, and the walk's `contextlib.suppress` is `json.loads.suppress`.
+    Neither import is safe alone, so the correct answer for this statement is
+    "no, it rebinds a walked root".
+
+    Overlaying this statement's own aliases on the caller's table is what
+    restores the per-statement question without making the caller rebuild a
+    scope: later bindings stay visible (they are not this statement's
+    business), and the statement under test always sees its own effect.
+    """
+    own = dict(bound)
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            own[alias.asname or alias.name] = alias.name
+    elif isinstance(node, ast.ImportFrom) and node.module:
+        for alias in node.names:
+            own[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return own
+
+
 def _import_only_binds_the_resolved_root(node, function, bound):
     """Is this an import that leaves every name the witness reads untouched?
 
@@ -1318,6 +1356,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
         return False
     if not node.names:
         return False
+    own = _bindings_after_import(node, bound)
     if isinstance(node, ast.ImportFrom):
         # #475. `from a import b` binds `b`, and resolves to `a.b`.  That is
         # the same collision test as every other spelling, read off the binding
@@ -1336,7 +1375,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
                     ctx=ast.Load(),
                 ),
                 "contextlib.suppress",
-                bound,
+                own,
             ):
                 return False
         return True
@@ -1374,7 +1413,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
                     ctx=ast.Load(),
                 ),
                 "contextlib.suppress",
-                bound,
+                own,
             ):
                 return False
             continue
@@ -1397,7 +1436,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
         if head in _witness_module_roots(function, bound) and not _resolves_to(
             ast.Attribute(value=ast.Name(id=head, ctx=ast.Load()), attr="suppress", ctx=ast.Load()),
             "contextlib.suppress",
-            bound,
+            own,
         ):
             return False
     # The import must not rebind a name the header or the manager path reads,
@@ -1422,6 +1461,20 @@ def _witness_module_roots(function, bound):
     Anything the witness later has to attribute to the real `contextlib`
     module is spelled as an attribute path in this scope, so the roots are
     exactly the `ast.Name` nodes that heads such attribute chains.
+
+    ``bound`` is unused here on purpose, and the parameter is kept only so the
+    call sites read the same as the other helpers. What a spelling *is* at a
+    given point in the scope is a separate question, asked per statement by
+    :func:`_import_only_binds_the_resolved_root` against
+    :func:`_bindings_after_import`: in
+
+        import json as contextlib
+        import contextlib
+
+    the name `contextlib` heads an attribute path in both, but it is the real
+    module only after the second statement. Collapsing that into one merged
+    table is what made the first look transparent and turned a live assert
+    into a false-DEAD.
     """
     roots = set()
     for node in ast.walk(function):
