@@ -14547,3 +14547,206 @@ def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, execu
         f"CPython gives `{outcome}` here ({executed}), so this row is pinned "
         f"against the analyzer directly rather than through the swept oracle."
     )
+
+
+@pytest.mark.parametrize(
+    "module_preamble,prefix,parameter,live",
+    (
+        ("h = 1\n", "", "h", True),
+        ("h = 1\n", "    h = contextlib.nullcontext()\n", "", True),
+        ("", "    a = contextlib.nullcontext()\n    h = a\n    a = 1\n", "", True),
+        ("", "    a = 1\n    h = a\n    a = contextlib.nullcontext()\n", "", False),
+        ("a = 1\nh = a\na = contextlib.nullcontext()\n", "", "", False),
+        ("", "    def h(): pass\n    h = contextlib.nullcontext()\n", "", True),
+        ("h = 1\n", "    h = 1\n    if flag: h = contextlib.nullcontext()\n", "", True),
+    ),
+)
+def test_walrus_name_uses_lexical_store_and_alias_snapshot(
+    module_preamble, prefix, parameter, live
+):
+    source = (
+        "import contextlib\n"
+        + module_preamble
+        + "def outer(x, flag"
+        + (", h" if parameter else "")
+        + "):\n"
+        + prefix
+        + "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-lexical-snapshot>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    outcomes = []
+    for flag in (False, True):
+        try:
+            namespace["outer"](1, flag, contextlib.nullcontext()) if parameter else namespace[
+                "outer"
+            ](1, flag)
+        except AssertionError:
+            outcomes.append(True)
+        except TypeError:
+            outcomes.append(False)
+        else:
+            outcomes.append(False)
+    assert any(outcomes) is live
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
+
+
+def test_walrus_name_declines_module_binding_shadowed_by_closure():
+    source = (
+        "import contextlib\nh = 1\ndef parent(h):\n"
+        "    def outer(x):\n        with (cs := h):\n            assert x != 1\n"
+        "    return outer\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-closure-shadow>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    with pytest.raises(AssertionError):
+        namespace["parent"](contextlib.nullcontext())(1)
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_assume_decorated_definition_is_function():
+    source = (
+        "import contextlib\ndef decorate(function):\n    return contextlib.nullcontext()\n"
+        "def outer(x):\n    @decorate\n    def h(): pass\n"
+        "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<decorated-walrus-carrier>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_assume_class_metaclass_is_unenterable():
+    source = (
+        "class Meta(type):\n    def __enter__(cls): return cls\n"
+        "    def __exit__(cls, *args): return False\n"
+        "def outer(x):\n    class h(metaclass=Meta): pass\n"
+        "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<metaclass-walrus-carrier>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_read_module_future_store_into_earlier_invocation():
+    source = (
+        "import contextlib\nhelper = contextlib.nullcontext()\n"
+        "def outer(x):\n    with (cs := helper):\n        assert x != 1\n"
+        "outer(1)\nhelper = 1\n"
+    )
+    namespace = {}
+    with pytest.raises(AssertionError):
+        exec(compile(source, "<early-module-walrus-invocation>", "exec"), namespace)  # noqa: S102
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_module_snapshot_declines_implicit_decorator_invocation():
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+def invoke(function):
+    outer(1)
+    return function
+@invoke
+def marker():
+    pass
+helper = 1
+"""
+    with pytest.raises(AssertionError):
+        exec(source, {})  # noqa: S102
+    module = ast.parse(source)
+    function = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_walrus_module_snapshot_declines_implicit_truthiness_invocation():
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+if trigger:
+    pass
+helper = 1
+"""
+    namespace = {}
+
+    class Trigger:
+        def __bool__(self):
+            namespace["outer"](1)
+            return True
+
+    namespace["trigger"] = Trigger()
+    with pytest.raises(AssertionError):
+        exec(source, namespace)  # noqa: S102
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_walrus_module_snapshot_declines_late_import_callback(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+from sentinel_walrus_import_fixture import trigger
+helper = 1
+"""
+    namespace = {}
+    fixture = ModuleType("sentinel_walrus_import_fixture")
+
+    def lookup(name):
+        if name == "trigger":
+            namespace["outer"](1)
+        raise AttributeError(name)
+
+    fixture.__getattr__ = lookup
+    monkeypatch.setitem(sys.modules, fixture.__name__, fixture)
+    with pytest.raises(AssertionError):
+        exec(source, namespace)  # noqa: S102
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
