@@ -12274,6 +12274,105 @@ LOOP_ELSE_SUPPRESSOR_SHAPES = (
         "        if not x:\n            break",
         False,
     ),
+    # -- #479. `Is` and `IsNot` were the operators #471 left declined, so they
+    #    reached `_condition_can_hold` as "not readable" -- which that function
+    #    counts as *possibly true*, the damaging direction. `x is None` decides
+    #    False at the failing value `x == 1`, the `if` body is skipped, the loop
+    #    completes normally, the `else` installs the suppressor, and the assert
+    #    is swallowed on every call. Master certified it enforced: a false-LIVE
+    #    live on `origin/master`, not a draft-only artifact.
+    #
+    #    `None` is not in the swept domain, so the identity guard is False at
+    #    every value the oracle calls, which is exactly what makes the row a
+    #    false-LIVE rather than a live contract.
+    (
+        "479 filed: an identity guard excludes every failing call",
+        "for item in (1,):",
+        "        if x is None:\n            break",
+        False,
+    ),
+    # -- The mirror, and the reason a wholesale refusal of identity guards
+    #    would be a regression rather than a fix: `x is not None` HOLDS at the
+    #    failing value, so there really is a call that both breaks and fails,
+    #    and the assert is live. Answering "unreadable" for every identity
+    #    guard would flip this row to a false-DEAD.
+    (
+        "479 live: an inverted identity guard holds on a failing call",
+        "for item in (1,):",
+        "        if x is not None:\n            break",
+        True,
+    ),
+    # -- Identity against a literal the domain can actually hold, so this is
+    #    decided rather than constant. `x is 0` is False at `x == 1` for small
+    #    ints under CPython's interning, which makes it a second excluded-failure
+    #    row in the damaging direction.
+    (
+        "479 control: identity against a literal the domain holds",
+        "for item in (1,):",
+        "        if x is 0:\n            break",
+        False,
+    ),
+    # -- #479 residual. Membership was declined for the same reason identity
+    #    was: `None` reached `_condition_can_hold` as "possibly true". `x in [0]`
+    #    decides False at the failing value `x == 1`, so the loop completes
+    #    normally, the `else` installs the suppressor, and the assert is
+    #    swallowed on every call.
+    (
+        "479 residual: a membership guard excludes every failing call",
+        "for item in (1,):",
+        "        if x in [0]:\n            break",
+        False,
+    ),
+    # -- A membership guard the failing value satisfies, and the reason
+    #    membership cannot be read as always-false. `x in (0, 1)` HOLDS at
+    #    `x == 1`, so there is a call that both breaks and fails, the `else` is
+    #    skipped, and the carried `nullcontext` is what the header enters.
+    #
+    #    The *inverted* spelling is the opposite and is deliberately absent:
+    #    `x not in (0, 1)` is False at `x == 1`, so the `else` runs and the
+    #    assert is swallowed -- it is the excluded-failure case, not a live one.
+    (
+        "479 residual live: a satisfied membership guard holds on a failing call",
+        "for item in (1,):",
+        "        if x in (0, 1):\n            break",
+        True,
+    ),
+    # -- A container the guard holds on, for the damaging direction from the
+    #    other side: `x in (0, 1)` is True at `x == 1`, so the break is reached
+    #    on the failing call and the `else` is skipped. Live, and a repair that
+    #    read membership as always-false would call this dead.
+    (
+        "479 residual live: membership against a tuple holds on a failing call",
+        "for item in (1,):",
+        "        if x in (0, 1, 2):\n            break",
+        True,
+    ),
+    # -- #479 residual. `and`/`or` were declined as a whole, so a guard built
+    #    from one read as "possibly true" even where a single operand settles it.
+    #    `x is None` is False at `x == 1` and that false operand settles `and`
+    #    on its own -- Python short-circuits there and never reads `y` at all --
+    #    so the loop completes normally and the `else` installs the suppressor.
+    (
+        "479 residual: a short-circuited conjunction excludes every failing call",
+        "for item in (1,):",
+        "        if x is None and y:\n            break",
+        False,
+    ),
+    # -- The mirror on the other side, and the reason the operator cannot be
+    #    read as always-false. A false *first* operand does not settle `or`, so
+    #    the second operand decides it; at `x == 1` the guard holds, the break
+    #    is reached on the failing call, and the contract is live.
+    #
+    #    Both operands have to be pinned by the failing assert for this to be
+    #    decidable, which is why the row reads the same parameter the assert
+    #    reads. A guard naming a *different* parameter is caller-dependent --
+    #    see `WALRUS`-style declines elsewhere in this module.
+    (
+        "479 residual live: a disjunction decides on its second operand",
+        "for item in (1,):",
+        "        if x == 0 or x:\n            break",
+        True,
+    ),
 )
 
 
@@ -14137,6 +14236,37 @@ LOOP_ELSE_IMPORT_SPELLINGS = (
         "contextlib.suppress(AssertionError)",
         True,
     ),
+    # -- #481. A nested `def` binds its own name and does nothing else at this
+    #    point: its body is not run, no value is produced, and nothing the
+    #    header enters can come from it. The pre-chain scan rejected the
+    #    *statement* -- it is neither a `Pass`, an `Assign`, nor an import --
+    #    so the witness never fired and this live assert was certified dead.
+    (
+        "481 a nested def before the header is transparent",
+        "    def inner():\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- The filed spelling, where the definition's body is itself an import.
+    #    That import is not what makes the row live; the definition is. It
+    #    matters because "the nested def contains an import" is the shape the
+    #    issue filed, and a fix that only handled the empty body would miss it.
+    (
+        "481 a nested def containing an import is transparent",
+        "    def inner():\n        import contextlib\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    # -- This empty class body executes only `pass`, so creation is inert.
+    (
+        "481 a nested class before the header is transparent",
+        "    class Inner:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
 )
 
 
@@ -14163,6 +14293,16 @@ LOOP_ELSE_IMPORT_SHADOWS = (
         "    import contextlib\n    import contextlib.nullcontext as contextlib\n",
     ),
     ("a relative import of the root", "    from . import contextlib\n"),
+    # -- #481's boundary. A nested definition is transparent precisely because
+    #    it binds a *local* name, but a definition spelled with a walked root's
+    #    own name is a shadow wearing a definition's clothes: it rebinds
+    #    `contextlib` to a function object, so `contextlib.nullcontext()` in the
+    #    header raises and the witness must decline rather than resolve through
+    #    a root that is no longer the module.
+    (
+        "a nested def shadowing the walked root",
+        "    def contextlib():\n        pass\n",
+    ),
 )
 
 
@@ -14351,3 +14491,71 @@ def test_a_loop_else_witness_declines_a_guard_that_raises(guard, assert_is_live)
         f"and the else cannot be installed. Treating it as possibly-reachable "
         f"certifies a header that can never run."
     )
+
+
+@pytest.mark.parametrize("guard,literal", (("x is 1000", 1000), ("x is True", 1)))
+def test_loop_else_identity_uses_runtime_object_not_ast_object(guard, literal):
+    source = (
+        "import contextlib\ndef outer(x):\n    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n        if " + guard + ": break\n"
+        "    else: cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != " + str(literal) + "\n"
+    )
+    namespace = {}
+    exec(compile(source, "<runtime-identity-witness>", "exec"), namespace)  # noqa: S102
+    function = namespace["outer"]
+    value = (
+        next(value for value in function.__code__.co_consts if type(value) is int and value == 1000)
+        if literal == 1000
+        else True
+    )
+    with pytest.raises(AssertionError):
+        function(value)
+    tree = ast.parse(source)
+    outer = tree.body[1]
+    target = next(node for node in ast.walk(outer) if isinstance(node, ast.Assert))
+    assert _is_enforced(outer, target, tree) is True
+
+
+@pytest.mark.parametrize(
+    "definition,error",
+    (
+        ("    class Inner:\n        raise ValueError\n", ValueError),
+        ("    def inner(value=missing()): pass\n", NameError),
+        ("    @missing()\n    def inner(): pass\n", NameError),
+        ("    class Inner(missing()): pass\n", NameError),
+        ("    def inner(value: missing()): pass\n", NameError),
+    ),
+)
+def test_loop_else_witness_declines_effectful_definition_creation(definition, error):
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        + definition
+        + "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+        + "    else: cs = contextlib.suppress(AssertionError)\n"
+        + "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<effectful-definition>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
+
+
+def test_loop_else_witness_declines_definition_overwriting_failure_parameter():
+    source = (
+        "import contextlib\ndef outer(x):\n    def x(): pass\n"
+        "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+        "    else: cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<definition-overwrites-witness>", "exec"), namespace)  # noqa: S102
+    namespace["outer"](1)
+    tree = ast.parse(source)
+    function = tree.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is False
