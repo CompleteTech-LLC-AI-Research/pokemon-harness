@@ -511,21 +511,38 @@ def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
         return False
     for item in node.items:
         call = item.context_expr
+        # Resolve readable containers/classes before deciding the entered value.
         if not isinstance(call, ast.Call):
+            carried = _dereferenced_header_value(call, bound, owning, function)
+            if (
+                isinstance(carried, ast.Call)
+                and _is_suppression_call(carried, bound)
+                and any(
+                    _name_catches_assertion_error(name)
+                    for name in _suppression_names(carried, bound, function)
+                )
+            ):
+                return True
             continue
         dunder = _suppressed_by_dunder(call, bound)
         if dunder and any(_name_catches_assertion_error(name) for name in dunder):
             return True
         if not _is_suppression_call(call, bound):
             continue
-        if any(_name_catches_assertion_error(name) for name in _suppression_names(call)):
+        if any(
+            _name_catches_assertion_error(name)
+            for name in _suppression_names(call, bound, function)
+        ):
             return True
     for argument in _entered_suppressions(node, bound):
         if not isinstance(argument, ast.Call):
             continue
         if not _is_suppression_call(argument, bound):
             continue
-        if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
+        if any(
+            _name_catches_assertion_error(name)
+            for name in _suppression_names(argument, bound, function)
+        ):
             return True
     if function is None:
         return False
@@ -561,7 +578,10 @@ def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
         # therefore not a surviving defect, and shipping an unpinned
         # re-test would be exactly the kind of change this lane rejects.
         # #390 tracks the related own-body `lambda` case.
-        if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
+        if any(
+            _name_catches_assertion_error(name)
+            for name in _suppression_names(argument, bound, function)
+        ):
             return True
     return False
 

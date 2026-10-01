@@ -581,12 +581,10 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
     #             with cs:                       # still the suppressor
     #                 assert x != 1              # swallowed
     #
-    # The test is "does a later store in this function write the name, at a
-    # source position after the capture's own statement". Source order is the
-    # right question here: it is what makes the second write the one a read
-    # *after* it sees, and the clause body is written below the `match`
-    # statement, so a store there is always later.
-    competing = _drop_captures_shadowed_by_later_stores(competing, entries, orders, function)
+    # Source position locates the later store; a shared statement body must
+    # also prove that the store runs before this query. An unselected arm or
+    # a store after the queried header leaves the capture in force.
+    competing = _drop_captures_shadowed_by_later_stores(competing, entries, orders, function, query)
     # A conditional non-enterable value cannot revive a carried suppressor:
     # the skipped path still suppresses, and the taken path fails on entry.
     if len(competing) == 1 and _literal_runtime_type(competing[0][1]) in NON_CONTEXT_MANAGER_TYPES:
