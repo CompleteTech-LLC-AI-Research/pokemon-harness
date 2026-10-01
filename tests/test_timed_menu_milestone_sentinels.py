@@ -12497,15 +12497,26 @@ IMPORT_SHAPE_ROWS = (
         "        pass",
         False,
     ),
-    # -- `import contextlib as cl` binds `cl`, not the root the witness reads.
-    #    The alias has to keep declining, or an import that genuinely does
-    #    rebind something would be waved through as transparent.
+    # -- `import contextlib as cl` binds the name `cl`, and leaves `contextlib`
+    #    itself untouched: `cl is contextlib` is True, so the root the witness
+    #    resolves through is the same object either way. The preamble imports the
+    #    root as well, because the table's fixture has no module-level import and
+    #    `contextlib.nullcontext()` would otherwise raise `NameError` before the
+    #    `with` is ever reached. With the root bound, the assert fires, so the
+    #    header is LIVE and the row is asserted live.
+    #
+    #    This row previously expected DEAD, on the reading that an alias "binds a
+    #    different name". That reading is wrong about which name is bound: the
+    #    alias binds `cl`, and `contextlib` was already bound at module scope
+    #    and is not rebound. Declining it reported a firing assert defeated.
+    #    #445's import-admission predicate accepts it, which is the correct
+    #    answer and the reason this row's expectation changed.
     (
-        "451 import declined: an alias binds a different name",
-        "    import contextlib as cl\n",
+        "451 import accepted: an alias binds another name, not the root",
+        "    import contextlib as cl\n    import contextlib\n",
         "for item in (1,):",
         "        break",
-        False,
+        True,
     ),
     # -- A dotted import binds the *leaf* `contextlib.nullcontext`, shadowing
     #    the attribute path the witness walks.  It cannot be pinned as an
@@ -12530,14 +12541,16 @@ IMPORT_SHAPE_ROWS = (
 def test_only_the_resolved_root_is_admitted_as_a_transparent_import(
     label, preamble, loop, body, assert_is_live
 ):
-    """An import is transparent only when it binds the witness's own root.
+    """An import is transparent only when it leaves the witness's own root alone.
 
     #451's repair lets a function-local `import contextlib` pass the pre-chain
-    scan that otherwise rejects it.  "Any import is transparent" would be
-    wrong: an alias, a dotted import, or an unrelated module each leave the
-    name the witness resolves through untouched while rebinding something else,
-    and accepting them would turn the correlated witness into a false-LIVE on
-    those shapes.
+    scan that otherwise rejects it. "Any import is transparent" would still be
+    wrong, but the question is not whether the import binds the root -- it is
+    whether the import *changes what the root means*. An import that rebinds
+    `contextlib` to a different object, or a relative import that resolves
+    against a package this analyzer knows nothing about, is declined. An
+    unrelated import, an alias under another name, and a re-import of the same
+    module all leave the root untouched and are admitted.
 
     Each row is executed first, so CPython decides the expected verdict rather
     than the author's reasoning about what the import means.
@@ -12563,8 +12576,8 @@ def test_only_the_resolved_root_is_admitted_as_a_transparent_import(
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert results == [assert_is_live], (
         f"{label}: expected verdicts [{assert_is_live}], got {results}. Only an "
-        f"import binding the module root the witness already resolves through is "
-        f"transparent; an alias or a leaf import rebinds a different name."
+        f"import that leaves the module root the witness resolves through alone is "
+        f"transparent; one that rebinds that name to something else is not."
     )
 
 
