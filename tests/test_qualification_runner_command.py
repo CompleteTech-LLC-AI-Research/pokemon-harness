@@ -295,6 +295,49 @@ def test_run_command_child_dies_with_parent(tmp_path: Path):
             process.wait(timeout=5)
 
 
+@pytest.mark.parametrize("restricted", (False, True))
+def test_pid_alive_rechecks_existence_after_proc_entry_disappears(monkeypatch, restricted):
+    """A reaped zombie can vanish between kill(0) and the /proc read."""
+    calls = []
+
+    def kill(pid, signum):
+        calls.append((pid, signum))
+        if len(calls) == 1:
+            if restricted:
+                raise PermissionError
+            return
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(runner, "_pid_is_zombie", lambda pid: False)
+    assert runner._pid_alive(12345) is False
+    assert calls == [(12345, 0), (12345, 0)]
+
+
+@pytest.mark.parametrize("restricted", (False, True))
+def test_pid_alive_keeps_existing_non_zombie_or_unreadable_process(monkeypatch, restricted):
+    """Restricted visibility remains evidence of existence, never free capacity."""
+    calls = []
+
+    def kill(pid, signum):
+        calls.append((pid, signum))
+        if restricted:
+            raise PermissionError
+
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(runner, "_pid_is_zombie", lambda pid: False)
+    assert runner._pid_alive(12345) is True
+    assert calls == [(12345, 0), (12345, 0)]
+
+
+def test_pid_alive_does_not_reclassify_an_observed_zombie(monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "kill", lambda pid, signum: calls.append((pid, signum)))
+    monkeypatch.setattr(runner, "_pid_is_zombie", lambda pid: True)
+    assert runner._pid_alive(12345) is False
+    assert calls == [(12345, 0)]
+
+
 def test_run_command_sweeps_grandchild_after_successful_parent_exit(tmp_path: Path):
     """A command that exits 0 must not leave a live descendant running."""
 
