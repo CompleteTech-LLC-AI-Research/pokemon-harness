@@ -124,6 +124,10 @@ async def finish_battle_return(
         if attempt % 2 == 1:
             for owner, state in enumerate(states):
                 location = state["overworld"]
-                if (location["x"], location["y"]) == positions[owner]:
+                if (
+                    (location["x"], location["y"]) == positions[owner]
+                    and type(location["walk_counter"]) is int
+                    and location["walk_counter"] == 0
+                ):
                     await pair.press(owner, "down", duration=2)
     raise AssertionError("returned Colosseum did not accept ordinary movement")

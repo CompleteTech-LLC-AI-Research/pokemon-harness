@@ -537,3 +537,116 @@ async def test_return_requires_actual_new_room_control_after_restoration(moves):
     else:
         with pytest.raises(AssertionError, match="ordinary movement"):
             await battle_return.finish_battle_return(pair, states, [records, records], states, live)
+
+
+@pytest.mark.asyncio
+async def test_return_never_retries_down_during_a_step_at_old_coordinates():
+    states, records, live = return_case()
+
+    class Pair:
+        def __init__(self):
+            self.remaining = [0, 0]
+            self.started = [False, False]
+            self.calls = []
+
+        async def state(self, owner):
+            state = copy.deepcopy(states[owner])
+            if self.started[owner]:
+                state["overworld"]["walk_counter"] = self.remaining[owner]
+                if self.remaining[owner] == 0:
+                    state["overworld"]["y"] = 5
+            return state
+
+        async def records(self, owner):
+            return {"records": records}
+
+        async def release_buttons(self):
+            pass
+
+        async def press(self, owner, button, *, duration):
+            assert self.remaining[owner] == 0, "retry queued during unfinished first tile"
+            assert button == "down" and duration == 8
+            self.remaining[owner] = 16
+            self.started[owner] = True
+            self.calls.append(owner)
+
+        async def step(self, count):
+            self.remaining = [max(0, value - count) for value in self.remaining]
+
+    pair = Pair()
+    result = await battle_return.finish_battle_return(
+        pair, states, [records, records], states, live
+    )
+    assert pair.calls == [0, 1]
+    assert all(state["overworld"]["y"] == 5 for state in result["usable_room_states"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fade_owner", [0, 1])
+async def test_return_retries_only_stationary_owner_after_fade(fade_owner):
+    states, records, live = return_case()
+
+    class Pair:
+        def __init__(self):
+            self.remaining = [0, 0]
+            self.started = [False, False]
+            self.calls = []
+
+        async def state(self, owner):
+            state = copy.deepcopy(states[owner])
+            state["overworld"]["walk_counter"] = self.remaining[owner]
+            if self.started[owner] and self.remaining[owner] == 0:
+                state["overworld"]["y"] = 5
+            return state
+
+        async def records(self, owner):
+            return {"records": records}
+
+        async def release_buttons(self):
+            pass
+
+        async def press(self, owner, button, *, duration):
+            assert button == "down"
+            assert self.remaining[owner] == 0, "moving peer received another pulse"
+            self.calls.append((owner, duration))
+            if owner == fade_owner and duration == 8:
+                return
+            self.remaining[owner] = 16
+            self.started[owner] = True
+
+        async def step(self, count):
+            self.remaining = [max(0, value - count) for value in self.remaining]
+
+    pair = Pair()
+    result = await battle_return.finish_battle_return(
+        pair, states, [records, records], states, live
+    )
+    assert pair.calls == [(0, 8), (1, 8), (fade_owner, 2)]
+    assert all(state["overworld"]["y"] == 5 for state in result["usable_room_states"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("counter", [None, False])
+async def test_return_unknown_walk_counter_cannot_authorize_retry(counter):
+    states, records, live = return_case()
+
+    class Pair:
+        async def state(self, owner):
+            state = copy.deepcopy(states[owner])
+            state["overworld"]["walk_counter"] = counter
+            return state
+
+        async def records(self, owner):
+            return {"records": records}
+
+        async def release_buttons(self):
+            pass
+
+        async def press(self, owner, button, *, duration):
+            assert duration == 8, "retry issued without known stationary counter"
+
+        async def step(self, count):
+            pass
+
+    with pytest.raises(AssertionError, match="ordinary movement"):
+        await battle_return.finish_battle_return(Pair(), states, [records, records], states, live)
