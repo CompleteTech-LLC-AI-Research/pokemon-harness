@@ -14263,3 +14263,75 @@ def test_a_loop_else_witness_declines_an_import_that_shadows_its_root(label, pre
         f"depends on statement order, so the witness must decline rather than "
         f"claim a resolution the source does not determine."
     )
+
+
+
+#: #451. A guard whose evaluation *raises* is not a guard that may hold -- it is
+#: a guard after which the loop body never completes, so the ``else`` is never
+#: installed and the assert under test is never evaluated at all. Reading that
+#: as "possibly reachable" reports a header live whose code cannot run.
+#:
+#: The witness still treats a guard it merely *cannot read* (``is``, ``in``,
+#: a chain) as possibly-true, which is conservative and correct: there the
+#: ``else`` genuinely may or may not run. The two cases used to share one
+#: ``None``, and only one of them is safe that way.
+#:
+#: These rows pin the raising case. ``Eq``/``NotEq`` are deliberately absent
+#: from the raising set: ``1 == "a"`` is ``False`` in Python rather than an
+#: error, so a mixed-type equality leaves the loop able to complete and must not
+#: be treated this way. Those are the controls, and a repair that swept them in
+#: alongside the ordering operators would make the first a false-DEAD.
+LOOP_ELSE_RAISING_GUARDS = (
+    ('x < "a"', False),
+    ('x > "a"', False),
+    ('x <= "a"', False),
+    ('x >= "a"', False),
+    ('"a" < x', False),
+    ('1 < "a"', False),
+    ('x == "a"', False),
+    ('x != "a"', True),
+)
+
+
+@pytest.mark.parametrize(
+    ("guard", "assert_is_live"),
+    LOOP_ELSE_RAISING_GUARDS,
+    ids=[f"guard {row[0]}" for row in LOOP_ELSE_RAISING_GUARDS],
+)
+def test_a_loop_else_witness_declines_a_guard_that_raises(guard, assert_is_live):
+    """#451: evaluating the guard can raise, which decides it, not a maybe.
+
+    `1 < "a"` raises `TypeError` in CPython, so the loop body never finishes and
+    the `else` never runs. There is no suppressor to swallow the assert and no
+    contract to certify, so the header cannot be reported live.
+
+    This is the damaging direction the whole #451 witness exists to avoid: a
+    sentinel certified load-bearing whose code cannot run. The rows are executed
+    before the verdict is compared, so CPython decides whether the guard raises
+    rather than this table.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n"
+        f"        if {guard}:\n"
+        "            break\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(f"451 raising guard {guard}", source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    results = _is_enforced(function, target, tree)
+    assert results is assert_is_live, (
+        f"451 raising guard {guard}: expected {assert_is_live}, got {results}. "
+        f"This guard raises rather than answering, so the loop cannot complete "
+        f"and the else cannot be installed. Treating it as possibly-reachable "
+        f"certifies a header that can never run."
+    )
