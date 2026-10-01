@@ -4,7 +4,7 @@ if __name__ == "tests._sentinel_support_part22":
     raise ImportError("Import tests._timed_menu_milestone_sentinel_support instead.")
 
 
-def _nonlocal_match_captures(function, query=None):
+def _nonlocal_match_captures(function, query=None, global_names=None):
     """Reached plain nested bodies with proved capture values; opaque code declines.
 
     Function definitions alone do not execute their bodies. Only a direct zero-arg
@@ -72,8 +72,17 @@ def _nonlocal_match_captures(function, query=None):
         ):
             continue
         declared = _nonlocal_declared(nested)
+        declaration_type = ast.Nonlocal
+        if global_names is not None:
+            declaration_type = ast.Global
+            declared = {
+                name
+                for statement in nested.body
+                if isinstance(statement, ast.Global)
+                for name in statement.names
+            } & global_names
         if not declared or any(
-            not isinstance(statement, (ast.Nonlocal, ast.Match, ast.Pass))
+            not isinstance(statement, (declaration_type, ast.Match, ast.Pass))
             for statement in nested.body
         ):
             continue
@@ -85,6 +94,15 @@ def _nonlocal_match_captures(function, query=None):
             continue
         if any(not isinstance(statement, ast.Pass) for statement in match.cases[0].body):
             continue
+        original_subject = match.subject
+        if isinstance(original_subject, (ast.List, ast.Tuple)):
+            replacements = [
+                _source_known_manager_value(element, module, function) or element
+                for element in original_subject.elts
+            ]
+            match.subject = ast.copy_location(
+                type(original_subject)(elts=replacements, ctx=ast.Load()), original_subject
+            )
         original_body = function.body
         # Preserve the definition's binding when checking callee and witness
         # shadowing. This placeholder models a store, not the runtime value.
@@ -92,11 +110,19 @@ def _nonlocal_match_captures(function, query=None):
             targets=[ast.Name(id=nested.name, ctx=ast.Store())], value=ast.Constant(None)
         )
         ast.copy_location(binding, nested)
-        projected = [binding if statement is nested else statement for statement in original_body]
+        projected = [
+            binding if statement is nested else statement
+            for statement in original_body
+            if global_names is None or not isinstance(statement, ast.Global)
+        ]
         if owner is nested:
             projected.insert(projected.index(binding) + 1, match)
         else:
             projected[projected.index(owner)] = match
+        had_module_managers = hasattr(function, "_allow_literal_module_managers")
+        previous_module_managers = getattr(function, "_allow_literal_module_managers", None)
+        if global_names is not None:
+            function._allow_literal_module_managers = True
         function.body = projected
         try:
             values = {
@@ -106,6 +132,12 @@ def _nonlocal_match_captures(function, query=None):
             }
         finally:
             function.body = original_body
+            match.subject = original_subject
+            if not had_module_managers:
+                if hasattr(function, "_allow_literal_module_managers"):
+                    del function._allow_literal_module_managers
+            else:
+                function._allow_literal_module_managers = previous_module_managers
         for name in _match_capture_names_for(match):
             if name not in declared:
                 continue

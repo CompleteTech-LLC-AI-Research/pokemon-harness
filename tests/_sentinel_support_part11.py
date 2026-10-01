@@ -372,6 +372,13 @@ def _literal_subject_element_is_safe(element, function):
                 return False
             continue
         if any(isinstance(node, ast.Call) for node in ast.walk(statement)):
+            if (
+                getattr(function, "_allow_literal_module_managers", False)
+                and isinstance(statement, ast.Assign)
+                and all(isinstance(target, ast.Name) for target in statement.targets)
+                and _source_known_manager_value(statement.value, owning, function) is not None
+            ):
+                continue
             return False
     root = element.func
     while isinstance(root, ast.Attribute):
