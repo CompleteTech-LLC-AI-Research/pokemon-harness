@@ -456,7 +456,9 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         # The value is what is entered here and now; what `cs` holds on a
         # later line is a different store's question, answered by
         # `_stores_of` when that `with` is reached.
-        return _literal_entry_is_dead(expression.value)
+        return _literal_entry_is_dead(expression.value) or _walrus_name_entry_is_dead(
+            expression.value, by_index, index, function, bound, module
+        )
     if not isinstance(expression, ast.Name):
         return False
     name = expression.id
