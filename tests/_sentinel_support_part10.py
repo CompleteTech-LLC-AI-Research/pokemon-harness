@@ -828,6 +828,14 @@ def _elif_skipped_path_walks(
     chain is what the ``with`` actually enters. A decided ``if False:`` whose
     ``else`` always runs falls out of the walk with ``False``, which keeps it
     DEFEATED.
+
+    #451 asks a neighbouring question of a loop ``else``, and the answer is the
+    # same: the suppressor is not installed on the path that skips its arm, so
+    # the manager carried in from before is what the ``with`` actually enters.
+    # The difference is *which* path skips the arm -- an earlier test succeeding
+    # here, a ``break`` firing there -- so the loop's witness is a separate walk
+    # in :func:`_break_skipped_loop_else_can_fail`, dispatched from the same call
+    # site so the two guards cannot drift apart.
     """
     if not isinstance(query, ast.Assert) or function is None:
         return False
@@ -1584,6 +1592,18 @@ def _import_leaves_the_witness_root_alone(node, root_name, function):
     """
     if isinstance(node, ast.ImportFrom) and node.level:
         return False
+    if isinstance(node, ast.Import):
+        # A dotted import rebinds the *leaf*, not the root: `import a.b` binds a
+        # name of its own that shadows the attribute path the witness walks, with
+        # or without an alias. Accepting it would let a rebinding import pass the
+        # pre-chain scan and talk the witness into a false-LIVE -- measured, not
+        # assumed: `import contextlib.nullcontext as cn` before the loop makes
+        # `contextlib.nullcontext()` resolve to the *module*, which is not
+        # enterable, so the header raises and the assert never runs while the
+        # witness still reports it live.
+        for alias in node.names:
+            if "." in alias.name:
+                return False
     bound_names = _import_binds(node, root_name.id)
     if root_name.id not in bound_names:
         return True
@@ -1600,3 +1620,51 @@ def _import_leaves_the_witness_root_alone(node, root_name, function):
         ):
             return False
     return True
+
+
+def _witness_module_roots(function, bound):
+    """The ``ast.Name`` heads of the attribute chains this scope reads through.
+
+    An import is transparent to the witness only when it binds the module root
+    an existing chain already starts from, so the roots have to be known.
+    """
+    roots = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Attribute):
+            head = node
+            while isinstance(head, ast.Attribute):
+                head = head.value
+            if isinstance(head, ast.Name):
+                roots.add(head.id)
+    return roots
+
+
+def _import_only_binds_the_resolved_root(node, function, bound):
+    """Is this a plain import of a module root, and nothing else?
+
+    Kept alongside :func:`_import_leaves_the_witness_root_alone`, which is the
+    gate the #451 witness actually consults. That one answers the narrower
+    question "does this import leave the resolved root alone", and so accepts
+    an alias or an unrelated module, neither of which can say anything about
+    the root. This one answers the stricter question "is this *only* a plain
+    binding of a root the witness already reads", which is what pins the
+    declined spellings: a dotted import binds the leaf rather than the root,
+    and treating it as transparent would let a rebinding import through the
+    pre-chain scan and talk the witness into a false-LIVE.
+    """
+    if not isinstance(node, ast.Import) or not node.names:
+        return False
+    roots = []
+    for alias in node.names:
+        if alias.asname is not None:
+            # `import x as y` binds `y`, not the module root.
+            return False
+        head, dot, _ = alias.name.partition(".")
+        if not head or dot:
+            # `import a.b` binds `a.b` as a name of its own, shadowing the
+            # attribute path the witness walks.
+            return False
+        roots.append(head)
+    if len(set(roots)) != 1:
+        return False
+    return roots[0] in _witness_module_roots(function, bound)

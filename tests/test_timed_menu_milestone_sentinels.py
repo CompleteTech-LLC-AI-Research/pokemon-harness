@@ -12150,6 +12150,512 @@ def test_elif_suppression_resolution_requires_an_enterable_failing_skipped_path(
     assert _is_enforced(function, target, tree) is expected
 
 
+#: #451, the loop spelling of the arm the #441 table above pins for `elif`.
+#:
+#: A `for`/`else` or `while`/`else` `else` clause runs only when the loop
+#: finishes *without* a `break`. #378 correctly established the complementary
+#: rule -- a zero-iteration loop's `else` still runs -- but the other side was
+#: not modelled, so a suppressor bound in an `else` that a `break` skips
+#: retired the carried `nullcontext` and the assert was reported defeated.
+#:
+#: `loop` is the loop head, `body` its body, and `assert_is_live` the exact
+#: verdict. Each fixture is executed across `x in (0, 1)` before the
+#: analyzer's answer is compared, so CPython decides every row and a row
+#: cannot claim a verdict the interpreter disagrees with.
+LOOP_ELSE_SUPPRESSOR_SHAPES = (
+    # -- The filed defect. `break` is unconditional, so the `else` never runs
+    #    on any call and the carried `nullcontext` is what the `with` enters.
+    (
+        "451 filed: a break skips the loop else",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- Same shape with `while`. The clause is spelled the same way and the
+    #    loop is spelled the other way; only the head differs.
+    (
+        "451 while/else: a break skips the loop else",
+        "while True:",
+        "        break",
+        True,
+    ),
+    # -- A break the failure value does not exclude. The filed `assert x != 1`
+    #    holds at `x == 1`, and so does `if x == 1: break`, so there IS a call
+    #    that both breaks and fails. Pinned because it is the correlation the
+    #    witness has to get right in the live direction.
+    (
+        "451 live: the break holds on a failing call",
+        "for item in (1,):",
+        "        if x == 1:\n            break",
+        True,
+    ),
+    # -- No `break` at all: the loop always completes normally, so the `else`
+    #    always runs, the suppressor really is installed on every call, and
+    #    the assert really is swallowed. Declining the witness here is what
+    #    keeps the change from inventing a false-LIVE.
+    (
+        "451 control: no break, so the else always runs",
+        "for item in (1,):",
+        "        pass",
+        False,
+    ),
+    (
+        "451 control: a while loop with no break completes normally",
+        "while False:",
+        "        pass",
+        False,
+    ),
+    # -- `continue` is not a `break`. The loop still completes normally, so the
+    #    `else` still runs. This is the row a naive "any jump out of the body"
+    #    reading gets wrong, and it is the reason `_has_own_break` matches
+    #    `ast.Break` and nothing else.
+    (
+        "451 control: continue does not skip the else",
+        "for item in (1,):",
+        "        continue",
+        False,
+    ),
+    # -- A `break` bound to a NESTED loop. The inner loop's `break` leaves the
+    #    *inner* loop, so the outer one still completes normally and the outer
+    #    `else` still runs. `_has_own_break` stops at the inner loop for this.
+    (
+        "451 control: a break in a nested for belongs to that loop",
+        "for item in (1,):",
+        "        for inner in (2,):\n            break",
+        False,
+    ),
+    (
+        "451 control: a break in a nested while belongs to that loop",
+        "for item in (1,):",
+        "        while True:\n            break",
+        False,
+    ),
+    # -- The break is guarded by exactly the assert's own condition. The two
+    #    are *not* exclusive: the `else` binds the calls where the guard is
+    #    false, and the assert fails on the calls where it is true, so the
+    #    suppressor is in force on precisely the calls that cannot fail and
+    #    the assert fires on the rest. Pinned because it is the row that
+    #    decides the polarity of the correlation -- reading "the break and the
+    #    failure are the same condition" as *exclusive* would wrongly decline
+    #    a live header, and that is the mistake this table exists to catch.
+    (
+        "451 live: the break guard matches the failure condition",
+        "for item in (1,):",
+        "        if x:\n            break",
+        True,
+    ),
+    # -- The guard that names the assert's own condition. The break is taken
+    #    exactly where the assert *holds*, so the `else` binds precisely the
+    #    calls where the assert fails -- and swallows every one of them. This is
+    #    the exclusive shape, and it is the one that must be declined: the
+    #    break is unreachable at the failing value, the loop completes
+    #    normally, and the header really is defeated.
+    (
+        "451 control: a guard naming the assert condition is exclusive",
+        "for item in (1,):",
+        "        if x != 1:\n            break",
+        False,
+    ),
+    # -- A guard that is *decided* the wrong way for every failing call, so
+    #    the failing calls all take the `else` and really are swallowed. This
+    #    is the correlation in the damaging direction, and the row the witness
+    #    has to get right to avoid a new false-LIVE.
+    (
+        "451 control: the break excludes every failing call",
+        "for item in (1,):",
+        "        if x == 0:\n            break",
+        False,
+    ),
+    (
+        "451 control: an inverted guard also excludes the failing call",
+        "for item in (1,):",
+        "        if not x:\n            break",
+        False,
+    ),
+)
+
+
+#: #451 as the issue *filed* it: the module is imported **inside the
+#: function**, not at module scope.  The first version of this repair pinned
+#: only the module-level spelling, so the filed fixture kept reporting dead
+#: and the issue stayed open -- the exact hazard this repository's ground-truth
+#: rule exists to catch.  These rows use the filed spelling verbatim.
+#:
+#: `import contextlib` is transparent to the witness: it binds the same module
+#: root `_resolves_to` already follows, and introduces no value, branch, or
+#: ordering that could settle `cs`.  The witnesses accept it; the rows below
+#: pin that, in both the live and the declined direction, so the acceptance
+#: cannot quietly widen into a false-LIVE.
+FUNCTION_LOCAL_IMPORT_SHAPES = (
+    # -- The filed fixture. `break` is unconditional, so the `else` never runs
+    #    and the carried `nullcontext` is what the header enters.
+    (
+        "451 filed: function-local import, a break skips the loop else",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    (
+        "451 filed: function-local import, while/else",
+        "while True:",
+        "        break",
+        True,
+    ),
+    # -- The live correlation under the filed spelling: the break's guard and
+    #    the assert's condition are the same predicate, but a call needs only
+    #    one of them, so the break is still reachable where the assert fails.
+    (
+        "451 filed: local import, the break guard matches the failure",
+        "for item in (1,):",
+        "        if x:\n            break",
+        True,
+    ),
+    # -- Declined under the filed spelling. The guard names the assert's own
+    #    condition, so the `else` binds precisely the failing calls and
+    #    swallows every one. Answering live here would be a false-LIVE, and
+    #    this row is what stops the import acceptance from becoming one.
+    (
+        "451 control: local import, guard naming the assert is exclusive",
+        "for item in (1,):",
+        "        if x != 1:\n            break",
+        False,
+    ),
+    (
+        "451 control: local import, the break excludes every failing call",
+        "for item in (1,):",
+        "        if x == 0:\n            break",
+        False,
+    ),
+    # -- No `break`: the loop completes normally, so the `else` always runs and
+    #    the suppressor really is installed on every call.
+    (
+        "451 control: local import, no break so the else always runs",
+        "for item in (1,):",
+        "        pass",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "loop", "body", "assert_is_live"),
+    LOOP_ELSE_SUPPRESSOR_SHAPES,
+    ids=[row[0] for row in LOOP_ELSE_SUPPRESSOR_SHAPES],
+)
+def test_a_loop_else_suppressor_is_live_when_a_break_skips_it(label, loop, body, assert_is_live):
+    """A `break` skipping a loop's `else` does not defeat the assert.
+
+    This is #451. The filed fixture:
+
+        import contextlib
+        def outer(x):
+            cs = contextlib.nullcontext()
+            for item in (1,):
+                break                       # loop exits without completion
+            else:
+                cs = contextlib.suppress(AssertionError)   # SKIPPED
+            with cs:                       # `cs` is still the nullcontext
+                assert x != 1             # LIVE
+
+    Executed on CPython 3.12 the assert **fires**, while `_is_enforced`
+    reported it defeated on master `2c81f10` and on merged `02776f8`. The
+    suppressor was recorded as an unconditional store, so it retired the
+    carried `nullcontext` and the header resolved to a suppressor.
+
+    The repair demotes a store in a loop `else` that a `break` bound to *that
+    loop* can skip, exactly as #441 demotes a store in an `elif` arm, and then
+    proves the witness separately. The witness is correlated rather than
+    symmetric with #441's: #441 shows a *failure value* selects an arm that
+    skips the suppressor, while #451 has to show a call that both reaches the
+    `break` and still fails. Those are the same call only when the break's
+    guard does not exclude the failure, which is why the two exclusion rows
+    are pinned as controls.
+
+    Every row is executed before the analyzer's verdict is compared, so
+    CPython decides the row rather than the author's reasoning about it.
+    """
+    # `_assert_suppression_contract` sweeps `outer(value, True, None)`, so the
+    # fixture takes the same three parameters even though only `x` is read.
+    # The two unused ones keep the row on the shared helper -- and therefore on
+    # the shared CPython oracle -- rather than re-deriving one here.
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    cs = contextlib.nullcontext()\n"
+        f"    {loop}\n"
+        f"{body}\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. A loop's "
+        f"`else` runs only when the loop completes without a `break`, so a "
+        f"suppressor bound there is installed on the calls that break and not "
+        f"on the rest."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "loop", "body", "assert_is_live"),
+    FUNCTION_LOCAL_IMPORT_SHAPES,
+    ids=[row[0] for row in FUNCTION_LOCAL_IMPORT_SHAPES],
+)
+def test_a_loop_else_suppressor_is_live_under_a_function_local_import(
+    label, loop, body, assert_is_live
+):
+    """#451 as filed: `import contextlib` is **inside** the function.
+
+    The filed fixture is
+
+        def outer(x):
+            import contextlib
+            cs = contextlib.nullcontext()
+            for item in (1,):
+                break
+            else:
+                cs = contextlib.suppress(AssertionError)   # SKIPPED
+            with cs:
+                assert x != 1
+
+    Executed on CPython 3.12 the assert **fires**, so the correct verdict is
+    live.  This spelling is the reason the issue was filed, and a repair that
+    pins only the module-level import leaves it dead -- a false-DEAD in the
+    damaging direction, on the exact fixture the issue names.
+
+    A function-local import is transparent to the witness: it binds the same
+    module root the witness already resolves through, and it introduces no
+    value, branch, or ordering that could settle `cs`.  The repair therefore
+    admits an import that binds exactly that root, and only that root -- an
+    alias, a dotted import of a different root, or a `from ... import` of the
+    leaf all still decline, because each of those rebinds something other than
+    the name the witness reads.
+
+    Every row is executed across `x in (0, 1)` before the analyzer's verdict is
+    compared, so CPython decides the row.  The declined rows are what stop this
+    acceptance from widening into a false-LIVE.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        f"    {loop}\n"
+        f"{body}\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. The filed "
+        f"fixture imports contextlib inside the function; that import binds the "
+        f"same root the witness resolves through and must not defeat the "
+        f"correlated loop-else witness."
+    )
+
+
+#: The repair admits an import that binds exactly the module root the witness
+#: reads.  These rows pin the *other* side of that rule: the import spellings
+#: that must keep declining.  Without them the acceptance can be widened to
+#: "any import is transparent" and the lane still goes green -- measured as
+#: surviving mutant N2 -- which would let a rebinding import talk the witness
+#: into a false-LIVE.
+IMPORT_SHAPE_ROWS = (
+    # -- The filed spelling is admitted.  Kept here so this table and the
+    #    `#451` table cannot drift apart on the live direction.
+    (
+        "451 import accepted: the root the witness reads",
+        "    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- An unrelated module binds a different root.  It says nothing about the
+    #    one the witness resolves through, and the loop still completes
+    #    normally, so the suppressor installs and the header is defeated.
+    (
+        "451 import declined: an unrelated module",
+        "    import json\n    import contextlib\n",
+        "for item in (1,):",
+        "        pass",
+        False,
+    ),
+    # -- `import contextlib as cl` binds `cl`, which is a name the header and
+    #    the manager path never read, so it cannot change what the witness
+    #    resolves.  Measured, not argued: executed on CPython 3.12 the assert
+    #    still fires and `True` is the only correct verdict.
+    #
+    #    This row previously claimed the alias must be *declined* (False).
+    #    Execution contradicts that, and on `origin/master` `49b899a` the
+    #    decline it demanded produced a false-DEAD on a live contract.  A
+    #    declined import does not make the assert dead, it only makes the
+    #    witness silent -- and silence there is the damaging direction.
+    (
+        "451 import accepted: an alias binds an unread name",
+        "    import contextlib as cl\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- A dotted import binds the *leaf* `contextlib.nullcontext`, shadowing
+    #    the attribute path the witness walks.  It cannot be pinned as an
+    #    execution row -- CPython rejects the module outright with
+    #    `ModuleNotFoundError: 'contextlib' is not a package`, so the oracle
+    #    never reaches the assert -- so the decline is pinned directly below.
+    (
+        "451 import accepted: two plain imports of the same root",
+        "    import contextlib\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "loop", "body", "assert_is_live"),
+    IMPORT_SHAPE_ROWS,
+    ids=[row[0] for row in IMPORT_SHAPE_ROWS],
+)
+def test_only_the_resolved_root_is_admitted_as_a_transparent_import(
+    label, preamble, loop, body, assert_is_live
+):
+    """An import is transparent only when it binds the witness's own root.
+
+    #451's repair lets a function-local `import contextlib` pass the pre-chain
+    scan that otherwise rejects it.  "Any import is transparent" would be
+    wrong: an alias, a dotted import, or an unrelated module each leave the
+    name the witness resolves through untouched while rebinding something else,
+    and accepting them would turn the correlated witness into a false-LIVE on
+    those shapes.
+
+    Each row is executed first, so CPython decides the expected verdict rather
+    than the author's reasoning about what the import means.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        f"{preamble}"
+        "    cs = contextlib.nullcontext()\n"
+        f"    {loop}\n"
+        f"{body}\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. Only an "
+        f"import binding the module root the witness already resolves through is "
+        f"transparent; an alias or a leaf import rebinds a different name."
+    )
+
+
+def test_a_dotted_import_alias_is_not_a_transparent_root():
+    """`import contextlib.nullcontext as cn` binds the leaf, so it must decline.
+
+    An alias is otherwise transparent -- it binds a name the header never
+    reads -- but a *dotted* alias binds the leaf module, shadowing the
+    attribute path the witness walks.  Accepting it is a false-LIVE:
+    `contextlib.nullcontext` then resolves to the module object, which is not
+    enterable, so the `with` header raises and the assert never runs while the
+    witness still reports the header live.
+
+    This cannot be an execution row: CPython rejects the import outright with
+    `ModuleNotFoundError: 'contextlib' is not a package`, so there is no
+    `outer` to sweep. The decline is therefore asserted directly, which is a
+    statement about the analyzer rather than about CPython.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib.nullcontext as cn\n"
+        "    import contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n"
+        "        break\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    statement = function.body[0]
+    assert isinstance(statement, ast.Import), "fixture no longer starts with a bare import"
+    assert not support._import_only_binds_the_resolved_root(statement, function, set()), (
+        "a dotted import binds the leaf name even behind an alias, so it must not "
+        "be admitted as a transparent import"
+    )
+    assert not support._import_leaves_the_witness_root_alone(
+        statement, ast.Name(id="contextlib", ctx=ast.Load()), function
+    ), (
+        "the permissive gate must decline a dotted alias too: it rebinds the leaf "
+        "that shadows the attribute path the witness walks"
+    )
+
+
+def test_a_dotted_import_of_a_leaf_is_not_a_transparent_root():
+    """`import contextlib.nullcontext` binds the leaf, so it must decline.
+
+    This cannot be an execution row: CPython rejects the import outright
+    (`ModuleNotFoundError: 'contextlib' is not a package`), so the shared
+    oracle never reaches an assert and cannot judge a verdict.  The predicate
+    is therefore pinned directly, which is the only honest way to hold it.
+
+    The distinction matters because a dotted import is exactly the shape that
+    *does* shadow the attribute path the witness follows.  Treating it as
+    transparent would let a rebinding import pass the pre-chain scan and talk
+    the correlated witness into a false-LIVE.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib.nullcontext\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n"
+        "        break\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    statement = function.body[0]
+    assert isinstance(statement, ast.Import), "fixture no longer starts with a bare import"
+    assert not support._import_only_binds_the_resolved_root(statement, function, set()), (
+        "a dotted import binds the leaf name, not the root the witness reads, "
+        "so it must not be admitted as a transparent import"
+    )
+
+
 def test_an_elif_cannot_invent_a_nullcontext_from_a_shadowed_import():
     source = (
         "import contextlib\n"
@@ -13641,7 +14147,9 @@ LOOP_ELSE_IMPORT_SHADOWS = (
     LOOP_ELSE_SUPPRESSOR_SHAPES,
     ids=[row[0] for row in LOOP_ELSE_SUPPRESSOR_SHAPES],
 )
-def test_a_loop_else_suppressor_is_live_when_a_break_skips_it(label, loop, body, assert_is_live):
+def test_a_loop_else_suppressor_is_live_when_a_break_skips_it_local_import(
+    label, loop, body, assert_is_live
+):
     """A `break` skipping a loop's `else` does not defeat the assert.
 
     This is #451. The filed fixture:

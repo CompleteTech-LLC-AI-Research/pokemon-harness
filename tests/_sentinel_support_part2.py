@@ -601,6 +601,7 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
         and (
             _store_is_in_an_elif_link(competing[0][0], function)
             or _store_is_in_a_skipped_else_arm(competing[0][0], function)
+            or _store_is_in_a_break_skipped_else_clause(competing[0][0], function)
         )
         and not _entry_suppresses_assertion_errors(competing[0], bound)
         and _elif_skipped_path_carries_defeat(
