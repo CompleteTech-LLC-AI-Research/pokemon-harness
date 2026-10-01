@@ -167,7 +167,8 @@ def _swallowing_exit_class(expression, bound, tree=None, function=None):
     for child in node.body:
         if not isinstance(child, ast.FunctionDef) or child.name != "__exit__":
             continue
-        if _provably_truthy_exit(child):
+        _remember_module_for_function(child, module)
+        if _provably_truthy_exit(child, node):
             return node
     return None
 
@@ -418,7 +419,7 @@ def _unbound_local_class_constructor(value, function, module=None):
     return False
 
 
-def _provably_truthy_exit(exit_function):
+def _provably_truthy_exit(exit_function, owner=None):
     """Does this ``__exit__`` provably return a truthy value?
 
     Three shapes are decided, and nothing else:
@@ -436,6 +437,8 @@ def _provably_truthy_exit(exit_function):
     ``__exit__`` does not count, so an undecidable return is left alone rather
     than guessed at.
     """
+    if _exit_return_is_known_truthy_for_failure(exit_function, owner):
+        return True
     for node in ast.walk(exit_function):
         if not isinstance(node, ast.Return) or node.value is None:
             continue
