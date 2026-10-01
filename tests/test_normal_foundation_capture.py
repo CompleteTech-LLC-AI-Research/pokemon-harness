@@ -48,6 +48,16 @@ class FakeSession:
         self.calls = []
         self.state = State()
         self.close_error = None
+        self.observation_ready = True
+
+    def enable_battle_menu_observation(self):
+        return self.observation_ready
+
+    def enable_battle_resolution_observation(self):
+        return self.observation_ready
+
+    def enable_battle_end_observation(self):
+        return self.observation_ready
 
     def current_tick(self):
         return self.tick
@@ -250,3 +260,68 @@ def test_route_declines_invalid_or_unsettled_interruptions(invalid):
     driver = SimpleNamespace(session=session, press=lambda *args, **kwargs: None)
     with pytest.raises(capture.CaptureRefused):
         capture.run_route1_to_viridian(driver)
+
+
+@pytest.mark.parametrize(
+    "initializer",
+    (
+        "enable_battle_menu_observation",
+        "enable_battle_resolution_observation",
+        "enable_battle_end_observation",
+    ),
+)
+def test_missing_execution_observation_refuses_before_any_input(tmp_path, monkeypatch, initializer):
+    rom, symbols = inputs(tmp_path)
+    session = FakeSession()
+    monkeypatch.setattr(session, initializer, lambda: False)
+    monkeypatch.setattr(capture.Session, "from_files", lambda *args, **kwargs: session)
+    monkeypatch.setattr(capture, "register_default_hooks", lambda session: None)
+    output = tmp_path / "output"
+    with pytest.raises(capture.CaptureRefused, match="execution observation"):
+        capture.capture(rom, symbols, output, stop_after="pick_starter", seconds=30)
+    receipt = json.loads((output / "receipt.json").read_text())
+    assert receipt["status"] == "failed"
+    observations = {"menu": True, "resolution": True, "end": True}
+    observations[initializer.removeprefix("enable_battle_").removesuffix("_observation")] = False
+    assert receipt["battle_observation_enabled"] == observations
+    assert session.calls == [("close", False)]
+    assert not list(output.glob("*.state"))
+
+
+def test_wild_unknown_menu_observation_never_mashes_inputs():
+    session = FakeSession()
+    session.state.overworld.map_id = capture.walkthrough.MAP_ROUTE_1
+    session.state.battle.active = True
+    session.state.battle.kind = SimpleNamespace(name="WILD")
+    session.state.battle.menu_open = None
+    driver = SimpleNamespace(session=session, press=lambda *args, **kwargs: pytest.fail("input"))
+    with pytest.raises(capture.CaptureRefused, match="menu observation"):
+        capture.run_route1_to_viridian(driver)
+
+
+@pytest.mark.parametrize(
+    "initializer",
+    (
+        "enable_battle_menu_observation",
+        "enable_battle_resolution_observation",
+        "enable_battle_end_observation",
+    ),
+)
+def test_raising_observation_initializer_closes_without_input(tmp_path, monkeypatch, initializer):
+    rom, symbols = inputs(tmp_path)
+    session = FakeSession()
+    monkeypatch.setattr(capture.Session, "from_files", lambda *args, **kwargs: session)
+    monkeypatch.setattr(capture, "register_default_hooks", lambda session: None)
+
+    def fail_initialization():
+        raise RuntimeError("observation-initializer-control")
+
+    monkeypatch.setattr(session, initializer, fail_initialization)
+    output = tmp_path / "output"
+    with pytest.raises(RuntimeError, match="initializer-control"):
+        capture.capture(rom, symbols, output, stop_after="pick_starter", seconds=30)
+    receipt = json.loads((output / "receipt.json").read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["error"] == "RuntimeError: observation-initializer-control"
+    assert receipt["session_closed_without_save"]
+    assert session.calls == [("close", False)]

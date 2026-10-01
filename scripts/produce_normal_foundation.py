@@ -164,6 +164,8 @@ def run_route1_to_viridian(driver: JournalDriver) -> None:
             if state.battle.active:
                 if state.battle.kind.name != "WILD":
                     raise CaptureRefused("Route1 continuation encountered a non-wild battle")
+                if state.battle.menu_open is None:
+                    raise CaptureRefused("Route1 wild menu observation is unavailable")
                 if state.battle.menu_open is True:
                     # Cancel a move submenu, select the command menu's RUN,
                     # then observe escape; no success is assumed from a press.
@@ -246,6 +248,14 @@ def capture(rom: Path, symbols: Path, output: Path, *, stop_after: str, seconds:
         runtime = sys.modules.get("pyboy.pyboy")
         receipt["pyboy_runtime_origin"] = getattr(runtime, "__file__", None)
         register_default_hooks(session)
+        observations = {
+            "menu": session.enable_battle_menu_observation(),
+            "resolution": session.enable_battle_resolution_observation(),
+            "end": session.enable_battle_end_observation(),
+        }
+        receipt["battle_observation_enabled"] = observations
+        if any(enabled is not True for enabled in observations.values()):
+            raise CaptureRefused("required battle execution observation is unavailable")
         driver = JournalDriver(session, output, deadline=began + seconds)
         receipt["status"] = "running"
         receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
