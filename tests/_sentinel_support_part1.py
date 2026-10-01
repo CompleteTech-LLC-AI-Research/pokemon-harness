@@ -556,60 +556,6 @@ def _name_catches_assertion_error(name):
     return True
 
 
-def _suppression_names(call):
-    """The exception names passed to a ``suppress(...)`` call.
-
-    A tuple is flattened, because ``suppress((TypeError, ValueError))`` and
-    ``pytest.raises((KeyError, RuntimeError))`` are both ordinary spellings that
-    name two types. Reading only the tuple node itself would report the
-    unreadable case ``BaseException`` for *every* tuple, and since
-    ``BaseException`` catches ``AssertionError``, that would report the pinned
-    file's four tuple-typed ``pytest.raises`` sites as defeated -- a false alarm
-    on real, live asserts. Measured on ``test_timed_menu_milestones.py``:
-    ``(TypeError, ValueError)``, ``(KeyError, ValueError, RuntimeError)`` and
-    ``(ValueError, RuntimeError)`` all appear.
-
-    An element that is not a plain name is still reported as universal, so an
-    argument the check cannot read is never assumed to be harmless.
-
-    The *no positional argument at all* case is the one place where the two
-    families must be told apart, and the difference is measured rather than
-    assumed:
-
-    * ``contextlib.suppress()`` is legal, and the no-argument reading here is
-      ``BaseException`` -- but that is *stricter than the interpreter*, not a
-      description of it. Measured: ``contextlib.suppress()`` stores
-      ``_exceptions == ()``, and ``issubclass(AssertionError, ())`` is
-      ``False``, so it suppresses **nothing** and an assert inside it fails
-      loudly. Reading it as universal therefore over-reports.
-      That direction is chosen on purpose: the argument the check *can* read
-      is absent, and an absent argument is not evidence of a harmless one.
-      The cost is a false alarm on a spelling the pinned file does not use; the
-      alternative would be to treat "no argument" as "no suppression", which
-      cannot be told apart here from a call whose arguments are simply
-      unreadable.
-    * ``pytest.raises()`` with no expected type raises ``ValueError: You must
-      specify at least one parameter`` while the context object is being
-      constructed -- before the body is entered at all. The test fails loudly
-      and no assert is ever evaluated, so calling it a defeat would report a
-      live contract as dead.
-
-    ``pytest.raises(match=...)`` stays universal on purpose; see
-    ``_raises_without_an_expected_type`` for why that case is undecidable
-    rather than loud.
-    """
-    names = []
-    for argument in call.args:
-        if isinstance(argument, ast.Tuple):
-            names.extend(
-                element.id if isinstance(element, ast.Name) else "BaseException"
-                for element in argument.elts
-            )
-        else:
-            names.append(argument.id if isinstance(argument, ast.Name) else "BaseException")
-    return names or ["BaseException"]
-
-
 def _suppressed_by_dunder(call, bound):
     """Is this ``suppressor.__enter__()`` -- the dunder spelling of the defeat?
 
@@ -790,75 +736,6 @@ def _match_capture_names(function):
             elif isinstance(node, ast.MatchMapping) and node.rest is not None:
                 owners.setdefault(node.rest, statement)
     return owners
-
-
-def _nonlocal_match_captures(function):
-    """Every ``(name, capture statement, owning statement)`` a ``nonlocal`` moves.
-
-    A ``nonlocal`` declaration is the one place the source states outright that
-    a name belongs to an enclosing function rather than to the nested body that
-    contains it. :func:`_nonlocal_declared` reads exactly that for a single
-    scope; this extends the read to the ``match`` captures those nested scopes
-    write, which :func:`_match_capture_names` cannot reach because
-    :func:`_scope_body_nodes` stops at the class boundary.
-
-    Both boundaries stay. A capture with no ``nonlocal`` for its name still
-    binds the nested namespace and is still invisible here -- that is #350's
-    rule and it is correct on its own. What is added is only the case where the
-    language says the binding lands one scope out:
-
-        def outer(x):
-            with (cs := contextlib.suppress(AssertionError)):
-                pass
-            class C:
-                match [contextlib.nullcontext()]:
-                    case [cs]:      # binds C.cs -- outer's cs is untouched
-                        pass
-
-    The returned owner is the *top-level* statement of `function` that
-    contains the nested scope, because that is the sort key
-    :func:`_binding_order` assigns and the position every caller compares
-    stores by. Returning the inner ``ast.Match`` would order a store by a
-    statement that lives in a different scope.
-
-    Only ``nonlocal`` is followed. ``global`` names a *module* binding, which is
-    a different question with its own machinery, and a name declared in
-    neither is this scope's own.
-    """
-    if function is None:
-        return []
-    captured = []
-    for statement in _scope_body_nodes(function):
-        for nested in _nested_scope_bodies(statement):
-            declared = _nonlocal_declared(nested)
-            if not declared:
-                continue
-            for match in _own_match_statements(nested):
-                for name in _match_capture_names_for(match):
-                    if name in declared:
-                        captured.append((name, match, statement))
-    return captured
-
-
-def _nested_scope_bodies(statement):
-    """The ``def``/``class`` bodies written directly in ``statement``.
-
-    Nested scopes are not walked transitively: a ``nonlocal`` in the innermost
-    body binds *its* enclosing function, which may itself be a nested one. The
-    callers of this helper resolve one level at a time, and a deeper body is
-    reachable when the caller walks that intermediate scope in turn.
-    """
-    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        yield statement
-        return
-    for node in ast.iter_child_nodes(statement):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            yield node
-
-
-def _own_match_statements(scope):
-    """Every ``ast.Match`` written directly in ``scope``'s own body."""
-    return [node for node in _scope_body_nodes(scope) if isinstance(node, ast.Match)]
 
 
 def _carrier_runtime_kinds(function):

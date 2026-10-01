@@ -446,39 +446,9 @@ def _store_bindings(function, bound, query=None):
         bindings.setdefault(name, []).append(
             (statement, _literal_match_capture_value(function, statement, name), conditional)
         )
-    # #383. A `match` capture inside a nested scope that declares the name
-    # `nonlocal` binds the *enclosing function's* name, and that store lands
-    # where `_match_capture_names` above cannot look: it stops at the class
-    # boundary (`_scope_body_nodes`), correctly, because a class body has its
-    # own namespace.
-    #
-    #     def outer(x):
-    #         with (cs := contextlib.suppress(AssertionError)):
-    #             pass
-    #         class C:
-    #             nonlocal cs
-    #             match [contextlib.nullcontext()]:
-    #                 case [cs]:        # binds `outer`'s `cs`, not `C.cs`
-    #                     pass
-    #         with cs:                  # cs is a real nullcontext -> LIVE
-    #             assert x != 1
-    #
-    # With the capture invisible, the carried walrus was the only `cs` store
-    # the table knew, the header resolved to that suppressor, and the assert
-    # was reported swallowed -- a **live** contract dropped from the enforced
-    # set, which is the damaging direction under #308 criterion 1. Measured on
-    # master `a5cece2`: analyzer `False`, CPython raises `AssertionError`.
-    #
-    # The value is `UNREADABLE_VALUE` rather than the matched element. What a
-    # capture receives is whatever was matched, which is arbitrary and very
-    # often a real context manager (#342 owns that question), so recording the
-    # element would resolve this header by a rule that is not decidable from
-    # the syntax. An unreadable value is the position `#359` established for
-    # exactly this reason: the name is known to be bound, so the earlier
-    # suppressor cannot be read forward, and the header stays undecided.
-    for name, statement, owner in _nonlocal_match_captures(function):
-        conditional = owner not in function.body or not _store_retires(owner, name, function)
-        bindings.setdefault(name, []).append((owner, UNREADABLE_VALUE, conditional))
+    # #383: only a reached, source-proved capture updates the enclosing value.
+    for name, owner, value in _nonlocal_match_captures(function, query):
+        bindings.setdefault(name, []).append((owner, value, False))
     # #359. The four string-field carriers (`import os as cs`, `def cs`,
     # `class cs`, ...) bind a name the loop above never sees, because their
     # name is a string field of a node rather than a target. They are recorded
