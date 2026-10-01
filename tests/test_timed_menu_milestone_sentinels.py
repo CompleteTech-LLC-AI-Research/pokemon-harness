@@ -15541,6 +15541,59 @@ WALRUS_NAME_ENTRY_SHAPES = (
         "contextlib.suppress(AssertionError)",
         False,
     ),
+    # -- #464 residual. The repair above resolves a name through the store
+    #    machinery, but the *value* that store binds was still unreadable for
+    #    two whole families, so each of these stayed a false-LIVE:
+    #
+    #    * a zero-argument builtin constructor -- `m = list()`. The callee
+    #      fixes the result, exactly as it does for `cs = list()`.
+    #    * a bare builtin *name* -- `m = int`, `m = len`. The name is the
+    #      object; there is no call to be opaque.
+    (
+        "464 residual: a local alias to a builtin constructor call",
+        "",
+        "    m = list()\n",
+        "m",
+        False,
+    ),
+    (
+        "464 residual: a local alias to a bare builtin class",
+        "",
+        "    m = int\n",
+        "m",
+        False,
+    ),
+    (
+        "464 residual: a local alias to a bare builtin function",
+        "",
+        "    m = len\n",
+        "m",
+        False,
+    ),
+    (
+        "464 residual: a local alias to object()",
+        "",
+        "    m = object()\n",
+        "m",
+        False,
+    ),
+    # -- A shadowed constructor must NOT be read as the builtin. This is the
+    #    control that keeps the repair from inventing false-DEADs: `list` here
+    #    returns a real context manager, so the assert is live and a repair
+    #    that read the callee as the builtin would report it defeated.
+    (
+        "464 control: a shadowed constructor stays live",
+        "",
+        "    def list():\n        return contextlib.nullcontext()\n    m = list()\n",
+        "m",
+        True,
+    ),
+    # -- The *bare name* spelling has no live control, and that is the point:
+    #    `m = int` binds whatever the name denotes, never its result, so it is
+    #    a function object here and a class object for the real builtin. Both
+    #    are unenterable and both are reported dead. Only the *call* spelling
+    #    can return a context manager, which is why the shadowing control
+    #    above is the one that matters.
 )
 
 
@@ -15608,15 +15661,68 @@ def test_a_walrus_header_named_to_an_unenterable_value_is_not_a_live_assert(
 WALRUS_NAME_ENTRY_DECLINES = (
     ("a parameter is chosen by the caller", "helper", "live or TypeError, per call site"),
     ("a genuinely unbound name", "mystery", "NameError on entry"),
+    # #464 residual. `memoryview` is the *only* bare builtin that implements
+    # `__enter__` -- checked across all 157 exported names -- so the repair
+    # declines it rather than routing an enterable header through the dead
+    # path. It is pinned here rather than swept because it needs a store to
+    # be reached, and a swept fixture would need a value CPython cannot choose
+    # on this row's behalf.
+    (
+        "the one bare builtin that can be entered",
+        "m",  # bound by the local store below
+        "memoryview enters; the assert is live",
+    ),
+    # #464 residual. A *parameter* named for a builtin is the other way a
+    # bare name stops being the builtin, and it is the one a body-only walk
+    # cannot see -- the signature binds the name for the whole call:
+    #
+    #     def outer(x, int=None):
+    #         m = int        # the caller's object, not the class object
+    #
+    # The caller decides, so the honest verdict is the decline. Reading it as
+    # the builtin reported the header dead, which is a false-DEAD whenever the
+    # caller passes a context manager -- the opposite error from the one this
+    # repair exists to remove.
+    (
+        "a parameter named for a builtin",
+        "m",
+        "the caller's object; per call site",
+    ),
 )
 
 
 @pytest.mark.parametrize(
-    ("label", "value", "executed"),
-    WALRUS_NAME_ENTRY_DECLINES,
+    ("label", "value", "executed", "signature", "local_preamble"),
+    [
+        (label, value, executed, "x, flag, helper", "")
+        for label, value, executed in WALRUS_NAME_ENTRY_DECLINES[:2]
+    ]
+    + [
+        # `memoryview` is bound by a real local store, so the name resolves and
+        # the *value* decides: the header is entered and the assert is live.
+        (
+            WALRUS_NAME_ENTRY_DECLINES[2][0],
+            "m",
+            WALRUS_NAME_ENTRY_DECLINES[2][2],
+            "x, flag, helper",
+            "    m = memoryview\n",
+        ),
+        # A parameter named `int` binds the name for the whole call, so the
+        # body's `m = int` reads the caller's object. Nothing in the body
+        # rebinds it, which is exactly the case a body-only shadow walk misses.
+        (
+            WALRUS_NAME_ENTRY_DECLINES[3][0],
+            "m",
+            WALRUS_NAME_ENTRY_DECLINES[3][2],
+            "x, flag, helper, int=None",
+            "    m = int\n",
+        ),
+    ],
     ids=[row[0] for row in WALRUS_NAME_ENTRY_DECLINES],
 )
-def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, executed):
+def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(
+    label, value, executed, signature, local_preamble
+):
     """#464: the conservative fallback must not be inverted.
 
     #308 criterion 1 makes a false-LIVE the damaging direction, but a repair
@@ -15631,8 +15737,9 @@ def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, execu
     """
     source = (
         "import contextlib\n"
-        "def outer(x, flag, helper):\n"
+        f"def outer({signature}):\n"
         "    import contextlib\n"
+        f"{local_preamble}"
         f"    with (cs := {value}):\n"
         "        assert x != 1\n"
     )
@@ -15640,7 +15747,12 @@ def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, execu
     exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
     outcome = "returned"
     try:
-        namespace["outer"](0, True, None)
+        # The fourth row's signature takes a fourth argument; the rest take
+        # exactly `(x, flag, helper)`, so the call is sized from the signature.
+        if signature.endswith("int=None"):
+            namespace["outer"](0, True, None, contextlib.nullcontext())
+        else:
+            namespace["outer"](0, True, None)
     except AssertionError:
         outcome = "AssertionError"
     except BaseException as error:  # noqa: BLE001 - the outcome is the datum

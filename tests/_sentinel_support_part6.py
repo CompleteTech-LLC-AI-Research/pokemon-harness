@@ -512,7 +512,7 @@ def _module_stores(name, module):
     return _stores_of(name, by_index, index, module)
 
 
-def _literal_runtime_type(value):
+def _literal_runtime_type(value, function=None):
     """The runtime type name a literal expression is pinned to, or ``None``."""
     if isinstance(value, ast.Starred):
         # `cs, *rest = ...` and `*cs, = ...` build a list. `#336` measured
@@ -558,7 +558,81 @@ def _literal_runtime_type(value):
         return "dict"
     if isinstance(value, ast.Constant):
         return type(value.value).__name__
+    # #464 residual. A zero-argument builtin constructor call produces a
+    # value whose type the callee already fixes, so the same question
+    # `_literal_runtime_type` answers for a literal is decidable here too:
+    #
+    #     m = list()
+    #     with (cs := m):      # enters a list -> TypeError before the body
+    #         assert x != 1    # unreachable, but reported `enforced`
+    #
+    # `_builtin_constructor_kind` is the existing rule for this and already
+    # declines a shadowed callee, so a `def list(): ...` or a rebound `list`
+    # keeps its ordinary "a call is a call" answer -- which is the safe
+    # direction, because a shadowing `list()` may well return a real context
+    # manager. Delegating rather than re-deciding is the point: a hand-kept
+    # list of constructor names would have to agree with the one that already
+    # answers the emptiness and type questions elsewhere.
+    kind = _builtin_constructor_kind(value, function)
+    if kind is not None:
+        return kind
+    # A bare builtin *name* is the same object without the call: `m = int`
+    # binds the type itself and `m = len` binds a builtin function, and neither
+    # can be entered. Only the function's *own* rebound names are excluded --
+    # `m = int` after `def int(): ...` is that function instead, and it may
+    # well be a real context manager.
+    #
+    # The question is asked of the real ``builtins`` module rather than of a
+    # kept list of names, for the reason the probe table is: a list would have
+    # to be right about all 157 exported names, and a miss is a wrong verdict
+    # about a real contract. Nothing here enumerates them; the interpreter
+    # answers "does this object have ``__enter__``" and the name is recorded
+    # under the *type of the object it names*, so a kind the probe table has
+    # never seen still declines through `_runtime_kind_can_enter`.
+    if isinstance(value, ast.Name) and not _callee_is_shadowed(value, function):
+        return _bare_builtin_object_kind(value.id)
     return None
+
+
+def _bare_builtin_object_kind(name):
+    """The runtime kind a bare builtin *name* binds, or ``None`` to decline.
+
+    ``m = int`` binds a class object and ``m = len`` a builtin function; both
+    are entered with a ``TypeError`` before the body runs, so an assert under
+    the header is unreachable while the analyzer was certifying it. The kind
+    reported is the type of the object the name resolves to, which keeps the
+    answer on the probe path: ``builtin_class`` for a class object, the
+    function's own type name for a function, and whatever a builtin constant
+    happens to be.
+
+    A name the ``builtins`` module does not export declines, as does one it
+    exports but that resolves to nothing usable. The caller has already
+    established that the name is not rebound in this scope, so an unresolved
+    name is genuinely the builtin and this is the only remaining question.
+    """
+    try:
+        import builtins
+
+        obj = getattr(builtins, name)
+    except (AttributeError, ImportError):
+        return None
+    if hasattr(obj, "__enter__"):
+        # `memoryview` is the sole bare builtin that *can* be entered. Naming
+        # the kind here would route a genuinely-enterable header through the
+        # dead path, so it is declined and the assert stays live.
+        return None
+    if isinstance(obj, type):
+        # A *class object* is reported under a kind of its own rather than as
+        # ``type``. Whether a class can be entered is decided by its
+        # **metaclass**, not by the class: every bare builtin class has the
+        # builtin ``type`` as its metaclass and so cannot be entered, while a
+        # class written in the file may have a metaclass that defines
+        # ``__enter__`` and is genuinely enterable. `_classdef_runtime_kind`
+        # already proves the locally-defined half separately, and collapsing
+        # both onto one ``type`` kind would let a probed builtin class answer
+        # for a local class that has a live metaclass protocol.
+        return "builtin_class"
+    return type(obj).__name__
 
 
 def _module_lacks_attribute(base, attribute):
