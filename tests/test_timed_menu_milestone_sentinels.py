@@ -16241,9 +16241,15 @@ TRY_UNKNOWN_IMPORT_RUNTIME_ROWS = (
 @pytest.mark.parametrize(
     ("label", "preamble", "carrier", "arm", "runtime_live"), TRY_UNKNOWN_IMPORT_RUNTIME_ROWS
 )
-def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
+def test_try_unknown_import_above_the_loop_else_is_transparent(
     label, preamble, carrier, arm, runtime_live
 ):
+    """Retain actual missing-import outcomes separately from source proof.
+
+    An unknown initializer may raise another exception or mutate contextlib;
+    local importability is not a portable source contract. These remain known
+    proof declines even though the measured absent-module execution is live.
+    """
     source = (
         "import contextlib\ndef outer(x, flag, helper):\n"
         + preamble
@@ -16256,6 +16262,158 @@ def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
     module = ast.parse(source)
     function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
-    # Original CPython fixtures are live; arbitrary initialization is unproved.
+    # Runtime truth and portable source proof are distinct for unknown imports.
     assert runtime_live is True
     assert _is_enforced(function, target, module) is False
+
+
+#: #485. Preserve all author import inputs and measured runtime outcomes.
+#: Unknown initializer effects are not proven by their import binding names;
+#: the portable checker declines these rows separately from their execution.
+TRY_ABOVE_LOOP_ELSE_BOUNDARY_ROWS = (
+    # Runtime reaches the header in this environment; source proof declines.
+    (
+        "reached a missing import caught by ImportError",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import caught by a bare except",
+        "    try:\n        import nope_missing_xyz\n    except:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import caught by a superset handler",
+        "    try:\n        import nope_missing_xyz\n    except BaseException:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a from-import of an unrelated module",
+        "    try:\n        from json import loads\n    except ImportError:\n        pass\n",
+        True,
+    ),
+    (
+        "reached a missing import behind a nested admitted try",
+        (
+            "    try:\n        try:\n            import nope_missing_xyz\n"
+            "        except ImportError:\n            pass\n"
+            "    except Exception:\n        pass\n"
+        ),
+        True,
+    ),
+    # --- controls: control does not reach the header, so the assert is dead ---
+    (
+        "stopped an uncaught missing import",
+        "    try:\n        import nope_missing_xyz\n    except ValueError:\n        pass\n",
+        False,
+    ),
+    (
+        "stopped a handler that returns",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        return\n",
+        False,
+    ),
+    (
+        "stopped a handler that re-raises",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        raise ValueError\n",
+        False,
+    ),
+    (
+        "stopped a finally that returns",
+        (
+            "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n"
+            "    finally:\n        return\n"
+        ),
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "preamble", "enforced"), TRY_ABOVE_LOOP_ELSE_BOUNDARY_ROWS)
+def test_try_above_loop_else_boundary(label, preamble, enforced):
+    """Unknown import rows retain runtime truth and an explicit proof decline."""
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    fired, other = [], []
+    for value in (0, 1, 2, -1):
+        try:
+            namespace["outer"](value, True, None)
+        except AssertionError:
+            fired.append(value)
+        except BaseException as error:  # noqa: BLE001 - any failure is recorded
+            other.append((value, type(error).__name__))
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False, label
+    # Admitting a row is only sound while the assert genuinely fires, and
+    # declining one only while the header is not reached with a live assert.
+    assert bool(fired) is enforced, f"{label}: fired={fired} other={other}"
+    # A `stopped` row has to be stopped for a reason the row describes. Every
+    # one of them stops by raising something else or by returning, never by
+    # returning cleanly past a suppressor that is actually installed.
+    if not enforced:
+        assert fired == [], f"{label}: fired={fired}"
+
+
+#: #485. Unknown module availability/caller callbacks remain explicit declines.
+#: The shadowing try-import now declines an unknown/unbound local root.
+TRY_ABOVE_LOOP_ELSE_NEIGHBOURING_ROWS = (
+    (
+        "a named handler target is not yet admitted",
+        "    try:\n        import nope_missing_xyz\n    except ImportError as exc:\n        pass\n",
+        False,
+        True,
+    ),
+    (
+        "an import shadowing the walked root is refused, and the fixture never runs",
+        "    try:\n        import fake as contextlib\n    except ImportError:\n        pass\n",
+        False,
+        False,
+    ),
+    (
+        "an opaque helper call is not admitted",
+        "    try:\n        helper()\n    except Exception:\n        pass\n",
+        False,
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "enforced", "fires"), TRY_ABOVE_LOOP_ELSE_NEIGHBOURING_ROWS
+)
+def test_485_records_neighbouring_forms_without_claiming_them(label, preamble, enforced, fires):
+    """Record unresolved callbacks/imports and the repaired unknown root decline."""
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            "    cs = contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs = contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    fired, other = [], []
+    for value in (0, 1, 2, -1):
+        try:
+            namespace["outer"](value, True, None)
+        except AssertionError:
+            fired.append(value)
+        except BaseException as error:  # noqa: BLE001 - any failure is recorded
+            other.append((value, type(error).__name__))
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is enforced, label
+    assert bool(fired) is fires, f"{label}: fired={fired} other={other}"
