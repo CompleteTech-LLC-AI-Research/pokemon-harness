@@ -12558,6 +12558,139 @@ def test_starred_loop_store_must_remain_in_force_at_entry(body, live):
 
 
 @pytest.mark.parametrize(
+    ("preamble", "postamble", "live"),
+    (
+        # A conditional `break` before the store is not taken on every
+        # iteration, so at least one iteration writes the list and the
+        # contract really is dead.
+        ("        if x == 99: break\n", "", False),
+        # A `break` written *after* the store cannot prevent that store from
+        # having run on the iteration that reached it. Treating it as
+        # disqualifying reported this genuinely dead contract as live.
+        ("", "        if x == 99: break\n", False),
+    ),
+    ids=("conditional-break-before", "break-after"),
+)
+def test_a_control_flow_diversion_around_a_starred_loop_store(preamble, postamble, live):
+    """#423. Only *earlier* unconditional diversion can skip the store.
+
+    The later-sibling repair reads a starred store in a loop body as settled
+    once the loop has necessarily run an iteration. The sharp edge is control
+    flow around that store inside the same body:
+
+    * an unconditional `break`/`continue`/`return`/`raise` *before* it means the
+      store is never written, so the name is left unbound (#334's family) and
+      the rule must decline rather than read a list that was never built;
+    * a diversion written *after* it changes nothing, because the store has
+      already run on the iteration that reached it;
+    * a diversion under a condition this cannot read leaves at least one
+      iteration that writes the store, so it is not disqualifying either.
+
+    Each row executes CPython before the verdict is checked, so a row cannot
+    pass by asserting a table's contents.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        "    for _ in (1,):\n"
+        f"{preamble}"
+        "        *cs, = (contextlib.suppress(AssertionError),)\n"
+        f"{postamble}"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract(preamble + postamble, source, False, live)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live, (
+        f"{preamble!r}{postamble!r}: executed CPython disagrees with the "
+        f"verdict this repair produced for a loop-body starred store."
+    )
+
+
+@pytest.mark.parametrize(
+    ("preamble", "live"),
+    (
+        # Both divert unconditionally before the store, so it is never
+        # written and CPython raises `UnboundLocalError` on entry. The rule
+        # must decline, which keeps the header live -- the safe direction.
+        ("        break\n", True),
+        ("        continue\n", True),
+    ),
+    ids=("break", "continue"),
+)
+def test_an_unconditional_diversion_before_a_starred_loop_store_stays_undecidable(preamble, live):
+    """#423. A store the loop body can never reach leaves the name unbound.
+
+    ``break`` and ``continue`` both end the iteration without reaching the
+    store, so `cs` is never written and CPython raises ``UnboundLocalError``
+    when the later header reads the name. That belongs to #334's family, so
+    the rule declines and keeps the header live rather than reading a list that
+    was never built -- reporting a reachable contract as swallowed is the
+    damaging error, and these rows exist to hold that line.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"    for _ in (1,):\n{preamble}"
+        "        *cs, = (contextlib.suppress(AssertionError),)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<starred-diversion>", "exec"), namespace)  # noqa: S102
+    with pytest.raises((UnboundLocalError, NameError)):
+        namespace["outer"](1, True, None)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
+
+
+@pytest.mark.parametrize(
+    ("preamble", "outcome"),
+    (
+        ("        return 0\n", None),
+        ("        raise ValueError\n", "ValueError"),
+    ),
+    ids=("return", "raise"),
+)
+def test_a_starred_loop_store_after_a_diversion_never_reaches_its_header(preamble, outcome):
+    """#423. A ``return``/``raise`` before the store ends the call outright.
+
+    These are separated from ``break``/``continue`` because the loop body is
+    never *skipped*: the iteration runs, and the store is written -- but the
+    call ends there, so the later ``with cs:`` header is never reached at all
+    and CPython raises nothing about `cs` being unbound. The analyzer keeps
+    reading the header as live, which is the correct answer for a contract the
+    interpreter never gets to.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"    for _ in (1,):\n{preamble}"
+        "        *cs, = (contextlib.suppress(AssertionError),)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<starred-diversion>", "exec"), namespace)  # noqa: S102
+    if outcome is None:
+        assert namespace["outer"](1, True, None) == 0
+    else:
+        with pytest.raises(ValueError):
+            namespace["outer"](1, True, None)
+    tree = ast.parse(source)
+    function = tree.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True, (
+        f"{preamble!r}: the call ends before the `with cs:` header, so the "
+        f"assert is unreachable and must not be reported as swallowed."
+    )
+
+
+@pytest.mark.parametrize(
     "iterable",
     (
         "()",

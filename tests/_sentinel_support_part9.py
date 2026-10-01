@@ -268,24 +268,79 @@ def _starred_store_in_completed_loop_body(statement, function, prior):
         ):
             return False
         if any(child is block for child in prior):
-            # The loop itself must have completed before the header. A `break`
-            # or a `return` inside the body would let the header be reached
-            # without the body finishing an iteration.
-            if _loop_can_be_left_early(block):
-                return False
             # The store has to be written directly in the loop body, so the
             # only hop between the loop and the store is the body itself.
             if statement in block.body:
-                return True
+                return not _loop_body_can_skip_store(block, statement, function)
             for node in block.body:
                 if any(child is statement for child in ast.walk(node)):
                     return False
     return False
 
 
-def _loop_can_be_left_early(loop):
-    """Can control reach the header without completing a loop iteration?"""
-    return any(_breaks_own_loop(child) or _leaves_the_function(child) for child in loop.body)
+def _loop_body_can_skip_store(loop, store, function):
+    """Can an iteration reach the header without writing ``store``?
+
+    #423. The loop's iterable already proves one iteration runs, but that is
+    not the same as *this* store running. Only statements written *before* the
+    store in the loop body can divert control away from it, so the question is
+    asked of those alone:
+
+        for _ in (1,):
+            continue              # skips the rest of the body
+            *cs, = (1,)           # never written on any iteration
+        with cs:                  # UnboundLocalError, not this issue's shape
+            assert x != 1
+
+    A `break`, `continue`, `return` or `raise` written unconditionally *before*
+    the store means it never runs, so the name is left unbound and this rule
+    must decline rather than read a list that was never built. Declining keeps
+    the header live, which is the safe direction -- the unbound case belongs to
+    #334's family.
+
+    The diversion has to be *unconditional*. A `break` under a condition this
+    cannot read leaves at least one iteration that runs the store, and the
+    question "does that iteration reach the header" is then the header's own
+    path question rather than this one:
+
+        for _ in (1,):
+            if x == 99:
+                break              # not taken when x == 1
+            *cs, = (contextlib.suppress(AssertionError),)
+        with cs:
+            assert x != 1          # dead, and `cs` really is the list
+
+    Only *earlier* statements count. A `break` written after the store cannot
+    prevent that store from having run on the iteration that reached it, and
+    treating it as disqualifying would report a genuinely dead contract as
+    live:
+
+        for _ in (1,):
+            *cs, = (contextlib.suppress(AssertionError),)
+            if x == 99:
+                break              # `cs` is already the list
+        with cs:
+            assert x != 1
+    """
+    preceding = []
+    found = False
+    for child in loop.body:
+        if child is store:
+            found = True
+            break
+        preceding.append(child)
+    if not found:
+        return True
+    return any(_diverts_unconditionally(child, function) for child in preceding)
+
+
+def _diverts_unconditionally(statement, function):
+    """Does ``statement`` always divert control when the loop body runs?"""
+    if isinstance(statement, (ast.Break, ast.Continue, ast.Return, ast.Raise)):
+        return True
+    return _statement_always_runs(statement, function) and (
+        _breaks_own_loop(statement) or _leaves_the_function(statement)
+    )
 
 
 def _leaves_the_function(node):
