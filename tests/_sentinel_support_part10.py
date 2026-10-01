@@ -940,7 +940,7 @@ def _elif_skipped_path_walks(
         ),
         None,
     )
-    if chain is None or not _elif_witness_reaches_header(function, chain, query, bound):
+    if chain is None or not _elif_witness_reaches_header(function, chain, query, bound, root_name):
         return False
     # #452. A trailing `else` reached through an `elif` link is a weaker
     # question than the one this walk below answers, and the walk below cannot
@@ -1126,7 +1126,7 @@ def _break_skipped_loop_else_can_fail(
     )
     if loop is None or not loop.orelse or not _contains_any(loop.orelse, competitor[0]):
         return False
-    if not _elif_witness_reaches_header(function, loop, query, bound):
+    if not _elif_witness_reaches_header(function, loop, query, bound, root_name):
         return False
     return _break_reachable_with_failure(loop, values, function)
 
@@ -1318,7 +1318,9 @@ def _elif_witness_header_value_is_readable(node, bound):
 
 
 
-def _elif_witness_reaches_header(function, chain, query, bound):
+def _elif_witness_reaches_header(function, chain, query, bound, witness_root=None):
+    if witness_root is None:
+        return False
     """Keep the small witness proof free of earlier exits or opaque effects."""
     header = next(
         (node for node in function.body if isinstance(node, ast.With) and query in node.body), None
