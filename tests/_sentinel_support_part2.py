@@ -139,13 +139,17 @@ def _assigned_suppressors(function, bound, query=None, owning=None):
             #     with cs:                          # still the suppressor
             #         assert x != 1                 # swallowed -> `enforced`
             #
-            # `_store_is_in_scope` draws the boundary and already tells the
-            # two declarations apart by the namespace they name: `nonlocal`
+            # The scope predicate distinguishes evaluated definition metadata
+            # from nested bodies, and the namespace named by `nonlocal`
             # does rebind the enclosing function's binding and is kept, while
             # `global` writes the module and leaves a function-local carrier
             # untouched. So this filter does not re-decide either case -- it
-            # defers to the one rule that already models them.
-            seen = [entry for entry in seen if _store_is_in_scope(entry[0], function)]
+            # retains the declaration distinction and readable metadata proof.
+            seen = [
+                entry
+                for entry in seen
+                if _assigned_alias_store_is_in_scope(entry[0], function, name, owning)
+            ]
             if not seen:
                 continue
             value = _resolve_bindings(seen, bound, orders, index, function, query, owning)
