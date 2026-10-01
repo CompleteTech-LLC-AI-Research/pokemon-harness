@@ -1160,8 +1160,69 @@ def _break_reachable_with_failure(loop, values, function):
         if not isinstance(node, ast.Break):
             continue
         test = _enclosing_conditions(node, loop)
-        if all(_elif_failure_predicate(condition, values) is not False for condition in test):
+        if all(_condition_can_hold(condition, values) for condition in test):
             return True
+    return False
+
+
+def _condition_can_hold(condition, values):
+    """Can this guard be true at ``values`` -- or at least not provably false?
+
+    Two outcomes, and the distinction between them is the whole point:
+
+    * ``False`` -- the guard is decided false, or deciding it would raise. In
+      the second case the loop cannot complete normally at all, so the guarded
+      ``break`` is unreachable *and* the ``else`` cannot be installed. Either
+      way the witness must fail.
+    * ``True`` -- decided true, or not decidable, so the break may be reached
+      and the witness stands.
+
+    A condition this cannot read is deliberately still "possibly reachable":
+    there the ``else`` genuinely may or may not run, and assuming it ran would
+    be the unsafe direction. A condition that *raises* is different -- the
+    loop cannot complete, so there is nothing left to assume. The two used to
+    share a single ``None``, and only one of them is safe to treat as
+    "possibly reachable".
+    """
+    if _condition_raises(condition, values):
+        return False
+    return _elif_failure_predicate(condition, values) is not False
+
+
+def _condition_raises(test, values):
+    """Would evaluating ``test`` at ``values`` raise, rather than answer?
+
+    Only the comparisons the predicate resolves to concrete operands can raise,
+    and only for the four ordering operators: ``==`` and ``!=`` are defined for
+    every pair of Python objects, ``1 == "a"`` is ``False`` rather than an
+    error. This mirrors the ``try``/``except TypeError`` that
+    ``_elif_failure_predicate`` uses to decline the same pairs, so the two
+    never disagree about which operands are unorderable.
+    """
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return False
+    operator = type(test.ops[0])
+    if operator not in (ast.Lt, ast.LtE, ast.Gt, ast.GtE):
+        return False
+    resolved = []
+    for operand in (test.left, test.comparators[0]):
+        if isinstance(operand, ast.Constant):
+            resolved.append(operand.value)
+        elif isinstance(operand, ast.Name) and operand.id in values:
+            resolved.append(values[operand.id])
+        else:
+            return False
+    left, right = resolved
+    evaluates = {
+        ast.Lt: lambda: left < right,
+        ast.LtE: lambda: left <= right,
+        ast.Gt: lambda: left > right,
+        ast.GtE: lambda: left >= right,
+    }
+    try:
+        evaluates[operator]()
+    except TypeError:
+        return True
     return False
 
 
