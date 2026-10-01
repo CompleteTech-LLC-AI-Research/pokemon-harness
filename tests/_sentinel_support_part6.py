@@ -656,7 +656,9 @@ def _bare_builtin_object_kind(name):
         # must stay live. The old ``hasattr(obj, "__enter__")`` gate could not
         # tell those two apart and declined both, reporting the unreachable
         # one as enforced. Every bare builtin class has the builtin ``type``
-        # as its metaclass, so asking ``type`` settles all 95 of them at once.
+        # as its metaclass, so asking ``type`` settles all of them at once --
+        # no count is written here because the exported set is interpreter
+        # specific, and a hardcoded one goes stale without changing the claim.
         if hasattr(type(obj), "__enter__"):
             return None
         return "builtin_class"
