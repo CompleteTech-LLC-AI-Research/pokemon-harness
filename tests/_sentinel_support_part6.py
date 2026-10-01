@@ -573,7 +573,18 @@ def _literal_runtime_type(value, function=None):
     # manager. Delegating rather than re-deciding is the point: a hand-kept
     # list of constructor names would have to agree with the one that already
     # answers the emptiness and type questions elsewhere.
+    if _entered_builtin_has_enclosing_binding(
+        value, function
+    ) or _entered_builtin_setup_is_uncertain(value, function):
+        return None
     kind = _builtin_constructor_kind(value, function)
+    if (
+        kind is None
+        and isinstance(value, ast.Call)
+        and _entered_global_builtin_is_intact(value, function)
+        and _builtin_constructor_arguments_are_ignorable(value.func, value)
+    ):
+        kind = _BUILTIN_CONSTRUCTOR_TYPES.get(value.func.id)
     if kind is not None:
         return kind
     # A bare builtin *name* is the same object without the call: `m = int`
@@ -589,7 +600,10 @@ def _literal_runtime_type(value, function=None):
     # answers "what is this object's type, and can *that* be entered" and the
     # name is recorded under the *type of the object it names*, so a kind the
     # probe table has never seen still declines through `_runtime_kind_can_enter`.
-    if isinstance(value, ast.Name) and not _callee_is_shadowed(value, function):
+    if isinstance(value, ast.Name) and (
+        not _callee_is_shadowed(value, function)
+        or _entered_global_builtin_is_intact(value, function)
+    ):
         return _bare_builtin_object_kind(value.id)
     return None
 
