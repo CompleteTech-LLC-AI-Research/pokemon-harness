@@ -556,6 +556,37 @@ def _resolve_bindings(entries, bound, orders, index=None, function=None, query=N
     collapsed_entries, collapsed = _collapse_loop_targets_into_bodies(competing)
     if collapsed:
         competing = collapsed_entries
+    # #399. A capture that a *later* store in the same clause shadows is no
+    # longer a binding the queried header could see, so it does not compete
+    # for the name:
+    #
+    #     match [1]:
+    #         case [cs]:
+    #             cs = contextlib.nullcontext()    # overwrites the capture
+    #             with cs:                       # `cs` is the nullcontext
+    #                 assert x != 1              # FIRES -> live
+    #
+    # Both stores share one top-level statement, so `_binding_order` gives them
+    # the same key and the capture was counted as a competing binding. The
+    # header was then recorded `AMBIGUOUS` -- "may be the captured `1`, may be
+    # the nullcontext" -- and an `AMBIGUOUS` name is read as a defeat, so a
+    # **live** assert was reported defeated. That is the damaging direction
+    # under #308 criterion 1: a pinned contract dropped from the enforced set.
+    #
+    # The capture still has to be a genuine competitor when nothing shadows
+    # it, which is the #342 case the `AMBIGUOUS` marker exists for:
+    #
+    #     match [contextlib.suppress(AssertionError)]:
+    #         case [cs]:
+    #             with cs:                       # still the suppressor
+    #                 assert x != 1              # swallowed
+    #
+    # The test is "does a later store in this function write the name, at a
+    # source position after the capture's own statement". Source order is the
+    # right question here: it is what makes the second write the one a read
+    # *after* it sees, and the clause body is written below the `match`
+    # statement, so a store there is always later.
+    competing = _drop_captures_shadowed_by_later_stores(competing, entries, orders, function)
     # A conditional non-enterable value cannot revive a carried suppressor:
     # the skipped path still suppresses, and the taken path fails on entry.
     if len(competing) == 1 and _literal_runtime_type(competing[0][1]) in NON_CONTEXT_MANAGER_TYPES:

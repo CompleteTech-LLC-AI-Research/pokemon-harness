@@ -39,6 +39,58 @@ def _entry_may_be_an_unrun_capture(entry, function=None):
     )
 
 
+def _drop_captures_shadowed_by_later_stores(competing, entries, orders, function):
+    """Competing ``match`` captures that a later store writes over.
+
+    #399. A capture binds the name only while it is the most recent write. A
+    store written below it in the same clause overwrites it before the queried
+    ``with`` header is read, so on every path that reaches that header the
+    capture is gone and cannot be the value in force:
+
+        match [1]:
+            case [cs]:
+                cs = contextlib.nullcontext()    # overwrites the capture
+                with cs:                       # `cs` is the nullcontext
+                    assert x != 1              # fires -- the header is live
+
+    Counting the capture as a competing binding made the name ambiguous, and
+    :data:`AMBIGUOUS_SUPPRESSOR` is read downstream as "may be a suppressor",
+    so the assert was reported defeated. That drops a live contract, which is
+    the damaging direction.
+
+    What is compared is **source order of the binding statements**, not
+    :func:`_binding_order`: the capture and the store that shadows it share one
+    top-level ``match`` statement, so the order key ties and cannot separate
+    them. Line and column can, because a store inside a clause body is written
+    after the ``match`` statement that owns the capture.
+
+    Only a store that is not itself a capture qualifies. Two captures of the
+    same name in one function leave the value genuinely undecidable -- which
+    clause ran is a runtime fact -- so that shape keeps the ambiguity marker.
+    """
+    if not competing:
+        return competing
+
+    def position(node):
+        return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+    def is_capture(entry):
+        return isinstance(entry[0], ast.Match)
+
+    kept = []
+    for entry in competing:
+        if not is_capture(entry):
+            kept.append(entry)
+            continue
+        shadowed = any(
+            not is_capture(other) and other is not entry and position(other[0]) > position(entry[0])
+            for other in entries
+        )
+        if not shadowed:
+            kept.append(entry)
+    return kept
+
+
 def _resolve_simple_literal_subject(function, match):
     """Follow a plain ``name = [literal]`` binding to the container it built.
 
