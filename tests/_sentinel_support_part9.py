@@ -518,14 +518,20 @@ def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
             return True
         if not _is_suppression_call(call, bound):
             continue
-        if any(_name_catches_assertion_error(name) for name in _suppression_names(call)):
+        if any(
+            _name_catches_assertion_error(name)
+            for name in _suppression_names(call, bound, function)
+        ):
             return True
     for argument in _entered_suppressions(node, bound):
         if not isinstance(argument, ast.Call):
             continue
         if not _is_suppression_call(argument, bound):
             continue
-        if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
+        if any(
+            _name_catches_assertion_error(name)
+            for name in _suppression_names(argument, bound, function)
+        ):
             return True
     if function is None:
         return False
@@ -561,7 +567,10 @@ def _is_suppressing_with(node, bound, function=None, owning=None, target=None):
         # therefore not a surviving defect, and shipping an unpinned
         # re-test would be exactly the kind of change this lane rejects.
         # #390 tracks the related own-body `lambda` case.
-        if any(_name_catches_assertion_error(name) for name in _suppression_names(argument)):
+        if any(
+            _name_catches_assertion_error(name)
+            for name in _suppression_names(argument, bound, function)
+        ):
             return True
     return False
 

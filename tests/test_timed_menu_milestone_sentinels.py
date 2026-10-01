@@ -1263,11 +1263,11 @@ RESIDUAL_DEFEAT_SHAPES = (
         True,
     ),
     # `contextlib.suppress()` with no argument is legal and suppresses
-    # everything, unlike pytest.raises()'s empty call above.
+    # nothing, unlike pytest.raises()'s empty call above.
     (
         "suppress with no exception type",
         "    with contextlib.suppress():\n        assert x != 1",
-        False,
+        True,
     ),
     # An unrelated enter_context on the same stack is not a suppression.
     (
