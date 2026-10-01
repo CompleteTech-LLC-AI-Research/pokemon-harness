@@ -1,0 +1,7 @@
+tested head   : fce42d57248e7b4e21d21561fd6dbc11eb1f9dfe
+tested tree   : ccd19d0dee855b6cefe1e972f726da18f664e375
+acceptance    : tests/test_battle_healing_items_rom.py::test_potion_heals_the_active_mon_from_the_battle_item_menu
+modules       : tests/test_state_bag.py tests/test_state_party.py tests/test_battle_healing_items_rom.py
+
+PASS  source  25 passed, 1 warning in 10.99s  tests=25 failures=0 errors=0 skipped=0  wall=10.972s
+PASS  cython  25 passed, 1 warning in 4.19s  tests=25 failures=0 errors=0 skipped=0  wall=4.169s
