@@ -19,14 +19,14 @@ from scripts._probe_timed_rom_pair_support import runtime_identity
 from scripts.normal_red_battle_drive import complete_battle
 from scripts.normal_red_battle_return import finish_battle_return
 from scripts.normal_red_link_admission import SCENARIO, resolve_normal_red_assets
-from scripts.normal_red_link_journal import JournalPair
+from scripts.normal_red_link_journal import JournalPair, TimedStream, TimingLedger
 from tests._mcp_trade_records_rom_drivers_support import _drive_trade, _enter_trade_flow
 from tests._mcp_trade_records_rom_oracle_support import _fixture_pair, assert_paired_exchange
 from tests._mcp_trade_records_rom_support import LocalPair, _child_runtime_mode, _stdio_server
 from tests._mcp_trade_records_rom_tests_support import _tcp_pair_servers
 
 
-async def trade_row(output: Path, asset: dict, transport: str, journal) -> dict:
+async def trade_row(output: Path, asset: dict, transport: str, journal, timing=None) -> dict:
     """Offer naturally different species through live public party cursors."""
     mode = _child_runtime_mode()
     context = (
@@ -36,7 +36,7 @@ async def trade_row(output: Path, asset: dict, transport: str, journal) -> dict:
     )
     async with context as endpoint:
         raw_pair = LocalPair(endpoint, mode) if transport == "local" else endpoint
-        pair = JournalPair(raw_pair, journal)
+        pair = JournalPair(raw_pair, journal, timing)
         before, peer_before = await _fixture_pair(pair, asset, asset, fixture=SCENARIO)
         assert len(before) == len(peer_before) == 6, (before, peer_before)
         # Ivysaur and Pidgey are ordinary caught/trained records, not synthetic
@@ -77,7 +77,7 @@ async def trade_row(output: Path, asset: dict, transport: str, journal) -> dict:
     return result
 
 
-async def battle_row(output, asset, transport, journal):
+async def battle_row(output, asset, transport, journal, timing=None):
     mode = _child_runtime_mode()
     context = (
         _stdio_server(output, asset, asset)
@@ -85,12 +85,21 @@ async def battle_row(output, asset, transport, journal):
         else _tcp_pair_servers(output, asset, asset)
     )
     async with context as endpoint:
-        pair = JournalPair(LocalPair(endpoint, mode) if transport == "local" else endpoint, journal)
+        pair = JournalPair(
+            LocalPair(endpoint, mode) if transport == "local" else endpoint, journal, timing
+        )
         before, peer_before = await _fixture_pair(pair, asset, asset, fixture=SCENARIO)
         assert len(before) == len(peer_before) == 6
+        pair.mark("fixture_loaded")
         before_states = [await pair.state(owner) for owner in range(2)]
-        with (output / "battle-observations.jsonl").open("x") as observations:
+        with (output / "battle-observations.jsonl").open("x") as raw_observations:
+            observations = (
+                raw_observations
+                if timing is None
+                else TimedStream(raw_observations, timing, "observation_journal_io")
+            )
             result = await complete_battle(pair, observations)
+            pair.mark("battle_complete")
             observations.write(
                 json.dumps({"phase": "terminal_edges_only", "result": result}) + "\n"
             )
@@ -98,6 +107,7 @@ async def battle_row(output, asset, transport, journal):
             result["post_match_return"] = await finish_battle_return(
                 pair, before_states, [before, peer_before], result["terminal"], result["last_live"]
             )
+            pair.mark("return_complete")
             observations.write(
                 json.dumps({"phase": "restored_usable_room", "result": result["post_match_return"]})
                 + "\n"
@@ -148,6 +158,7 @@ def main() -> int:
     }
     args.output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
+    timing = TimingLedger()
     receipt = {
         "status": "FAILED",
         "scenario": SCENARIO,
@@ -163,7 +174,7 @@ def main() -> int:
         with (args.output / "pair-operations.jsonl").open("x") as journal:
             receipt.update(
                 asyncio.run(
-                    asyncio.wait_for(row(args.output, asset, args.transport, journal), 1200)
+                    asyncio.wait_for(row(args.output, asset, args.transport, journal, timing), 1200)
                 )
             )
         receipt["status"] = "PASS"
@@ -172,6 +183,8 @@ def main() -> int:
         raise
     finally:
         receipt["seconds"] = time.monotonic() - started
+        # Optional diagnostic field; absent from receipts written before it existed.
+        receipt["timing"] = timing.summary()
         (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return 0
 
