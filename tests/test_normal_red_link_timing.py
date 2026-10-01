@@ -7,10 +7,14 @@ real emulator speed or whether the 1200 s source-local battle deadline is met.
 import asyncio
 import io
 import json
+import sys
+import types
 
 import pytest
 
 from scripts import normal_red_battle_drive as drive
+from scripts import normal_red_link_journal as journal_module
+from scripts import qualify_normal_red_link as qualify
 from scripts.normal_red_link_journal import (
     MAX_PHASE_MARKS,
     TIMING_SCHEMA,
@@ -169,12 +173,12 @@ def test_timed_stream_forwards_bytes_unchanged_and_times_io():
 
     sink = Sink()
     ledger = TimingLedger(clock)
-    stream = TimedStream(sink, ledger, "observation_journal_io")
+    stream = TimedStream(sink, ledger, "observation_stream_write_flush")
     stream.write("abc\n")
     stream.flush()
     assert sink.getvalue() == "abc\n"
-    assert ledger.summary()["operations"]["observation_journal_io"]["count"] == 2
-    assert ledger.summary()["operations"]["observation_journal_io"]["total_seconds"] == 0.5
+    assert ledger.summary()["operations"]["observation_stream_write_flush"]["count"] == 2
+    assert ledger.summary()["operations"]["observation_stream_write_flush"]["total_seconds"] == 0.5
 
 
 @pytest.mark.asyncio
@@ -262,3 +266,233 @@ async def test_battle_drive_still_works_with_pair_lacking_mark(monkeypatch):
         ],
     )
     assert all(result["terminal"])
+
+
+@pytest.mark.asyncio
+async def test_redaction_cost_is_journal_io_not_operation_time(monkeypatch):
+    clock = FakeClock()
+
+    def slow_redacted(value):
+        clock.advance(2.0)
+        return value
+
+    monkeypatch.setattr(journal_module, "redacted", slow_redacted)
+
+    class Pair:
+        async def state(self, owner):
+            clock.advance(1.0)
+            return {"ok": True}
+
+    ledger = TimingLedger(clock)
+    pair = JournalPair(Pair(), io.StringIO(), ledger)
+    await pair.state(0)
+    operations = ledger.summary()["operations"]
+    assert operations["state"]["total_seconds"] == 1.0
+    # args, kwargs and result are each redacted: three slow calls.
+    assert operations["operation_journal_io"]["total_seconds"] == 6.0
+
+
+@pytest.mark.asyncio
+async def test_release_buckets_are_exclusive_and_sum_to_elapsed():
+    clock = FakeClock()
+
+    class Client:
+        async def request(self, method, arguments):
+            clock.advance(1.0)
+            return {"tools": [{"name": "release"}, {"name": "link_peer_release"}]}
+
+        async def tool(self, name, arguments):
+            clock.advance(1.0)
+            return {"ok": True}
+
+    class Pair:
+        transport = "local_pair"
+        client = Client()
+
+    class SlowStream(io.StringIO):
+        def flush(self):
+            clock.advance(0.125)
+
+    ledger = TimingLedger(clock)
+    pair = JournalPair(Pair(), SlowStream(), ledger)
+    await pair.release_buttons()
+    operations = ledger.summary()["operations"]
+    # Two owners, one tools/list and four releases each; sixteen journal rows.
+    assert "release_buttons" not in operations
+    assert operations["release_rpc"]["count"] == 10
+    assert operations["release_rpc"]["total_seconds"] == 10.0
+    assert operations["operation_journal_io"]["count"] == 16
+    assert operations["operation_journal_io"]["total_seconds"] == 2.0
+    total = sum(row["total_seconds"] for row in operations.values())
+    assert total == ledger.summary()["elapsed_seconds"] == 12.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_write", [1, 2])
+@pytest.mark.parametrize("fail_on", ["write", "flush"])
+async def test_journal_failure_is_attributed_to_its_stage_and_still_raises(failing_write, fail_on):
+    clock = FakeClock()
+    stages = {1: "intent", 2: "completion"}
+
+    class FailingStream(io.StringIO):
+        writes = 0
+
+        def write(self, text):
+            if fail_on == "write":
+                self._maybe_fail()
+            return super().write(text)
+
+        def flush(self):
+            if fail_on == "flush":
+                self._maybe_fail()
+
+        def _maybe_fail(self):
+            if fail_on == "write":
+                type(self).writes += 1
+                count = type(self).writes
+            else:
+                count = type(self).writes = type(self).writes + 1
+            if count == failing_write:
+                clock.advance(3.0)
+                raise OSError("disk")
+
+    class Pair:
+        async def step(self, frames):
+            clock.advance(1.0)
+            return {}
+
+    ledger = TimingLedger(clock)
+    pair = JournalPair(Pair(), FailingStream(), ledger)
+    with pytest.raises(OSError, match="disk"):
+        await pair.step(4)
+    summary = ledger.summary()
+    interrupted = summary["interrupted"]
+    assert interrupted["operation"] == "operation_journal_io"
+    assert interrupted["stage"] == stages[failing_write]
+    assert interrupted["seconds"] == 3.0 and interrupted["error"] == "OSError"
+    assert summary["operations"]["operation_journal_io"]["total_seconds"] >= 3.0
+    if failing_write == 2:
+        # The underlying call really completed; only its completion row failed.
+        assert summary["operations"]["step"]["count"] == 1
+
+
+def test_timed_stream_failure_records_stage_and_duration():
+    clock = FakeClock()
+
+    class Sink(io.StringIO):
+        def flush(self):
+            clock.advance(4.0)
+            raise OSError("flush failed")
+
+    ledger = TimingLedger(clock)
+    stream = TimedStream(Sink(), ledger, "observation_stream_write_flush")
+    with pytest.raises(OSError, match="flush failed"):
+        stream.flush()
+    summary = ledger.summary()
+    assert summary["interrupted"]["stage"] == "flush"
+    assert summary["interrupted"]["seconds"] == 4.0
+    assert summary["operations"]["observation_stream_write_flush"]["total_seconds"] == 4.0
+
+
+def test_markers_past_the_cap_are_not_journaled():
+    ledger = TimingLedger(FakeClock())
+    stream = io.StringIO()
+    pair = JournalPair(object(), stream, ledger)
+    for index in range(MAX_PHASE_MARKS + 5):
+        pair.mark(f"p{index}")
+    phase_rows = [row for row in rows_of(stream) if row["event"] == "phase"]
+    assert len(phase_rows) == MAX_PHASE_MARKS
+    assert ledger.summary()["phases_dropped"] == 5
+
+
+@pytest.mark.asyncio
+async def test_untimed_rows_are_literally_the_pre_patch_bytes():
+    class Pair:
+        async def step(self, frames):
+            return {"ok": True}
+
+    stream = io.StringIO()
+    await JournalPair(Pair(), stream).step(4)
+    assert stream.getvalue() == (
+        '{"sequence": 1, "event": "intent", "operation": "step", "args": [4], "kwargs": {}}\n'
+        '{"sequence": 1, "event": "completion", "operation": "step", "result": {"ok": true}}\n'
+    )
+
+
+def run_main(monkeypatch, tmp_path, row):
+    asset = {
+        "pins": {"expected_pyboy_version": "2.7.0", "expected_pyboy_revision": "rev"},
+        "provenance": {"registry": {"sha256": "f" * 64}},
+    }
+    monkeypatch.setattr(qualify, "resolve_normal_red_assets", lambda *args: asset)
+    monkeypatch.setattr(qualify, "runtime_identity", dict)
+    fake = types.SimpleNamespace(__version__="2.7.0", __pokered_harness_revision__="rev")
+    monkeypatch.setitem(sys.modules, "pyboy", fake)
+    monkeypatch.setattr(qualify, "battle_row", row)
+    output = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qualify",
+            "--rom",
+            "r",
+            "--symbols",
+            "s",
+            "--fixture-root",
+            "f",
+            "--output",
+            str(output),
+            "--transport",
+            "local",
+            "--kind",
+            "battle",
+        ],
+    )
+    return output
+
+
+@pytest.mark.parametrize("error", [asyncio.TimeoutError, RuntimeError])
+def test_main_persists_timing_in_the_receipt_on_timeout_and_error(monkeypatch, tmp_path, error):
+    clock = FakeClock()
+    monkeypatch.setattr(qualify, "TimingLedger", lambda: TimingLedger(clock))
+
+    async def row(output, asset, transport, journal, timing):
+        class Pair:
+            async def step(self, frames):
+                clock.advance(5.0)
+                raise error()
+
+        await JournalPair(Pair(), journal, timing).step(4)
+
+    output = run_main(monkeypatch, tmp_path, row)
+    with pytest.raises(error):
+        qualify.main()
+    receipt = json.loads((output / "receipt.json").read_text())
+    assert receipt["status"] == "FAILED"
+    assert receipt["timing"]["schema"] == TIMING_SCHEMA
+    assert receipt["timing"]["interrupted"]["operation"] == "step"
+    assert receipt["timing"]["interrupted"]["error"] == error.__name__
+    assert receipt["timing"]["operations"]["step"]["total_seconds"] == 5.0
+
+
+def test_main_receipt_keeps_existing_fields_when_timing_is_added(monkeypatch, tmp_path):
+    async def row(output, asset, transport, journal, timing):
+        return {}
+
+    output = run_main(monkeypatch, tmp_path, row)
+    assert qualify.main() == 0
+    receipt = json.loads((output / "receipt.json").read_text())
+    for key in (
+        "status",
+        "scenario",
+        "transport",
+        "kind",
+        "fixture_sha256",
+        "source_sha256",
+        "loaded_source_footprint",
+        "runtime_identity",
+        "seconds",
+    ):
+        assert key in receipt
+    assert receipt["status"] == "PASS" and receipt["timing"]["interrupted"] is None

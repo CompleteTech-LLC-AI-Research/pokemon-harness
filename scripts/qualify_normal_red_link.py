@@ -96,7 +96,7 @@ async def battle_row(output, asset, transport, journal, timing=None):
             observations = (
                 raw_observations
                 if timing is None
-                else TimedStream(raw_observations, timing, "observation_journal_io")
+                else TimedStream(raw_observations, timing, "observation_stream_write_flush")
             )
             result = await complete_battle(pair, observations)
             pair.mark("battle_complete")

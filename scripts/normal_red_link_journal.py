@@ -34,10 +34,21 @@ def mark_phase(pair, name):
 class TimingLedger:
     """Bounded monotonic timing aggregates for one qualification row.
 
-    Diagnostic only: it never feeds a decision. Durations are clamped to be
-    nonnegative. Aggregates are keyed by operation name, so size stays bounded;
-    phase marks are capped. An operation that raised or was cancelled (for
-    example by the row deadline) is reported under ``interrupted``.
+    Diagnostic only: it never feeds a decision, and it shows where wall time
+    accrues, not why. Durations are clamped to be nonnegative. Buckets are
+    exclusive and may be summed:
+
+    - one bucket per wrapped pair operation: only the awaited underlying call;
+    - ``operation_journal_io``: building/redacting a journal row, serializing
+      it, and writing and flushing it;
+    - ``release_rpc``: the release sequence's own public tool calls;
+    - ``observation_stream_write_flush``: stream write/flush only (the caller's
+      own serialization is not included).
+
+    ``interrupted`` is the last exception caught inside a wrapped stage (an
+    operation, or a journal write/flush with its ``stage``). A deadline that
+    fires outside a wrapped stage, or during synchronous I/O, leaves it null;
+    it is not a universal indicator of the operation in flight.
     """
 
     def __init__(self, clock=time.monotonic):
@@ -62,14 +73,17 @@ class TimingLedger:
         row[2] = max(row[2], seconds)
 
     def mark(self, name):
+        """Record a phase; return False once the cap has dropped it."""
         if len(self._phases) >= MAX_PHASE_MARKS:
             self._phases_dropped += 1
-            return
+            return False
         self._phases.append({"phase": name, "seconds_since_start": self.elapsed()})
+        return True
 
-    def interrupted(self, bucket, seconds, error):
+    def interrupted(self, bucket, seconds, error, stage=None):
         self._interrupted = {
             "operation": bucket,
+            "stage": stage,
             "seconds": max(0.0, seconds),
             "error": type(error).__name__,
             "seconds_since_start": self.elapsed(),
@@ -98,18 +112,23 @@ class TimedStream:
         self._ledger = ledger
         self._bucket = bucket
 
-    def _timed(self, call, *args):
+    def _timed(self, stage, call, *args):
         started = self._ledger.now()
         try:
-            return call(*args)
-        finally:
-            self._ledger.add(self._bucket, self._ledger.now() - started)
+            result = call(*args)
+        except BaseException as exc:
+            seconds = max(0.0, self._ledger.now() - started)
+            self._ledger.add(self._bucket, seconds)
+            self._ledger.interrupted(self._bucket, seconds, exc, stage)
+            raise
+        self._ledger.add(self._bucket, self._ledger.now() - started)
+        return result
 
     def write(self, text):
-        return self._timed(self._stream.write, text)
+        return self._timed("write", self._stream.write, text)
 
     def flush(self):
-        return self._timed(self._stream.flush)
+        return self._timed("flush", self._stream.flush)
 
 
 class JournalPair:
@@ -126,31 +145,45 @@ class JournalPair:
         self._timing = timing
 
     def mark(self, name):
-        """Add an optional phase marker; no effect without a timing ledger."""
-        if self._timing is None:
+        """Add an optional phase marker; no effect without a timing ledger.
+
+        Markers beyond the ledger cap are counted there and not journaled. A
+        marker row reuses the current operation sequence number.
+        """
+        if self._timing is None or not self._timing.mark(name):
             return
-        self._timing.mark(name)
         self._write(
-            {
+            lambda: {
                 "sequence": self._sequence,
                 "event": "phase",
                 "phase": name,
                 "seconds_since_start": self._timing.elapsed(),
-            }
+            },
+            "phase",
         )
 
     def _begin(self):
         return None if self._timing is None else self._timing.now()
 
-    def _finish(self, bucket, started, error=None):
+    def _finish(self, bucket, started, error=None, stage=None):
         """Return the nonnegative duration, or None when untimed."""
         if started is None:
             return None
         seconds = max(0.0, self._timing.now() - started)
         self._timing.add(bucket, seconds)
         if error is not None:
-            self._timing.interrupted(bucket, seconds, error)
+            self._timing.interrupted(bucket, seconds, error, stage)
         return seconds
+
+    async def _call(self, bucket, awaitable):
+        """Await one underlying call, timing only that await."""
+        started = self._begin()
+        try:
+            result = await awaitable
+        except BaseException as exc:
+            self._finish(bucket, started, exc)
+            raise
+        return result, self._finish(bucket, started)
 
     def __getattr__(self, name):
         member = getattr(self._pair, name)
@@ -161,51 +194,45 @@ class JournalPair:
             self._sequence += 1
             sequence = self._sequence
             self._write(
-                {
+                lambda: {
                     "sequence": sequence,
                     "event": "intent",
                     "operation": name,
                     "args": redacted(args),
                     "kwargs": redacted(kwargs),
-                }
+                },
+                "intent",
             )
-            started = self._begin()
-            try:
-                result = await member(*args, **kwargs)
-            except BaseException as exc:
-                self._finish(name, started, exc)
-                raise
-            row = {
-                "sequence": sequence,
-                "event": "completion",
-                "operation": name,
-                "result": redacted(result),
-            }
-            seconds = self._finish(name, started)
-            if seconds is not None:
-                row["seconds"] = seconds
-            self._write(row)
+            result, seconds = await self._call(name, member(*args, **kwargs))
+
+            def completion():
+                row = {
+                    "sequence": sequence,
+                    "event": "completion",
+                    "operation": name,
+                    "result": redacted(result),
+                }
+                if seconds is not None:
+                    row["seconds"] = seconds
+                return row
+
+            self._write(completion, "completion")
             return result
 
         return recorded
 
-    def _write(self, row):
-        started = self._begin()
-        self._stream.write(json.dumps(row) + "\n")
-        self._stream.flush()
-        if started is not None:
-            self._timing.add("operation_journal_io", self._timing.now() - started)
-
-    async def release_buttons(self):
+    def _write(self, build, stage):
+        """Build (if lazy), serialize, write and flush one row; time all as journal I/O."""
         started = self._begin()
         try:
-            await self._release_buttons()
+            self._stream.write(json.dumps(build() if callable(build) else build) + "\n")
+            self._stream.flush()
         except BaseException as exc:
-            self._finish("release_buttons", started, exc)
+            self._finish("operation_journal_io", started, exc, stage)
             raise
-        self._finish("release_buttons", started)
+        self._finish("operation_journal_io", started)
 
-    async def _release_buttons(self):
+    async def release_buttons(self):
         """Release ordinary held buttons through advertised public owner tools."""
         clients = (
             [self._pair.client] if self._pair.transport == "local_pair" else self._pair.clients
@@ -213,7 +240,7 @@ class JournalPair:
         for owner in range(2):
             client = clients[0] if len(clients) == 1 else clients[owner]
             name = "link_peer_release" if len(clients) == 1 and owner == 1 else "release"
-            listed = await client.request("tools/list", {})
+            listed, _ = await self._call("release_rpc", client.request("tools/list", {}))
             if name not in {row["name"] for row in listed["tools"]}:
                 raise ValueError(f"owner {owner} does not advertise {name}")
             for button in ("a", "b", "up", "down"):
@@ -227,14 +254,16 @@ class JournalPair:
                         "owner": owner,
                         "button": button,
                         "public_tool": name,
-                    }
+                    },
+                    "release_intent",
                 )
-                result = await client.tool(name, {"button": button})
+                result, _ = await self._call("release_rpc", client.tool(name, {"button": button}))
                 self._write(
                     {
                         "sequence": sequence,
                         "event": "completion",
                         "operation": "release",
                         "result": result,
-                    }
+                    },
+                    "release_completion",
                 )
