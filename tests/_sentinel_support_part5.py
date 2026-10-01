@@ -450,6 +450,29 @@ def _statically_truthy(node):
         return bool(getattr(node, "elts", None) or getattr(node, "keys", None))
     if _exit_swallows_assertion_error(node):
         return True
+    # #338. These four spellings never mention `AssertionError` by name, so
+    # `_exit_swallows_assertion_error` declines them -- but every one of them
+    # is *true* whenever `__exit__` is called with an assertion failure, which
+    # is the only call this rule cares about.
+    #
+    # `__exit__` receives the raised exception type as its first argument
+    # after `self`, and when an `assert` fails that type is exactly
+    # `AssertionError`. Executed, `exc[0]` is `<class 'AssertionError'>`: a
+    # class object, so it is truthy, it is not `None`, it is not `False`, and it
+    # is a member of any tuple naming `AssertionError`. So each of these
+    # returns truthy and the assert is swallowed:
+    #
+    #     return exc[0] is not None
+    #     return bool(exc[0])
+    #     return exc[0] is not False
+    #     return exc[0] in (AssertionError,)
+    #
+    # Deciding them needs the *identity* of the argument, not its comparison
+    # against `AssertionError`, which is what #316's helper asks. The question
+    # they all share is "is this argument the assertion failure?", and the
+    # answer inside `__exit__` during an assert is yes.
+    if _exit_truthy_on_the_assertion_failure(node):
+        return True
     return None
 
 
@@ -457,6 +480,92 @@ def _statically_truthy(node):
 #: exception in ``__exit__``. Any of them means the same thing at runtime, and
 #: a user-written manager picks whichever reads best, so all are accepted.
 _EXIT_EXCEPTION_PARAMS = frozenset({"exc", "exc_type", "et", "e", "err", "exc_info"})
+
+
+def _exit_truthy_on_the_assertion_failure(node):
+    """Is ``node`` necessarily true while ``__exit__`` handles a failed assert?
+
+    #338. ``__exit__`` receives the raised exception *type* as the argument
+    after ``self``. When an ``assert`` fails that type is exactly
+    ``AssertionError``, so a handful of spellings that never name it are still
+    decidably true at the only moment this rule asks about:
+
+    * ``<param>[0] is not <literal>`` -- the type is a class object and identity
+      against a literal never holds, so this is true for every literal
+      (``None`` and ``False`` are the two #338 filed; ``0``, ``()``, ``"x"``
+      are the same truth reached the same way);
+    * ``bool(<param>[0])`` -- every class object is truthy;
+    * ``<param>[0] in (<AssertionError>, ...)`` -- the single-element tuple
+      naming the builtin tests membership by identity, and the type *is* it.
+
+    Each of these was a false-LIVE on master: the assert really is swallowed
+    and the analyzer reported it ``enforced``. The general truth is narrow --
+    it holds *because* the argument is the assertion failure -- so nothing is
+    admitted here that does not read that argument directly.
+
+    **Stated false-positive budget.** #338 asks for the budget to live in the
+    docstring rather than only in the table. There is exactly one: a ``__exit__``
+    that rebinds its exception parameter *before* the return, so that
+    ``<param>[0]`` no longer names the raised type. That costs a false DEFEAT
+    (a loud assert reported swallowed), not a false LIVE, and only in a
+    manager that reassigns the very argument the rule reads. This helper is
+    called on the return expression alone, with no view of the statements
+    above it, so that case cannot be admitted here; it is declined rather than
+    guessed. The budget is accepted: the damaging direction this rule is
+    written against stays closed.
+
+    A negated membership test (``not in``) is deliberately excluded. It is
+    true exactly when the failure is *not* an ``AssertionError``, so inside the
+    ``__exit__`` of a manager reached by this rule it is false, and reading it
+    as a swallow would be the wrong answer.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        # `bool(<param>[0])` -- the builtin, applied to the exception type.
+        return (
+            node.func.id == "bool"
+            and len(node.args) == 1
+            and not node.keywords
+            and _is_exception_argument(node.args[0])
+        )
+    if isinstance(node, ast.Compare):
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.IsNot, ast.NotIn)):
+            left = node.left
+            if not _is_exception_argument(left) or len(node.comparators) != 1:
+                return False
+            comparator = node.comparators[0]
+            if isinstance(node.ops[0], ast.IsNot):
+                # `is not <literal>` -- true of any class object, whatever the
+                # literal. Identity against a literal can never hold for a
+                # class object, so every such spelling is decided rather than
+                # just the two #316 filed. `is not 0` is included by the same
+                # rule as `is not None`: it is not excluded because `0 ==
+                # False`, it is included because `AssertionError is not 0`.
+                # `()` needs naming because the empty tuple parses as a
+                # `Tuple`, not a `Constant`.
+                return isinstance(comparator, ast.Constant) or (
+                    isinstance(comparator, ast.Tuple) and not comparator.elts
+                )
+            # `not in (...)` -- true when the failure is *not* an
+            # AssertionError, which is the opposite of what this rule needs.
+            return False
+        if len(node.ops) == 1 and isinstance(node.ops[0], ast.In):
+            # `in (AssertionError,)` -- membership by identity against a tuple
+            # whose every element is the builtin `AssertionError`. The subscript
+            # is load-bearing here and is *not* optional: under `*exc` a bare
+            # `exc` is the whole argument tuple, so `exc in (AssertionError,)`
+            # is false at runtime while `exc[0] in (AssertionError,)` is true.
+            # Admitting the bare name here would be a false-LIVE, so this
+            # branch requires the subscript. The `is not` branch above does not
+            # need it, because a tuple is also not `None`.
+            return (
+                isinstance(node.left, ast.Subscript)
+                and _is_exception_argument(node.left)
+                and len(node.comparators) == 1
+                and isinstance(node.comparators[0], (ast.Tuple, ast.List, ast.Set))
+                and len(node.comparators[0].elts) == 1
+                and _is_assertion_error_ref(node.comparators[0].elts[0])
+            )
+    return False
 
 
 def _exit_swallows_assertion_error(node):
