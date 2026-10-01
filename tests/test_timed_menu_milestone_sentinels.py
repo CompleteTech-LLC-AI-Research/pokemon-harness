@@ -5959,6 +5959,18 @@ BINDING_FORM_SHAPES = (
         False,
         "contextlib.nullcontext()",
     ),
+    (
+        "both suppressor names survive a swap at the binding epoch",
+        (
+            "    a = contextlib.suppress(AssertionError)\n"
+            "    b = contextlib.suppress(AssertionError)\n"
+            "    a, b = b, a\n"
+            "    with a:\n"
+            '        assert x != 1, "A1"'
+        ),
+        False,
+        "contextlib.nullcontext()",
+    ),
     # #381/#382: the element a destructuring target receives can be a *Name*,
     # and then it stands for whatever that name holds rather than for itself.
     # A swap makes that unavoidable -- both elements are names -- and it is the
