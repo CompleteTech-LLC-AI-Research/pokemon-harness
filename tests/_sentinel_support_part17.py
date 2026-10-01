@@ -84,7 +84,7 @@ def _name_kind_in_scope(name, by_index, index, scope, depth):
     if depth > 4:
         return None
     stores = _stores_of(name, by_index, index, scope)
-    kind = _entry_kind_of_stores(stores)
+    kind = _entry_kind_of_stores(stores, scope)
     if kind is not None:
         return kind
     if not stores or len(stores) != 1:
@@ -133,13 +133,18 @@ def _is_parameter_of(function, name):
     return any(isinstance(candidate, ast.arg) and candidate.arg == name for candidate in candidates)
 
 
-def _entry_kind_of_stores(stores):
+def _entry_kind_of_stores(stores, scope=None):
     """The runtime kind the settled ``stores`` bind, or ``None`` to decline.
 
     ``_stores_of``/``_module_stores`` answer with ``(statement, value,
     conditional)`` entries whose value may be an expression, a recorded kind
     string, or a marker. Anything that is not a single settled entry with a
     readable runtime kind declines, which keeps the caller on the safe side.
+
+    ``scope`` is the function the stores were read in. The #464 forms need it
+    because ``m = list()`` only produces a list when nothing in that scope
+    rebinds ``list``; without the scope every name would be read as the
+    builtin, which is the false-dead direction.
     """
     if not stores:
         return None
@@ -157,9 +162,47 @@ def _entry_kind_of_stores(stores):
     if isinstance(value, str):
         # A carrier: `_store_bindings` records the kind directly.
         return value
-    if not isinstance(value, (ast.Constant, ast.Lambda, ast.List, ast.Tuple, ast.Set, ast.Dict)):
+    # #464. `m = list()` and `m = int` are the same question the literal forms
+    # above answer, reached through a local alias: the callee or the bare type
+    # name fixes what the store produced, so `:func:`_literal_runtime_type`
+    # reads it the same way. The whitelist still decides *which* spellings may
+    # be read at all, and it stays closed -- an unlisted spelling is simply not
+    # answered here, which keeps the assert live rather than guessing.
+    if not isinstance(
+        value,
+        (
+            ast.Call,
+            ast.Name,
+            ast.Constant,
+            ast.Lambda,
+            ast.List,
+            ast.Tuple,
+            ast.Set,
+            ast.Dict,
+        ),
+    ):
         return None
-    return _literal_runtime_type(value)
+    # A `Name` is only the builtin when this scope has not rebound it. The
+    # literal forms below do not need the question -- `[]` is a list wherever
+    # it is written -- but a *name* can be a parameter, and a parameter is
+    # chosen by the caller:
+    #
+    #     def outer(x, int=None):
+    #         m = int            # the caller's object, not the builtin type
+    #
+    # Reading that as the builtin reports the header dead, when the caller may
+    # well pass a context manager. The question is the full one --
+    # `_callee_is_shadowed`, not the body-only `_name_is_shadowed_in` -- so a
+    # parameter and a module-level rebinding both count. It is repeated here
+    # because this store map is the path the walrus rule actually walks, and
+    # it is the same gate `_literal_runtime_type` applies on the direct route.
+    if (
+        isinstance(value, ast.Name)
+        and _callee_is_shadowed(value, scope)
+        and not _entered_global_builtin_is_intact(value, scope)
+    ):
+        return None
+    return _literal_runtime_type(value, scope)
 
 
 def _walrus_module_may_execute_early(module):
