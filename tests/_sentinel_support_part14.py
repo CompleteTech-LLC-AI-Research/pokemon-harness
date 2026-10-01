@@ -598,6 +598,11 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         if not isinstance(node, ast.Assign) or not all(
             isinstance(target, ast.Name) for target in node.targets
         ):
+            # #481. Function bodies are deferred, but decorators, defaults,
+            # annotations, class bases, and class bodies execute during creation.
+            # Accept only definitions whose evaluated parts are plainly inert.
+            if _witness_definition_is_transparent(node, function, bound):
+                continue
             return False
         value = node.value
         if isinstance(value, ast.Constant):
@@ -761,3 +766,36 @@ def _falsy_constant_pinned_to(name, function):
             return not value.value
         # A non-constant binding is a rebinding, not a pin; keep looking.
     return False
+
+
+def _witness_definition_is_transparent(node, function, bound):
+    """Admit only definitions whose creation cannot execute opaque effects."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return False
+    if node.name in _witness_module_roots(function, bound) or node.name in _signature_bound_names(
+        function
+    ):
+        return False
+    if node.decorator_list or getattr(node, "type_params", ()):
+        return False
+    if isinstance(node, ast.ClassDef):
+        return (
+            not node.bases
+            and not node.keywords
+            and all(
+                isinstance(statement, ast.Pass)
+                or (
+                    isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Constant)
+                    and isinstance(statement.value.value, str)
+                )
+                for statement in node.body
+            )
+        )
+    args = node.args
+    return (
+        node.returns is None
+        and all(argument.annotation is None for argument in _all_args(node) if argument is not None)
+        and all(isinstance(value, ast.Constant) for value in args.defaults)
+        and all(value is None or isinstance(value, ast.Constant) for value in args.kw_defaults)
+    )

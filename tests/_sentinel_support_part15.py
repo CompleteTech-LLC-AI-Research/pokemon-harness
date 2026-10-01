@@ -31,6 +31,35 @@ def _elif_failure_predicate(test, values):
     Mixed-type operands stay declined rather than raising: a ``TypeError`` from
     ``1 < "a"`` is not a truth value, and guessing one would be worse than
     declining.
+
+    #479. ``Is`` and ``IsNot`` join the evaluated set here. #471 closed the
+    ordering gap but left identity declined, and that is the *same* damaging
+    fall-through for the *same* reason: ``_break_reachable_with_failure`` reads
+    ``None`` as "possibly true", so a loop whose only ``break`` sits under
+    ``if x is None:`` was reported as skipping its ``else`` at every value the
+    domain can hold, and a suppressor the loop always installs was certified
+    absent. #479 measured 27 such fixtures live on master.
+
+    Identity is defined for every pair, but AST literals and equality-based
+    failure witnesses do not preserve runtime object identity. None, unequal
+    primitive values, literal booleans, and a name compared with itself can
+    settle the question; equal non-singletons remain undecidable.
+
+    #479 residual. ``In`` and ``NotIn`` join for the same reason. Membership is
+    #total over a literal container of resolved values -- ``1 in [0]`` is
+    #``False`` rather than an error -- so once the left operand and the
+    #container's elements are known the answer is decided. It is *not* total
+    #for an arbitrary container (``in`` can raise from a custom ``__contains__``
+    #or from a missing key on a ``dict``), so only a container the analyzer can
+    #read element by element is answered; anything else still declines.
+
+    #479 residual. ``ast.BoolOp`` joins too. ``and``/``or`` are total over
+    operands whose truth values are known, and ``bool`` is total on any object,
+    so evaluating the operands in Python's own order -- which is what the
+    loop body would do -- decides the guard without raising. Short-circuit is
+    respected rather than approximated: an operand after the one that already
+    decides the result is not needed, and one that cannot be read makes the
+    whole operator decline rather than guess.
     """
     if isinstance(test, ast.Constant):
         return bool(test.value)
@@ -39,7 +68,11 @@ def _elif_failure_predicate(test, values):
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         value = _elif_failure_predicate(test.operand, values)
         return None if value is None else not value
-    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and type(test.ops[0]) not in (ast.In, ast.NotIn)
+    ):
         operands = [test.left, test.comparators[0]]
         resolved = []
         for operand in operands:
@@ -64,10 +97,78 @@ def _elif_failure_predicate(test, values):
                 return left > right
             if operator is ast.GtE:
                 return left >= right
+            if operator in (ast.Is, ast.IsNot):
+                # AST literals and equality witnesses do not preserve runtime
+                # object identity. Unequal primitive values cannot be identical;
+                # None is the one singleton equality fixes without a numeric
+                # True/1 ambiguity. Equal non-singletons remain undecidable.
+                if left is None or right is None:
+                    identical = left is right
+                elif left != right:
+                    identical = False
+                elif (
+                    isinstance(operands[0], ast.Name)
+                    and isinstance(operands[1], ast.Name)
+                    and operands[0].id == operands[1].id
+                ):
+                    identical = True
+                elif all(
+                    isinstance(operand, ast.Constant) and type(operand.value) is bool
+                    for operand in operands
+                ):
+                    identical = left is right
+                else:
+                    return None
+                return identical if operator is ast.Is else not identical
         except TypeError:
             # An unorderable pair has no truth value Python would compute, and
             # the assert under test cannot be evaluated against it either.
             return None
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        operator = type(test.ops[0])
+        if operator not in (ast.In, ast.NotIn):
+            return None
+        container = test.comparators[0]
+        if isinstance(container, (ast.List, ast.Tuple, ast.Set)):
+            elements = container.elts
+        else:
+            return None
+        member = test.left
+        if isinstance(member, ast.Constant):
+            member_value = member.value
+        elif isinstance(member, ast.Name) and member.id in values:
+            member_value = values[member.id]
+        else:
+            return None
+        if not all(isinstance(element, ast.Constant) for element in elements):
+            return None
+        # Element-wise rather than `in`: this evaluates the same question Python
+        # would, without inheriting `__eq__` from any operand, and it cannot
+        # raise the way a custom `__contains__` can -- which is why an
+        # unreadable container still declines above rather than guessing here.
+        contained = any(member_value == element.value for element in elements)
+        return contained if operator is ast.In else not contained
+    if isinstance(test, ast.BoolOp):
+        results = []
+        for value in test.values:
+            results.append(_elif_failure_predicate(value, values))
+        if isinstance(test.op, ast.And):
+            if any(result is False for result in results):
+                # One false operand settles `and` outright. Python short-
+                # circuits on it too, so an unreadable operand *after* that
+                # point cannot change the answer or raise.
+                return False
+            if all(result is True for result in results):
+                return True
+        else:
+            if any(result is True for result in results):
+                # The mirror: one true operand settles `or`, and Python stops
+                # evaluating there.
+                return True
+            if all(result is False for result in results):
+                return False
+        # Anything still unreadable leaves the operator genuinely undecided.
+        return None
     return None
 
 
