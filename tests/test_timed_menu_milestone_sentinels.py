@@ -2969,6 +2969,81 @@ def test_a_context_manager_instance_stays_enterable():
     )
 
 
+def test_a_local_class_with_an_enterable_metaclass_enters_the_bare_header():
+    """#468. The *class-carrier* path must consult the metatype, not identity.
+
+    #457 repaired the ``cs = CM`` store spelling, and this is deliberately the
+    other spelling. A bare ``with CM:`` header reaches a different rule: the
+    local ``class CM`` is recorded by ``_carrier_runtime_kinds`` as the kind
+    ``"type"``, and ``"type"`` is unconditionally unenterable, so an enterable
+    metaclass was never consulted and a firing assert was reported defeated --
+
+        def probe(x):
+            class Meta(type):
+                def __enter__(cls): return cls
+                def __exit__(cls, *exc): return False
+            class CM(metaclass=Meta): pass
+            with CM:
+                assert x != 1        # fires at x=1
+
+    ``with CM:`` performs the protocol lookup on ``type(CM)``, which is
+    ``Meta``, and ``Meta`` defines both dunders, so entry succeeds and the body
+    runs. The two spellings are the same program with different verdicts, and
+    both are live at runtime.
+
+    Executed, so the row cannot pass by the checker and the claim being wrong
+    together: at ``x=1`` the assert must fire.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    class Meta(type):\n"
+        "        def __enter__(cls):\n"
+        "            return cls\n"
+        "        def __exit__(cls, *exc):\n"
+        "            return False\n"
+        "    class CM(metaclass=Meta):\n"
+        "        pass\n"
+        "    with CM:\n"
+        "        assert x != 1\n"
+    )
+    _assert_entry_contract("a local class with an enterable metaclass", source, False, True)
+    tree = ast.parse(source)
+    function = tree.body[-1]
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [True], (
+        f"expected [True] -- `with CM:` looks the dunder up on `type(CM)`, "
+        f"which is `Meta`, and `Meta` implements the protocol -- got {results}. "
+        f"Recording every local `class` as the unconditionally-unenterable kind "
+        f'`"type"` drops a genuinely live contract.'
+    )
+
+
+def test_a_local_class_whose_metaclass_is_unreadable_is_declined():
+    """Plain/unresolved classes retain the prior conservative verdict.\n\n    The exact runtime controls raise TypeError before the assertion.\n    Unresolved metaclasses may have other behavior and are not proven live.\n"""
+    for label, body, expected in (
+        ("a plain local class", "    class CM: pass\n", False),
+        ("a local class inheriting type", "    class CM(type): pass\n", False),
+        ("an explicit metaclass keyword", "    class CM(metaclass=type): pass\n", False),
+    ):
+        source = f"def outer(x, flag, helper):\n{body}    with CM:\n        assert x != 1\n"
+        namespace = {}
+        exec(source, namespace)  # noqa: S102
+        with pytest.raises(TypeError):
+            namespace["outer"](1, False, lambda: None)
+        tree = ast.parse(source)
+        function = tree.body[-1]
+        asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(function, node, tree) for node in asserts]
+        assert results == [expected], (
+            f"{label}: expected {[expected]} -- got {results}. A class with no "
+            f"bases, or one inheriting `type`, has metatype `type`, which does "
+            f"not implement the protocol, so these executed controls raise `TypeError` "
+            f"before the assert. Unknown metaclasses keep the conservative "
+            f"verdict; only a source-proven live protocol widens it."
+        )
+
+
 def test_a_class_with_an_enterable_metaclass_is_enterable():
     """The discriminating row a "classes are never enterable" rule gets wrong.
 
@@ -8303,6 +8378,106 @@ USER_EXIT_SWALLOW_SHAPES = (
     (
         "equality spelling",
         "def __exit__(self, *exc):\n    return exc[0] == AssertionError",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # --- #338: an __exit__ that swallows *every* exception ---
+    #
+    # #316 decided the spellings that say "the failure is an AssertionError".
+    # These four never name `AssertionError` at all, yet every one of them is
+    # *true* whenever `__exit__` is called with an assertion failure -- the only
+    # call this rule asks about -- so all four were false-LIVEs: executed, the
+    # assert was swallowed, and the analyzer reported it `enforced`.
+    #
+    # The shared truth is that `exc[0]` is the raised exception *type*, i.e.
+    # `<class 'AssertionError'>`: a class object. A class object is truthy, is
+    # not `None`, is not `False`, and is a member of a tuple holding exactly
+    # `AssertionError`.
+    (
+        "338: is-not-None swallows every exception",
+        "def __exit__(self, *exc):\n    return exc[0] is not None",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: bool of the exception type swallows every exception",
+        "def __exit__(self, *exc):\n    return bool(exc[0])",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: is-not-False swallows every exception",
+        "def __exit__(self, *exc):\n    return exc[0] is not False",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: membership in a one-element AssertionError tuple swallows",
+        "def __exit__(self, *exc):\n    return exc[0] in (AssertionError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # The same `is not <literal>` truth reached through literals other than the
+    # two filed. Identity against a literal can never hold for a class object,
+    # so these are decided by one rule rather than by a `None`/`False` list --
+    # and `()` is here because the empty tuple parses as a `Tuple`, not a
+    # `Constant`, which is the branch a naive `isinstance(Constant)` misses.
+    (
+        "338: is-not-int-literal swallows",
+        "def __exit__(self, *exc):\n    return exc[0] is not 0",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    (
+        "338: is-not-empty-tuple swallows",
+        "def __exit__(self, *exc):\n    return exc[0] is not ()",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # --- #338 loud controls: near misses that must stay enforced ---
+    # The negated membership. `exc[0] not in (AssertionError,)` is false when
+    # an assert *was* swallowed, so this `__exit__` propagates and the assert
+    # stays live. Reading it as a swallow is the damaging direction, and this
+    # row is what makes the `not in` guard non-vacuous.
+    (
+        "338: negated membership stays enforced",
+        "def __exit__(self, *exc):\n    return exc[0] not in (AssertionError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # Membership against a tuple that does not name the builtin.
+    (
+        "338: membership in a foreign tuple stays enforced",
+        "def __exit__(self, *exc):\n    return exc[0] in (ValueError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # Both members are genuine builtin types; the received AssertionError is
+    # a member by identity. Execution, rather than a conservative label, pins
+    # this row as swallowed.
+    (
+        "338: multi-element builtin tuple swallows by identity",
+        "def __exit__(self, *exc):\n    return exc[0] in (AssertionError, ValueError)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        False,
+    ),
+    # The subscript is load-bearing for the membership spelling. Under `*exc` a
+    # bare `exc` is the whole argument tuple, so `exc in (AssertionError,)` is
+    # false at runtime -- the opposite of `exc[0] in (AssertionError,)`. A
+    # generalized helper that accepted the bare name would report this row
+    # swallowed when it propagates, so the row pins the difference.
+    (
+        "338: bare exception tuple is not the raised type",
+        "def __exit__(self, *exc):\n    return exc in (AssertionError,)",
+        "    helper = Suppressor()\n    with helper:\n        assert x != 1",
+        True,
+    ),
+    # The bare name under the `is not` spelling is still a swallow -- a tuple
+    # is likewise not `None` -- so the two directions are deliberately
+    # asymmetric and this row pins that asymmetry from the other side.
+    (
+        "338: bare exception tuple is-not-None still swallows",
+        "def __exit__(self, *exc):\n    return exc is not None",
         "    helper = Suppressor()\n    with helper:\n        assert x != 1",
         False,
     ),
@@ -14267,6 +14442,27 @@ LOOP_ELSE_IMPORT_SPELLINGS = (
         "contextlib.suppress(AssertionError)",
         True,
     ),
+    (
+        "485 inert try/pass",
+        "    try:\n        pass\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 canonical import try",
+        "    try:\n        import contextlib\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 nested canonical try",
+        "    try:\n        try:\n            import contextlib\n        except ImportError:\n            pass\n    except Exception:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
 )
 
 
@@ -14303,6 +14499,23 @@ LOOP_ELSE_IMPORT_SHADOWS = (
         "a nested def shadowing the walked root",
         "    def contextlib():\n        pass\n",
     ),
+    (
+        "a try that rebinds the carried manager",
+        "    try:\n        cs = contextlib.suppress(AssertionError)\n    except Exception:\n        pass\n",
+    ),
+    (
+        "a try whose finally rebinds the carried manager",
+        "    try:\n        import os\n    finally:\n        cs = contextlib.suppress(AssertionError)\n",
+    ),
+    (
+        "a try whose handler binds a name",
+        "    try:\n        helper()\n    except Exception as exc:\n        pass\n",
+    ),
+    (
+        "a try whose body defines a shadowing name",
+        "    try:\n        def cs():\n            pass\n    except Exception:\n        pass\n",
+    ),
+    ("a try whose body returns", "    try:\n        return\n    except Exception:\n        pass\n"),
 )
 
 
@@ -14958,3 +15171,336 @@ def test_loop_else_witness_declines_definition_overwriting_failure_parameter():
     function = tree.body[1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(("exit_value", "live"), [("False", True), ("True", False)])
+def test_class_carrier_proves_metaclass_exit_before_admitting_body(exit_value, live):
+    source = (
+        "def outer(x):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n"
+        f"        def __exit__(cls, *exc): return {exit_value}\n"
+        "    class CM(metaclass=Meta): pass\n    with CM:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if live:
+        with pytest.raises(AssertionError):
+            namespace["outer"](1)
+    else:
+        assert namespace["outer"](1) is None
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is live
+
+
+@pytest.mark.parametrize(
+    ("prefix", "error"),
+    [
+        ("    missing_name\n", NameError),
+        ("    if trigger:\n        pass\n", AssertionError),
+        ("    trigger[0]\n", TypeError),
+        ("    return\n", None),
+    ],
+)
+def test_class_carrier_declines_opaque_setup_before_bare_header(prefix, error):
+    source = (
+        "def outer(x, trigger):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        "    class CM(metaclass=Meta): pass\n" + prefix + "    with CM:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if error is None:
+        assert namespace["outer"](1, object()) is None
+    else:
+        with pytest.raises(error):
+            namespace["outer"](1, object())
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "    class CM(**{'metaclass': Meta}): pass\n",
+        "    class Base(metaclass=Meta): pass\n    class CM(Base): pass\n",
+    ],
+)
+def test_class_carrier_unresolved_shape_keeps_live_runtime_as_known_decline(declaration):
+    source = (
+        "def outer(x):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        + declaration
+        + "    with CM:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # Runtime is live; inherited/unpacked metaclass resolution is not claimed.
+    assert _is_enforced(function, target, module) is False
+
+
+def test_class_carrier_declines_member_overwrite_before_entry():
+    source = (
+        "def outer(x):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        "    class CM(metaclass=Meta): pass\n"
+        "    Meta.__exit__ = lambda cls, *exc: True\n"
+        "    with CM:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    assert namespace["outer"](1) is None
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+def test_class_carrier_type_spelling_does_not_resolve_caller_parameter():
+    class Meta(type):
+        def __enter__(cls):
+            return cls
+
+        def __exit__(cls, *exc):
+            return False
+
+    class Base(metaclass=Meta):
+        pass
+
+    source = "def outer(x, type):\n    class CM(type): pass\n    with CM:\n        assert x != 1\n"
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1, Base)
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # Unknown caller metatypes are a retained conservative decline.
+    assert _is_enforced(function, target, module) is False
+
+
+def test_class_carrier_declines_decorator_replacing_class_value():
+    source = """import contextlib
+def outer(x):
+    def decorate(cls):
+        return contextlib.nullcontext()
+    @decorate
+    class CM:
+        pass
+    with CM:
+        assert x != 1
+"""
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[1]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize(
+    ("message", "error"), [("missing_name", NameError), ("1 / 0", ZeroDivisionError)]
+)
+def test_class_carrier_requires_inert_assertion_message(message, error):
+    source = (
+        "def outer(x):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        "    class CM(metaclass=Meta): pass\n    with CM:\n"
+        f"        assert x != 1, {message}\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="class type parameters require Python 3.12")
+@pytest.mark.parametrize(("parameter", "error"), [("Meta", TypeError), ("T", AssertionError)])
+def test_class_carrier_declines_generic_metaclass_lookup_scope(parameter, error):
+    source = (
+        "def outer(x):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        f"    class CM[{parameter}](metaclass=Meta): pass\n"
+        "    with CM:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(error):
+        namespace["outer"](1)
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize("signature", ["*x", "**x"])
+def test_class_carrier_variadic_collectors_are_not_primitive_failure_witnesses(signature):
+    source = (
+        f"def outer({signature}):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        "    class CM(metaclass=Meta): pass\n    with CM:\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if signature == "*x":
+        assert namespace["outer"](1) is None
+    else:
+        assert namespace["outer"](x=1) is None
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize("parameter", ["CM", "Meta"])
+def test_class_carrier_class_definitions_cannot_be_parameter_failure_witnesses(parameter):
+    source = (
+        f"def outer({parameter}):\n    class Meta(type):\n"
+        "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
+        "    class CM(metaclass=Meta): pass\n    with CM:\n"
+        f"        assert {parameter} != 1\n"
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    assert namespace["outer"](1) is None
+    module = ast.parse(source)
+    function = module.body[0]
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+@pytest.mark.parametrize(
+    ("preamble", "error"),
+    [
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except ImportError:\n        return\n",
+            None,
+        ),
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except ImportError:\n        raise ValueError\n",
+            ValueError,
+        ),
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except ValueError:\n        pass\n",
+            ModuleNotFoundError,
+        ),
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except 123:\n        pass\n",
+            TypeError,
+        ),
+        ("    try:\n        pass\n    finally:\n        return\n", None),
+        (
+            "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        return\n",
+            None,
+        ),
+    ],
+)
+def test_try_witness_requires_every_reachable_arm_to_resume(preamble, error):
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        + preamble
+        + (
+            "    cs=contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs=contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if error is None:
+        assert namespace["outer"](1) is None
+    else:
+        with pytest.raises(error):
+            namespace["outer"](1)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+def test_try_witness_declines_opaque_helper_even_when_one_call_is_harmless():
+    source = """import contextlib
+def outer(x, helper):
+    try:
+        helper()
+    except Exception:
+        pass
+    cs = contextlib.nullcontext()
+    for item in (1,):
+        break
+    else:
+        cs = contextlib.suppress(AssertionError)
+    with cs:
+        assert x != 1
+"""
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1, lambda: None)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # Caller-specific callback effects cannot be inferred from this body.
+    assert _is_enforced(function, target, module) is False
+
+
+TRY_UNKNOWN_IMPORT_RUNTIME_ROWS = (
+    (
+        "485 a try/except above the loop is transparent",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 a try*/except* above the loop is transparent",
+        "    try:\n        import nope_missing_xyz\n    except* ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 a nested admitted try above the loop is transparent",
+        "    try:\n        try:\n            import nope_missing_xyz\n        except ImportError:\n            pass\n    except Exception:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "carrier", "arm", "runtime_live"), TRY_UNKNOWN_IMPORT_RUNTIME_ROWS
+)
+def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
+    label, preamble, carrier, arm, runtime_live
+):
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            f"    cs = {carrier}\n    for item in (1,):\n        break\n    else:\n        cs = {arm}\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    _assert_suppression_contract(label, source, runtime_live)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # Original CPython fixtures are live; arbitrary initialization is unproved.
+    assert runtime_live is True
+    assert _is_enforced(function, target, module) is False
