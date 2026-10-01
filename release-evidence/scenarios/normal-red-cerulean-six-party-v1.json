@@ -1,0 +1,50 @@
+{
+  "scenario_id": "normal-red-cerulean-six-party-v1",
+  "schema_version": 1,
+  "scope": "Captured ordinary Red color continuation; admission does not certify strict link or full release",
+  "fixture_root": "operator-managed",
+  "asset_policy": {
+    "repository_distributed": false,
+    "validation_policy": "fail closed on missing, size, SHA-1, or SHA-256 mismatch"
+  },
+  "fixture": {
+    "id": "normal-red-cerulean-six-party-v1",
+    "path": "red/normal-red-cerulean-six-party-v1.state",
+    "version": "red",
+    "variant": "color",
+    "kind": "slots",
+    "size_bytes": 200548,
+    "sha1": "79a9d30c0a49220e4501ef861fdc1b3d334e1b6c",
+    "sha256": "c9120b2d979cef82f4320fc61465779e263600266cbd79edac431e23bd2e52e7",
+    "expected_rom": {
+      "path": "rom/red/pokemon-red-color.gb",
+      "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+    },
+    "expected_symbols": {
+      "path": "rom/red/pokemon-red.sym",
+      "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+    },
+    "repository_distributed": false,
+    "provenance": {
+      "status": "captured",
+      "producer": "scripts/produce_normal_club_journey.py",
+      "producer_commit": "35a9ccc9c00ebfe9f578f6eaf68a957de275d171",
+      "producer_sha256": "31e7ab992bb21696091cff6357b460936df138bbbd0ffce530bf76257245657c",
+      "source_state": "Reviewed ordinary six-party capture SHA-1 53c756e073c677f7aa9adb7548352fc745d040e3; ancestor fresh boot producer 573e973965c7ddb0b93fbb580dbe6f657d1cac9b",
+      "capture_command_template": "python -m scripts.produce_normal_club_journey --rom <pinned-ROM> --symbols <pinned-SYM> --game-source <matching-source> --source-state <reviewed-six-party.state> --parent-receipt <receipt.json> --state-sha1 <parent-SHA1> --state-sha256 <parent-SHA256> --receipt-sha256 <receipt-SHA256> --output <new-external-directory> --seconds 600",
+      "runtime_identity": "Python 3.12.13; mcp 1.29.1; native PyBoy 2.7.0 fd765b1808ac9cb192b42ae971987158ff36ae48; UID 1000",
+      "captured_at_utc": "2026-10-01 (exact launch timestamp not retained; launch receipt timestamp recorded after terminal)",
+      "verification_method": "Independent read/hash audit of 66 artifacts, 30 state pairs, 3088 continuous action pairs and four loaded Git source blobs; no independent ROM rerun",
+      "receipt_sha256": "3d6ddf9717b64d9caf1b3a08cabe4bc8dfee4484a253c708429f95514df80226",
+      "controller_ram_writes": false,
+      "fresh_boot": false,
+      "ancestry": "State continuation from reviewed 53c catch -> reviewed Mart -> canonical fresh boot 573e Boulder Badge; ordinary buttons and read-only observation",
+      "limitations": [
+        "No dedicated quiet CPU reservation",
+        "No strict link qualification claimed by capture",
+        "Operator pret checkout whole HEAD differs pinned source; 36 consulted file identities individually verified",
+        "Original zero-input geometry failure retained separately"
+      ]
+    }
+  }
+}
