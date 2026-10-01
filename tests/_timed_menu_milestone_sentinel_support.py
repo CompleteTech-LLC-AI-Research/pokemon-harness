@@ -77,6 +77,7 @@ _FRAGMENT_FILES = (
     "_sentinel_support_part27",
     "_sentinel_support_part28",
     "_sentinel_support_part29",
+    "_sentinel_support_part30",
     "_sentinel_support_part31",
 )
 
