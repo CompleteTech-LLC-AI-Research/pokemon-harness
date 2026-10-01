@@ -754,3 +754,21 @@ def test_recorded_head_identity_is_verified_against_history() -> None:
     for bad_head, bad_tree in ((head, "f" * 40), ("f" * 40, tree), ("f" * 40, "f" * 40)):
         with pytest.raises(AssertionError):
             _versions_at_recorded_head(bad_head, bad_tree)
+
+
+def test_post_divergence_yellow_registration_reuses_unchanged_guards(monkeypatch):
+    """The refreshed cell must meet the same guard as its historical record."""
+    refreshed = (
+        PROJECT_ROOT
+        / "release-evidence"
+        / "feature-qualification"
+        / "issue235-medicine-yellow-fce42d57"
+    )
+    # Select the independent record without changing either validator body.
+    # pytest restores this module attribute before the next test executes.
+    monkeypatch.setattr(f"{__name__}.QUALIFICATION_BUNDLE", refreshed)
+    identity = json.loads((refreshed / "runtime-identity.json").read_text(encoding="utf-8"))
+    assert identity["refresh_issue"] == 235
+    assert identity["vendored_revision_marker"] == "fd765b1808ac9cb192b42ae971987158ff36ae48"
+    test_runtime_registration_bundle_is_sanitized_and_consistent()
+    test_recorded_head_identity_is_verified_against_history()

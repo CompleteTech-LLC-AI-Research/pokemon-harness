@@ -1,0 +1,11 @@
+# Blue capped Potion mechanics cell
+
+Status: scoped measurement complete; broader qualification PARTIAL.
+
+The added node `tests/test_battle_healing_items_rom.py::test_blue_potion_caps_healing_and_spends_one_observed_turn` loads the existing immutable Blue-color fixture, observes ITEM -> POTION -> target, and checks HP 150/152 -> 152, exactly one Potion consumed, unchanged money, last-unit compaction, idempotent continuation, and one ROM-announced opponent action after application. The original Yellow acceptance and expectations are unchanged. Three asset-free controls independently reject size, SHA-1 and SHA-256 mismatches.
+
+The frozen test source SHA-256 is `601ce82f4512724ae8b86e9fd63141bb3818389aeb17d02d983e98073d4d1b8b`. Its nine selected tests passed in each runtime on Python 3.12.13 with pin `fd765b1808ac9cb192b42ae971987158ff36ae48`: source terminal 24.26s, native terminal 3.51s, zero failures/errors/skips. Operator-managed external receipts are `blue-medicine-source.xml`, `blue-medicine-source.log`, `blue-medicine-native.xml` and `blue-medicine-native.log`; they are not a later-head or full production-gate result. Native/source origins use separate environments. Independent review verified the source and receipts plus three admission controls, without a separate real-ROM rerun.
+
+The fixture SHA-1 `4a2903e043cda7a179f92f78751f41577279a679` was reproduced through normal joypad continuation from the pinned operator `after_brock` milestone (`63287049a18105ae16433914cc3b3c136fe25db2`). That proves the final input bytes and our continuation, not the ancestor's normal-play origin. Read-only audit found an optional RAM-boost branch in the operator's ignored `scripts/blue_forest_to_brock.py` (SHA-256 `051de430fb2a2943385d33beb8fa6c5e7bad01519b9d2c54e362063f26478910`); the source milestone's selected mode and historical generation receipt are unverified. No original input or immutable pin was changed.
+
+These are actual ROM-owned scoped healing observations from an admitted fixture, not an end-to-end human-valid playthrough. Dedicated quiet CPU allocation and complete current-head source/native production gates are not established. Other medicines, failures, targets, games, remote roles and the full #90/#72 acceptance remain open. ROM, symbol, save-state and screenshot bytes remain outside version control.

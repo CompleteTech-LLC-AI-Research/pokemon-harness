@@ -532,6 +532,13 @@ def _literal_match_reaches_header(function, match):
             # never decided for the issue's own spelling and a header
             # CPython enters was reported defeated.
             #
+            # The module restriction here is redundant with the authoritative
+            # callee provenance check below (#463): removing only this walk
+            # condition does not establish a different module's callee as
+            # contextlib. It is a conservative readability boundary, not a
+            # separately load-bearing soundness guard. The module restriction
+            # in `_binding_is_the_callee_import` remains authoritative.
+            #
             # The gate stays exactly as narrow as the qualified form: the
             # import must come from `contextlib` and nothing may be renamed,
             # since an `as` alias is a rebinding this walk cannot follow. The
