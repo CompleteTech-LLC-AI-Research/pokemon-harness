@@ -165,6 +165,8 @@ def _is_enforced(function, target, tree=None):
                 return False
             if _header_expression_raises(ancestor, function, owning):
                 return False
+            if function is not None and _scope_above_header_raises(function, ancestor):
+                return False
         elif (
             isinstance(ancestor, (ast.If, ast.While))
             and _falsy_literal(ancestor.test, function)
@@ -715,7 +717,105 @@ def _outermost_chain_link(block, function):
     return None
 
 
+def _elif_skipped_path_carries_defeat(entries, orders, competitor, bound, function, query, owning):
+    """Prove the value carried across a skipped arm is the one the ``with`` enters.
+
+    ``#445``. ``#441``/``#452`` answer *live* by showing the failure value skips
+    the arm and enters a plain manager carried in from before the chain. This is
+    the same walk with the opposite question: does the skipped path enter a
+    value that *swallows*? The arm is correctly demoted either way, because an
+    ``elif`` runs only when every test above it failed, so it is never the
+    binding on the failing call. What differs is the value the failing call
+    enters -- the carried one -- and that is the value that decides.
+
+    The gate is what makes the answer symmetric. The carried value must be
+    *readable*, which the ``_elif_witness_reaches_header`` scan already
+    restricts to ``nullcontext()`` and a named suppression. Reading it here
+    through :func:`_entry_suppresses_assertion_errors` is what distinguishes the
+    two polarities without widening the witness:
+
+        with (cs := contextlib.suppress(AssertionError)):   # swallows
+            pass
+        if x: pass
+        elif True: cs = contextlib.nullcontext()           # skipped at x=1
+        with cs: assert x != 1                             # DEAD -- x=1 enters
+                                                          # the carried suppress
+
+    An unreadable carried value answers ``False`` here, which keeps the assert
+    live. That is deliberate and it is the safe direction: a factory call the
+    reader cannot resolve is not evidence that the assert is defeated.
+    """
+    return _elif_skipped_path_walks(
+        entries, orders, competitor, bound, function, query, owning, carried_suppresses=True
+    )
+
+
+def _carried_suppression_value(entries, orders, competitor, bound):
+    """The value in force at the header on the calls that skip the arm.
+
+    The caller has already proven, through
+    :func:`_elif_skipped_path_carries_defeat`, that this value swallows
+    ``AssertionError``. This returns the *value* rather than a marker so the
+    header resolves the way it would have had the arm not been written at all,
+    which is exactly what CPython does: the arm's assignment never runs on the
+    failing call, so the name still carries the earlier binding there.
+
+    ``None`` is never returned for a proven case -- the witness refuses unless
+    the carried entry is a readable suppression call, and that same entry is
+    what is returned here. The lookup is by the same identity, order and
+    conditionality the witness used, so the two cannot disagree.
+    """
+    prior = [entry for entry in entries if orders[id(entry[0])] < orders[id(competitor[0])]]
+    if not prior:
+        return _NOT_A_SUPPRESSOR
+    latest_order = max(orders[id(entry[0])] for entry in prior)
+    latest = [entry for entry in prior if orders[id(entry[0])] == latest_order]
+    if len(latest) != 1 or latest[0][2]:
+        return _NOT_A_SUPPRESSOR
+    return latest[0][1]
+
+
+def _carried_value_is_plain_manager(manager, bound):
+    """Is the carried value a *readable* manager that lets ``AssertionError`` out?
+
+    #452 originally spelled this as "is it exactly ``contextlib.nullcontext()``".
+    # That is narrower than the question the walk is asking, and the gap shows
+    # in both polarities. A carried ``suppress(ValueError)`` is just as readable
+    and just as enterable as a ``nullcontext()``, and it does not catch
+    ``AssertionError`` -- so a call that skips the suppressing arm really does
+    let the failure escape, and the assert is live. Restricting the carried
+    value to the one spelling reported that live header as DEFEATED.
+
+    The question asked here is deliberately narrow -- *readable*, and provably
+    not catching ``AssertionError``. An unreadable call answers False, which
+    leaves the resolution untouched, because a factory the reader cannot follow
+    is not evidence either way.
+    """
+    if bound is None or not isinstance(manager, ast.Call) or manager.keywords:
+        return False
+    if _resolves_to(manager.func, "contextlib.nullcontext", bound) and not manager.args:
+        return True
+    if not _is_readable_suppressor(manager, bound):
+        return False
+    return not _entry_suppresses_assertion_errors((None, manager, False), bound)
+
+
 def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, query, owning=None):
+    """Prove the filed literal-comparison failure reaches a skipped elif arm.
+
+    A non-suppressor is not necessarily enterable. A live classification also
+    needs a failure value that takes an earlier arm, rather than the suppressing
+    one. Unknown managers, predicates, local rebinding and nested control flow
+    retain the existing resolution.
+    """
+    return _elif_skipped_path_walks(
+        entries, orders, competitor, bound, function, query, owning, carried_suppresses=False
+    )
+
+
+def _elif_skipped_path_walks(
+    entries, orders, competitor, bound, function, query, owning, carried_suppresses
+):
     """Prove the filed literal-comparison failure reaches a skipped arm.
 
     A non-suppressor is not necessarily enterable. A live classification also
@@ -749,12 +849,19 @@ def _elif_skipped_path_can_fail(entries, orders, competitor, bound, function, qu
     if len(latest) != 1 or latest[0][2]:
         return False
     manager = latest[0][1]
-    if not (
-        isinstance(manager, ast.Call)
-        and not manager.args
-        and not manager.keywords
-        and _resolves_to(manager.func, "contextlib.nullcontext", bound)
-    ):
+    if carried_suppresses:
+        # #445. The carried value decides the skipped path, so ask what it
+        # *is* rather than which spelling it has. #452's witness could hard-code
+        # `contextlib.nullcontext()` because it was only ever asking "is the
+        # carried value enterable?"; the same question is asked here, and the
+        # polarity of the answer -- suppresses or does not -- is decided by the
+        # caller. A carried `suppress(AssertionError)` is exactly as readable as
+        # a carried `nullcontext()` and just as enterable, and requiring the
+        # nullcontext spelling is what made this case read live while the assert
+        # really is swallowed.
+        if not _entry_suppresses_assertion_errors(latest[0], bound):
+            return False
+    elif not _carried_value_is_plain_manager(manager, bound):
         return False
     root_name = manager.func
     while isinstance(root_name, ast.Attribute):
@@ -1055,8 +1162,69 @@ def _break_reachable_with_failure(loop, values, function):
         if not isinstance(node, ast.Break):
             continue
         test = _enclosing_conditions(node, loop)
-        if all(_elif_failure_predicate(condition, values) is not False for condition in test):
+        if all(_condition_can_hold(condition, values) for condition in test):
             return True
+    return False
+
+
+def _condition_can_hold(condition, values):
+    """Can this guard be true at ``values`` -- or at least not provably false?
+
+    Two outcomes, and the distinction between them is the whole point:
+
+    * ``False`` -- the guard is decided false, or deciding it would raise. In
+      the second case the loop cannot complete normally at all, so the guarded
+      ``break`` is unreachable *and* the ``else`` cannot be installed. Either
+      way the witness must fail.
+    * ``True`` -- decided true, or not decidable, so the break may be reached
+      and the witness stands.
+
+    A condition this cannot read is deliberately still "possibly reachable":
+    there the ``else`` genuinely may or may not run, and assuming it ran would
+    be the unsafe direction. A condition that *raises* is different -- the
+    loop cannot complete, so there is nothing left to assume. The two used to
+    share a single ``None``, and only one of them is safe to treat as
+    "possibly reachable".
+    """
+    if _condition_raises(condition, values):
+        return False
+    return _elif_failure_predicate(condition, values) is not False
+
+
+def _condition_raises(test, values):
+    """Would evaluating ``test`` at ``values`` raise, rather than answer?
+
+    Only the comparisons the predicate resolves to concrete operands can raise,
+    and only for the four ordering operators: ``==`` and ``!=`` are defined for
+    every pair of Python objects, ``1 == "a"`` is ``False`` rather than an
+    error. This mirrors the ``try``/``except TypeError`` that
+    ``_elif_failure_predicate`` uses to decline the same pairs, so the two
+    never disagree about which operands are unorderable.
+    """
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return False
+    operator = type(test.ops[0])
+    if operator not in (ast.Lt, ast.LtE, ast.Gt, ast.GtE):
+        return False
+    resolved = []
+    for operand in (test.left, test.comparators[0]):
+        if isinstance(operand, ast.Constant):
+            resolved.append(operand.value)
+        elif isinstance(operand, ast.Name) and operand.id in values:
+            resolved.append(values[operand.id])
+        else:
+            return False
+    left, right = resolved
+    evaluates = {
+        ast.Lt: lambda: left < right,
+        ast.LtE: lambda: left <= right,
+        ast.Gt: lambda: left > right,
+        ast.GtE: lambda: left >= right,
+    }
+    try:
+        evaluates[operator]()
+    except TypeError:
+        return True
     return False
 
 
@@ -1083,6 +1251,42 @@ def _enclosing_conditions(node, loop):
             break
     conditions.reverse()
     return conditions
+
+
+def _bindings_after_import(node, bound):
+    """The binding table as it stands once ``node`` itself has run.
+
+    The question `_import_only_binds_the_resolved_root` asks is about *this
+    statement*: "does the name I bind coincide with a name the witness walks,
+    and is it the real module?" Answering that from the caller's merged table
+    answers a different question -- what is bound at the *end* of the scope --
+    and the two disagree whenever a later import rebinds the same name.
+
+    In
+
+        from json import loads as contextlib
+        import contextlib
+
+    the merged table says `contextlib` is the real module, because the second
+    import wins. Read that way the first statement looks transparent, and
+    admitting it is a false-LIVE: on the first call `contextlib` really is
+    `json.loads`, and the walk's `contextlib.suppress` is `json.loads.suppress`.
+    Neither import is safe alone, so the correct answer for this statement is
+    "no, it rebinds a walked root".
+
+    Overlaying this statement's own aliases on the caller's table is what
+    restores the per-statement question without making the caller rebuild a
+    scope: later bindings stay visible (they are not this statement's
+    business), and the statement under test always sees its own effect.
+    """
+    own = dict(bound)
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            own[alias.asname or alias.name] = alias.name
+    elif isinstance(node, ast.ImportFrom) and node.module:
+        for alias in node.names:
+            own[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return own
 
 
 def _import_only_binds_the_resolved_root(node, function, bound):
@@ -1152,6 +1356,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
         return False
     if not node.names:
         return False
+    own = _bindings_after_import(node, bound)
     if isinstance(node, ast.ImportFrom):
         # #475. `from a import b` binds `b`, and resolves to `a.b`.  That is
         # the same collision test as every other spelling, read off the binding
@@ -1170,7 +1375,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
                     ctx=ast.Load(),
                 ),
                 "contextlib.suppress",
-                bound,
+                own,
             ):
                 return False
         return True
@@ -1208,7 +1413,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
                     ctx=ast.Load(),
                 ),
                 "contextlib.suppress",
-                bound,
+                own,
             ):
                 return False
             continue
@@ -1231,7 +1436,7 @@ def _import_only_binds_the_resolved_root(node, function, bound):
         if head in _witness_module_roots(function, bound) and not _resolves_to(
             ast.Attribute(value=ast.Name(id=head, ctx=ast.Load()), attr="suppress", ctx=ast.Load()),
             "contextlib.suppress",
-            bound,
+            own,
         ):
             return False
     # The import must not rebind a name the header or the manager path reads,
@@ -1256,6 +1461,20 @@ def _witness_module_roots(function, bound):
     Anything the witness later has to attribute to the real `contextlib`
     module is spelled as an attribute path in this scope, so the roots are
     exactly the `ast.Name` nodes that heads such attribute chains.
+
+    ``bound`` is unused here on purpose, and the parameter is kept only so the
+    call sites read the same as the other helpers. What a spelling *is* at a
+    given point in the scope is a separate question, asked per statement by
+    :func:`_import_only_binds_the_resolved_root` against
+    :func:`_bindings_after_import`: in
+
+        import json as contextlib
+        import contextlib
+
+    the name `contextlib` heads an attribute path in both, but it is the real
+    module only after the second statement. Collapsing that into one merged
+    table is what made the first look transparent and turned a live assert
+    into a false-DEAD.
     """
     roots = set()
     for node in ast.walk(function):
@@ -1266,6 +1485,44 @@ def _witness_module_roots(function, bound):
             if isinstance(head, ast.Name):
                 roots.add(head.id)
     return roots
+
+
+def _elif_witness_is_binding_header(node):
+    """A ``with`` header whose only effect is binding the name it enters.
+
+    ``with (cs := ...):`` binds and enters in one statement. It is a safe
+    carrier for the witness only when the body is a single ``pass`` and the
+    context expression is the assignment expression itself -- a body that
+    could rebind the name, or a second item that could bind another one, would
+    make the carried value undecidable, so those shapes are declined here
+    rather than reasoned about downstream.
+    """
+    if not isinstance(node, ast.With) or len(node.items) != 1:
+        return False
+    if not (len(node.body) == 1 and isinstance(node.body[0], ast.Pass)):
+        return False
+    return isinstance(node.items[0].context_expr, ast.NamedExpr)
+
+
+def _elif_witness_header_value_is_readable(node, bound):
+    """Is the binding header's own value one the witness can reason about?"""
+    walrus = node.items[0].context_expr
+    if not isinstance(walrus.target, ast.Name):
+        return False
+    value = walrus.value
+    if isinstance(value, ast.Constant):
+        return True
+    if not isinstance(value, ast.Call) or value.keywords:
+        return False
+    if _resolves_to(value.func, "contextlib.nullcontext", bound) and not value.args:
+        return True
+    if not _is_readable_suppressor(value, bound):
+        return False
+    return all(
+        isinstance(argument, ast.Name)
+        and argument.id in ("AssertionError", "Exception", "BaseException", "ValueError")
+        for argument in value.args
+    )
 
 
 def _elif_witness_reaches_header(function, chain, query, bound):
@@ -1305,6 +1562,28 @@ def _elif_witness_reaches_header(function, chain, query, bound):
         # import that binds exactly the module root the witness already reads
         # is transparent, so that is what is admitted here.
         if _import_only_binds_the_resolved_root(node, function, bound):
+            continue
+        # #445. The carried binding may arrive through a `with` header's
+        # assignment expression rather than a plain assignment:
+        #
+        #     with (cs := contextlib.suppress(AssertionError)):
+        #         pass
+        #     if x:
+        #         pass
+        #     elif True:
+        #         cs = contextlib.nullcontext()
+        #     with cs:
+        #         assert x != 1
+        #
+        # The header still enters only the object its own expression names, so
+        # a `pass` body and a bare-name value are exactly as safe here as they
+        # are for the plain-assignment spelling -- the statement runs, binds
+        # the name, and leaves the rest of the suite to the value gate below.
+        # Requiring an `ast.Assign` made the whole #445 shape unprovable while
+        # the analyzer still read it live.
+        if _elif_witness_is_binding_header(node):
+            if not _elif_witness_header_value_is_readable(node, bound):
+                return False
             continue
         if not isinstance(node, ast.Assign) or not all(
             isinstance(target, ast.Name) for target in node.targets
