@@ -14267,6 +14267,27 @@ LOOP_ELSE_IMPORT_SPELLINGS = (
         "contextlib.suppress(AssertionError)",
         True,
     ),
+    (
+        "485 inert try/pass",
+        "    try:\n        pass\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 canonical import try",
+        "    try:\n        import contextlib\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 nested canonical try",
+        "    try:\n        try:\n            import contextlib\n        except ImportError:\n            pass\n    except Exception:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
 )
 
 
@@ -14303,6 +14324,23 @@ LOOP_ELSE_IMPORT_SHADOWS = (
         "a nested def shadowing the walked root",
         "    def contextlib():\n        pass\n",
     ),
+    (
+        "a try that rebinds the carried manager",
+        "    try:\n        cs = contextlib.suppress(AssertionError)\n    except Exception:\n        pass\n",
+    ),
+    (
+        "a try whose finally rebinds the carried manager",
+        "    try:\n        import os\n    finally:\n        cs = contextlib.suppress(AssertionError)\n",
+    ),
+    (
+        "a try whose handler binds a name",
+        "    try:\n        helper()\n    except Exception as exc:\n        pass\n",
+    ),
+    (
+        "a try whose body defines a shadowing name",
+        "    try:\n        def cs():\n            pass\n    except Exception:\n        pass\n",
+    ),
+    ("a try whose body returns", "    try:\n        return\n    except Exception:\n        pass\n"),
 )
 
 
@@ -14958,3 +14996,126 @@ def test_loop_else_witness_declines_definition_overwriting_failure_parameter():
     function = tree.body[1]
     target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
     assert _is_enforced(function, target, tree) is False
+
+
+@pytest.mark.parametrize(
+    ("preamble", "error"),
+    [
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except ImportError:\n        return\n",
+            None,
+        ),
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except ImportError:\n        raise ValueError\n",
+            ValueError,
+        ),
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except ValueError:\n        pass\n",
+            ModuleNotFoundError,
+        ),
+        (
+            "    try:\n        import missing_sentinel_491_probe\n    except 123:\n        pass\n",
+            TypeError,
+        ),
+        ("    try:\n        pass\n    finally:\n        return\n", None),
+        (
+            "    try:\n        pass\n    except Exception:\n        pass\n    else:\n        return\n",
+            None,
+        ),
+    ],
+)
+def test_try_witness_requires_every_reachable_arm_to_resume(preamble, error):
+    source = (
+        "import contextlib\ndef outer(x):\n"
+        + preamble
+        + (
+            "    cs=contextlib.nullcontext()\n    for item in (1,):\n        break\n"
+            "    else:\n        cs=contextlib.suppress(AssertionError)\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    if error is None:
+        assert namespace["outer"](1) is None
+    else:
+        with pytest.raises(error):
+            namespace["outer"](1)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is False
+
+
+def test_try_witness_declines_opaque_helper_even_when_one_call_is_harmless():
+    source = """import contextlib
+def outer(x, helper):
+    try:
+        helper()
+    except Exception:
+        pass
+    cs = contextlib.nullcontext()
+    for item in (1,):
+        break
+    else:
+        cs = contextlib.suppress(AssertionError)
+    with cs:
+        assert x != 1
+"""
+    namespace = {}
+    exec(source, namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1, lambda: None)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # Caller-specific callback effects cannot be inferred from this body.
+    assert _is_enforced(function, target, module) is False
+
+
+TRY_UNKNOWN_IMPORT_RUNTIME_ROWS = (
+    (
+        "485 a try/except above the loop is transparent",
+        "    try:\n        import nope_missing_xyz\n    except ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 a try*/except* above the loop is transparent",
+        "    try:\n        import nope_missing_xyz\n    except* ImportError:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+    (
+        "485 a nested admitted try above the loop is transparent",
+        "    try:\n        try:\n            import nope_missing_xyz\n        except ImportError:\n            pass\n    except Exception:\n        pass\n",
+        "contextlib.nullcontext()",
+        "contextlib.suppress(AssertionError)",
+        True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "preamble", "carrier", "arm", "runtime_live"), TRY_UNKNOWN_IMPORT_RUNTIME_ROWS
+)
+def test_try_unknown_import_keeps_original_execution_and_records_known_decline(
+    label, preamble, carrier, arm, runtime_live
+):
+    source = (
+        "import contextlib\ndef outer(x, flag, helper):\n"
+        + preamble
+        + (
+            f"    cs = {carrier}\n    for item in (1,):\n        break\n    else:\n        cs = {arm}\n"
+            "    with cs:\n        assert x != 1\n"
+        )
+    )
+    _assert_suppression_contract(label, source, runtime_live)
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    # Original CPython fixtures are live; arbitrary initialization is unproved.
+    assert runtime_live is True
+    assert _is_enforced(function, target, module) is False
