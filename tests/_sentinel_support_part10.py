@@ -1086,7 +1086,7 @@ def _enclosing_conditions(node, loop):
 
 
 def _import_only_binds_the_resolved_root(node, function, bound):
-    """Is this a plain import of the module root the witness reads through?
+    """Is this an import that leaves every name the witness reads untouched?
 
     #451. The filed fixture imports `contextlib` inside the function:
 
@@ -1100,50 +1100,107 @@ def _import_only_binds_the_resolved_root(node, function, bound):
             with cs:
                 assert x != 1
 
-    `import contextlib` is transparent to the witness: it binds the module
-    root that `_resolves_to` already follows to reach `contextlib.nullcontext`
-    and `contextlib.suppress`, and it introduces no value, no branch, and no
-    ordering that could settle the name under test.
+    An import is transparent exactly when it cannot change what the header
+    enters, and that is one question with one answer for every spelling: does
+    the name this statement binds coincide with a name the witness resolves
+    `contextlib.nullcontext` / `contextlib.suppress` through?  If no, the
+    statement rebinds something this scope never reads and is inert.  If yes,
+    it must resolve to the real `contextlib`, or it has genuinely rebound the
+    walked root and the witness would be reasoning about a different object.
 
-    Everything else stays rejected, because each of these can change what the
-    header actually enters:
+    That rule is what #475 added, because refusing every non-canonical
+    spelling was wrong in the damaging direction.  Each of these binds a name
+    the fixture does not read, yet all of them really do fire the assert:
 
-    * an alias (`import contextlib as cl`) rebinds a *different* name, so the
-      root the witness resolves through is untouched and the statement says
-      nothing about it -- but it is also not the filed spelling, so declining
-      it only costs coverage, never correctness;
-    * `import contextlib.nullcontext` binds a *different* root than the one
-      the witness resolves through, and would shadow the attribute path;
-    * `from contextlib import nullcontext` binds the leaf, not the root;
+    * ``import contextlib as cb`` with ``cb.nullcontext()`` -- `cb` *is* the
+      root here, and it resolves to `contextlib`;
+    * ``import os.path`` or ``import json`` beside the canonical import;
+    * ``import json as cl`` beside the canonical import.
+
+    Declining them certified a live assert dead, which is the same false-DEAD
+    the residue below describes, one import spelling further out.
+
+    What is still refused is any spelling that shadows a walked root with
+    something other than the real `contextlib`:
+
+    * ``import fake as contextlib`` -- `contextlib` resolves to `fake`, and
+      admitting it would certify a genuinely swallowed assert enforced;
+    * ``import contextlib.nullcontext`` binds the single name `contextlib` as
+      a *package*, shadowing the attribute path the witness walks;
+    * ``from contextlib import nullcontext`` binds the leaf, not the root;
     * any binding of a name that is later stored to, or that shadows the root,
       is refused by the checks below;
-    * a relative import (`level > 0`) resolves against a package this witness
+    * a relative import (``level > 0``) resolves against a package this witness
       knows nothing about.
 
-    A dotted import whose root matches is the one form that is provably
-    transparent, so only that is admitted.
+    Every one of those answers is read off the AST and the binding table rather
+    than from a reading of what the import "means", so the admitted and refused
+    sets cannot drift apart the way a hand-enumerated list did.
     """
     if not isinstance(node, ast.Import):
         return False
     if not node.names:
         return False
-    roots = []
     for alias in node.names:
+        head, dot, _leaf = alias.name.partition(".")
+        if not head:
+            return False
         if alias.asname is not None:
-            # `import x as y` binds `y`, not the module root.  Not the filed
-            # spelling, and it tells us nothing about the resolved root.
+            # #475. `import x as y` binds `y`, never `x`.  So the only question
+            # is whether `y` is a name this witness resolves through.  If it is
+            # not, the statement cannot change what the header enters, so it is
+            # transparent whatever `y` happens to point at -- `import json as
+            # cl` beside the canonical import binds `cl`, which nothing here
+            # reads, and the filed assert still fires.
+            #
+            # When it *is* a walked root, `_resolves_to` already answers it
+            # exactly, because that is the same resolved-path test used
+            # everywhere else:
+            #   * `import contextlib as cb` with `cb.nullcontext(...)` --
+            #     `cb` resolves to `contextlib`, so this *is* the filed
+            #     spelling under another name and must be admitted;
+            #   * `import fake as contextlib` -- `contextlib` resolves to
+            #     `fake`, which is not `contextlib.suppress`, so the alias has
+            #     genuinely rebound the root the witness walks and must be
+            #     refused.  Admitting that one is a false-LIVE: the fixture
+            #     installs a real suppressor through `fake` and swallows the
+            #     assert, yet the witness would certify it enforced.
+            #
+            # Nothing here is decided from the author's reading of what the
+            # alias "means".
+            if alias.asname in _witness_module_roots(function, bound) and not _resolves_to(
+                ast.Attribute(
+                    value=ast.Name(id=alias.asname, ctx=ast.Load()),
+                    attr="suppress",
+                    ctx=ast.Load(),
+                ),
+                "contextlib.suppress",
+                bound,
+            ):
+                return False
+            continue
+        if dot:
+            # `import a.b` binds the single name `a` (the leaf is an attribute
+            # of it), so it collides with a walked root exactly when `a` is
+            # one.  When `a` is unrelated -- `import os.path` next to the
+            # canonical `import contextlib` -- the statement rebinds nothing
+            # the witness resolves through and is transparent.
+            if head in _witness_module_roots(function, bound):
+                return False
+            continue
+        # A plain `import a` binds the single name `a`, which is exactly the
+        # same collision test the dotted and aliased spellings above make:
+        # `a` has to be either a root this witness walks -- in which case it is
+        # the filed spelling and must resolve to the real `contextlib` -- or a
+        # name nothing here reads, which cannot change what the header enters.
+        # `import json` beside the canonical import is that second case: it
+        # rebinds `json`, and `contextlib.nullcontext()` still fires.
+        if head in _witness_module_roots(function, bound) and not _resolves_to(
+            ast.Attribute(value=ast.Name(id=head, ctx=ast.Load()), attr="suppress", ctx=ast.Load()),
+            "contextlib.suppress",
+            bound,
+        ):
             return False
-        head, dot, _ = alias.name.partition(".")
-        if not head or dot:
-            # `import a.b` binds the leaf `a.b` as a name of its own, which
-            # shadows the attribute path the witness walks.  It does not
-            # re-bind the root, and admitting it would let a rebinding import
-            # pass as transparent -- measured as a false-LIVE.
-            return False
-        roots.append(head)
-    if len(set(roots)) != 1:
-        return False
-    root = roots[0]
     # The import must not rebind a name the header or the manager path reads,
     # and must not collide with a store anywhere in the scope: that would make
     # the value the witness reasons about a different object at the header.
@@ -1152,10 +1209,12 @@ def _import_only_binds_the_resolved_root(node, function, bound):
     # module root, so it cannot answer this question.  What matters is that
     # the import does not shadow a name the witness reads: the module roots
     # behind `contextlib.nullcontext` / `contextlib.suppress` in this scope.
-    # Binding the same root it already resolves through is therefore the
-    # transparent case, and binding anything else -- a different root, or a
-    # leaf -- is not.
-    return root in _witness_module_roots(function, bound)
+    # Every spelling above has already been checked against that rule, so
+    # reaching here means each name in this statement is bound either to the
+    # real `contextlib` the witness resolves through or to a name nothing here
+    # reads.  Either way it introduces no value, no branch, and no ordering
+    # that could settle the name under test.
+    return True
 
 
 def _witness_module_roots(function, bound):

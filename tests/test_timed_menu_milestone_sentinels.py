@@ -23,6 +23,8 @@ import ast
 import asyncio
 import contextlib
 import inspect
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -12451,12 +12453,12 @@ def test_a_loop_else_suppressor_is_live_under_a_function_local_import(
     )
 
 
-#: The repair admits an import that binds exactly the module root the witness
-#: reads.  These rows pin the *other* side of that rule: the import spellings
-#: that must keep declining.  Without them the acceptance can be widened to
-#: "any import is transparent" and the lane still goes green -- measured as
-#: surviving mutant N2 -- which would let a rebinding import talk the witness
-#: into a false-LIVE.
+#: The repair admits an import that cannot change what the header enters.  These
+#: rows pin both sides of that rule: the spellings that are transparent, and the
+#: one that genuinely rebinds a walked root.  Without the negative side the
+#: acceptance can be widened to "any import is transparent" and the lane still
+#: goes green -- measured as surviving mutant N2 -- which would let a
+#: rebinding import talk the witness into a false-LIVE.
 IMPORT_SHAPE_ROWS = (
     # -- The filed spelling is admitted.  Kept here so this table and the
     #    `#451` table cannot drift apart on the live direction.
@@ -12467,9 +12469,10 @@ IMPORT_SHAPE_ROWS = (
         "        break",
         True,
     ),
-    # -- An unrelated module binds a different root.  It says nothing about the
-    #    one the witness resolves through, and the loop still completes
-    #    normally, so the suppressor installs and the header is defeated.
+    # -- The unrelated import is transparent, but the loop has no `break`, so
+    #    its `else` runs and the suppressor really does install.  What defeats
+    #    the header here is the missing `break`, not the import -- ROW2b below
+    #    is the same import with the `break` restored, and it fires.
     (
         "451 import declined: an unrelated module",
         "    import json\n    import contextlib\n",
@@ -12477,21 +12480,51 @@ IMPORT_SHAPE_ROWS = (
         "        pass",
         False,
     ),
-    # -- `import contextlib as cl` binds `cl`, not the root the witness reads.
-    #    The alias has to keep declining, or an import that genuinely does
-    #    rebind something would be waved through as transparent.
+    # -- The same unrelated import with the `break` back.  `json` is not a name
+    #    the witness resolves through, so it is transparent and the assert
+    #    fires (#475).
     (
-        "451 import declined: an alias binds a different name",
-        "    import contextlib as cl\n",
+        "475 import accepted: an unrelated module, break present",
+        "    import json\n    import contextlib\n",
         "for item in (1,):",
         "        break",
-        False,
+        True,
     ),
-    # -- A dotted import binds the *leaf* `contextlib.nullcontext`, shadowing
-    #    the attribute path the witness walks.  It cannot be pinned as an
-    #    execution row -- CPython rejects the module outright with
-    #    `ModuleNotFoundError: 'contextlib' is not a package`, so the oracle
-    #    never reaches the assert -- so the decline is pinned directly below.
+    # -- An alias bound to a name the witness never reads.  `cl` is not
+    #    resolved through, so the statement cannot change what the header
+    #    enters and the canonical `contextlib` calls still fire.  Refusing it
+    #    reported this live assert dead (#475).
+    #
+    #    This row used to carry `import contextlib as cl` *alone* and claim
+    #    DEAD, but the fixture could not judge anything: with `cl` bound and
+    #    `contextlib` never imported, every call died with
+    #    `NameError: name 'contextlib' is not defined` and never reached the
+    #    assert.  The oracle only counted that as "did not fire", so the row
+    #    was really asserting that an unrunnable fixture stayed unrunnable.
+    (
+        "475 import accepted: an alias the witness never reads",
+        "    import contextlib as cl\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- The alias under the name the witness *does* resolve through.  `cb`
+    #    expands to `contextlib`, so the alias is the filed spelling wearing a
+    #    different name.
+    #
+    #    `import contextlib` is still needed beside it: this table's builder
+    #    spells the `contextlib.nullcontext()` / `contextlib.suppress()` calls
+    #    canonically, so an alias-only preamble leaves that name unbound and the
+    #    fixture dies with `NameError` before reaching the assert -- which is
+    #    how the old alias row ended up asserting nothing.
+    (
+        "475 import accepted: the filed spelling behind an alias",
+        "    import contextlib as cb\n    import contextlib\n",
+        "for item in (1,):",
+        "        break",
+        True,
+    ),
+    # -- Two plain imports of the same root.  Idempotent, so still transparent.
     (
         "451 import accepted: two plain imports of the same root",
         "    import contextlib\n    import contextlib\n",
@@ -12510,17 +12543,23 @@ IMPORT_SHAPE_ROWS = (
 def test_only_the_resolved_root_is_admitted_as_a_transparent_import(
     label, preamble, loop, body, assert_is_live
 ):
-    """An import is transparent only when it binds the witness's own root.
+    """An import is transparent unless it rebinds a root the witness reads.
 
     #451's repair lets a function-local `import contextlib` pass the pre-chain
-    scan that otherwise rejects it.  "Any import is transparent" would be
-    wrong: an alias, a dotted import, or an unrelated module each leave the
-    name the witness resolves through untouched while rebinding something else,
-    and accepting them would turn the correlated witness into a false-LIVE on
-    those shapes.
+    scan that otherwise rejects it.  "Any import is transparent" is still wrong
+    -- `import fake as contextlib` really does swap the object the witness walks
+    -- but that is pinned directly, below, because it needs a stand-in module
+    rather than a fixture row.
+
+    #475 widened the accepted set the other way.  Refusing every non-canonical
+    spelling certified live asserts dead: an alias, a dotted import of an
+    unrelated root, and an unrelated plain import all leave the walked root
+    alone, and CPython fires the assert for each.
 
     Each row is executed first, so CPython decides the expected verdict rather
-    than the author's reasoning about what the import means.
+    than the author's reasoning about what the import means.  A row whose
+    fixture cannot reach its assert cannot be judged this way, which is why
+    every row here is a shape that actually runs.
     """
     source = (
         "def outer(x, flag, helper):\n"
@@ -12542,10 +12581,103 @@ def test_only_the_resolved_root_is_admitted_as_a_transparent_import(
     assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
     results = [_is_enforced(function, node, tree) for node in asserts]
     assert results == [assert_is_live], (
-        f"{label}: expected verdicts [{assert_is_live}], got {results}. Only an "
-        f"import binding the module root the witness already resolves through is "
-        f"transparent; an alias or a leaf import rebinds a different name."
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. An import "
+        f"is transparent unless it rebinds a root the witness resolves through, "
+        f"and then only if it really is the module the witness follows."
     )
+
+
+def test_an_alias_that_rebinds_the_walked_root_is_not_transparent():
+    """`import fake as contextlib` must not pass as the filed spelling.
+
+    This is the negative side of #475, and it is the one that keeps the widened
+    acceptance sound.  Widening to "an alias the witness never reads is
+    inert" is only safe while an alias that *does* rebind a walked root is
+    still refused, because such an import puts a different module behind the
+    name the witness walks:
+
+        import fake as contextlib   # fake.suppress is contextlib.suppress
+        cs = contextlib.nullcontext()
+        for item in (1,):
+            break
+        else:
+            cs = contextlib.suppress(AssertionError)
+        with cs:
+            assert x != 1
+
+    A stand-in module is needed rather than a fixture row, because the fixture
+    has to run for this to measure anything, and no unrelated module in the
+    standard library carries the `nullcontext` / `suppress` pair.  It is
+    registered in `sys.modules` so `import fake` resolves, and restored
+    afterwards so the rest of the lane sees a clean namespace.
+
+    What is pinned here is the *predicate*, which is the only part #475
+    changed.  With the `break` above, CPython fires the assert and the
+    end-to-end verdict agrees with the refusal, so this shape cannot
+    demonstrate a false-LIVE by itself.  Dropping the `break` makes the `else`
+    install `fake.suppress` and swallow the assert while `_is_enforced` still
+    answers True -- but that residual is pre-existing on `49b899a`, is
+    unchanged by this repair, and belongs to the loop-`else` reachability
+    family tracked in #466 rather than to the import rule.  Widening the
+    predicate here must not make that worse, which is what this test holds.
+    """
+    source = (
+        "def outer(x, flag, helper):\n"
+        "    import fake as contextlib\n"
+        "    cs = contextlib.nullcontext()\n"
+        "    for item in (1,):\n"
+        "        break\n"
+        "    else:\n"
+        "        cs = contextlib.suppress(AssertionError)\n"
+        "    with cs:\n"
+        "        assert x != 1\n"
+    )
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    statement = function.body[0]
+    assert isinstance(statement, ast.Import), "fixture no longer starts with a bare import"
+
+    stand_in = types.ModuleType("fake")
+    stand_in.nullcontext = contextlib.nullcontext
+    stand_in.suppress = contextlib.suppress
+    previous = sys.modules.get("fake")
+    sys.modules["fake"] = stand_in
+    try:
+        namespace = {}
+        exec(compile(source, "<alias-rebind>", "exec"), namespace)  # noqa: S102
+        assert (
+            support._import_only_binds_the_resolved_root(
+                statement, function, support._bound_names(tree, function)
+            )
+            is False
+        ), (
+            "an alias that rebinds the root the witness walks is not the filed "
+            "spelling and must not be admitted as a transparent import"
+        )
+        # The false-LIVE residual lives in the loop-`else` family (#466), so it
+        # is held at its measured base value rather than fixed here.  What #475
+        # must not do is make it worse by letting this import through the
+        # pre-chain scan, which is what the assertion above prevents.
+        rebound = ast.parse(source.replace("        break\n", "        pass\n"))
+        shadow_fn = next(
+            node
+            for node in rebound.body
+            if isinstance(node, ast.FunctionDef) and node.name == "outer"
+        )
+        targets = [node for node in ast.walk(shadow_fn) if isinstance(node, ast.Assert)]
+        results = [_is_enforced(shadow_fn, node, rebound) for node in targets]
+        assert results == [True], (
+            "known residual, unchanged from 49b899a: the rebinding alias with no "
+            "`break` is still certified enforced while CPython swallows the assert "
+            f"(got {results})."
+        )
+    finally:
+        if previous is None:
+            sys.modules.pop("fake", None)
+        else:
+            sys.modules["fake"] = previous
 
 
 def test_a_dotted_import_of_a_leaf_is_not_a_transparent_root():
