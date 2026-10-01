@@ -14568,6 +14568,405 @@ def test_a_loop_else_witness_declines_a_guard_that_raises(guard, assert_is_live)
     )
 
 
+#: #464. A ``with`` header whose walrus value is a bare ``Name`` enters
+#: whatever that name holds. #390 fixed the ``ast.Lambda`` spelling by reading
+#: the entered value's own runtime type, but ``_literal_runtime_type`` declines
+#: a plain ``Name``, so every name-valued walrus header kept the assert live.
+#: When the name holds a function object the header raises ``TypeError`` while
+#: it is being evaluated -- before the body is entered -- so the assert under it
+#: never runs at all. Reporting that *enforced* is the damaging direction.
+#:
+#: Every row below is executed across the swept domain by
+#: :func:`_assert_suppression_contract` before the analyzer's answer is
+#: compared, so CPython decides each verdict rather than this table. The rows
+#: that reach CPython's ``True``-shaped outcome are the controls: a repair that
+#: swept the whole ``NamedExpr`` family into "dead" would fail them.
+#:
+#: The two rows that stay **live** are the deliberate declines, and they are
+#: what keeps the repair honest:
+#:
+#: * a *parameter* is chosen by the caller. ``def outer(x, helper)`` enters
+#:   ``helper``, which is live when the caller passes ``nullcontext()`` and
+#:   raises when it passes ``1``. The function body does not determine the
+#:   answer, so declining is the only honest verdict -- and answering dead
+#:   would drop a real contract.
+#: * a genuinely *unbound* name is a ``NameError`` on entry. Master already
+#:   pins that as a live header (``bare name in the header``), and a fix that
+#:   flipped it would contradict that row.
+#:
+#: The repair resolves only what the scope can actually determine: a local
+#: store, an alias chain through local stores, a module-level store, and a
+#: ``def``/``class`` carrier. Everything else declines.
+WALRUS_NAME_ENTRY_SHAPES = (
+    # -- The filed defect, reached through a local alias rather than a
+    #    parameter: `h = _h` binds the *same* function object the header enters.
+    (
+        "464 local alias to a function",
+        "def _maker():\n    return None\n",
+        "    h = _maker\n",
+        "h",
+        False,
+    ),
+    # -- A module-level store whose value is a literal.
+    (
+        "464 module constant bound to an int",
+        "CS = 1\n",
+        "",
+        "CS",
+        False,
+    ),
+    # -- A module-level store whose value is an alias of a `def`. Two hops from
+    #    the header: module store -> module `def` carrier.
+    (
+        "464 module constant aliased to a def",
+        "def _maker():\n    return None\nCS = _maker\n",
+        "",
+        "CS",
+        False,
+    ),
+    # -- A local `def` carrier reached by name rather than through a lambda.
+    (
+        "464 local def carrier",
+        "",
+        "    def _maker():\n        pass\n",
+        "_maker",
+        False,
+    ),
+    # -- Controls. These really are enterable, so a repair that answered "dead"
+    #    for any name it could resolve would fail them.
+    (
+        "464 control: a real context manager is live",
+        "",
+        "",
+        "contextlib.nullcontext()",
+        True,
+    ),
+    (
+        "464 control: a suppressor swallows, so the header is defeated",
+        "",
+        "",
+        "contextlib.suppress(AssertionError)",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "module_preamble", "local_preamble", "value", "assert_is_live"),
+    WALRUS_NAME_ENTRY_SHAPES,
+    ids=[row[0] for row in WALRUS_NAME_ENTRY_SHAPES],
+)
+def test_a_walrus_header_named_to_an_unenterable_value_is_not_a_live_assert(
+    label, module_preamble, local_preamble, value, assert_is_live
+):
+    """#464: resolve the name the walrus enters, or decline -- never assume live.
+
+    The entered object is whatever the walrus *value* names, exactly as in the
+    ``ast.Lambda`` case #390 already handles. Reading only literal shapes left
+    every name-valued header reporting `enforced`, which for a function object
+    is a contract the interpreter never evaluates.
+
+    Resolution goes through the store machinery this module already trusts
+    (`_stores_of`, `_module_stores`, `_carrier_runtime_kinds`) rather than a
+    parallel walk, so a name bound by a caller or by nothing at all still
+    declines -- and declining keeps the assert live, the safe direction.
+    """
+    source = (
+        "import contextlib\n"
+        f"{module_preamble}"
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"{local_preamble}"
+        f"    with (cs := {value}):\n"
+        "        assert x != 1\n"
+    )
+    _assert_suppression_contract(label, source, assert_is_live)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    asserts = [node for node in ast.walk(function) if isinstance(node, ast.Assert)]
+    assert len(asserts) == 1, f"{label}: fixture declared {len(asserts)} asserts, expected 1"
+    results = [_is_enforced(function, node, tree) for node in asserts]
+    assert results == [assert_is_live], (
+        f"{label}: expected verdicts [{assert_is_live}], got {results}. A walrus "
+        f"header enters the value it names, so a name bound to a function, an "
+        f"int or any other non-manager raises before the body and the assert is "
+        f"unreachable. A name the scope does not determine -- a parameter, or "
+        f"one bound nowhere -- must stay live rather than be called dead."
+    )
+
+
+#: #464, the two shapes that must NOT be swept into the repair. Neither can be
+#: judged by executing the fixture, which is exactly why they need pinning:
+#:
+#: * a *parameter* is chosen by the caller. ``def outer(x, helper)`` enters
+#:   ``helper``; with ``nullcontext()`` the assert is live, with ``1`` the header
+#:   raises ``TypeError``. The body determines neither, so the only honest
+#:   verdict is the decline, and a "dead" answer would drop a real contract.
+#: * a genuinely *unbound* name raises ``NameError`` on entry. Master already
+#:   pins that header as live (``bare name in the header``), so flipping it
+#:   would contradict a row that is already green.
+#:
+#: They are therefore asserted directly against `_is_enforced`, with the
+#: executed outcome recorded in the message, because a widened rule that
+#: resolved either name would make them dead -- the damaging direction for the
+#: first and a regression for the second.
+WALRUS_NAME_ENTRY_DECLINES = (
+    ("a parameter is chosen by the caller", "helper", "live or TypeError, per call site"),
+    ("a genuinely unbound name", "mystery", "NameError on entry"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "executed"),
+    WALRUS_NAME_ENTRY_DECLINES,
+    ids=[row[0] for row in WALRUS_NAME_ENTRY_DECLINES],
+)
+def test_a_walrus_name_the_scope_cannot_resolve_is_left_live(label, value, executed):
+    """#464: the conservative fallback must not be inverted.
+
+    #308 criterion 1 makes a false-LIVE the damaging direction, but a repair
+    that answered "dead" for every name it could not resolve would trade these
+    two false-LIVEs for false-DEADs on real pinned contracts -- the opposite
+    error, and the one #308 also names. A name the scope genuinely does not
+    determine stays live.
+
+    CPython cannot adjudicate either row (``executed`` records why: the caller
+    picks the parameter's value, and an unbound name raises before the body),
+    so the verdict is asserted directly rather than through the swept oracle.
+    """
+    source = (
+        "import contextlib\n"
+        "def outer(x, flag, helper):\n"
+        "    import contextlib\n"
+        f"    with (cs := {value}):\n"
+        "        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, f"<{label}>", "exec"), namespace)  # noqa: S102
+    outcome = "returned"
+    try:
+        namespace["outer"](0, True, None)
+    except AssertionError:
+        outcome = "AssertionError"
+    except BaseException as error:  # noqa: BLE001 - the outcome is the datum
+        outcome = type(error).__name__
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, assertion, tree) is True, (
+        f"{label}: the analyzer must decline this name and keep the assert live. "
+        f"CPython gives `{outcome}` here ({executed}), so this row is pinned "
+        f"against the analyzer directly rather than through the swept oracle."
+    )
+
+
+@pytest.mark.parametrize(
+    "module_preamble,prefix,parameter,live",
+    (
+        ("h = 1\n", "", "h", True),
+        ("h = 1\n", "    h = contextlib.nullcontext()\n", "", True),
+        ("", "    a = contextlib.nullcontext()\n    h = a\n    a = 1\n", "", True),
+        ("", "    a = 1\n    h = a\n    a = contextlib.nullcontext()\n", "", False),
+        ("a = 1\nh = a\na = contextlib.nullcontext()\n", "", "", False),
+        ("", "    def h(): pass\n    h = contextlib.nullcontext()\n", "", True),
+        ("h = 1\n", "    h = 1\n    if flag: h = contextlib.nullcontext()\n", "", True),
+    ),
+)
+def test_walrus_name_uses_lexical_store_and_alias_snapshot(
+    module_preamble, prefix, parameter, live
+):
+    source = (
+        "import contextlib\n"
+        + module_preamble
+        + "def outer(x, flag"
+        + (", h" if parameter else "")
+        + "):\n"
+        + prefix
+        + "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-lexical-snapshot>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    outcomes = []
+    for flag in (False, True):
+        try:
+            namespace["outer"](1, flag, contextlib.nullcontext()) if parameter else namespace[
+                "outer"
+            ](1, flag)
+        except AssertionError:
+            outcomes.append(True)
+        except TypeError:
+            outcomes.append(False)
+        else:
+            outcomes.append(False)
+    assert any(outcomes) is live
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is live
+
+
+def test_walrus_name_declines_module_binding_shadowed_by_closure():
+    source = (
+        "import contextlib\nh = 1\ndef parent(h):\n"
+        "    def outer(x):\n        with (cs := h):\n            assert x != 1\n"
+        "    return outer\n"
+    )
+    namespace = {}
+    exec(compile(source, "<walrus-closure-shadow>", "exec"), namespace)  # noqa: S102
+    import contextlib
+
+    with pytest.raises(AssertionError):
+        namespace["parent"](contextlib.nullcontext())(1)
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_assume_decorated_definition_is_function():
+    source = (
+        "import contextlib\ndef decorate(function):\n    return contextlib.nullcontext()\n"
+        "def outer(x):\n    @decorate\n    def h(): pass\n"
+        "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<decorated-walrus-carrier>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_assume_class_metaclass_is_unenterable():
+    source = (
+        "class Meta(type):\n    def __enter__(cls): return cls\n"
+        "    def __exit__(cls, *args): return False\n"
+        "def outer(x):\n    class h(metaclass=Meta): pass\n"
+        "    with (cs := h):\n        assert x != 1\n"
+    )
+    namespace = {}
+    exec(compile(source, "<metaclass-walrus-carrier>", "exec"), namespace)  # noqa: S102
+    with pytest.raises(AssertionError):
+        namespace["outer"](1)
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_name_does_not_read_module_future_store_into_earlier_invocation():
+    source = (
+        "import contextlib\nhelper = contextlib.nullcontext()\n"
+        "def outer(x):\n    with (cs := helper):\n        assert x != 1\n"
+        "outer(1)\nhelper = 1\n"
+    )
+    namespace = {}
+    with pytest.raises(AssertionError):
+        exec(compile(source, "<early-module-walrus-invocation>", "exec"), namespace)  # noqa: S102
+    tree = ast.parse(source)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, tree) is True
+
+
+def test_walrus_module_snapshot_declines_implicit_decorator_invocation():
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+def invoke(function):
+    outer(1)
+    return function
+@invoke
+def marker():
+    pass
+helper = 1
+"""
+    with pytest.raises(AssertionError):
+        exec(source, {})  # noqa: S102
+    module = ast.parse(source)
+    function = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "outer"
+    )
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_walrus_module_snapshot_declines_implicit_truthiness_invocation():
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+if trigger:
+    pass
+helper = 1
+"""
+    namespace = {}
+
+    class Trigger:
+        def __bool__(self):
+            namespace["outer"](1)
+            return True
+
+    namespace["trigger"] = Trigger()
+    with pytest.raises(AssertionError):
+        exec(source, namespace)  # noqa: S102
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
+def test_walrus_module_snapshot_declines_late_import_callback(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    source = """import contextlib
+helper = contextlib.nullcontext()
+def outer(x):
+    with (cs := helper):
+        assert x != 1
+from sentinel_walrus_import_fixture import trigger
+helper = 1
+"""
+    namespace = {}
+    fixture = ModuleType("sentinel_walrus_import_fixture")
+
+    def lookup(name):
+        if name == "trigger":
+            namespace["outer"](1)
+        raise AttributeError(name)
+
+    fixture.__getattr__ = lookup
+    monkeypatch.setitem(sys.modules, fixture.__name__, fixture)
+    with pytest.raises(AssertionError):
+        exec(source, namespace)  # noqa: S102
+    module = ast.parse(source)
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef))
+    target = next(node for node in ast.walk(function) if isinstance(node, ast.Assert))
+    assert _is_enforced(function, target, module) is True
+
+
 @pytest.mark.parametrize("guard,literal", (("x is 1000", 1000), ("x is True", 1)))
 def test_loop_else_identity_uses_runtime_object_not_ast_object(guard, literal):
     source = (

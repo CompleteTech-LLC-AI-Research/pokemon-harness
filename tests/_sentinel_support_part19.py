@@ -276,19 +276,9 @@ def _entry_is_dead(expression, by_index, index, function, bound, module=None):
         # risk the live side.
         return all(isinstance(element, ast.Starred) for element in expression.elts)
     if isinstance(expression, ast.NamedExpr) and isinstance(expression.target, ast.Name):
-        # #390. `with (cs := lambda: None):` binds the walrus value directly as
-        # the entered object, so the question is the same one the store rules
-        # ask about `cs = lambda: None` -- and it has the same answer. Without
-        # this the lambda never reached the readable-literal set below (that
-        # set is consulted for values reached through an *assignment target*),
-        # and a header that raises `TypeError` on entry left the assert under
-        # it certified as load-bearing.
-        #
-        # The name the walrus binds is deliberately not followed afterwards.
-        # The value is what is entered here and now; what `cs` holds on a
-        # later line is a different store's question, answered by
-        # `_stores_of` when that `with` is reached.
-        return _literal_entry_is_dead(expression.value)
+        return _literal_entry_is_dead(expression.value) or _walrus_name_entry_is_dead(
+            expression.value, by_index, index, function, bound, module
+        )
     if not isinstance(expression, ast.Name):
         return False
     name = expression.id
