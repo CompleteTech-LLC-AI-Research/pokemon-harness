@@ -146,21 +146,38 @@ def _finder_source(finder: object) -> Path | None:
     ``sys.meta_path`` -- so the defining module is often absent from
     ``sys.modules``.  ``find_spec`` locates it without executing the guarded
     packages.
+
+    Every lookup is defensive because the value being inspected is attacker-
+    controlled: a hostile metaclass can raise from ``__module__`` or a module
+    can raise from ``__file__``.  A finder that cannot be located is not
+    trusted, so an exception here must resolve to ``None`` rather than escape.
     """
 
-    module = _finder_module(finder)
+    try:
+        module = _finder_module(finder)
+    except Exception:  # noqa: BLE001 - hostile metaclass; untrusted by default
+        return None
     if module is not None:
-        origin = getattr(module, "__file__", None)
+        try:
+            origin = getattr(module, "__file__", None)
+        except Exception:  # noqa: BLE001 - hostile module; fall through to find_spec
+            origin = None
         if isinstance(origin, str) and origin:
             return _safe_resolve(Path(origin))
-    name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    try:
+        name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    except Exception:  # noqa: BLE001 - hostile metaclass; untrusted by default
+        return None
     if not isinstance(name, str) or not name:
         return None
     try:
         spec = importlib.util.find_spec(name)
-    except (ImportError, ValueError, AttributeError):
+    except Exception:  # noqa: BLE001 - a hostile import hook must not abort the guard
         return None
-    origin = getattr(spec, "origin", None) if spec is not None else None
+    try:
+        origin = getattr(spec, "origin", None) if spec is not None else None
+    except Exception:  # noqa: BLE001 - hostile spec object
+        return None
     if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
         return None
     return _safe_resolve(Path(origin))
@@ -183,12 +200,27 @@ def _is_installation_finder(finder: object) -> bool:
     live in this interpreter's own site-packages.  The check is on the
     defining file's *location*, never its name, so a renamed or lookalike
     module does not inherit trust and a genuine install finder is not refused.
+
+    The file must additionally *exist*.  ``module.__file__`` is ordinary
+    mutable state: a finder defined anywhere can register a module object
+    under a trusted name whose ``__file__`` names a site-packages path that was
+    never written, and a purely lexical comparison would believe it.  Requiring
+    the resolved path to be a real file inside site-packages means the trust
+    decision is attested by the filesystem rather than asserted by the object
+    being judged -- the same "location only, never self-report" rule the rest
+    of this guard is built on.  A spoofed name resolves to nothing and is
+    refused.
     """
 
     if _is_trusted_stdlib_finder(finder):
         return True
     source = _finder_source(finder)
     if source is None:
+        return False
+    try:
+        if not source.is_file():
+            return False
+    except (OSError, ValueError):
         return False
     return any(_is_within(source, root, strict=False) for root in _site_packages_roots())
 
@@ -213,13 +245,21 @@ def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
 
 
 def _describe_finder(entry: tuple[object, Path | None]) -> str:
-    """Return a stable, human-readable name for a refused finder."""
+    """Return a stable, human-readable name for a refused finder.
+
+    Naming a hostile finder must not itself raise: the detail string is part
+    of the refusal the operator has to read, so an unnameable finder degrades
+    to a placeholder instead of turning the FAIL into a traceback.
+    """
 
     finder, source = entry
-    if isinstance(finder, type):
-        name = f"{finder.__module__}.{getattr(finder, '__qualname__', finder.__name__)}"
-    else:
-        name = f"{type(finder).__module__}.{type(finder).__qualname__}"
+    try:
+        if isinstance(finder, type):
+            name = f"{finder.__module__}.{getattr(finder, '__qualname__', None) or finder.__name__}"
+        else:
+            name = f"{type(finder).__module__}.{type(finder).__qualname__}"
+    except Exception:  # noqa: BLE001 - a hostile metaclass must not abort the report
+        name = "<finder with an unreadable identity>"
     if source is not None:
         return f"{name} (from {source})"
     return f"{name} (from an unidentifiable location)"

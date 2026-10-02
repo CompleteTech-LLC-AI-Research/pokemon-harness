@@ -24,6 +24,7 @@ import scripts.production_gate as gate
 from scripts.check_import_origins import (
     _is_installation_finder,
     _is_trusted_stdlib_finder,
+    _site_packages_roots,
     check_origins,
     main,
 )
@@ -1881,3 +1882,107 @@ def test_standard_and_installation_finders_are_still_trusted():
             f"{entry!r} should be recognised as an installation finder, "
             "otherwise the release lane is refused"
         )
+
+
+def test_a_finder_cannot_trust_itself_by_claiming_a_site_packages_module(tmp_path, monkeypatch):
+    """``module.__file__`` is mutable, so it cannot be the trust evidence.
+
+    Trusting a finder because the module object it names carries a
+    site-packages ``__file__`` is trusting a claim the finder itself can make.
+    A module registered under a trusted-looking name, whose ``__file__`` points
+    at a site-packages path that was never written, would otherwise pass and
+    then serve a foreign submodule -- reintroducing exactly the blocker this
+    guard change exists to close.
+
+    Requiring the resolved file to actually exist keeps the decision on the
+    filesystem rather than on self-report, matching the "provenance is decided
+    by location only" rule the rest of the module already follows.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "spoof_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "spoof_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "spoof_pkg" or name.startswith("spoof_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir(), "the live interpreter must have a site-packages directory"
+    claimed = site_root / "spoofed_trusted_finder_module.py"
+    assert not claimed.exists(), "the spoofed path must not exist for this row to mean anything"
+
+    fake_module = types.ModuleType("spoofed_trusted_finder_module")
+    fake_module.__file__ = str(claimed)
+    monkeypatch.setitem(sys.modules, "spoofed_trusted_finder_module", fake_module)
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+
+    class SpoofingFinder:
+        # A *class* is what setuptools actually installs, and CPython calls
+        # its find_spec unbound, so it must be a classmethod.  An ordinary
+        # method here would receive the module name as ``self`` and never
+        # match, making the row pass for the wrong reason.
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            if name == "spoof_pkg.leaked":
+                return importlib.util.spec_from_file_location(name, foreign_file)
+            return None
+
+    SpoofingFinder.__module__ = "spoofed_trusted_finder_module"
+    # Inserted by hand rather than via monkeypatch.setattr so the teardown
+    # below can remove it while the path and sys.modules setup survive.
+    sys.meta_path.insert(0, SpoofingFinder)
+
+    try:
+        assert not _is_installation_finder(SpoofingFinder), (
+            "a finder whose claimed site-packages file does not exist must not be trusted"
+        )
+        report = check_origins(root, ("spoof_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"]
+
+        # The escape is real, so the row is not asserting a hypothetical.
+        leaked = importlib.import_module("spoof_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(SpoofingFinder)
+
+
+def test_a_hostile_finder_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """Inspecting a hostile finder must fail closed, not raise.
+
+    A metaclass may raise from ``__module__``, and a module object may raise
+    from ``__file__``.  The guard is a preflight: an exception escaping it
+    turns an explicit refusal into a traceback, which is the crash mode
+    ``_resolve_path`` already had to be hardened against for package origins.
+    A finder that cannot be inspected is simply not trusted.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hostile_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "hostile_pkg" or name.startswith("hostile_pkg."):
+            del sys.modules[name]
+
+    class HostileMeta(type):
+        @property
+        def __module__(cls):
+            raise RuntimeError("metaclass refuses to name itself")
+
+    hostile = HostileMeta("HostileFinder", (), {"find_spec": lambda self, *a: None})
+    monkeypatch.setattr(sys, "meta_path", [hostile, *sys.meta_path])
+
+    report = check_origins(root, ("hostile_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "meta_path" in report["packages"][0]["detail"], report
