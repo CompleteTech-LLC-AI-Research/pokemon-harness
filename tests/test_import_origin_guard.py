@@ -2828,7 +2828,9 @@ def test_a_record_attested_file_is_trusted_and_a_tampered_one_is_not(tmp_path):
     commay.write_text("VALUE = 2\n", encoding="utf-8")
     (dist_info / "RECORD").write_text(
         f"recorded_finder.py,sha256={_record_digest(plain)},21\n"
-        f"recorded,finder.py,sha256={_record_digest(commay)},21\n",
+        # A name holding a comma is quoted in real RECORD output; the parser is
+        # CSV, so an unquoted one is malformed and must not resolve.
+        f'"{commay.name}",sha256={_record_digest(commay)},21\n',
         encoding="utf-8",
     )
     site_root = site_root.resolve()
@@ -2850,6 +2852,66 @@ def test_a_record_attested_file_is_trusted_and_a_tampered_one_is_not(tmp_path):
         encoding="utf-8",
     )
     assert _is_recorded_by_an_install(plain.resolve(), site_root) is False
+
+
+def test_a_csv_quoted_record_name_is_decoded(tmp_path):
+    """``RECORD`` is CSV, so pip quotes a name that contains a comma.
+
+    A hand-rolled split keeps the quotes attached to the name, so the path built
+    from the row names a file no record ever listed and a genuinely installed
+    finder with a comma in its path loses its provenance.  That is a false
+    refusal on an honest install, bought for no security gain.
+
+    Found independently on #558, then reproduced against this branch's own
+    parser before fixing rather than assumed equivalent.
+    """
+
+    site_root = tmp_path / "site-packages"
+    dist_info = site_root / "probe_dist-1.0.dist-info"
+    dist_info.mkdir(parents=True)
+
+    commay = site_root / "csv,comma_row.py"
+    commay.write_text("VALUE = 1\n", encoding="utf-8")
+    (dist_info / "RECORD").write_text(
+        f'"{commay.name}",sha256={_record_digest(commay)},14\n',
+        encoding="utf-8",
+    )
+    site_root = site_root.resolve()
+
+    assert _is_recorded_by_an_install(commay.resolve(), site_root) is True, (
+        "a CSV-quoted name must be decoded, or an honest install is refused"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('"target.py,sha256=abc\n', id="unterminated_quote"),
+        pytest.param("\x00\x01target.py,sha256=abc,4\n", id="nul_and_binary"),
+        pytest.param(",,,,\n", id="only_commas"),
+        pytest.param("x" * 100000 + ",sha256=abc,4\n", id="giant_field"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_a_hostile_record_never_raises_and_never_attests(tmp_path, body):
+    """``RECORD`` is untrusted input, so a malformed row is inert.
+
+    The parser reads a file the interpreter does not control.  A row that is not
+    valid CSV, carries a NUL, or is enormous must contribute nothing and must
+    not raise: this decision runs inside conftest, so an escape here is an
+    INTERNALERROR rather than a FAIL finding.
+    """
+
+    site_root = tmp_path / "site-packages"
+    dist_info = site_root / "probe_dist-1.0.dist-info"
+    dist_info.mkdir(parents=True)
+    target = site_root / "target.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    site_root = site_root.resolve()
+
+    (dist_info / "RECORD").write_text(body, encoding="utf-8", errors="replace")
+
+    assert _is_recorded_by_an_install(target.resolve(), site_root) is False
 
 
 def test_a_planted_pth_cannot_certify_a_hand_written_finder(tmp_path, monkeypatch):

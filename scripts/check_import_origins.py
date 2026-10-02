@@ -45,9 +45,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import hashlib
 import importlib.metadata
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -225,18 +227,9 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
             text = record.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             continue
-        for line in text.splitlines():
-            # ``RECORD`` is CSV with the shape ``path,sha256=<digest>,size``.
-            # The path may legally contain a comma, so this is parsed from the
-            # right: the size is the last field, the digest the one before it,
-            # and the name is everything remaining.  Splitting on every comma
-            # would truncate a name that holds one.
-            head, _, _size = line.rpartition(",")
-            name_field, separator, digest = head.rpartition(",")
-            if not separator or not name_field:
-                continue
-            algorithm, _, expected = digest.partition("=")
-            if algorithm.lower() != "sha256" or not expected or not name_field:
+        for row in _record_rows(text):
+            name_field, algorithm, expected = row
+            if algorithm is None or expected is None or not name_field:
                 continue
             resolved = _safe_resolve(root / name_field)
             if resolved is not None:
@@ -246,6 +239,33 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
                 # happens to sort first.
                 digests.setdefault(str(resolved), set()).add(expected)
     return digests
+
+
+def _record_rows(text: str) -> list[tuple[str, str | None, str | None]]:
+    """Return ``(name, algorithm, digest)`` for each parseable ``RECORD`` row.
+
+    ``RECORD`` is CSV, and pip *quotes* a name that contains a comma.  Reading
+    such a row by hand leaves the quotes attached to the name, so the path
+    built from it names a file no record ever listed and a genuinely installed
+    finder with a comma in its path loses its provenance.  That is a false
+    refusal on an honest install, bought for no security gain.
+
+    The stdlib parser is used rather than a hand-rolled split because it is the
+    one that implements the quoting rules, including a quoted field that itself
+    contains the delimiter or an escaped quote.  A row that does not parse
+    yields no entry rather than raising, because ``RECORD`` is untrusted input.
+    """
+
+    rows: list[tuple[str, str | None, str | None]] = []
+    for fields in csv.reader(io.StringIO(text)):
+        if len(fields) < 2:
+            continue
+        name_field = fields[0]
+        algorithm: str | None = None
+        expected: str | None = None
+        algorithm, _, expected = fields[1].partition("=")
+        rows.append((name_field, algorithm, expected))
+    return rows
 
 
 def _file_digest(candidate: Path) -> str | None:
