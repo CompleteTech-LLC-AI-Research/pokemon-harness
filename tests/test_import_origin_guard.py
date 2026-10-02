@@ -6,6 +6,7 @@ selected tier silently measures that other tree.  These rows pin both
 directions: the guard must accept the tree under test and reject any other.
 """
 
+import contextlib
 import importlib
 import json
 import os
@@ -32,6 +33,46 @@ def _make_package(root: Path, package: str) -> Path:
     directory.mkdir(parents=True)
     (directory / "__init__.py").write_text("", encoding="utf-8")
     return directory
+
+
+@contextlib.contextmanager
+def _module_installed(name: str, module: types.ModuleType):
+    """Temporarily install ``module`` under ``name`` in ``sys.modules``.
+
+    Used by the rows that drive the real CLI, where pytest's ``monkeypatch``
+    fixture is not in scope.
+    """
+
+    original = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        yield module
+    finally:
+        if original is None:
+            del sys.modules[name]
+        else:
+            sys.modules[name] = original
+
+
+@contextlib.contextmanager
+def _import_replaced(replacement):
+    """Temporarily swap the built-in ``__import__`` for ``replacement``.
+
+    ``_resolve_origin`` imports the package it is auditing, so the only way to
+    drive a hostile loader is to replace the importer itself.  ``monkeypatch``
+    is not in scope for the rows that drive the real CLI, and patching
+    ``builtins.__import__`` for the duration of a test is safe here because
+    the guard is single-threaded.
+    """
+
+    import builtins
+
+    original = builtins.__import__
+    builtins.__import__ = replacement
+    try:
+        yield
+    finally:
+        builtins.__import__ = original
 
 
 def test_repo_checkout_resolves_its_own_packages():
@@ -458,6 +499,10 @@ def test_check_origins_rejects_a_competing_pyboy_distribution(tmp_path, monkeypa
         ({"dir_info": {}, "url": None}, "null url"),
         ({"dir_info": {}, "url": 17}, "non-string url"),
         ("not json at all", "malformed json"),
+        (
+            {"dir_info": {}, "url": "file:///tmp/checkout%00elsewhere"},
+            "percent-encoded NUL makes the recorded path unresolvable",
+        ),
     ],
 )
 def test_installed_from_refuses_an_unattributable_record(payload, reason):
@@ -483,6 +528,449 @@ def test_installed_from_refuses_an_unattributable_record(payload, reason):
         assert origins._installed_from("pyboy", Path("/anywhere")) is None, reason
     finally:
         origins._distribution = original
+
+
+class _HostileFspath:
+    """A path-like whose ``__fspath__`` raises something unanticipated.
+
+    No tuple of expected exception types can enumerate what an object supplied
+    by a foreign package or a corrupt install record chooses to raise, so the
+    guards must not be written as an enumeration.
+    """
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __fspath__(self):
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        AssertionError("arbitrary fspath failure"),
+        KeyError("not a filesystem error at all"),
+        ZeroDivisionError("nor this one"),
+        UnicodeError("or this"),
+    ],
+)
+def test_fspath_that_raises_anything_is_a_finding_not_a_crash(tmp_path, monkeypatch, raised):
+    """A ``__fspath__`` raising an arbitrary exception must not escape.
+
+    Enumerating ``(OSError, TypeError, ValueError, RuntimeError)`` covers the
+    ways a *well-behaved* path fails, but ``Path()`` calls ``__fspath__`` on a
+    foreign object and that object can raise anything.  An arbitrary raise
+    escaped ``check_origins`` as a traceback, so the run died instead of
+    reporting the package it was refusing.
+    """
+
+    module = types.ModuleType("hostile_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), _HostileFspath(raised)]
+    monkeypatch.setitem(sys.modules, "hostile_ns", module)
+
+    report = check_origins(tmp_path, ("hostile_ns",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["package"] == "hostile_ns"
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_operator_interrupt_is_not_swallowed_as_a_finding(tmp_path, monkeypatch, raised):
+    """An interrupt must still stop the run, not become a finding.
+
+    The guards catch ``BaseException`` so no foreign ``__fspath__`` can escape.
+    That must not extend to swallowing the operator's own Ctrl-C or a
+    deliberate ``sys.exit``: both are re-raised.
+    """
+
+    module = types.ModuleType("interrupting_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), _HostileFspath(raised)]
+    monkeypatch.setitem(sys.modules, "interrupting_ns", module)
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        check_origins(tmp_path, ("interrupting_ns",))
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_resolve_path_does_not_swallow_an_interrupt(raised):
+    """``_resolve_path`` itself must re-raise, not just callers that reach it.
+
+    The namespace row above is not enough: a hostile portion is first passed
+    through ``_is_within``, whose own re-raise happens to stop the interrupt
+    before ``_resolve_path`` is reached.  That would let the guard swallow
+    Ctrl-C for any caller that converts a path directly, so the conversion
+    boundary is pinned on its own.
+    """
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._resolve_path(_HostileFspath(raised), "pkg")
+
+
+@pytest.mark.parametrize("empty", ["", b""], ids=["str", "bytes"])
+def test_cli_refuses_an_empty_origin(tmp_path, capsys, empty):
+    """An empty ``__file__`` proves nothing and must not be credited (#552).
+
+    ``Path("")`` is not malformed: it resolves cleanly to the process CWD,
+    which is normally inside the checkout, so the guard used to report PASS
+    and name the checkout as the origin.  That is the exact false-PASS class
+    #534 exists to prevent -- the origin is unproven, not verified.
+    """
+
+    module = types.ModuleType("empty_origin")
+    module.__file__ = empty
+    with _module_installed("empty_origin", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "empty_origin"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["origin"] is None
+    assert "empty" in report["packages"][0]["detail"]
+
+
+def test_empty_origin_check_does_not_treat_a_falsy_pathlike_as_empty():
+    """The empty check must not misread a real path as an empty one.
+
+    A path-like object with ``__len__`` returning 0 is falsy but perfectly
+    usable, so a bare ``if not candidate`` would refuse it.  The check is
+    scoped to ``str``/``bytes`` for that reason.
+    """
+
+    class FalsyButReal:
+        def __len__(self):
+            return 0
+
+        def __fspath__(self):
+            return str(REPO_ROOT / "src" / "pokered_harness" / "__init__.py")
+
+    resolved, error = origins._resolve_path(FalsyButReal(), "pkg")
+
+    assert error == ""
+    assert resolved == (REPO_ROOT / "src" / "pokered_harness" / "__init__.py").resolve()
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_is_within_does_not_swallow_an_interrupt(raised):
+    """``_is_within`` must re-raise rather than read a refused comparison as
+    "not within" and let the caller carry on.
+
+    Pinned directly: the namespace rows reach the interrupt through
+    ``_is_within`` first, but they still fail later in ``_resolve_path``, so
+    they do not distinguish the two sites.
+    """
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._is_within(_HostileFspath(raised), REPO_ROOT)
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_is_this_checkout_does_not_swallow_an_interrupt(raised):
+    """``_is_this_checkout`` must re-raise for the same reason."""
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._is_this_checkout(REPO_ROOT, _HostileFspath(raised))
+
+
+def test_describe_never_raises_on_a_hostile_value():
+    """A detail line built from untrusted data must itself be safe to build."""
+
+    class Unprintable:
+        def __str__(self):
+            raise AssertionError("str blew up")
+
+        def __repr__(self):
+            raise AssertionError("repr blew up")
+
+    rendered = origins._describe(Unprintable())
+
+    assert "unprintable" in rendered
+    assert "Unprintable" in rendered
+
+
+def test_cli_survives_a_portion_whose_str_also_raises(tmp_path, capsys):
+    """Formatting the finding must not resurrect the traceback it replaced.
+
+    A portion that is hostile in both ``__fspath__`` and ``__str__`` reached
+    ``str(item)`` while the detail was assembled, so the refusal crashed
+    exactly as the original bug did.
+    """
+
+    class HostileBoth:
+        def __fspath__(self):
+            raise AssertionError("fspath blew up")
+
+        def __str__(self):
+            raise AssertionError("str blew up")
+
+    module = types.ModuleType("hostile_str_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), HostileBoth()]
+    with _module_installed("hostile_str_ns", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "hostile_str_ns"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+
+
+def test_cli_survives_an_exception_whose_str_raises(tmp_path, capsys):
+    """A caught exception from a hostile ``__fspath__`` is itself untrusted."""
+
+    class ExplodingExc(BaseException):
+        def __str__(self):
+            raise AssertionError("exception formatting escaped")
+
+    class Hostile:
+        def __fspath__(self):
+            raise ExplodingExc()
+
+    module = types.ModuleType("hostile_exc_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), Hostile()]
+    with _module_installed("hostile_exc_ns", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "hostile_exc_ns"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+
+
+def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
+    """A loader that fails with an unprintable exception is still a finding.
+
+    ``_describe`` hardened the path-conversion and namespace reporting sites,
+    but the import-failure detail was assembled with a bare f-string.  A
+    package loader is third-party code, so it can raise an exception whose own
+    ``__str__`` raises, and the refusal then died with a traceback and no
+    JSON at all -- the same class of escape the rest of the module fixes.
+    """
+
+    class ExplodingImportError(ImportError):
+        def __str__(self):
+            raise AssertionError("import error formatting escaped")
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _failing_import(name, *args, **kwargs):
+        if name == "unprintable_import":
+            raise ExplodingImportError("nope")
+        return real_import(name, *args, **kwargs)
+
+    with _module_installed("unprintable_import", types.ModuleType("unprintable_import")):
+        with _import_replaced(_failing_import):
+            returncode = main(["--project-root", str(tmp_path), "--package", "unprintable_import"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["origin"] is None
+    assert "import failed" in report["packages"][0]["detail"]
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_resolve_origin_does_not_swallow_an_interrupt(raised):
+    """An operator interrupt during an import must stop the run.
+
+    ``_resolve_origin`` catches ``BaseException`` because a loader can raise
+    anything, and that catch must not become a way for ``Ctrl-C`` to be
+    recorded as a failed import.
+    """
+
+    def _interrupting_import(name, *args, **kwargs):
+        raise raised
+
+    with _import_replaced(_interrupting_import):
+        with pytest.raises((KeyboardInterrupt, SystemExit)):
+            origins._resolve_origin("interruptible_import")
+
+
+def test_installed_from_refuses_a_record_the_interpreter_will_not_parse():
+    """A valid-JSON integer past CPython's digit cap is still a refused record.
+
+    ``json.loads`` raises ``ValueError`` rather than ``JSONDecodeError`` once
+    the integer string conversion limit is exceeded, so catching only the
+    subclass let a record on disk abort the whole run.
+    """
+
+    oversized = '{"url": ' + ("9" * 5000) + "}"
+
+    class _Distribution:
+        def read_text(self, filename):
+            return oversized if filename == "direct_url.json" else None
+
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._installed_from("pyboy", Path("/anywhere")) is None
+    finally:
+        origins._distribution = original
+
+
+def test_install_location_reader_that_raises_contributes_no_root(tmp_path):
+    """``locate_file`` is third-party code and can raise anything.
+
+    An install whose location cannot be read contributes no allowed root,
+    which is the fail-closed direction: the run then refuses an origin it
+    cannot attribute rather than trusting an unverified root.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"url": tmp_path.as_uri()})
+
+        def locate_file(self, _package):
+            raise KeyError("locate")
+
+    original_pd = origins.importlib.metadata.packages_distributions
+    original_d = origins._distribution
+    origins.importlib.metadata.packages_distributions = lambda: {"widget": ["widget"]}
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._allowed_roots(tmp_path, ("widget",)) == [tmp_path]
+    finally:
+        origins.importlib.metadata.packages_distributions = original_pd
+        origins._distribution = original_d
+
+
+def test_cli_reports_a_hostile_fspath_as_a_failure_without_a_traceback(tmp_path, capsys):
+    """The real CLI must print parseable JSON and exit non-zero, not raise."""
+
+    module = types.ModuleType("hostile_cli_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), _HostileFspath(AssertionError("boom"))]
+    with _module_installed("hostile_cli_ns", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "hostile_cli_ns"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+
+
+@pytest.mark.parametrize("junk", [None, 7, 42, object()])
+def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path, monkeypatch, junk):
+    """A ``__path__`` entry that is not a path must be reported, not raised.
+
+    The unresolvable-path rows pin ``ValueError`` from ``Path.resolve``.  A
+    value that is not a path at all fails earlier and differently:
+    ``Path(...)`` raises ``TypeError``, which no ``except (OSError,
+    ValueError, RuntimeError)`` clause catches.  That escaped ``check_origins``
+    as a traceback, the same INTERNALERROR the NUL rows were added to stop.
+
+    The portion belongs in the foreign list regardless: it cannot be shown to
+    be inside any allowed root, and "inside this checkout" is the claim being
+    disproved.
+    """
+
+    module = types.ModuleType("junk_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), junk]
+    monkeypatch.setitem(sys.modules, "junk_ns", module)
+
+    report = check_origins(tmp_path, ("junk_ns",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["package"] == "junk_ns"
+    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+
+
+@pytest.mark.parametrize("junk", [7, 42, 3.5, object()])
+def test_origin_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path, monkeypatch, junk):
+    """A ``__file__`` that is not a path must be a finding, not a traceback.
+
+    ``_resolve_path`` owns the only coercion of untrusted data to a ``Path``,
+    so a wrong-typed ``__file__`` is reported on the same channel as a
+    wrong-shaped one.  ``None`` is deliberately excluded: it is the documented
+    namespace-package signal and takes the ``__path__`` branch instead.
+    """
+
+    module = types.ModuleType("junk_file")
+    module.__file__ = junk
+    monkeypatch.setitem(sys.modules, "junk_file", module)
+
+    report = check_origins(tmp_path, ("junk_file",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["detail"].startswith("origin is not a usable path")
+
+
+def test_install_location_that_is_not_a_path_is_dropped_not_raised(tmp_path, monkeypatch):
+    """``locate_file`` returning ``None`` must drop the root, not raise.
+
+    Dropping is the fail-closed direction: the run then refuses an origin it
+    cannot attribute, rather than admitting one on an unverified root.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"url": tmp_path.as_uri()})
+
+        def locate_file(self, _package):
+            return None
+
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"widget": ["widget"]},
+    )
+    monkeypatch.setattr(origins, "_distribution", lambda _name: _Distribution())
+
+    assert origins._allowed_roots(tmp_path, ("widget",)) == [tmp_path]
+
+
+@pytest.mark.parametrize("payload", ["[]", '"a string"', "42", "null", "true"])
+def test_installed_from_refuses_a_wrong_shaped_record(payload):
+    """Valid JSON that is not an object cannot name a source.
+
+    pip writes an object here, but the record is on-disk data and must be
+    total: ``payload.get`` on a list raised ``AttributeError`` out of the
+    guard.  Unattributable is the correct answer, exactly as for a missing
+    record.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            return payload if filename == "direct_url.json" else None
+
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._installed_from("pyboy", Path("/anywhere")) is None
+    finally:
+        origins._distribution = original
+
+
+def test_is_this_checkout_refuses_an_unresolvable_source(monkeypatch):
+    """A recorded source that cannot be resolved must not raise out of the guard.
+
+    ``_installed_from`` is guarded, so a malformed ``direct_url.json`` record
+    already resolves to ``None`` and never reaches this function.  But
+    ``_is_this_checkout`` also resolves ``project_root`` and ``source``, and a
+    path can be malformed anywhere downstream of the metadata reader.  When it
+    raised, the traceback escaped ``check_origins`` as an ``INTERNALERROR``
+    rather than becoming a finding.
+
+    Refusing is the fail-closed direction: "this install came from this
+    checkout" is the claim being proved, and an unresolvable path cannot
+    prove it.
+    """
+
+    source = Path("/tmp/outside\x00checkout")
+
+    assert origins._is_this_checkout(REPO_ROOT, source) is False
+
+
+def test_is_this_checkout_refuses_an_unresolvable_project_root():
+    """The checkout side is equally untrusted; refusing is still fail-closed."""
+
+    assert origins._is_this_checkout(Path("/tmp/root\x00here"), Path("/tmp/x")) is False
 
 
 def test_installed_from_accepts_a_plain_local_record():
@@ -1045,9 +1533,9 @@ def test_namespace_package_refuses_a_foreign_path_portion(tmp_path, monkeypatch)
 
     package = importlib.import_module("split_pkg")
     assert getattr(package, "__file__", None) is None, "expected a namespace package"
-    assert str(foreign) in [
-        str(Path(item).resolve() / "sub") for item in package.__path__
-    ], "the foreign portion must actually be reachable"
+    assert str(foreign) in [str(Path(item).resolve() / "sub") for item in package.__path__], (
+        "the foreign portion must actually be reachable"
+    )
 
     report = check_origins(root, ("split_pkg",))
 
@@ -1070,6 +1558,36 @@ def test_namespace_package_inside_the_checkout_still_passes(tmp_path, monkeypatc
     report = check_origins(tmp_path, ("solo_ns",))
 
     assert report["status"] == "PASS", report
+
+
+def test_unusable_namespace_portion_is_a_finding_not_a_crash(tmp_path, monkeypatch):
+    """An unusable ``__path__`` portion must be reported, not raised.
+
+    ``test_unusable_origin_is_a_finding_not_a_crash`` pins the ``__file__``
+    path only.  A namespace package never reaches it, so the same
+    ``Path.resolve`` hazard was still reachable through ``__path__``: the
+    namespace rows then crashed with ``ValueError: embedded null character``
+    out of ``check_origins`` instead of producing a finding.
+
+    The namespace finding names the offending portion rather than reusing the
+    ``not a usable path`` wording, because an unresolvable portion is still a
+    foreign portion and the caller reports it on that channel.  What matters
+    is that it is a finding naming the package, at the verdict level, with no
+    exception escaping.
+    """
+
+    module = types.ModuleType("bad_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), "/tmp/bad\x00port/ns"]
+    monkeypatch.setitem(sys.modules, "bad_ns", module)
+
+    report = check_origins(tmp_path, ("bad_ns",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["package"] == "bad_ns"
+    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+
+
 def test_unusable_origin_is_a_finding_not_a_crash(monkeypatch):
     """A path the interpreter cannot resolve must be reported, not raised.
 
@@ -1163,4 +1681,3 @@ def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert returncode == 1
     assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
-

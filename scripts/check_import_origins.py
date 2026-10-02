@@ -74,14 +74,30 @@ def _is_within(candidate: Path, root: Path, *, strict: bool = False) -> bool:
     compares as "inside" while living somewhere else entirely.  The staging
     root must therefore still be a real subdirectory of the checkout after
     resolution.
+
+    A path that cannot be resolved at all compares as *not* within.  Both
+    sides are data reported by the interpreter or by install metadata rather
+    than paths this checkout chose, and the comparison must stay total:
+    letting ``Path.resolve`` raise turned a finding into an ``INTERNALERROR``
+    traceback.  Refusing is the fail-closed direction, because "within this
+    checkout" is the claim being disproved.  A value that is not a path at all
+    is refused for the same reason: ``Path(...)`` raises ``TypeError``, which
+    is a failure of the data, not of this checkout.  ``except BaseException``
+    rather than an enumeration, because a foreign object's ``__fspath__`` can
+    raise anything and both operands here are untrusted.
     """
 
-    resolved_root = Path(root).resolve()
+    try:
+        resolved_root = Path(root).resolve()
+        resolved_candidate = Path(candidate).resolve()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return False
     if strict and Path(root).is_symlink():
         return False
-    candidate = Path(candidate).resolve()
     try:
-        candidate.relative_to(resolved_root)
+        resolved_candidate.relative_to(resolved_root)
     except ValueError:
         return False
     return True
@@ -93,7 +109,9 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     ``direct_url.json`` is written by pip for both editable and local installs
     and names the directory the install was produced from.  A distribution
     without that record cannot be attributed to a checkout, so it contributes
-    no allowed site-packages root.
+    no allowed site-packages root.  A record naming a path that cannot be
+    resolved is treated the same way: the install is unattributable, not
+    crashing the run.
     """
 
     try:
@@ -107,15 +125,32 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return None
+    except ValueError:
+        # Valid JSON can still be refused by the interpreter itself: CPython
+        # caps integer string conversion, so a record holding a 5,000-digit
+        # integer raises ValueError from json.loads rather than
+        # JSONDecodeError.  A record that cannot be parsed is unattributable.
+        return None
+    if not isinstance(payload, dict):
+        # Valid JSON is not necessarily the object pip writes.  A record that
+        # parses to a list or a scalar cannot name a source, so it is
+        # unattributable rather than a crash.
+        return None
     url = payload.get("url")
     if not isinstance(url, str):
         return None
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
     if parsed.scheme != "file":
         return None
     if parsed.netloc not in ("", "localhost"):
         return None
-    return Path(unquote(parsed.path)).resolve()
+    try:
+        return Path(unquote(parsed.path)).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _normalise_distribution_name(name: str) -> str:
@@ -172,8 +207,13 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
 
     if source is None:
         return False
-    root = project_root.resolve()
-    source = Path(source).resolve()
+    try:
+        root = project_root.resolve()
+        source = Path(source).resolve()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data; see _resolve_path
+        return False
     if source == root:
         return True
     return _is_within(source, _staging_root(root), strict=True)
@@ -210,7 +250,17 @@ def _allowed_roots(
                 located = _distribution(owner).locate_file(package)
             except (OSError, importlib.metadata.PackageNotFoundError):
                 continue
-            roots.append(Path(located).resolve())
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:  # noqa: BLE001, S112 - untrusted metadata reader
+                # A distribution object is third-party code; any of its
+                # methods can raise anything.  An install whose location
+                # cannot be read contributes no allowed root, which is the
+                # fail-closed direction.
+                continue
+            resolved, _ = _resolve_path(located, package)
+            if resolved is not None:
+                roots.append(resolved)
     return roots
 
 
@@ -219,8 +269,10 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
 
     try:
         module = __import__(package)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
-        return None, f"import failed: {type(exc).__name__}: {exc}"
+        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}"
     origin = getattr(module, "__file__", None)
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
@@ -228,32 +280,85 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
         locations = list(getattr(module, "__path__", ()) or ())
         if not locations:
             return None, "module exposed neither __file__ nor __path__"
-        candidate = Path(locations[0])
+        candidate = locations[0]
     else:
-        candidate = Path(origin)
+        candidate = origin
     return _resolve_path(candidate, package)
 
 
-def _resolve_path(candidate: Path, package: str) -> tuple[Path | None, str]:
+def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
     """Return ``candidate`` resolved, or the error that made it unusable.
 
     A path an interpreter reports is data, and a path can be malformed rather
-    than merely foreign: an embedded NUL raises from ``Path.resolve``.  Letting
-    that escape turned a finding into a traceback, so a bare ``pytest`` run
-    died with an ``INTERNALERROR`` instead of the explicit refusal that names
-    the offending package.  An unusable origin is a finding like any other, so
-    report it and let the caller fail closed.
+    than merely foreign.  It can also be the wrong *type* entirely: an
+    embedded NUL raises from ``Path.resolve``, and a value that is not a path
+    at all raises from ``Path(...)`` before this function is ever reached.
+    Worse, the value may be an object with a ``__fspath__`` that raises
+    anything at all -- ``Path(...)`` calls it, and no list of expected
+    exception types can anticipate what a foreign object chooses to raise.
+    Every one of these let a finding escape as a traceback, so a bare
+    ``pytest`` run died with an ``INTERNALERROR`` instead of the explicit
+    refusal that names the offending package.
+
+    Conversion therefore happens *inside* the guard, and is the only place in
+    the module that coerces untrusted data to a ``Path``.  An unusable origin
+    is a finding like any other, so report it and let the caller fail closed.
+
+    The clause is therefore ``except BaseException`` rather than an
+    enumeration: the input is untrusted interpreter or metadata output, and
+    "this path is unusable" must hold for *every* way it can fail to be one.
+    Narrowing this to a tuple reintroduces the escape the moment some caller
+    passes an object that raises something unanticipated.  ``KeyboardInterrupt``
+    and ``SystemExit`` are re-raised so an operator interrupt still stops the
+    run rather than being recorded as a finding.
+
+    The message is rendered with ``_describe`` rather than an f-string: the
+    caught exception is itself untrusted, since it can come straight out of a
+    foreign ``__fspath__``, and ``str(exc)`` on such an object can raise.  A
+    detail line that is itself hostile must still produce a finding.
+
+    An empty candidate is refused before conversion.  ``Path("")`` is not
+    malformed -- it resolves cleanly to the process CWD, which is normally
+    inside this checkout -- so it would otherwise be credited here and turn an
+    origin that says nothing about where the package came from into a PASS.
+    The guard is meant to *prove* a package was imported from this tree, and
+    an empty ``__file__`` proves no such thing.
+
+    The test is scoped to ``str``/``bytes`` on purpose.  A path-like object
+    with ``__len__`` returning 0 is falsy but perfectly usable, so a bare
+    ``if not candidate`` would refuse a real path.  It also sits inside the
+    ``try`` so a candidate that raises while being interrogated is reported
+    as a finding rather than escaping.
     """
 
     try:
-        return candidate.resolve(), ""
-    except (OSError, ValueError, RuntimeError) as exc:
-        return None, f"origin is not a usable path: {type(exc).__name__}: {exc}"
+        if isinstance(candidate, (str, bytes)) and not candidate:
+            return None, "origin is an empty path"
+        return Path(candidate).resolve(), ""
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - untrusted data, see docstring
+        return None, f"origin is not a usable path: {_describe(exc)}"
 
 
-def _foreign_namespace_locations(
-    package: str, allowed_roots: list[Path]
-) -> list[Path]:
+def _describe(value: object) -> str:
+    """Return a printable rendering of ``value`` that cannot itself raise.
+
+    Everything this module reports came from the interpreter or from install
+    metadata, so any of it may be an object with a hostile ``__str__``.  A
+    detail string that raises while being built turns the finding back into a
+    traceback, which is the exact failure this module exists to prevent.
+    """
+
+    try:
+        return str(value)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return f"<unprintable {type(value).__name__}>"
+
+
+def _foreign_namespace_locations(package: str, allowed_roots: list[Path]) -> list[Path]:
     """Return namespace portions of ``package`` that resolve outside the checkout.
 
     A namespace package exposes no ``__file__``, so every entry of its
@@ -262,6 +367,13 @@ def _foreign_namespace_locations(
     additional portion outside the checkout -- exactly the shape a shared
     environment produces when ``sys.path`` mixes two worktrees, where a
     subpackage missing locally still imports from the foreign portion.
+
+    A portion that will not resolve is reported as the path it claims to be,
+    unresolved.  It is certainly not inside any allowed root, so the caller
+    fails closed -- and the detail stays readable instead of raising out of
+    ``check_origins`` as a traceback.  A portion that is not a path at all is
+    reported as itself, which keeps the finding readable without ever
+    coercing untrusted data outside ``_resolve_path``.
     """
 
     module = sys.modules.get(package)
@@ -269,10 +381,9 @@ def _foreign_namespace_locations(
         return []
     outside = []
     for location in getattr(module, "__path__", ()) or ():
-        if not any(
-            _is_within(location, allowed, strict=False) for allowed in allowed_roots
-        ):
-            outside.append(Path(location).resolve())
+        if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
+            resolved, _ = _resolve_path(location, package)
+            outside.append(resolved if resolved is not None else location)
     return outside
 
 
@@ -304,7 +415,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                     "status": "FAIL",
                     "detail": (
                         "namespace package also resolves outside this checkout: "
-                        + ", ".join(str(item) for item in foreign)
+                        + ", ".join(_describe(item) for item in foreign)
                     ),
                 }
             )
