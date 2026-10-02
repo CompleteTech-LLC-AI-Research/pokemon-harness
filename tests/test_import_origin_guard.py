@@ -871,9 +871,11 @@ def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path,
     ValueError, RuntimeError)`` clause catches.  That escaped ``check_origins``
     as a traceback, the same INTERNALERROR the NUL rows were added to stop.
 
-    The portion belongs in the foreign list regardless: it cannot be shown to
-    be inside any allowed root, and "inside this checkout" is the claim being
-    disproved.
+    The portion cannot be shown to be inside any allowed root, and "inside this
+    checkout" is the claim being disproved.  It is reported on the *unusable*
+    channel rather than the foreign one because #551 split those apart: a
+    portion that exists and resolves elsewhere is a different finding from one
+    that never resolved at all.  Either way the caller fails closed.
     """
 
     module = types.ModuleType("junk_ns")
@@ -885,7 +887,7 @@ def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path,
 
     assert report["status"] == "FAIL"
     assert report["packages"][0]["package"] == "junk_ns"
-    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+    assert "path portion is not usable" in report["packages"][0]["detail"]
 
 
 @pytest.mark.parametrize("junk", [7, 42, 3.5, object()])
@@ -1578,11 +1580,10 @@ def test_unusable_namespace_portion_is_a_finding_not_a_crash(tmp_path, monkeypat
     namespace rows then crashed with ``ValueError: embedded null character``
     out of ``check_origins`` instead of producing a finding.
 
-    The namespace finding names the offending portion rather than reusing the
-    ``not a usable path`` wording, because an unresolvable portion is still a
-    foreign portion and the caller reports it on that channel.  What matters
-    is that it is a finding naming the package, at the verdict level, with no
-    exception escaping.
+    The finding names the offending portion on the *unusable* channel, since
+    #551 reports a portion that never resolved separately from one that
+    resolved somewhere foreign.  What matters is that it is a finding naming
+    the package, at the verdict level, with no exception escaping.
     """
 
     module = types.ModuleType("bad_ns")
@@ -1594,7 +1595,7 @@ def test_unusable_namespace_portion_is_a_finding_not_a_crash(tmp_path, monkeypat
 
     assert report["status"] == "FAIL"
     assert report["packages"][0]["package"] == "bad_ns"
-    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+    assert "path portion is not usable" in report["packages"][0]["detail"]
 
 
 def test_unusable_origin_is_a_finding_not_a_crash(monkeypatch):
