@@ -815,6 +815,17 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                 "detail": "",
             }
         )
+    # `all()` over an empty sequence is True, so an empty request would report
+    # PASS for verifying nothing.  A gate that checked no packages must not be
+    # able to certify that all is well; fail closed at the report boundary so
+    # the verdict holds no matter which caller supplied the list.
+    if not findings:
+        return {
+            "project_root": str(root),
+            "packages": [],
+            "status": "FAIL",
+            "detail": "no packages were selected to verify",
+        }
     return {
         "project_root": str(root),
         "packages": findings,
