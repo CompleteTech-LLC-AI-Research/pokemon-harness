@@ -358,33 +358,61 @@ def _describe(value: object) -> str:
         return f"<unprintable {type(value).__name__}>"
 
 
-def _foreign_namespace_locations(package: str, allowed_roots: list[Path]) -> list[Path]:
-    """Return namespace portions of ``package`` that resolve outside the checkout.
+def _foreign_path_locations(
+    package: str, allowed_roots: list[Path], origin: Path
+) -> tuple[list[Path], list[str]]:
+    """Return importable ``__path__`` entries of ``package`` that are not local.
 
-    A namespace package exposes no ``__file__``, so every entry of its
-    ``__path__`` is a place the interpreter will import from.  Crediting only
-    ``__path__[0]`` passes a package whose in-checkout portion shadows an
-    additional portion outside the checkout -- exactly the shape a shared
-    environment produces when ``sys.path`` mixes two worktrees, where a
-    subpackage missing locally still imports from the foreign portion.
+    Every entry of a package's ``__path__`` is a directory the interpreter will
+    import from, whether or not the package also has a ``__file__``.  A regular
+    package carrying a checkout-local ``__init__.py`` is no safer than a
+    namespace package: ``pkgutil.extend_path``, an explicit ``__path__``
+    extension, or a ``.pth``-installed path entry can add a second portion from
+    another worktree, and a submodule missing locally then imports from that
+    foreign portion while the top-level origin still looks correct.
 
-    A portion that will not resolve is reported as the path it claims to be,
-    unresolved.  It is certainly not inside any allowed root, so the caller
-    fails closed -- and the detail stays readable instead of raising out of
-    ``check_origins`` as a traceback.  A portion that is not a path at all is
-    reported as itself, which keeps the finding readable without ever
-    coercing untrusted data outside ``_resolve_path``.
+    Crediting only the top-level origin (or only ``__path__[0]``) therefore
+    reports PASS for a package that is genuinely partly foreign -- the exact
+    false PASS this guard exists to prevent.  So this applies to regular
+    packages too, not only to namespaces.
+
+    Returns the foreign locations and the reasons any entry was unusable.  A
+    portion that cannot be resolved is a finding, never an exception: the
+    caller fails closed on either.
     """
 
     module = sys.modules.get(package)
-    if module is None or getattr(module, "__file__", None) is not None:
-        return []
-    outside = []
+    if module is None:
+        return [], []
+    # Judge the module that actually corresponds to the origin being reported.
+    # A caller may have resolved the origin from install metadata rather than
+    # from the live ``sys.modules`` entry (the release lane does exactly that),
+    # and then the ambient module is some *other* tree's package.  Comparing
+    # that module's portions against these roots would report a foreign path
+    # for a package that is genuinely installed from an allowed root.
+    module_origin = getattr(module, "__file__", None)
+    if module_origin is not None:
+        try:
+            if Path(module_origin).resolve() != origin:
+                return [], []
+        except (OSError, ValueError, RuntimeError):
+            return [], []
+    outside: list[Path] = []
+    unusable: list[str] = []
     for location in getattr(module, "__path__", ()) or ():
         if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
-            resolved, _ = _resolve_path(location, package)
-            outside.append(resolved if resolved is not None else location)
-    return outside
+            # Coerce through ``_resolve_path`` rather than ``Path(...).resolve``
+            # directly: a portion is untrusted interpreter output, so it can be
+            # the wrong type, embed a NUL, or be an object whose ``__fspath__``
+            # raises anything at all.  An unusable portion is reported as the
+            # path it claims to be and still fails the caller closed, and a
+            # hostile ``__str__`` cannot escape while the reason is rendered.
+            resolved, error = _resolve_path(location, package)
+            if resolved is not None:
+                outside.append(resolved)
+            else:
+                unusable.append(f"{_describe(location)}: {error}")
+    return outside, unusable
 
 
 def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKAGES) -> dict:
@@ -406,33 +434,48 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
             )
             continue
         assert origin is not None  # guaranteed when ``error`` is empty
-        foreign = _foreign_namespace_locations(package, allowed_roots)
-        if foreign:
+        # Judge the top-level origin first.  When the package itself resolves
+        # outside every allowed root that is the whole finding, and reporting a
+        # path-portion detail as well would bury it.
+        if not any(_is_within(origin, allowed) for allowed in allowed_roots):
             findings.append(
                 {
                     "package": package,
                     "origin": str(origin),
                     "status": "FAIL",
                     "detail": (
-                        "namespace package also resolves outside this checkout: "
-                        + ", ".join(_describe(item) for item in foreign)
+                        f"resolves outside this checkout {root} and outside the "
+                        "site-packages of an install made from it; the "
+                        "interpreter is importing a different checkout"
                     ),
                 }
             )
             continue
-        inside = any(_is_within(origin, allowed) for allowed in allowed_roots)
+        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin)
+        if foreign or unusable:
+            detail = ""
+            if foreign:
+                detail = "package also resolves outside this checkout: " + ", ".join(
+                    _describe(item) for item in foreign
+                )
+            if unusable:
+                joined = "path portion is not usable: " + ", ".join(unusable)
+                detail = f"{detail}; {joined}" if detail else joined
+            findings.append(
+                {
+                    "package": package,
+                    "origin": str(origin),
+                    "status": "FAIL",
+                    "detail": detail,
+                }
+            )
+            continue
         findings.append(
             {
                 "package": package,
                 "origin": str(origin),
-                "status": "PASS" if inside else "FAIL",
-                "detail": (
-                    ""
-                    if inside
-                    else f"resolves outside this checkout {root} and outside the "
-                    "site-packages of an install made from it; the interpreter "
-                    "is importing a different checkout"
-                ),
+                "status": "PASS",
+                "detail": "",
             }
         )
     return {
