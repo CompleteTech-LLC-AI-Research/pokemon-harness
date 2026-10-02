@@ -9,6 +9,7 @@ directions: the guard must accept the tree under test and reject any other.
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import types
@@ -806,3 +807,62 @@ def test_preflight_accepts_the_real_interpreter_on_this_checkout(package, monkey
         timeout_seconds=60,
     )
     assert result.status == "PASS", result.reason
+
+
+def test_matrix_audit_ignores_the_nodeidless_origin_row(monkeypatch):
+    """The origin row must not be mistaken for the collected pytest tree.
+
+    This PR prepends a nodeidless ``import-origins`` preflight to the
+    collection list, so reading ``collection_list[0]`` audits an empty matrix
+    and reports ``structural=FAIL``/``collected=0`` even when the real
+    pytest collection succeeded.  The audit must read the first entry point
+    that actually carries node ids.
+
+    Master had no preflight row, so positional indexing was correct there;
+    adding the row is what makes the shape reachable, which is why this row
+    belongs with the guard rather than with the matrix auditor.
+    """
+
+    audited: list[tuple[str, ...]] = []
+
+    def fake_audit_collection(nodeids, **kwargs):
+        audited.append(tuple(nodeids))
+        return {
+            "structural_pass": True,
+            "acceptance_matrix_complete": True,
+            "collected": len(nodeids),
+            "groups": {},
+        }
+
+    monkeypatch.setattr(
+        runpy,
+        "run_path",
+        lambda _path: {
+            "audit_collection": fake_audit_collection,
+            "STRICT_ACCEPTANCE_NODEIDS": {
+                "trade": frozenset({"tests/test_trade.py::test_trade_row"}),
+                "battle": frozenset({"tests/test_battle.py::test_battle_row"}),
+            },
+        },
+    )
+
+    real_nodeids = ("tests/test_a.py::test_one", "tests/test_b.py::test_two")
+    collections = [
+        gate.CollectionResult("import-origins", [], "PASS", 0),
+        gate.CollectionResult(
+            "python-module",
+            ["pytest"],
+            "PASS",
+            0,
+            nodeids=real_nodeids,
+        ),
+    ]
+
+    audit = gate.run_matrix_collection_audit(
+        project_root=REPO_ROOT,
+        collections=collections,
+    )
+
+    assert audited == [real_nodeids]
+    assert audit["status"] == "PASS"
+    assert audit["collected"] == len(real_nodeids)
