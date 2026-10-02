@@ -359,6 +359,8 @@ def test_check_origins_rejects_a_competing_pyboy_distribution(tmp_path, monkeypa
     ("payload", "reason"),
     [
         ({"dir_info": {}, "url": "https://example.invalid/checkout"}, "https scheme"),
+        ({"dir_info": {}, "url": "https:///checkout"}, "https scheme, empty netloc"),
+        ({"dir_info": {}, "url": "https://localhost/checkout"}, "https scheme, localhost netloc"),
         ({"dir_info": {}, "url": "ssh://localhost/checkout"}, "non-file scheme"),
         ({"dir_info": {}, "url": "file://evil-host/checkout"}, "foreign netloc"),
         ({"dir_info": {}}, "missing url key"),
