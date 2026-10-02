@@ -25,14 +25,14 @@ import pytest
 import scripts.check_import_origins as origins
 import scripts.production_gate as gate
 from scripts.check_import_origins import (
+    _file_digest,
     _finder_code_file,
     _finder_source,
-    _file_digest,
     _is_installation_finder,
     _is_recorded_by_an_install,
-    _record_digests,
     _is_trusted_stdlib_finder,
     _is_within,
+    _record_digests,
     _site_packages_roots,
     check_origins,
     main,
