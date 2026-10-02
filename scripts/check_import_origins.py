@@ -58,6 +58,12 @@ from urllib.parse import unquote, urlparse
 # vendored emulator it drives; a stale copy of either invalidates a release.
 REQUIRED_PACKAGES = ("pokered_harness", "pyboy")
 
+# ``co_flags`` bit recording that ``from __future__ import annotations`` was in
+# effect.  It describes how a module's bytecode was produced rather than what
+# the code does, so it is excluded when comparing a finder's compiled code with
+# the source recompiled from disk; see ``_constant_signature``.
+_CO_FUTURE_ANNOTATIONS = 0x1000000
+
 
 def _trusted_stdlib_finders() -> set[object]:
     """Return the import machinery finders that ship with the interpreter.
@@ -211,19 +217,44 @@ def _constant_signature(code: object):
     tell a genuine ``find_spec`` from a hostile one that merely has the same
     bytecode shape and serves a different path.
 
-    Nested code objects are reduced to their own constant signature rather
-    than compared by identity, because the recompiled copy is a different
-    object even when the source is identical.  Comparing code objects with
-    ``==`` would always fail for them, which is why the signature recurses
-    instead.
+    A nested body -- a lambda, a comprehension, a closure -- is itself a code
+    object in this table, at a fixed index, so this function's ``co_code``
+    cannot see what that body *does*.  Reducing a nested code object to only
+    its constants therefore still admits a twin whose nested bytecode
+    differs, so the nested object's own identity is folded in and the
+    recursion continues from there.  Comparing code objects with ``==`` would
+    always fail, because the recompiled copy is a different object even when
+    the source is identical; that is why this builds a value summary instead.
+
+    ``co_flags`` is compared with ``CO_FUTURE_ANNOTATIONS`` masked out.  That
+    bit records whether the module had ``from __future__ import annotations``
+    in effect, and a ``.pyc`` installed from such a module keeps the bit while
+    recompiling the same text here also sets it -- but a ``.pyc`` installed
+    from a module *without* the future import lacks the bit and recompiling
+    that same text does not add it.  Comparing the raw flags therefore refuses
+    a genuine installer over a difference in how its bytecode was produced,
+    which is exactly the false red this comparison must not produce.  The
+    remaining flags are structural properties of the code itself.
     """
 
-    return tuple(
-        _constant_signature(item)
-        if isinstance(item, types.CodeType)
-        else (type(item).__name__, repr(item))
-        for item in getattr(code, "co_consts", ())
-    )
+    signature: list = []
+    for item in getattr(code, "co_consts", ()):
+        if isinstance(item, types.CodeType):
+            signature.append(
+                (
+                    "<code>",
+                    item.co_name,
+                    item.co_code,
+                    item.co_names,
+                    item.co_varnames,
+                    item.co_argcount,
+                    item.co_flags & ~_CO_FUTURE_ANNOTATIONS,
+                    _constant_signature(item),
+                )
+            )
+        else:
+            signature.append((type(item).__name__, repr(item)))
+    return tuple(signature)
 
 
 def _code_matches_source(function: object, source_file: Path) -> bool:
@@ -248,7 +279,9 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
     still embed different values, and a hostile ``find_spec`` sharing the shape
     of a genuine one would otherwise corroborate while serving a foreign path.
     The constant table is therefore part of the comparison, summarised
-    recursively so a nested code object's own constants count too.
+    recursively, and a nested code object's own bytecode is folded in as well
+    -- otherwise a lambda or comprehension could differ while its constants
+    matched.
 
     This is a strong corroboration, not a proof of provenance.  It closes the
     case where a hostile finder differs from a genuine one only in the values it

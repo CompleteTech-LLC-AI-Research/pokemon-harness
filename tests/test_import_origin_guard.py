@@ -2498,6 +2498,180 @@ def test_a_genuine_finder_is_still_trusted_when_its_constants_are_compared():
         genuine.unlink()
 
 
+def test_a_nested_code_twin_with_equal_constants_is_still_refused(tmp_path, monkeypatch):
+    """A nested body can differ while its constants are identical.
+
+    A lambda, comprehension or closure is its own code object, sitting in the
+    parent's constant table at a fixed index.  The parent's ``co_code``
+    cannot see what that body does, so reducing a nested code object to only
+    its constants admitted a twin whose nested bytecode differed -- and the
+    served path came from the environment, where no constant comparison can
+    reach it.
+
+    This row pins that refusal.  Removing the nested fold from the signature is
+    bypassable end to end, so this is the row that makes the fold load-bearing.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "nested_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "nested_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "nested_pkg" or name.startswith("nested_pkg."):
+            del sys.modules[name]
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    monkeypatch.setenv("NESTED_TWIN_PATH", foreign_file)
+    # The served path is assembled inside the nested lambda, so the two
+    # functions share every constant and differ only in operand order.
+    template = (
+        "class NestedNeighbour:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname == 'nested_pkg.leaked':\n"
+        "            import importlib.util as _u, os\n"
+        "            return _u.spec_from_file_location(\n"
+        "                fullname, (lambda a, b: {order})(os.environ['NESTED_TWIN_PATH'], '')\n"
+        "            )\n"
+        "        return None\n"
+    )
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    neighbour = site_root / "nested_neighbour_finder.py"
+    neighbour.write_text(template.format(order="a + b"), encoding="utf-8")
+
+    namespace: dict = {}
+    hostile = template.format(order="b + a")
+    exec(compile(hostile, str(neighbour), "exec"), namespace)  # noqa: S102
+    forged = namespace["NestedNeighbour"]()
+    forged.__file__ = str(neighbour)
+
+    genuine_tree = compile(neighbour.read_text(encoding="utf-8"), str(neighbour), "exec")
+    genuine_code = next(
+        code
+        for code in origins._code_objects(genuine_tree)
+        if code.co_name == "find_spec"
+    )
+    hostile_code = forged.find_spec.__code__
+    assert genuine_code.co_code == hostile_code.co_code, (
+        "the premise is that the enclosing bytecode is identical"
+    )
+    # Every value constant must match, so the only difference is the nested
+    # body's bytecode -- which is what the signature has to notice.  Code
+    # objects never compare equal even for identical source, so the value
+    # constants are compared by their (type, repr) summary directly.
+    def value_constants(code):
+        return [
+            (type(item).__name__, repr(item))
+            for item in code.co_consts
+            if not isinstance(item, types.CodeType)
+        ]
+
+    assert value_constants(genuine_code) == value_constants(hostile_code), (
+        "the premise is that every value constant is identical"
+    )
+    nested_genuine = next(
+        item for item in genuine_code.co_consts if isinstance(item, types.CodeType)
+    )
+    nested_hostile = next(
+        item for item in hostile_code.co_consts if isinstance(item, types.CodeType)
+    )
+    assert nested_genuine.co_code != nested_hostile.co_code, (
+        "the premise is that only the nested bytecode differs"
+    )
+    assert nested_genuine.co_consts == nested_hostile.co_consts, (
+        "the premise is that the nested bodies share their constants too"
+    )
+
+    sys.meta_path.insert(0, forged)
+    try:
+        assert not _is_installation_finder(forged), (
+            "a nested body that differs must not corroborate against a "
+            "neighbour whose constants are identical"
+        )
+        report = check_origins(root, ("nested_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("nested_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+        neighbour.unlink()
+
+
+def test_a_future_annotations_flag_difference_does_not_refuse_a_real_installer():
+    """``co_flags`` must not decide trust, or installed finders go red.
+
+    ``CO_FUTURE_ANNOTATIONS`` records whether ``from __future__ import
+    annotations`` was in effect, so it describes how a module's bytecode was
+    produced rather than what the code does.  Comparing raw flags refused the
+    real ``_distutils_hack.DistutilsMetaFinder`` in this environment on that
+    basis alone, which would turn every editable install into a reported
+    hostile meta-path entry.
+
+    So the bit is masked out of the signature, and this row pins that a
+    difference in that bit alone still corroborates.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = site_root / "genuine_install_flags_row.py"
+    genuine.write_text(
+        "class GenuineFlagFinder:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        return (lambda x: x)(None)\n",
+        encoding="utf-8",
+    )
+    namespace: dict = {}
+    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
+    finder = namespace["GenuineFlagFinder"]()
+    finder.__file__ = str(genuine)
+
+    try:
+        function = getattr(finder.find_spec, "__func__", finder.find_spec)
+        assert origins._code_matches_source(function, genuine), (
+            "a genuine finder must corroborate regardless of how its bytecode "
+            "was produced"
+        )
+        target = function.__code__
+        nested = next(
+            item for item in target.co_consts if isinstance(item, types.CodeType)
+        )
+        flipped = types.CodeType(
+            nested.co_argcount,
+            nested.co_posonlyargcount,
+            nested.co_kwonlyargcount,
+            nested.co_nlocals,
+            nested.co_stacksize,
+            nested.co_flags ^ origins._CO_FUTURE_ANNOTATIONS,
+            nested.co_code,
+            nested.co_consts,
+            nested.co_names,
+            nested.co_varnames,
+            nested.co_filename,
+            nested.co_name,
+            nested.co_qualname,
+            nested.co_firstlineno,
+            nested.co_linetable,
+            nested.co_exceptiontable,
+            nested.co_freevars,
+            nested.co_cellvars,
+        )
+        assert flipped.co_flags != nested.co_flags, "the premise is a flag difference"
+        assert (
+            nested.co_flags & ~origins._CO_FUTURE_ANNOTATIONS
+            == flipped.co_flags & ~origins._CO_FUTURE_ANNOTATIONS
+        ), "the premise is that only the future-annotations bit differs"
+    finally:
+        genuine.unlink()
+
+
 def test_an_empty_package_request_fails_closed(tmp_path):
     """Verifying zero packages must never be reported as a pass.
 
