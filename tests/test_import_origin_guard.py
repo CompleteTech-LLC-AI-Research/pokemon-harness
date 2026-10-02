@@ -2372,3 +2372,24 @@ def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
         )
     finally:
         genuine.unlink()
+
+
+def test_an_empty_package_request_fails_closed(tmp_path):
+    """Verifying zero packages must never be reported as a pass.
+
+    ``all()`` over an empty sequence is ``True``, so the verdict used to be
+    ``PASS`` for a request that checked nothing.  No live caller can reach
+    that today -- ``main()`` maps an empty list back to ``REQUIRED_PACKAGES``
+    and ``tests/conftest.py`` uses the default -- but the parameter is now
+    caller-controlled, so a future caller would silently get a gate that
+    exits 0 having verified nothing.
+
+    This is the mutation guard for the empty-request branch: dropping it
+    restores ``{"packages": [], "status": "PASS"}``.
+    """
+
+    report = check_origins(tmp_path, ())
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"] == [], report
+    assert report["detail"] == "no packages were selected to verify", report
