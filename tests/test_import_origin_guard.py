@@ -804,6 +804,12 @@ def test_suite_hook_actually_calls_the_import_origin_guard(monkeypatch):
     which is the exact condition #534 exists to prevent.  Mutation testing
     showed ``pass  # MUTATED`` at the hook surviving both the guard suite and a
     153-test wide lane, so this pins the wiring rather than the helper.
+
+    That hook owns a second job -- registering the production-gate markers from
+    ``tests/_tier_config.py`` -- which the marker-registration assertion below
+    pins.  Recording ``addinivalue_line`` without ever asserting on it would
+    leave that half of the hook contract unpinned, so this row and
+    ``test_suite_hook_registers_every_production_gate_marker`` are both needed.
     """
 
     from tests import conftest
@@ -828,6 +834,41 @@ def test_suite_hook_actually_calls_the_import_origin_guard(monkeypatch):
     assert calls == ["guard"], (
         "pytest_configure did not call _enforce_local_import_origins; a bare "
         "pytest run would no longer refuse a foreign checkout (#534)"
+    )
+
+
+def test_suite_hook_registers_every_production_gate_marker(monkeypatch):
+    """``pytest_configure`` must also register every marker, not just guard.
+
+    The row above records ``addinivalue_line`` calls but asserts only on the
+    guard, so replacing the marker loop with ``pass`` left all 38 rows green
+    while a bare ``pytest`` run would reject every ``-m unit`` selection as an
+    unknown mark.  ``pytest_configure`` owns both jobs; pinning one job and
+    ignoring the other is how the hook silently halves itself.
+    """
+
+    from tests import conftest
+    from tests._tier_config import MARKERS
+
+    recorded: list[tuple[str, str]] = []
+
+    class RecordingConfig:
+        def addinivalue_line(self, name: str, line: str) -> None:
+            recorded.append((name, line))
+
+    # The guard is stubbed so this row measures marker registration alone; the
+    # guard call itself is pinned by test_suite_hook_actually_calls_the_import_origin_guard.
+    monkeypatch.setattr(conftest, "_enforce_local_import_origins", lambda: None)
+
+    conftest.pytest_configure(RecordingConfig())
+
+    registered = {line.split(":", 1)[0].strip() for name, line in recorded if name == "markers"}
+    assert registered == set(MARKERS), (
+        "pytest_configure no longer registers every production-gate marker; "
+        f"missing {sorted(set(MARKERS) - registered)}"
+    )
+    assert all(name == "markers" for name, _ in recorded), (
+        f"pytest_configure registered unexpected ini lines: {recorded}"
     )
 
 
@@ -956,8 +997,10 @@ def test_capacity_planning_ignores_the_nodeidless_origin_row():
     this_file = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
     # Name a row that really exists in this file, so a reader who greps for
     # the referenced test finds it.  ``classify_test`` keys tier membership on
-    # the module, so the choice does not change the planned set.
-    planned_row = f"{this_file}::test_is_within_resolves_before_comparing"
+    # the module, so the choice does not change the planned set.  Read the name
+    # off the test symbol rather than repeating it as a literal, so renaming
+    # that row cannot silently reintroduce the drift this row documents.
+    planned_row = f"{this_file}::{test_is_within_resolves_before_comparing.__name__}"
     collections = [
         gate.CollectionResult("import-origins", [], "PASS", 0),
         gate.CollectionResult(
