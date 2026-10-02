@@ -2510,3 +2510,163 @@ def test_a_foreign_portion_that_cannot_be_rendered_is_still_reported(tmp_path, m
     assert "unprintable" in detail or "not a usable path" in detail, detail
     # The report must stay JSON-serializable, since the CLI emits it verbatim.
     json.dumps(report)
+
+
+def test_source_copied_into_site_packages_does_not_certify_an_execed_finder(tmp_path, monkeypatch):
+    """Matching bytes in a site-packages file are not load provenance.
+
+    The content check asks whether the finder's code is *in* the file it names.
+    That is necessary, but it is not the claim the guard needs: the running
+    finder must have been *loaded from* that file.  Writing the finder's own
+    source into site-packages and then running
+    ``exec(compile(source, that_path, "exec"))`` satisfies every content check
+    while the finder has no provenance there at all.  Two independent reviewers
+    reproduced this by different routes and each time the guard reported PASS
+    with a foreign submodule loading afterwards.
+
+    This row pins the missing half: the defining module must be an entry the
+    import system created for that same file, which a bare ``exec`` never
+    produces.  Dropping ``_finder_was_imported_from`` from the trust decision
+    leaves the content check satisfied and this row fails.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "copied_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "copied_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "copied_pkg" or name.startswith("copied_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "copied_source_finder_row.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "import importlib.util\n"
+        "class CopiedSourceFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'copied_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    planted.write_text(source, encoding="utf-8")
+    forged = None
+    try:
+        namespace = {"importlib": importlib, "__name__": "copied_source_finder_row"}
+        # The attack: the file really holds these exact bytes, and the code is
+        # compiled with that file as co_filename -- but it is never imported.
+        exec(compile(source, str(planted), "exec"), namespace)  # noqa: S102
+        forged = namespace["CopiedSourceFinder"]
+        forged.__module__ = "copied_source_finder_row"
+
+        code = forged.find_spec.__func__.__code__
+        assert code.co_filename == str(planted)
+        assert Path(planted).is_file(), "the planted file must really exist"
+        assert any(
+            _is_within(Path(planted), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the planted file must really sit inside site-packages"
+        # The premise: content matching succeeds and is still not enough.
+        assert _code_is_defined_in(code, Path(planted)), (
+            "this row needs the content check to pass so it isolates provenance"
+        )
+        assert "copied_source_finder_row" not in sys.modules, (
+            "a bare exec must not create a module entry"
+        )
+
+        assert not _is_installation_finder(forged), (
+            "code that merely matches a site-packages file was never loaded from it"
+        )
+        sys.meta_path.insert(0, forged)
+        report = check_origins(root, ("copied_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("copied_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        if forged is not None:
+            sys.meta_path.remove(forged)
+        planted.unlink(missing_ok=True)
+
+
+def test_a_genuine_finder_with_a_non_utf8_source_file_keeps_its_trust():
+    """Reading source as UTF-8 refuses a real latin-1 installation finder.
+
+    PEP 263 lets a module declare its encoding in a cookie, and the import
+    system honours it.  Reading the same file as UTF-8 with ``errors="replace"``
+    rewrites its bytes into *different* string constants, so the recompiled code
+    never matches the running finder's and a genuine finder is refused.  That is
+    a false FAIL on the supported release lane, not a safe refusal.
+
+    This row pins the decoder: source is read the way the interpreter reads it.
+    """
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    latin = site_root / "latin1_encoded_finder_row.py"
+    latin.write_bytes(
+        (
+            "# coding: latin-1\n"
+            "class Latin1Finder:\n"
+            "    @classmethod\n"
+            "    def find_spec(cls, name, path=None, target=None):\n"
+            "        tag = 'caf\u00e9'\n"
+            "        if name == tag:\n"
+            "            return None\n"
+            "        return None\n"
+        ).encode("latin-1")
+    )
+    try:
+        module = importlib.import_module("latin1_encoded_finder_row")
+        code = module.Latin1Finder.find_spec.__func__.__code__
+        assert any(
+            isinstance(constant, str) and not constant.isascii() for constant in code.co_consts
+        ), "this row needs a non-ASCII constant inside find_spec"
+
+        assert _finder_code_file(module.Latin1Finder) is not None, (
+            "a genuine finder with a latin-1 source must report its code file"
+        )
+        assert _is_installation_finder(module.Latin1Finder), (
+            "a genuine finder must not be refused because of its source encoding"
+        )
+    finally:
+        sys.modules.pop("latin1_encoded_finder_row", None)
+        latin.unlink(missing_ok=True)
+
+
+def test_a_module_whose_file_attribute_raises_becomes_a_finding(tmp_path):
+    """Reading ``__file__`` is untrusted too, and must not escape the guard.
+
+    A module can override ``__getattribute__`` so that touching ``__file__``
+    raises.  That read sat outside the guard's exception boundary, so the raise
+    escaped ``check_origins`` as a traceback -- the operator sees a crash instead
+    of the FAIL naming the offending package, which is the one outcome this
+    module exists to make impossible.
+
+    The existing hostile rows cover converting a returned value; none of them
+    covers a getter that raises.
+    """
+
+    class RaisingFile(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "__file__":
+                raise RuntimeError("getter boom")
+            return super().__getattribute__(name)
+
+    sys.modules["raising_file_pkg"] = RaisingFile("raising_file_pkg")
+    try:
+        report = check_origins(tmp_path, ("raising_file_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "could not be read" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        del sys.modules["raising_file_pkg"]

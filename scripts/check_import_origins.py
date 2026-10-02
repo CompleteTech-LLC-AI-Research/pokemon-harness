@@ -49,6 +49,7 @@ import importlib.util
 import json
 import re
 import sys
+import tokenize
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -132,10 +133,66 @@ def _site_packages_roots() -> list[Path]:
 def _finder_module(finder: object) -> object | None:
     """Return the module object that defines ``finder``, if it is loaded."""
 
-    name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    try:
+        name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
+        return None
     if not isinstance(name, str):
         return None
     return sys.modules.get(name)
+
+
+def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
+    """Return whether the interpreter itself imported ``finder`` from ``source_file``.
+
+    Matching the finder's code against the bytes of a site-packages file proves
+    only that *equivalent code exists there*, never that the running finder was
+    loaded from there.  Those are different claims, and the gap between them is
+    a false PASS: writing the finder's own source into site-packages and then
+    running ``exec(compile(source, that_path, "exec"))`` produces a finder whose
+    code matches that file exactly while having no provenance in it at all.
+    Independent review reproduced this twice, by two different routes, and each
+    time the guard reported ``PASS`` and a foreign submodule loaded afterwards.
+
+    Content matching is therefore not sufficient on its own, and this check
+    supplies what it cannot: the defining module must be a real entry in
+    ``sys.modules`` whose spec names the same file.  Code produced by a bare
+    ``exec`` is never a module the import system created, so it has no such
+    entry and cannot pass here.
+
+    A planted ``sys.modules`` entry does not help an attacker either: the
+    module's spec must name the same file *and* that file's ``__init__`` /
+    submodule relationship is re-checked by the caller through the code
+    fingerprint, so forging the pair means writing the file, which is the
+    threat model the site-packages location already assumes.  What this removes
+    is the cheap attack that needed no import at all.
+
+    Returns ``False`` on every difficulty -- a missing module, a spec without an
+    origin, or a raising attribute -- so an unanswerable question never becomes
+    trust.
+    """
+
+    module = _finder_module(finder)
+    if module is None:
+        return False
+    try:
+        spec = getattr(module, "__spec__", None)
+        if spec is None:
+            return False
+        origin = getattr(spec, "origin", None)
+        if not isinstance(origin, str) or not origin:
+            return False
+        # A namespace or synthetic spec carries no file-backed origin.
+        if getattr(spec, "has_location", False) is not True:
+            return False
+        resolved = _safe_resolve(Path(origin))
+        return resolved is not None and resolved == source_file
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted spec; untrusted by default
+        return False
 
 
 def _finder_source(finder: object) -> Path | None:
@@ -288,8 +345,16 @@ def _code_is_defined_in(code: object, source_file: Path) -> bool:
     if target is None:
         return False
     try:
-        source = source_file.read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError, UnicodeError):
+        # Decode the way the interpreter itself does, via PEP 263: honour any
+        # encoding cookie first and fall back to UTF-8.  Reading as UTF-8 with
+        # ``errors="replace"`` silently rewrote the bytes of a latin-1 module
+        # into different string constants, so its recompiled code never matched
+        # the running finder's and a *genuine* installation finder was refused.
+        # That is a false FAIL on the supported release lane, not a safe
+        # refusal, so the decoder has to be the import system's.
+        with tokenize.open(source_file) as handle:
+            source = handle.read()
+    except (OSError, ValueError, UnicodeError, SyntaxError):
         return False
     try:
         # ``dont_inherit`` is load-bearing, not tidiness.  ``compile()`` without
@@ -338,16 +403,24 @@ def _is_installation_finder(finder: object) -> bool:
     alone is *not* proof: ``compile()`` lets a caller name any file without
     reading it, so a forged filename would otherwise pass every check here.
     ``_code_is_defined_in`` therefore reads the named file and requires the
-    finder's code to actually be in it, so trust rests on the code being
-    physically present in site-packages rather than on a filename assertion.
-    Anything a finder can merely *say* about itself is ignored for this
-    decision.
+    finder's code to actually be in it.
+
+    That is necessary but not sufficient, and the gap was the last false PASS:
+    code *matching* a site-packages file is not the same as code *loaded from*
+    it.  Writing the finder's own source into site-packages and then running
+    ``exec(compile(source, that_path, "exec"))`` satisfies every content check
+    while having no provenance there whatsoever.  So the defining module must
+    also be an entry the import system actually created for that same file,
+    which a bare ``exec`` never produces.  Anything a finder can merely *say*
+    about itself is ignored for this decision.
     """
 
     if _is_trusted_stdlib_finder(finder):
         return True
     code_file = _finder_code_file(finder)
     if code_file is None:
+        return False
+    if not _finder_was_imported_from(finder, code_file):
         return False
     try:
         if not code_file.is_file():
@@ -621,11 +694,30 @@ def _resolve_origin(package: str) -> tuple[Path | None, str, object]:
         raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
         return None, f"import failed: {type(exc).__name__}: {_describe(exc)}", None
-    origin = getattr(module, "__file__", None)
+    # Reading the attribute is itself untrusted: a module can override
+    # ``__getattribute__`` to raise from ``__file__``, and that raise used to
+    # escape ``check_origins`` as a traceback rather than becoming the finding
+    # it describes.  The read is inside the same guard as the import, and the
+    # module is returned either way so the caller can judge it.
+    try:
+        origin = getattr(module, "__file__", None)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - untrusted getter, see docstring
+        return None, f"origin could not be read: {type(exc).__name__}: {_describe(exc)}", module
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
         # the only available statement of where they resolved.
-        locations = list(getattr(module, "__path__", ()) or ())
+        try:
+            locations = list(getattr(module, "__path__", ()) or ())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - untrusted getter, see above
+            return (
+                None,
+                f"module search path could not be read: {type(exc).__name__}: {_describe(exc)}",
+                module,
+            )
         if not locations:
             return None, "module exposed neither __file__ nor __path__", module
         candidate = locations[0]
