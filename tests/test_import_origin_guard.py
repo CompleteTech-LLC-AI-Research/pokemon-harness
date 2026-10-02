@@ -14,6 +14,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -792,6 +793,36 @@ def test_suite_allows_collection_when_origins_match(monkeypatch):
     # A guard that always raised would break every run, so the PASS direction
     # must stay silent.
     conftest._enforce_local_import_origins()
+
+
+def test_suite_hook_calls_the_origin_guard(monkeypatch):
+    """``pytest_configure`` must actually invoke the guard, not merely define it.
+
+    The two rows above pin ``_enforce_local_import_origins`` itself, in both
+    directions.  Neither pins the *call* inside ``pytest_configure``, so
+    replacing that one line with ``pass`` leaves the helper fully tested while a
+    bare ``pytest`` run silently stops refusing to collect against a foreign
+    checkout -- the exact failure #534 exists to prevent.  Observed with that
+    mutation: the guard suite still reported 37 passed, 0 failed.  Pin the
+    wiring so that mutant is killed.
+    """
+
+    from tests import conftest
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        conftest,
+        "_enforce_local_import_origins",
+        lambda: calls.append(1),
+    )
+
+    config = SimpleNamespace(
+        addinivalue_line=lambda *_args, **_kwargs: None,
+    )
+
+    conftest.pytest_configure(config)
+
+    assert calls == [1]
 
 
 def test_a_failing_origin_preflight_stops_before_collection_runs(tmp_path, monkeypatch):
