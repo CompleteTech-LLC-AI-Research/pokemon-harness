@@ -430,6 +430,56 @@ def test_check_origins_rejects_a_package_from_another_checkout(tmp_path, monkeyp
     assert "importing a different checkout" in finding["detail"]
 
 
+def test_is_within_resolves_before_comparing(tmp_path):
+    """Containment must be decided on real paths, not on their spelling.
+
+    ``Path.relative_to`` compares strings, so a lexical check would call
+    ``<checkout>/build/pyboy-native-link`` a child of ``<checkout>/build``
+    even when that name is a symlink into a sibling worktree, and would treat
+    ``<checkout>/build/../../elsewhere`` as inside without ever applying the
+    traversal.  Provenance is a claim about where a file really is.
+    """
+
+    project = tmp_path / "checkout"
+    (project / "build").mkdir(parents=True)
+    sibling = tmp_path / "other-worktree"
+    (sibling / "build").mkdir(parents=True)
+
+    link = project / "build" / "pyboy-native-link"
+    link.symlink_to(sibling / "build", target_is_directory=True)
+
+    assert not origins._is_within(link / "pyboy-native-x", project / "build")
+    assert not origins._is_within(project / "build" / ".." / ".." / "other-worktree", project)
+    assert origins._is_within(
+        project / "build" / "pyboy-native-abc" / "pyboy-src", project / "build"
+    )
+    # A sibling checkout is never inside this one, prefix or not.
+    assert not origins._is_within(sibling, project)
+
+
+def test_is_this_checkout_refuses_a_symlinked_staging_path(tmp_path):
+    """A symlink under ``build/`` must not smuggle in a sibling worktree.
+
+    The native lane's provenance is its staging location, so the staging
+    location has to be the real one.  A ``build/`` entry pointing at another
+    checkout would otherwise satisfy a lexical containment test while the
+    install it describes was built from a different tree entirely.
+    """
+
+    project = tmp_path / "checkout"
+    (project / "build").mkdir(parents=True)
+    sibling = tmp_path / "other-worktree"
+    (sibling / "build" / "pyboy-native-x").mkdir(parents=True)
+
+    link = project / "build" / "pyboy-native-link"
+    link.symlink_to(sibling / "build", target_is_directory=True)
+
+    assert not origins._is_this_checkout(project, link / "pyboy-native-x")
+    assert not origins._is_this_checkout(project, sibling / "build" / "pyboy-native-x")
+    assert origins._is_this_checkout(project, project)
+    assert origins._is_this_checkout(project, project / "build" / "pyboy-native-abc" / "pyboy-src")
+
+
 def test_check_origins_reports_an_unimportable_package(tmp_path):
     report = check_origins(tmp_path, ("pokered_definitely_missing_pkg_xyz",))
 

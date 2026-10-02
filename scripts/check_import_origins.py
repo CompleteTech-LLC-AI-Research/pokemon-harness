@@ -60,6 +60,14 @@ REQUIRED_PACKAGES = ("pokered_harness", "pyboy")
 def _is_within(candidate: Path, root: Path) -> bool:
     """Return whether ``candidate`` is ``root`` or lives beneath it."""
 
+    # Resolve both sides before comparing.  A lexical comparison would treat
+    # ``<checkout>/build/pyboy-native-link`` as inside ``<checkout>/build``
+    # even when that name is a symlink into a sibling worktree, and would
+    # compare ``<checkout>/build/../../elsewhere`` as inside without ever
+    # applying the traversal.  Provenance is a statement about where a file
+    # really is, so the paths must be real before they are compared.
+    candidate = Path(candidate).resolve()
+    root = Path(root).resolve()
     try:
         candidate.relative_to(root)
     except ValueError:
@@ -152,9 +160,11 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
 
     if source is None:
         return False
-    if source == project_root:
+    root = project_root.resolve()
+    source = Path(source).resolve()
+    if source == root:
         return True
-    return _is_within(source, _staging_root(project_root))
+    return _is_within(source, _staging_root(root))
 
 
 def _allowed_roots(project_root: Path) -> list[Path]:
