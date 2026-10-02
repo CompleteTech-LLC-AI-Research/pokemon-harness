@@ -769,9 +769,11 @@ def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
             raise ExplodingImportError("nope")
         return real_import(name, *args, **kwargs)
 
-    with _module_installed("unprintable_import", types.ModuleType("unprintable_import")):
-        with _import_replaced(_failing_import):
-            returncode = main(["--project-root", str(tmp_path), "--package", "unprintable_import"])
+    with (
+        _module_installed("unprintable_import", types.ModuleType("unprintable_import")),
+        _import_replaced(_failing_import),
+    ):
+        returncode = main(["--project-root", str(tmp_path), "--package", "unprintable_import"])
 
     assert returncode == 1
     report = json.loads(capsys.readouterr().out)
@@ -792,9 +794,8 @@ def test_resolve_origin_does_not_swallow_an_interrupt(raised):
     def _interrupting_import(name, *args, **kwargs):
         raise raised
 
-    with _import_replaced(_interrupting_import):
-        with pytest.raises((KeyboardInterrupt, SystemExit)):
-            origins._resolve_origin("interruptible_import")
+    with _import_replaced(_interrupting_import), pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._resolve_origin("interruptible_import")
 
 
 def test_installed_from_refuses_a_record_the_interpreter_will_not_parse():
