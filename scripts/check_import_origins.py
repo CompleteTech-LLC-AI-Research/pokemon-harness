@@ -82,13 +82,17 @@ def _is_within(candidate: Path, root: Path, *, strict: bool = False) -> bool:
     traceback.  Refusing is the fail-closed direction, because "within this
     checkout" is the claim being disproved.  A value that is not a path at all
     is refused for the same reason: ``Path(...)`` raises ``TypeError``, which
-    is a failure of the data, not of this checkout.
+    is a failure of the data, not of this checkout.  ``except BaseException``
+    rather than an enumeration, because a foreign object's ``__fspath__`` can
+    raise anything and both operands here are untrusted.
     """
 
     try:
         resolved_root = Path(root).resolve()
         resolved_candidate = Path(candidate).resolve()
-    except (OSError, TypeError, ValueError, RuntimeError):
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
         return False
     if strict and Path(root).is_symlink():
         return False
@@ -200,7 +204,9 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
     try:
         root = project_root.resolve()
         source = Path(source).resolve()
-    except (OSError, TypeError, ValueError, RuntimeError):
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data; see _resolve_path
         return False
     if source == root:
         return True
@@ -271,18 +277,31 @@ def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
     than merely foreign.  It can also be the wrong *type* entirely: an
     embedded NUL raises from ``Path.resolve``, and a value that is not a path
     at all raises from ``Path(...)`` before this function is ever reached.
-    Both let a finding escape as a traceback, so a bare ``pytest`` run died
-    with an ``INTERNALERROR`` instead of the explicit refusal that names the
-    offending package.
+    Worse, the value may be an object with a ``__fspath__`` that raises
+    anything at all -- ``Path(...)`` calls it, and no list of expected
+    exception types can anticipate what a foreign object chooses to raise.
+    Every one of these let a finding escape as a traceback, so a bare
+    ``pytest`` run died with an ``INTERNALERROR`` instead of the explicit
+    refusal that names the offending package.
 
     Conversion therefore happens *inside* the guard, and is the only place in
     the module that coerces untrusted data to a ``Path``.  An unusable origin
     is a finding like any other, so report it and let the caller fail closed.
+
+    The clause is therefore ``except BaseException`` rather than an
+    enumeration: the input is untrusted interpreter or metadata output, and
+    "this path is unusable" must hold for *every* way it can fail to be one.
+    Narrowing this to a tuple reintroduces the escape the moment some caller
+    passes an object that raises something unanticipated.  ``KeyboardInterrupt``
+    and ``SystemExit`` are re-raised so an operator interrupt still stops the
+    run rather than being recorded as a finding.
     """
 
     try:
         return Path(candidate).resolve(), ""
-    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - untrusted data, see docstring
         return None, f"origin is not a usable path: {type(exc).__name__}: {exc}"
 
 

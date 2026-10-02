@@ -489,6 +489,105 @@ def test_installed_from_refuses_an_unattributable_record(payload, reason):
         origins._distribution = original
 
 
+class _HostileFspath:
+    """A path-like whose ``__fspath__`` raises something unanticipated.
+
+    No tuple of expected exception types can enumerate what an object supplied
+    by a foreign package or a corrupt install record chooses to raise, so the
+    guards must not be written as an enumeration.
+    """
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __fspath__(self):
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        AssertionError("arbitrary fspath failure"),
+        KeyError("not a filesystem error at all"),
+        ZeroDivisionError("nor this one"),
+        UnicodeError("or this"),
+    ],
+)
+def test_fspath_that_raises_anything_is_a_finding_not_a_crash(tmp_path, monkeypatch, raised):
+    """A ``__fspath__`` raising an arbitrary exception must not escape.
+
+    Enumerating ``(OSError, TypeError, ValueError, RuntimeError)`` covers the
+    ways a *well-behaved* path fails, but ``Path()`` calls ``__fspath__`` on a
+    foreign object and that object can raise anything.  An arbitrary raise
+    escaped ``check_origins`` as a traceback, so the run died instead of
+    reporting the package it was refusing.
+    """
+
+    module = types.ModuleType("hostile_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), _HostileFspath(raised)]
+    monkeypatch.setitem(sys.modules, "hostile_ns", module)
+
+    report = check_origins(tmp_path, ("hostile_ns",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["package"] == "hostile_ns"
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_operator_interrupt_is_not_swallowed_as_a_finding(tmp_path, monkeypatch, raised):
+    """An interrupt must still stop the run, not become a finding.
+
+    The guards catch ``BaseException`` so no foreign ``__fspath__`` can escape.
+    That must not extend to swallowing the operator's own Ctrl-C or a
+    deliberate ``sys.exit``: both are re-raised.
+    """
+
+    module = types.ModuleType("interrupting_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), _HostileFspath(raised)]
+    monkeypatch.setitem(sys.modules, "interrupting_ns", module)
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        check_origins(tmp_path, ("interrupting_ns",))
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_resolve_path_does_not_swallow_an_interrupt(raised):
+    """``_resolve_path`` itself must re-raise, not just callers that reach it.
+
+    The namespace row above is not enough: a hostile portion is first passed
+    through ``_is_within``, whose own re-raise happens to stop the interrupt
+    before ``_resolve_path`` is reached.  That would let the guard swallow
+    Ctrl-C for any caller that converts a path directly, so the conversion
+    boundary is pinned on its own.
+    """
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._resolve_path(_HostileFspath(raised), "pkg")
+
+
+def test_cli_reports_a_hostile_fspath_as_a_failure_without_a_traceback(tmp_path, capsys):
+    """The real CLI must print parseable JSON and exit non-zero, not raise."""
+
+    module = types.ModuleType("hostile_cli_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), _HostileFspath(AssertionError("boom"))]
+    original = sys.modules.get("hostile_cli_ns")
+    sys.modules["hostile_cli_ns"] = module
+    try:
+        returncode = main(["--project-root", str(tmp_path), "--package", "hostile_cli_ns"])
+    finally:
+        if original is None:
+            del sys.modules["hostile_cli_ns"]
+        else:
+            sys.modules["hostile_cli_ns"] = original
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+
+
 @pytest.mark.parametrize("junk", [None, 7, 42, object()])
 def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path, monkeypatch, junk):
     """A ``__path__`` entry that is not a path must be reported, not raised.
