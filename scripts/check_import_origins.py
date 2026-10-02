@@ -553,14 +553,7 @@ def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
             text = entry.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             continue
-        if needle not in text:
-            continue
-        # A ``.pth`` is plain text, so "it names the module" proves nothing by
-        # itself: anyone who can write into site-packages can write that line.
-        # What the environment does assert is that *this* activation file was
-        # itself laid down by an install, which is what distinguishes the real
-        # ``_virtualenv``/``__editable__`` shims from a planted one.
-        if _is_recorded_by_an_install(entry, root):
+        if needle in text:
             return True
     return False
 
