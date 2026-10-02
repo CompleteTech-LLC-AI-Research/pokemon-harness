@@ -1,21 +1,35 @@
-# Independent review of #551 (`lead/551-combine-553`) — REQUEST CHANGES
+# Review of #551 (`lead/551-combine-553`) — findings reported, NOT an independent review
 
 Date: 2026-10-02
-Reviewer: lead delivery agent (**not** the author of this branch; author is
-`CompleteDotTech`)
 Reviewed head: `90deb71` "#534: decode RECORD with the CSV parser, not a
 hand-rolled split"
 Review worktree: `/workspace/poke-harness/.scratch/rev551` (detached at `90deb71`)
-Verdict: **REQUEST CHANGES**
+Verdict of the measurements: **one blocking bypass survives**
+Status: **does not count as a review. #551 remains unreviewed.**
 
-## Independence
+## Correction to the record
 
-`#551` is authored by `CompleteDotTech`, so reviewing it is legitimate: an
-author may not approve their own change, and I am not its author. (`#558` is
-mine, so my review of it would not count and I have not tried to make it.)
+An earlier ledger entry in this round described a review of `#551` as
+*independent*, on the grounds that `#551` was authored by someone other than
+me. **That is wrong, and this entry retracts it.**
 
-The branch was force-pushed during this review. The first pass was against
-`5c272ae`; findings below are re-measured against the current head `90deb71`.
+```
+$ gh api user --jq .login          ->  CompleteDotTech
+$ gh pr view 551 --json author     ->  CompleteDotTech
+$ gh pr view 558 --json author     ->  CompleteDotTech
+```
+
+Every commit on `lead/551-combine-553` is authored by `CompleteDotTech`, which
+is the account I push from. I authored `#551` and `#558`. So the `#551` pass is
+**self-review**, and under "an author may not independently approve their own
+change" it carries **no approval weight at all**. GitHub enforced the same rule
+mechanically: `gh pr review 551 --request-changes` was rejected with *"Review
+Can not request changes on your own pull request."*
+
+`LEAD_20261002_558_ROUND8_PLANTED_PTH.md` repeats the same error in its "How
+this was found" section. It is marked withdrawn, but the correction stands:
+there is still **no independent review of either PR**, and the eleven delegation
+failures of #489 are still what blocks that.
 
 ## Suite
 
@@ -41,17 +55,16 @@ foreign submodule loaded: foreign
 ```
 
 A finder with no provenance at all is certified, and a submodule is then served
-from a directory outside the checkout. That is the whole point of the guard.
+from a directory outside the checkout.
 
-**This one is not fixable by attesting the `.pth`.** I tried that on `#558`
-(round 8, `722ecb2`) and measured it failing twice over: an attacker who can
-write a `.pth` can write the `dist-info/RECORD` that attests it, so the bypass
-survives identically; and requiring `RECORD` attestation refuses the genuine
+**This is not fixable by attesting the `.pth`.** Measured on `#558` (round 8,
+`722ecb2`, since reverted at `14aa5b9`): an attacker who can write a `.pth` can
+equally write the `dist-info/RECORD` that attests it, so the bypass survives
+identically; and requiring `RECORD` attestation refuses the genuine
 `_virtualenv`/`__editable__` shims, which the channel's own docstring says are
-*"not owned by any distribution's RECORD"*. Both measurements are in
-`LEAD_20261002_558_ROUND8_PTH_REVERT.md`. The honest position is that the
-`.pth` channel needs a discriminator that is not an install record at all, and
-I do not have one to propose.
+*"not owned by any distribution's RECORD"*. See
+`LEAD_20261002_558_ROUND8_PTH_REVERT.md` for both measurements. The channel
+needs a discriminator that is not an install record at all.
 
 ## Finding 2 — `RECORD` CSV quoting false red (**fixed on this head**)
 
@@ -59,36 +72,26 @@ I do not have one to propose.
 right-to-left split left the quotes attached, so the reconstructed path named a
 file no record had listed and an honestly installed finder lost provenance.
 
-On the previous head `5c272ae`:
+| head | result |
+|---|---|
+| `5c272ae` | `recorded: False (expect True)` |
+| `90deb71` (`csv.reader`) | `recorded: True (expect True)` |
 
-```
-RECORD: b'"rev551,comma_row_module.py",sha256=9sJVXU4kDdGTXZh51ZsrdxHqdGfNSz2slW3gGcL8fmQ,10\n'
-recorded: False (expect True)
-```
-
-On the current head `90deb71`, which routes through `csv.reader`:
-
-```
-RECORD: b'"rev551,comma_row_module.py",sha256=9sJVXU4kDdGTXZh51ZsrdxHqdGfNSz2slW3gGcL8fmQ,10\n'
-recorded: True (expect True)
-```
-
-**Resolved.** Recorded here so the disposition of the earlier finding is clear
-and the fix is not re-litigated.
+**Resolved.** Recorded so the earlier finding's disposition is clear.
 
 ## Comparison with #558
 
-Both PRs harden the same guard. `#558` is further along on rounds 1–7
-(raising-`__file__`, hostile metaclass, forged `__spec__`, RECORD byte
-mutation, conflicting claims); `#551` carries the CSV fix that `#558` lacked
-until round 7. Neither is merged. The planted-`.pth` gap is **shared by both**
-and is not a discriminator between them.
+Both PRs harden the same guard. `#558` is further along on rounds 1–7;
+`#551` carries the CSV fix that `#558` lacked until round 7. Neither is merged.
+The planted-`.pth` gap is **shared by both** and is not a discriminator between
+them. `#558` is also strictly ahead of `#551` on the provenance design, since it
+has the planted-`.pth` change and the reasoned revert; consolidating onto
+`#558` looks better than repairing both in parallel.
 
 ## Disposition
 
-**REQUEST CHANGES on `90deb71`** — Finding 1 is blocking.
-
-I am not the author, so this review is a legitimate independent one, but it is
-also not sufficient on its own: merging is the lead's action and `#551` still
-carries the open planted-`.pth` gap with no known fix. Nothing here should be
-read as approval to merge. Release remains `PARTIAL`.
+- Findings reported on `#551` as a comment, explicitly labelled self-review.
+- **No review, independent or otherwise, exists for `#551` or `#558`.**
+- Neither PR is approved, ready, or merged. Release remains `PARTIAL`.
+- The actual unblock is #489: delegation has delivered no task eleven times, and
+  until it does, no PR on this branch of work can be independently approved.
