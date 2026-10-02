@@ -25,7 +25,9 @@ import scripts.production_gate as gate
 from scripts.check_import_origins import (
     _finder_code_file,
     _finder_source,
+    _file_digest,
     _is_installation_finder,
+    _is_recorded_by_an_install,
     _is_trusted_stdlib_finder,
     _is_within,
     _site_packages_roots,
@@ -2348,33 +2350,29 @@ def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
     the site-packages file it names has to stay trusted, or every editable
     install would be reported as a hostile meta-path entry.
 
-    The finder is genuinely *imported* here rather than ``exec``'d.  Trust
-    requires load provenance, not merely bytes that happen to match, so a row
-    that built its "genuine" finder with ``exec(compile(source, path))`` was
-    asserting the very attack the guard refuses: correct content, no
-    provenance.
+    The trusted direction is demonstrated with the finders this interpreter
+    actually has installed, not with a file written into site-packages during
+    the test.  Provenance is decided from install records -- a distribution's
+    ``RECORD`` hash, or a ``.pth`` in the same directory that imports the
+    defining module -- so a source file the test just dropped there is, by
+    construction, not something any install vouched for.
     """
 
-    site_root = _site_packages_roots()[0]
-    assert site_root.is_dir()
-    genuine = site_root / "genuine_install_finder_row.py"
-    genuine.write_text(
-        "class GenuineFinder:\n"
-        "    def find_spec(self, fullname, path=None, target=None):\n"
-        "        return None\n",
-        encoding="utf-8",
-    )
-    try:
-        module = importlib.import_module("genuine_install_finder_row")
-        finder = module.GenuineFinder()
+    custom = [entry for entry in sys.meta_path if not _is_trusted_stdlib_finder(entry)]
+    assert custom, "expected this interpreter to have an installation finder"
+    for finder in custom:
+        code_file = _finder_code_file(finder)
+        assert code_file is not None, (
+            f"{finder!r} is installed by this checkout but reports no code file"
+        )
+        assert code_file.is_file(), f"{code_file} must exist"
         function = getattr(finder.find_spec, "__func__", finder.find_spec)
-        assert origins._code_matches_source(function, genuine), (
+        assert origins._code_matches_source(function, code_file), (
             "bytecode compiled from this file must be recognised as coming from it"
         )
-        assert _is_installation_finder(finder), "a genuine site-packages finder must keep its trust"
-    finally:
-        sys.modules.pop("genuine_install_finder_row", None)
-        genuine.unlink()
+        assert _is_installation_finder(finder), (
+            f"{finder!r} must stay trusted; refusing it fails the release lane"
+        )
 
 
 def test_an_empty_package_request_fails_closed(tmp_path):
@@ -2481,14 +2479,15 @@ def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
     that way has to keep its trust, or the extra strictness becomes a false
     red on ordinary editable installs.
 
-    As with the other genuine-finder row, the finder is really *imported*:
-    trust depends on load provenance, so an ``exec``'d "genuine" finder no
-    longer demonstrates the trusted direction.
+    The finder is built outside this checkout on purpose.  This row is about
+    the *content* channel -- that a source containing nested code compiles to a
+    signature the guard reproduces -- so it exercises
+    ``_code_matches_source`` directly.  Load provenance is a separate channel
+    with its own rows; testing it here with a file no install ever recorded
+    would only re-test the wrong thing.
     """
 
-    site_root = _site_packages_roots()[0]
-    assert site_root.is_dir()
-    genuine = site_root / "genuine_nested_finder_row.py"
+    genuine = tmp_path / "nested_finder_source.py"
     genuine.write_text(
         "class NestedFinder:\n"
         "    def find_spec(self, fullname, path=None, target=None):\n"
@@ -2498,15 +2497,15 @@ def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
         "        return None\n",
         encoding="utf-8",
     )
-    try:
-        module = importlib.import_module("genuine_nested_finder_row")
-        finder = module.NestedFinder()
-        function = getattr(finder.find_spec, "__func__", finder.find_spec)
-        assert origins._code_signature(function.__code__), "constants are captured"
-        assert _is_installation_finder(finder), "a genuine nested finder must keep its trust"
-    finally:
-        sys.modules.pop("genuine_nested_finder_row", None)
-        genuine.unlink()
+    namespace: dict = {}
+    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
+    finder = namespace["NestedFinder"]()
+    function = getattr(finder.find_spec, "__func__", finder.find_spec)
+
+    assert origins._code_signature(function.__code__), "constants are captured"
+    assert origins._code_matches_source(function, genuine), (
+        "a source whose find_spec contains nested code must still match itself"
+    )
 
 
 def test_a_nested_code_twin_with_equal_constants_is_still_refused(tmp_path, monkeypatch):
@@ -2910,3 +2909,132 @@ def test_a_foreign_portion_that_cannot_be_rendered_is_still_reported(tmp_path, m
     assert "unprintable" in detail or "not a usable path" in detail, detail
     # The report must stay JSON-serializable, since the CLI emits it verbatim.
     json.dumps(report)
+
+
+def test_a_forged_module_and_spec_do_not_certify_an_uncertified_finder(tmp_path, monkeypatch):
+    """``sys.modules[name].__spec__`` is attacker-writable, so it is no evidence.
+
+    The previous attempt to supply load provenance asked the defining module's
+    spec to name the file.  Independent review showed the whole pair can be
+    written by hand: build a module with ``types.ModuleType``, attach a spec
+    from ``importlib.util.spec_from_file_location`` -- which sets
+    ``has_location=True`` -- and every check the guard made is satisfied while
+    the import system never loaded anything from that file.  The guard reported
+    PASS, ``cli_rc`` was 0, and a foreign submodule loaded afterwards.
+
+    This row pins the replacement: provenance comes from install records on disk
+    (``RECORD`` hash, or a ``.pth`` that imports the module), which a running
+    process cannot rewrite into a different claim.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "forged_spec_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = tmp_path / "outside" / "forged_spec_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "forged_spec_pkg" or name.startswith("forged_spec_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "forged_spec_finder_row.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "import importlib.util\n"
+        "class ForgedSpecFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'forged_spec_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    planted.write_text(source, encoding="utf-8")
+    forged = None
+    try:
+        namespace = {"__name__": "forged_spec_finder_row"}
+        exec(compile(source, str(planted), "exec"), namespace)  # noqa: S102
+        forged = namespace["ForgedSpecFinder"]
+
+        # The forgery: a module the import system never created, carrying a
+        # file-location spec pointing at the planted file.
+        planted_module = types.ModuleType("forged_spec_finder_row")
+        planted_module.__file__ = str(planted)
+        planted_module.__spec__ = importlib.util.spec_from_file_location(
+            "forged_spec_finder_row", planted
+        )
+        sys.modules["forged_spec_finder_row"] = planted_module
+        try:
+            # The premise: every in-memory signal the earlier check relied on is
+            # satisfied, so this row really isolates the new provenance rule.
+            assert planted_module.__spec__.has_location is True
+            assert planted_module.__spec__.origin == str(planted)
+            assert Path(planted).is_file()
+            assert any(
+                _is_within(Path(planted), root_, strict=False) for root_ in _site_packages_roots()
+            ), "the planted file must really sit inside site-packages"
+            assert _finder_code_file(forged) is not None, (
+                "this row needs the content check to pass so it isolates provenance"
+            )
+
+            assert not _is_installation_finder(forged), (
+                "a hand-written module and spec are not load provenance"
+            )
+            sys.meta_path.insert(0, forged)
+            report = check_origins(root, ("forged_spec_pkg",))
+
+            assert report["status"] == "FAIL", report
+            assert "meta_path" in report["packages"][0]["detail"], report
+            json.dumps(report)
+
+            leaked = importlib.import_module("forged_spec_pkg.leaked")
+            assert leaked.ORIGIN == "foreign"
+        finally:
+            sys.modules.pop("forged_spec_finder_row", None)
+    finally:
+        if forged is not None and forged in sys.meta_path:
+            sys.meta_path.remove(forged)
+        planted.unlink(missing_ok=True)
+
+
+def test_a_recorded_file_stops_being_recorded_when_its_bytes_change():
+    """``RECORD`` is provenance only while the bytes still hash to what it says.
+
+    The disk-recorded channel is what replaces the forgeable in-memory one, so
+    the part of it that actually carries the claim is the *hash*: a file being
+    listed in a ``RECORD`` says only that some install laid down that path, not
+    that the bytes now there are the ones it laid down.
+
+    Treating mere presence in ``RECORD`` as provenance was measured to survive
+    its own mutation: replacing the digest comparison with a membership test
+    left every row in the suite green.  This row pins the difference.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_hash_pin_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_hash_pin_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        recorded = dist_info / "RECORD"
+        digest = _file_digest(planted)
+        assert digest is not None, "the planted file must be readable"
+        recorded.write_text(f"pokemon_hash_pin_row_module.py,sha256={digest},6\n", encoding="utf-8")
+
+        assert _is_recorded_by_an_install(planted, root), (
+            "a file whose bytes match its RECORD entry is install-recorded"
+        )
+
+        planted.write_text("VALUE = 'tampered'\n", encoding="utf-8")
+        assert not _is_recorded_by_an_install(planted, root), (
+            "the same path with different bytes is no longer what the install wrote"
+        )
+    finally:
+        sys.modules.pop("pokemon_hash_pin_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
