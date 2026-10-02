@@ -2347,6 +2347,12 @@ def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
     row in the other direction: a finder whose bytecode genuinely comes from
     the site-packages file it names has to stay trusted, or every editable
     install would be reported as a hostile meta-path entry.
+
+    The finder is genuinely *imported* here rather than ``exec``'d.  Trust
+    requires load provenance, not merely bytes that happen to match, so a row
+    that built its "genuine" finder with ``exec(compile(source, path))`` was
+    asserting the very attack the guard refuses: correct content, no
+    provenance.
     """
 
     site_root = _site_packages_roots()[0]
@@ -2358,20 +2364,16 @@ def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
         "        return None\n",
         encoding="utf-8",
     )
-    namespace: dict = {}
-    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
-    finder = namespace["GenuineFinder"]()
-    finder.__file__ = str(genuine)
-
     try:
+        module = importlib.import_module("genuine_install_finder_row")
+        finder = module.GenuineFinder()
         function = getattr(finder.find_spec, "__func__", finder.find_spec)
         assert origins._code_matches_source(function, genuine), (
             "bytecode compiled from this file must be recognised as coming from it"
         )
-        assert _is_installation_finder(finder), (
-            "a genuine site-packages finder must keep its trust"
-        )
+        assert _is_installation_finder(finder), "a genuine site-packages finder must keep its trust"
     finally:
+        sys.modules.pop("genuine_install_finder_row", None)
         genuine.unlink()
 
 
@@ -2462,8 +2464,7 @@ def test_a_same_shape_twin_in_site_packages_cannot_corroborate_a_forged_finder(
         )
 
         assert not _is_installation_finder(holder), (
-            "a same-shape twin must not corroborate a finder serving a "
-            "different constant"
+            "a same-shape twin must not corroborate a finder serving a different constant"
         )
         report = check_origins(root, ("twin_pkg",))
         assert report["status"] == "FAIL", report
@@ -2479,6 +2480,10 @@ def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
     comprehension inside ``find_spec`` is covered.  A real installer written
     that way has to keep its trust, or the extra strictness becomes a false
     red on ordinary editable installs.
+
+    As with the other genuine-finder row, the finder is really *imported*:
+    trust depends on load provenance, so an ``exec``'d "genuine" finder no
+    longer demonstrates the trusted direction.
     """
 
     site_root = _site_packages_roots()[0]
@@ -2493,23 +2498,18 @@ def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
         "        return None\n",
         encoding="utf-8",
     )
-    namespace: dict = {}
-    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
-    finder = namespace["NestedFinder"]()
-    finder.__file__ = str(genuine)
     try:
+        module = importlib.import_module("genuine_nested_finder_row")
+        finder = module.NestedFinder()
         function = getattr(finder.find_spec, "__func__", finder.find_spec)
         assert origins._code_signature(function.__code__), "constants are captured"
-        assert _is_installation_finder(finder), (
-            "a genuine nested finder must keep its trust"
-        )
+        assert _is_installation_finder(finder), "a genuine nested finder must keep its trust"
     finally:
+        sys.modules.pop("genuine_nested_finder_row", None)
         genuine.unlink()
 
 
-def test_a_nested_code_twin_with_equal_constants_is_still_refused(
-    tmp_path, monkeypatch
-):
+def test_a_nested_code_twin_with_equal_constants_is_still_refused(tmp_path, monkeypatch):
     """The constant signature must cover nested BYTECODE, not just constants.
 
     A constant-only signature has a residual gap that this row pins shut.  A
@@ -2579,6 +2579,7 @@ def test_a_nested_code_twin_with_equal_constants_is_still_refused(
         assert forged.__code__.co_code == genuine.__code__.co_code
         assert forged.__code__.co_names == genuine.__code__.co_names
         assert forged.__code__.co_varnames == genuine.__code__.co_varnames
+
         # Every field the signature reads *besides* the nested recursion is
         # equal here, so the whole decision rests on recursing into the nested
         # code object. Assert that directly: comparing only the nested
@@ -2587,8 +2588,7 @@ def test_a_nested_code_twin_with_equal_constants_is_still_refused(
         def _nested_constant_tables(code: object) -> tuple:
             return tuple(
                 tuple(
-                    (type(item).__name__, repr(item))
-                    for item in getattr(constant, "co_consts", ())
+                    (type(item).__name__, repr(item)) for item in getattr(constant, "co_consts", ())
                 )
                 for constant in getattr(code, "co_consts", ())
                 if isinstance(constant, types.CodeType)
@@ -2597,14 +2597,13 @@ def test_a_nested_code_twin_with_equal_constants_is_still_refused(
         assert _nested_constant_tables(forged.__code__) == _nested_constant_tables(
             genuine.__code__
         ), "the premise: nested constants are identical, only bytecode differs"
-        assert (
-            origins._code_signature(forged.__code__)
-            != origins._code_signature(genuine.__code__)
+        assert origins._code_signature(forged.__code__) != origins._code_signature(
+            genuine.__code__
         ), "the signature must distinguish a nested body that differs"
         for field in ("co_flags", "co_argcount", "co_nlocals", "co_freevars"):
-            assert getattr(forged.__code__, field) == getattr(
-                genuine.__code__, field
-            ), f"the premise: {field} is equal on both"
+            assert getattr(forged.__code__, field) == getattr(genuine.__code__, field), (
+                f"the premise: {field} is equal on both"
+            )
 
         assert not _is_installation_finder(holder), (
             "a nested-code twin with equal constants must not corroborate"
@@ -2744,6 +2743,170 @@ def test_a_foreign_path_portion_is_reported_even_when_file_changes_between_reads
     hostile_report = check_origins(root, ("drifting_pkg",))
 
     assert hostile_report["status"] == "FAIL", hostile_report
-    assert "not a usable path" in hostile_report["packages"][0]["detail"], (
-        hostile_report
+    assert "not a usable path" in hostile_report["packages"][0]["detail"], hostile_report
+
+
+def test_a_module_whose_file_attribute_raises_becomes_a_finding(tmp_path):
+    """Reading ``__file__`` is untrusted too, and must not escape the guard.
+
+    A module can override ``__getattribute__`` so that touching ``__file__``
+    raises.  That read sat outside the guard's exception boundary, so the raise
+    escaped ``check_origins`` as a traceback -- the operator sees a crash instead
+    of the FAIL naming the offending package, which is the one outcome this
+    module exists to make impossible.
+
+    The existing hostile rows cover converting a returned value; none of them
+    covers a getter that raises.
+    """
+
+    class RaisingFile(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "__file__":
+                raise RuntimeError("getter boom")
+            return super().__getattribute__(name)
+
+    sys.modules["raising_file_pkg"] = RaisingFile("raising_file_pkg")
+    try:
+        report = check_origins(tmp_path, ("raising_file_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "could not be read" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        del sys.modules["raising_file_pkg"]
+
+
+def test_source_copied_into_site_packages_does_not_certify_an_execed_finder(tmp_path, monkeypatch):
+    """Matching bytes in a site-packages file are not load provenance.
+
+    The content check asks whether the finder's code is *in* the file it names.
+    That is necessary, but it is not the claim the guard needs: the running
+    finder must have been *loaded from* that file.  Writing the finder's own
+    source into site-packages and then running
+    ``exec(compile(source, that_path, "exec"))`` satisfies every content check
+    while the finder has no provenance there at all.
+
+    This row pins the missing half: the defining module must be an entry the
+    import system created for that same file, which a bare ``exec`` never
+    produces.  Dropping ``_finder_was_imported_from`` from the trust decision
+    leaves the content check satisfied and this row fails.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "copied_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "copied_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "copied_pkg" or name.startswith("copied_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "copied_source_finder_row.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "import importlib.util\n"
+        "class CopiedSourceFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'copied_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
     )
+    planted.write_text(source, encoding="utf-8")
+    forged = None
+    try:
+        namespace = {"importlib": importlib, "__name__": "copied_source_finder_row"}
+        # The attack: the file really holds these exact bytes, and the code is
+        # compiled with that file as co_filename -- but it is never imported.
+        exec(compile(source, str(planted), "exec"), namespace)  # noqa: S102
+        forged = namespace["CopiedSourceFinder"]
+        forged.__module__ = "copied_source_finder_row"
+
+        code = forged.find_spec.__func__.__code__
+        assert code.co_filename == str(planted)
+        assert Path(planted).is_file(), "the planted file must really exist"
+        assert any(
+            _is_within(Path(planted), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the planted file must really sit inside site-packages"
+        # The premise: content matching succeeds and is still not enough.
+        assert origins._code_matches_source(forged.find_spec, Path(planted)), (
+            "this row needs the content check to pass so it isolates provenance"
+        )
+        assert "copied_source_finder_row" not in sys.modules, (
+            "a bare exec must not create a module entry"
+        )
+
+        assert not _is_installation_finder(forged), (
+            "code that merely matches a site-packages file was never loaded from it"
+        )
+        sys.meta_path.insert(0, forged)
+        report = check_origins(root, ("copied_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("copied_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        if forged is not None and forged in sys.meta_path:
+            sys.meta_path.remove(forged)
+        planted.unlink(missing_ok=True)
+
+
+def test_a_foreign_portion_that_cannot_be_rendered_is_still_reported(tmp_path, monkeypatch):
+    """The FAIL detail is built from the same untrusted data it reports.
+
+    A finding names the foreign ``__path__`` entries it found, and rendering one
+    of those calls ``str()`` on an object the interpreter -- not this guard --
+    controls.  If that rendering raises, the finding is lost and the traceback
+    that replaces it is precisely the failure this module exists to prevent:
+    the operator sees a crash instead of the FAIL naming the offending package.
+
+    This row pins the reporting half.  ``_describe`` is the only place that
+    coerces untrusted data to text, so the detail must survive an object whose
+    ``__str__`` and ``__repr__`` both raise, and the status must still be FAIL.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hostile_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "hostile_pkg" or name.startswith("hostile_pkg."):
+            del sys.modules[name]
+
+    hostile = __import__("hostile_pkg")
+
+    class Unprintable:
+        """A path-like that cannot be converted *or* rendered."""
+
+        def __fspath__(self) -> str:
+            raise RuntimeError("boom-fspath")
+
+        def __str__(self) -> str:
+            raise RuntimeError("boom-str")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("boom-repr")
+
+    # A portion the guard cannot resolve *and* cannot render: the reason text
+    # is itself built from the object, so this exercises both coercions.
+    hostile.__path__ = [Unprintable(), tmp_path / "outside" / "hostile_pkg"]
+
+    report = check_origins(root, ("hostile_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert detail, "a FAIL must carry a detail naming what was wrong"
+    # The rendering degrades to a placeholder; the finding is not lost.
+    assert "unprintable" in detail or "not a usable path" in detail, detail
+    # The report must stay JSON-serializable, since the CLI emits it verbatim.
+    json.dumps(report)
