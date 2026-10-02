@@ -94,9 +94,49 @@ def _is_trusted_stdlib_finder(finder: object) -> bool:
     submodule from outside the checkout.
 
     ``is`` cannot be spoofed from the candidate's side.
+
+    Identity alone is not enough, though.  A ``sys.meta_path`` entry is a
+    mutable class in a running process, so an attacker with no write access to
+    site-packages can simply rebind ``PathFinder.find_spec`` and keep the
+    original object.  Review did exactly that: no ``.pth``, no ``RECORD``, no
+    new finder, identity intact, and the guard answered ``PASS`` while serving
+    a submodule from outside the checkout.
+
+    So trust additionally requires the finder's own ``find_spec`` still to be
+    the interpreter's own code.  These finders live in ``_frozen_importlib``
+    and ``_frozen_importlib_external``, which the interpreter loads from the
+    frozen stdlib, so genuine ones report a ``<frozen ...>`` code file.  A
+    rebound method reports wherever the attacker compiled it.
     """
 
-    return any(finder is trusted for trusted in _trusted_stdlib_finders())
+    return any(
+        finder is trusted and _has_frozen_find_spec(finder) for trusted in _trusted_stdlib_finders()
+    )
+
+
+def _has_frozen_find_spec(finder: object) -> bool:
+    """Return whether ``finder.find_spec`` is still the interpreter's own code.
+
+    The finders in ``_trusted_stdlib_finders`` are frozen modules, so their
+    ``find_spec`` carries a ``<frozen importlib._bootstrap...>`` code file.  An
+    attribute rebound in place -- the mutation review used to reach a false
+    PASS without touching the filesystem -- names some other file.
+
+    Returns ``False`` for anything it cannot read, so a finder that hides its
+    own code object loses trust rather than gaining it.
+    """
+
+    try:
+        function = getattr(finder, "find_spec", None)
+        if function is None:
+            return False
+        function = getattr(function, "__func__", function)
+        filename = function.__code__.co_filename
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted object; untrusted by default
+        return False
+    return isinstance(filename, str) and filename.startswith("<frozen ")
 
 
 def _site_packages_roots() -> list[Path]:
@@ -243,6 +283,14 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
             name_field, algorithm, expected = row
             if algorithm is None or expected is None or not name_field:
                 continue
+            # The label names the hash that produced ``expected``.  Only the
+            # algorithm this guard actually computes is attestable: a record
+            # claiming ``sha512=<a sha256 digest>`` describes a file this
+            # check cannot verify, and treating the label as decorative would
+            # let a row attest provenance under an algorithm that was never
+            # checked.
+            if algorithm != "sha256":
+                continue
             resolved = _safe_resolve(root / name_field)
             if resolved is not None:
                 # Collect *every* claim about a path rather than keeping the
@@ -266,10 +314,22 @@ def _record_rows(text: str) -> list[tuple[str, str | None, str | None]]:
     one that implements the quoting rules, including a quoted field that itself
     contains the delimiter or an escaped quote.  A row that does not parse
     yields no entry rather than raising, because ``RECORD`` is untrusted input.
+
+    That includes the parser's own limits.  ``csv`` refuses a field longer than
+    131072 characters with ``_csv.Error``, which is not an ``Exception``
+    subclass, so a single long row raised straight out of ``check_origins``
+    and became an ``INTERNALERROR`` under conftest.  A field the parser will
+    not read is a row the guard declines to attest, not a reason to abort.
     """
 
     rows: list[tuple[str, str | None, str | None]] = []
-    for fields in csv.reader(io.StringIO(text)):
+    try:
+        parsed = list(csv.reader(io.StringIO(text)))
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted input; attest nothing
+        return []
+    for fields in parsed:
         if len(fields) < 2:
             continue
         name_field = fields[0]

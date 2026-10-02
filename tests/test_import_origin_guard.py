@@ -2894,6 +2894,137 @@ def test_a_hostile_path_iterator_becomes_a_finding(tmp_path):
         del sys.modules[package.__name__]
 
 
+def test_a_rebound_stdlib_find_spec_loses_trust(tmp_path, monkeypatch):
+    """A frozen finder rebound in place is no longer the interpreter's own.
+
+    Identity is not enough on its own.  ``sys.meta_path`` entries are mutable
+    classes in a live process, so rebinding ``PathFinder.find_spec`` keeps the
+    original object while replacing the code that runs.  Round-5 review reached
+    a full false PASS that way -- no ``.pth``, no ``RECORD``, no new finder --
+    and the guard certified the interpreter.
+
+    These finders are frozen modules, so a genuine one reports a ``<frozen ...>``
+    code file and a rebound one names wherever the attacker compiled it.
+    """
+
+    import importlib.machinery
+
+    assert _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+        "premise: the untouched finder is trusted"
+    )
+
+    root = tmp_path / "root"
+    package_dir = root / "rebound_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = tmp_path / "outside" / "rebound_probe.py"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "rebound_pkg" or name.startswith("rebound_pkg."):
+            del sys.modules[name]
+
+    original = importlib.machinery.PathFinder.find_spec
+
+    def rebound(cls, name, path=None, target=None):
+        if name == "rebound_pkg.rebound_probe":
+            return importlib.util.spec_from_file_location(name, str(foreign))
+        return original(name, path, target)
+
+    importlib.machinery.PathFinder.find_spec = classmethod(rebound)
+    try:
+        assert not _is_trusted_stdlib_finder(importlib.machinery.PathFinder)
+        report = check_origins(root, ("rebound_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        importlib.machinery.PathFinder.find_spec = original
+
+    assert _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+        "restoring the original method must restore trust"
+    )
+
+
+def test_an_oversized_record_row_is_a_refusal_not_a_crash(tmp_path):
+    """A field the CSV parser refuses must not escape as ``_csv.Error``.
+
+    ``csv`` raises for a field longer than its 131072-character limit, and that
+    error is not an ``Exception`` subclass, so a single long row raised out of
+    ``check_origins`` -- an ``INTERNALERROR`` under conftest.  A row the parser
+    declines to read is a row the guard does not attest.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    record = site_root / "oversize_row_probe-0.1.0.dist-info" / "RECORD"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    target = site_root / "oversize_row_probe_module.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    record.write_text(
+        '"' + "z" * 150_000 + '",sha256=notarealdigest,3\n'
+        f"oversize_row_probe_module.py,sha256=notarealdigest,{target.stat().st_size}\n",
+        encoding="utf-8",
+    )
+    try:
+        # The row the parser will not read contributes no attestation, and the
+        # remaining rows still parse.
+        assert not _is_recorded_by_an_install(target, site_root), (
+            "an unparseable record must not attest anything"
+        )
+        rows = origins._record_rows("x" * 150_000 + ",sha256=abc,1\n")
+        assert rows == [], rows
+    finally:
+        record.unlink(missing_ok=True)
+        record.parent.rmdir()
+        target.unlink(missing_ok=True)
+
+
+def test_a_record_naming_another_algorithm_attests_nothing(tmp_path):
+    """The algorithm label is part of the claim, not decoration.
+
+    ``RECORD`` rows are ``path,algorithm=digest,size``.  The guard computes one
+    algorithm -- SHA-256 -- so a row labelled ``sha512`` or ``md5`` describes a
+    digest this check never verified.  Discarding the label accepted a
+    SHA-256 digest under an algorithm that was never checked.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    record_dir = site_root / "algorithm_label_probe-0.1.0.dist-info"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record = record_dir / "RECORD"
+    target = site_root / "algorithm_label_probe_module.py"
+    target.write_text("y = 2\n", encoding="utf-8")
+
+    digest = (
+        base64.urlsafe_b64encode(hashlib.sha256(target.read_bytes()).digest()).rstrip(b"=").decode()
+    )
+    size = target.stat().st_size
+    try:
+        for algorithm in ("sha512", "md5", "SHA256", "sha1"):
+            record.write_text(
+                f"algorithm_label_probe_module.py,{algorithm}={digest},{size}\n",
+                encoding="utf-8",
+            )
+            assert not _is_recorded_by_an_install(target, site_root), (
+                f"a row labelled {algorithm} must not attest a sha256 digest"
+            )
+        record.write_text(
+            f"algorithm_label_probe_module.py,sha256={digest},{size}\n",
+            encoding="utf-8",
+        )
+        assert _is_recorded_by_an_install(target, site_root), (
+            "the honest sha256 row must still attest"
+        )
+    finally:
+        record.unlink(missing_ok=True)
+        record_dir.rmdir()
+        target.unlink(missing_ok=True)
+
+
 def test_a_path_getter_that_raises_becomes_a_finding_not_a_traceback(tmp_path):
     """Reading ``__path__`` is untrusted, and a raising getter must fail closed.
 
