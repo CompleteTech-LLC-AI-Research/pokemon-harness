@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.check_import_origins as origins
 import scripts.production_gate as gate
 from scripts.check_import_origins import check_origins, main
 
@@ -52,6 +53,135 @@ def test_check_origins_accepts_packages_inside_the_project_root(tmp_path, monkey
     assert report["packages"][0]["origin"] == str(package / "__init__.py")
 
 
+def _fake_install(distributions, package_dirs, installed_from):
+    """Build a stand-in for ``importlib.metadata`` describing one install.
+
+    ``installed_from`` is the directory pip recorded in ``direct_url.json``,
+    which is the whole discriminator between this checkout's install and a
+    sibling worktree's.
+    """
+
+    class _Distribution:
+        def __init__(self, name):
+            self._name = name
+
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"dir_info": {"editable": True}, "url": f"file://{installed_from}"})
+
+        def locate_file(self, name):
+            # A real ``Distribution.locate_file`` returns a path for any name;
+            # only the directories actually installed should be honored, so
+            # anything else falls back to an unrelated location.
+            return package_dirs.get(name, installed_from / "unrelated" / name)
+
+    table = {name: _Distribution(name) for name in distributions}
+    return table
+
+
+def test_check_origins_accepts_a_venv_installed_from_this_checkout(tmp_path, monkeypatch):
+    """The release lane: CI installs into a venv outside the checkout.
+
+    ``scripts/run_native_unit_ci.sh`` creates its venv under ``$TMPDIR``, so
+    ``pyboy`` resolves to ``<venv>/site-packages/pyboy`` rather than to
+    ``vendor/pyboy-src``.  That is correct behavior, and the guard must accept
+    it -- an earlier containment-only check failed the real CI lane.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
+    for name, directory in installed.items():
+        _make_package(directory.parent, name)
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "distribution",
+        _fake_install(
+            ["pokered-harness"], {name: path for name, path in installed.items()}, project
+        ).__getitem__,
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {
+            "pokered_harness": ["pokered-harness"],
+            "pyboy": ["pokered-harness"],
+        },
+    )
+    monkeypatch.setattr(
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+    )
+
+    report = check_origins(project)
+
+    assert report["status"] == "PASS", report
+
+
+def test_check_origins_rejects_a_venv_installed_from_another_checkout(tmp_path, monkeypatch):
+    """The #534 shape, in its most dangerous form: a venv off another worktree.
+
+    This is exactly the stale-editable-install bug -- the packages are in a
+    real site-packages directory, so a naive containment check accepts them.  It
+    is only safe to accept them when the install was made *from this checkout*.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    other = tmp_path / "other-worktree"
+    site_packages = tmp_path / "venv" / "lib" / "site-packages"
+    installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
+    for name, directory in installed.items():
+        _make_package(directory.parent, name)
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "distribution",
+        _fake_install(["pokered-harness"], installed, other).__getitem__,
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {
+            "pokered_harness": ["pokered-harness"],
+            "pyboy": ["pokered-harness"],
+        },
+    )
+    monkeypatch.setattr(
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+    )
+
+    report = check_origins(project)
+
+    assert report["status"] == "FAIL", report
+    assert all(item["status"] == "FAIL" for item in report["packages"])
+
+
+def test_check_origins_rejects_a_competing_pyboy_distribution(tmp_path, monkeypatch):
+    """A stock PyBoy alongside the harness must not satisfy the guard."""
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    site_packages = tmp_path / "venv" / "lib" / "site-packages"
+    stock = site_packages / "pyboy"
+    _make_package(site_packages, "pyboy")
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "distribution",
+        _fake_install(["pokered-harness"], {"pyboy": stock}, project).__getitem__,
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["PyBoy"]},
+    )
+    monkeypatch.setattr(origins, "_resolve_origin", lambda name: (stock / "__init__.py", ""))
+
+    report = check_origins(project)
+
+    assert report["status"] == "FAIL", report
+
+
 def test_check_origins_rejects_a_package_from_another_checkout(tmp_path, monkeypatch):
     """The #534 shape: a sibling worktree shadows the tree under test."""
 
@@ -66,7 +196,7 @@ def test_check_origins_rejects_a_package_from_another_checkout(tmp_path, monkeyp
     assert report["status"] == "FAIL"
     finding = report["packages"][0]
     assert finding["origin"] == str(package / "__init__.py")
-    assert "outside the project root" in finding["detail"]
+    assert "importing a different checkout" in finding["detail"]
 
 
 def test_check_origins_reports_an_unimportable_package(tmp_path):
