@@ -49,6 +49,7 @@ import importlib.util
 import json
 import re
 import sys
+import types
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -192,12 +193,57 @@ def _safe_resolve(candidate: Path) -> Path | None:
         return None
 
 
+def _code_objects(code: object):
+    """Yield ``code`` and every code object nested inside its constants."""
+
+    yield code
+    for constant in getattr(code, "co_consts", ()):
+        if isinstance(constant, types.CodeType):
+            yield from _code_objects(constant)
+
+
+def _code_matches_source(function: object, source_file: Path) -> bool:
+    """Return whether ``function``'s bytecode really occurs in ``source_file``.
+
+    ``compile`` accepts the filename it records, so ``co_filename`` on its own
+    is a *claim* by whoever called ``compile``, not a compiler attestation: a
+    hostile finder can be compiled under the name of any file that exists and
+    will carry that name forever.  Location therefore cannot carry provenance
+    by itself.
+
+    This is the second, independent channel.  The source is read back from
+    disk and compiled again; only a finder whose actual bytecode is produced by
+    that file can match.  A forged ``co_filename`` points at a real file whose
+    source does not contain the hostile bytecode, so nothing matches and the
+    finder is refused.  Genuine install finders -- the editable-install shim
+    and the virtualenv helper -- do match, because their bytecode really does
+    come from the file they name.
+    """
+
+    try:
+        target = function.__code__
+        source = source_file.read_text(encoding="utf-8")
+        tree = compile(source, str(source_file), "exec")
+    except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
+        return False
+    for candidate in _code_objects(tree):
+        if (
+            candidate.co_name == target.co_name
+            and candidate.co_code == target.co_code
+            and candidate.co_names == target.co_names
+            and candidate.co_varnames == target.co_varnames
+        ):
+            return True
+    return False
+
+
 def _finder_code_file(finder: object) -> Path | None:
     """Return the file the finder's own ``find_spec`` was compiled from.
 
-    ``co_filename`` is written by the compiler, so it records where the code
-    executing as this finder really came from.  Unlike ``__module__`` and
-    ``module.__file__``, a finder cannot change it after the fact.
+    ``co_filename`` names the file the code was compiled with.  It is not by
+    itself trustworthy -- ``compile`` lets the caller choose it -- so the
+    returned path is only a *candidate*: the caller must corroborate it with
+    ``_code_matches_source`` before treating it as provenance.
 
     Returns ``None`` when the finder has no Python-level ``find_spec`` -- a C
     implementation (a builtin or extension module) has no code object to
@@ -244,14 +290,18 @@ def _is_installation_finder(finder: object) -> bool:
     genuine installed module that does.  Neither is forge-proof, because both
     read the *claim* rather than the code.
 
-    What cannot be forged is the finder's own code object.  ``co_filename`` is
-    recorded by the compiler from the file the code was actually compiled
-    from, so it names the finder's real implementation regardless of what the
-    finder claims about its module or its ``__file__``.  Trust therefore
-    requires that the executing ``find_spec`` was compiled from a real file
-    inside site-packages -- decided by the filesystem, not asserted by the
-    object being judged.  Anything a finder can merely *say* about itself is
-    ignored for this decision.
+    ``co_filename`` is no better on its own: ``compile`` takes the filename it
+    records, so a hostile finder can be compiled under the name of any file
+    that exists and inherit its location.  Trust therefore requires two
+    independent channels to agree: the finder's ``co_filename`` must name a
+    real file inside site-packages, *and* the bytecode actually executing must
+    be reproduced by recompiling that file's source from disk.  A forged
+    filename names a real file that does not contain the hostile bytecode, so
+    the second channel refuses it.
+
+    Residual boundary: an attacker who can write a file into this
+    interpreter's site-packages, or who runs code before the guard does, is out
+    of scope -- at that point they own the interpreter rather than the finder.
     """
 
     if _is_trusted_stdlib_finder(finder):
@@ -264,7 +314,19 @@ def _is_installation_finder(finder: object) -> bool:
             return False
     except (OSError, ValueError):
         return False
-    return any(_is_within(code_file, root, strict=False) for root in _site_packages_roots())
+    if not any(_is_within(code_file, root, strict=False) for root in _site_packages_roots()):
+        return False
+    try:
+        function = getattr(finder, "find_spec", None)
+    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+        return False
+    if function is None:
+        return False
+    try:
+        function = getattr(function, "__func__", function)
+    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+        return False
+    return _code_matches_source(function, code_file)
 
 
 def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
