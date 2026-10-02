@@ -10,15 +10,26 @@ the two packages a release depends on -- ``pokered_harness`` and the vendored
 An origin counts as this checkout's when it either
 
 * lives beneath ``project_root`` (a source tree or ``PYTHONPATH`` checkout), or
-* lives beneath the site-packages directory of an installed distribution whose
-  own recorded install source is ``project_root``.
+* lives in the site-packages directory of an installed distribution that is
+  traceable to this checkout.
 
 The second case is the release lane: CI runs ``pip install -e ".[dev]"`` into a
 virtual environment created outside the checkout, so ``pyboy`` legitimately
-resolves to ``<venv>/site-packages/pyboy``.  What makes that safe is that the
-install recorded *this* checkout as its source, which is exactly the property
-``bootstrap_pyboy.py``'s ``_runtime_roots`` already relies on.  A stale
-worktree's install records *that* worktree instead, so it still fails.
+resolves to ``<venv>/site-packages/pyboy``.  Two independent things can make an
+install traceable, because the release lane installs the vendored emulator in
+two different ways:
+
+* pip recorded ``project_root`` as the install source in ``direct_url.json``.
+  This covers the editable harness install and any plain local install.
+* the package reports this checkout's vendored PyBoy revision.  The native CI
+  lane builds ``pyboy`` from a *staged copy* of ``vendor/pyboy-src`` under a
+  temporary directory, so its recorded install source is a throwaway path that
+  never equals ``project_root``.  A stock PyBoy would not carry this checkout's
+  revision marker, so requiring the marker still separates the two.  This is
+  the same signal ``bootstrap_pyboy.py`` already treats as authoritative.
+
+A stale worktree satisfies neither: its install records that other directory,
+and its vendored revision does not match this checkout's.
 
 Exit codes: ``0`` when every package traces to ``project_root``, ``1`` on any
 mismatch or resolution failure, ``2`` on usage errors.
@@ -29,6 +40,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -37,9 +49,6 @@ from urllib.parse import unquote, urlparse
 # measures.  ``pokered_harness`` is the harness under test and ``pyboy`` is the
 # vendored emulator it drives; a stale copy of either invalidates a release.
 REQUIRED_PACKAGES = ("pokered_harness", "pyboy")
-
-# The distribution that vendors ``pyboy`` into the same install as the harness.
-PROJECT_DISTRIBUTION = "pokered-harness"
 
 
 def _is_within(candidate: Path, root: Path) -> bool:
@@ -62,7 +71,7 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     """
 
     try:
-        distribution = importlib.metadata.distribution(distribution_name)
+        distribution = _distribution(distribution_name)
         text = distribution.read_text("direct_url.json")
     except (OSError, importlib.metadata.PackageNotFoundError):
         return None
@@ -83,6 +92,61 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     return Path(unquote(parsed.path)).resolve()
 
 
+def _normalise_distribution_name(name: str) -> str:
+    """Return the PEP 503 normalized form of a distribution name."""
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _distribution(distribution_name: str):
+    """Return the installed distribution owning ``distribution_name``.
+
+    ``packages_distributions`` reports owners in the form recorded at install
+    time -- the native CI lane's wheel is named ``PyBoy`` -- while lookups by
+    an ad-hoc spelling must still resolve.  Try the normalized name, then the
+    literal one, so a case or separator difference cannot silently skip a
+    distribution that would otherwise be admitted.
+    """
+
+    for candidate in dict.fromkeys(
+        (
+            _normalise_distribution_name(distribution_name),
+            distribution_name,
+        )
+    ):
+        try:
+            return importlib.metadata.distribution(candidate)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    raise importlib.metadata.PackageNotFoundError(distribution_name)
+
+
+def _vendored_revision(project_root: Path) -> str | None:
+    """Return the vendored PyBoy revision this checkout pins, if readable."""
+
+    revision_file = project_root / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION"
+    try:
+        return revision_file.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _reports_revision(package: str, expected: str) -> bool:
+    """Return whether the imported ``package`` reports ``expected``.
+
+    ``bootstrap_pyboy`` already requires this marker to match the vendored
+    revision, so a copy that reports a different one is not this checkout's
+    emulator.  A module that cannot be imported, or that does not expose the
+    marker, reports ``False`` and is therefore not admitted on this basis.
+    """
+
+    try:
+        imported = __import__(package)
+    except BaseException:  # noqa: BLE001 - an unimportable package is not a match
+        return False
+    return getattr(imported, "__pokered_harness_revision__", None) == expected
+
+
 def _allowed_roots(project_root: Path) -> list[Path]:
     """Return every directory whose contents legitimately serve this checkout.
 
@@ -94,22 +158,26 @@ def _allowed_roots(project_root: Path) -> list[Path]:
     """
 
     roots = [project_root]
+    # A separately installed distribution is admitted when it records this
+    # checkout as its install source *or* carries this checkout's vendored
+    # PyBoy revision.  See the module docstring for why both are needed.
+    revision = _vendored_revision(project_root)
+
+    def _belongs_to_this_checkout(owner: str, package: str) -> bool:
+        if _installed_from(owner, project_root) == project_root:
+            return True
+        return package == "pyboy" and revision is not None and _reports_revision(package, revision)
+
     try:
         distributions = importlib.metadata.packages_distributions()
     except Exception:  # noqa: BLE001 - metadata is advisory here
         return roots
-    # Only an install that recorded *this* checkout as its source may speak for
-    # it.  A distribution installed from a sibling worktree records that other
-    # directory, so its site-packages copy describes the wrong tree and must
-    # not be admitted -- that is precisely the #534 condition.
-    if _installed_from(PROJECT_DISTRIBUTION, project_root) != project_root:
-        return roots
     for package in REQUIRED_PACKAGES:
         for owner in distributions.get(package, ()) or ():
-            if owner != PROJECT_DISTRIBUTION:
+            if not _belongs_to_this_checkout(owner, package):
                 continue
             try:
-                located = importlib.metadata.distribution(owner).locate_file(package)
+                located = _distribution(owner).locate_file(package)
             except (OSError, importlib.metadata.PackageNotFoundError):
                 continue
             roots.append(Path(located).resolve())
