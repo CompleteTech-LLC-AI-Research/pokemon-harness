@@ -241,6 +241,95 @@ def test_check_origins_rejects_a_foreign_pyboy_distribution(tmp_path, monkeypatc
     assert report["packages"][1]["package"] == "pyboy"
 
 
+def test_check_origins_rejects_a_foreign_staging_directory(tmp_path, monkeypatch):
+    """A sibling worktree's own ``build/`` tree is not this checkout's.
+
+    The staging rule is scoped to ``project_root``, so a staged path under
+    *another* checkout's ``build/`` must not be admitted.  The rule above
+    records the sibling worktree root; this one records a staging path, which
+    is the shape the native lane actually produces.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    other = tmp_path / "other-worktree"
+    # The other checkout staged its own build inside *its own* build/ tree.
+    # Sharing the directory name is not sharing provenance.
+    (other / "build" / "pyboy-native-abc" / "pyboy-src").mkdir(parents=True)
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
+    for name, directory in installed.items():
+        _make_package(directory.parent, name)
+    distributions = {
+        **_fake_install(
+            ["pokered-harness"], {"pokered_harness": installed["pokered_harness"]}, project
+        ),
+        **_fake_install(
+            ["pyboy"],
+            {"pyboy": installed["pyboy"]},
+            other / "build" / "pyboy-native-abc" / "pyboy-src",
+        ),
+    }
+    monkeypatch.setattr(
+        origins.importlib.metadata, "distribution", _distribution_lookup(distributions)
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
+    )
+    monkeypatch.setattr(
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+    )
+
+    report = check_origins(project)
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"][1]["package"] == "pyboy"
+
+
+def test_check_origins_scopes_the_staging_rule_to_this_checkout(tmp_path, monkeypatch):
+    """Another checkout's ``build`` directory must not be admitted by name.
+
+    The rule is "inside *this* checkout's ``build/``", a containment test, not
+    a name test.  These rows record the foreign ``build`` directory itself, so
+    an implementation matching on ``source.name == "build"`` -- which would
+    admit any such directory anywhere -- is caught.  No other fixture produces
+    that shape, so without this row the scope is unpinned.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    other_build = tmp_path / "other-worktree" / "build"
+    other_build.mkdir(parents=True)
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
+    for name, directory in installed.items():
+        _make_package(directory.parent, name)
+    distributions = {
+        **_fake_install(
+            ["pokered-harness"], {"pokered_harness": installed["pokered_harness"]}, project
+        ),
+        **_fake_install(["pyboy"], {"pyboy": installed["pyboy"]}, other_build),
+    }
+    monkeypatch.setattr(
+        origins.importlib.metadata, "distribution", _distribution_lookup(distributions)
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
+    )
+    monkeypatch.setattr(
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+    )
+
+    report = check_origins(project)
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"][1]["package"] == "pyboy"
+
+
 def test_check_origins_rejects_pyboy_reporting_this_checkouts_revision(tmp_path, monkeypatch):
     """A self-reported revision must not admit another checkout's install.
 
@@ -411,6 +500,39 @@ def test_installed_from_accepts_a_plain_local_record():
         assert origins._installed_from("pokered-harness", source) == source
     finally:
         origins._distribution = original
+
+
+def test_installed_from_resolves_parent_traversal():
+    """A recorded source containing ``..`` is normalized before it is judged.
+
+    ``_is_within`` compares paths lexically, so an unresolved
+    ``<checkout>/build/../elsewhere`` still sits *textually* beneath
+    ``<checkout>/build`` while pointing somewhere else entirely.  Dropping the
+    ``resolve()`` in ``_installed_from`` would let that through the staging
+    rule, so this row pins the normalization the rule depends on.
+    """
+
+    source = Path(__file__).resolve().parent.parent
+    escaping = source / "build" / ".." / ".." / "elsewhere"
+    assert escaping.resolve() == source.parent / "elsewhere"
+    # The lexical form is beneath build/; the resolved form is not.
+    assert escaping.is_relative_to(source / "build")
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"dir_info": {}, "url": f"file://{escaping}"})
+
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        recorded = origins._installed_from("pyboy", source)
+    finally:
+        origins._distribution = original
+
+    assert recorded == source.parent / "elsewhere"
+    assert not origins._is_this_checkout(source, recorded)
 
 
 def test_check_origins_rejects_a_package_from_another_checkout(tmp_path, monkeypatch):
