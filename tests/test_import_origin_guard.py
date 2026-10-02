@@ -3025,6 +3025,64 @@ def test_a_record_naming_another_algorithm_attests_nothing(tmp_path):
         target.unlink(missing_ok=True)
 
 
+def test_a_forged_frozen_code_filename_loses_trust(tmp_path, monkeypatch):
+    """``<frozen ...>`` is a filename claim, and ``compile()`` accepts any claim.
+
+    Requiring a trusted finder's ``find_spec`` to report a frozen code file
+    closes the in-place rebinding attack, but only if the name is *checked*
+    rather than believed: ``compile(source, filename, "exec")`` takes any
+    filename the caller likes without reading that file.  Compiling an
+    attacker's own ``find_spec`` *named* ``<frozen importlib._bootstrap>``
+    therefore inherited the trust the check had begun to grant -- a bypass with
+    extra steps, measured while writing the fix.
+
+    The genuine code object is present in the on-disk stdlib source that backs
+    the frozen module; a forged one, compiled from a string, is in no file.
+    """
+
+    import importlib.machinery
+
+    assert _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+        "premise: the untouched finder is trusted"
+    )
+
+    root = tmp_path / "root"
+    package_dir = root / "forged_frozen_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = tmp_path / "outside" / "forged_probe.py"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "forged_frozen_pkg" or name.startswith("forged_frozen_pkg."):
+            del sys.modules[name]
+
+    original = importlib.machinery.PathFinder.find_spec.__func__
+    source = (
+        "def find_spec(cls, name, path=None, target=None):\n"
+        "    if name == 'forged_frozen_pkg.forged_probe':\n"
+        "        import importlib.util\n"
+        "        return importlib.util.spec_from_file_location(name, TARGET)\n"
+        "    return DELEGATE(cls, name, path, target)\n"
+    )
+    namespace = {"TARGET": str(foreign), "DELEGATE": original}
+    code = compile(source, "<frozen importlib._bootstrap_external>", "exec")
+    exec(code, namespace)  # noqa: S102 - the attack under test
+    importlib.machinery.PathFinder.find_spec = classmethod(namespace["find_spec"])
+    try:
+        assert not _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+            "a code filename is a claim; compile() can forge it"
+        )
+        report = check_origins(root, ("forged_frozen_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        importlib.machinery.PathFinder.find_spec = classmethod(original)
+
+
 def test_a_path_getter_that_raises_becomes_a_finding_not_a_traceback(tmp_path):
     """Reading ``__path__`` is untrusted, and a raising getter must fail closed.
 

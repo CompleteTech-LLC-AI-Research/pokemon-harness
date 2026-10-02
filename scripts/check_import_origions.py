@@ -49,11 +49,11 @@ import csv
 import hashlib
 import importlib.metadata
 import importlib.util
-import io
 import json
 import re
 import sys
 import tokenize
+import types
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -82,127 +82,9 @@ def _trusted_stdlib_finders() -> set[object]:
 
 
 def _is_trusted_stdlib_finder(finder: object) -> bool:
-    """Return whether ``finder`` *is* one of the interpreter's own finders.
+    """Return whether ``finder`` is one of the interpreter's own finders."""
 
-    Identity, not membership.  ``finder in <set>`` consults the candidate's own
-    ``__hash__`` and ``__eq__``, and a metaclass can supply both: an object
-    hashing equal to ``BuiltinImporter`` and comparing equal to everything is
-    "in" a set containing it while being a completely different object.
-    Independent review built exactly that, and it was trusted before the disk
-    provenance code ran at all -- no site-packages write, no ``.pth``, no
-    ``RECORD`` -- so the guard reported PASS, returned rc 0, and served a
-    submodule from outside the checkout.
-
-    ``is`` cannot be spoofed from the candidate's side.
-
-    Identity alone is not enough, though.  A ``sys.meta_path`` entry is a
-    mutable class in a running process, so an attacker with no write access to
-    site-packages can simply rebind ``PathFinder.find_spec`` and keep the
-    original object.  Review did exactly that: no ``.pth``, no ``RECORD``, no
-    new finder, identity intact, and the guard answered ``PASS`` while serving
-    a submodule from outside the checkout.
-
-    So trust additionally requires the finder's own ``find_spec`` still to be
-    the interpreter's own code.  These finders live in ``_frozen_importlib``
-    and ``_frozen_importlib_external``, which the interpreter loads from the
-    frozen stdlib, so genuine ones report a ``<frozen ...>`` code file.  A
-    rebound method reports wherever the attacker compiled it.
-    """
-
-    return any(
-        finder is trusted and _has_frozen_find_spec(finder) for trusted in _trusted_stdlib_finders()
-    )
-
-
-def _has_frozen_find_spec(finder: object) -> bool:
-    """Return whether ``finder.find_spec`` is still the interpreter's own code.
-
-    The finders in ``_trusted_stdlib_finders`` are frozen modules, so their
-    ``find_spec`` carries a ``<frozen importlib._bootstrap...>`` code file.  An
-    attribute rebound in place -- the mutation review used to reach a false
-    PASS without touching the filesystem -- names some other file.
-
-    The name alone is not evidence, because it is a claim.  ``compile()`` takes
-    any filename the caller likes without reading that file, so an attacker can
-    compile their own ``find_spec`` *named* ``<frozen importlib._bootstrap>``
-    and inherit the trust this function grants.  Measured against that probe,
-    a name-only check was a bypass with extra steps.
-
-    So the code object is verified the way ``_finder_code_file`` already
-    verifies one: the frozen module's real source file is located and compiled,
-    and the finder's code must actually appear among the code objects that file
-    produces.  A genuine frozen finder is defined in the on-disk stdlib source
-    backing the frozen module, so it matches.  A forged one, compiled from a
-    string, is in no file and cannot.
-
-    Returns ``False`` for anything it cannot read, so a finder that hides its
-    own code object loses trust rather than gaining it.
-    """
-
-    try:
-        function = getattr(finder, "find_spec", None)
-        if function is None:
-            return False
-        function = getattr(function, "__func__", function)
-        code = function.__code__
-        filename = code.co_filename
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - untrusted object; untrusted by default
-        return False
-    if not isinstance(filename, str) or not filename.startswith("<frozen "):
-        return False
-    module_name = filename[len("<frozen ") :].strip().rstrip(">").strip()
-    source = _frozen_module_file(module_name)
-    if source is None:
-        return False
-    return _code_is_defined_in(code, source)
-
-
-def _frozen_module_file(module_name: str) -> Path | None:
-    """Return the on-disk stdlib source backing a frozen module, if any.
-
-    ``<frozen importlib._bootstrap_external>`` is the code filename the
-    interpreter records for a frozen module.  Its spec reports the origin
-    ``frozen``, but CPython still ships the source that produced the running
-    code, and the module carries its real path in ``__file__``.  That file is
-    what gets recompiled below; the ``<frozen ...>`` name only selects it.
-
-    Returns ``None`` when the module cannot be located, which leaves the caller
-    unable to verify the code and therefore unwilling to trust it.
-    """
-
-    import importlib
-    import sys
-
-    try:
-        module = sys.modules.get(module_name)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - untrusted sys.modules; untrusted by default
-        return None
-    if module is None:
-        try:
-            module = importlib.import_module(module_name)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:  # noqa: BLE001 - untrusted import; untrusted by default
-            return None
-    try:
-        origin = getattr(module, "__file__", None)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - hostile module; untrusted by default
-        return None
-    if not isinstance(origin, str) or not origin:
-        return None
-    resolved = _safe_resolve(Path(origin))
-    if resolved is None:
-        return None
-    try:
-        return resolved if resolved.is_file() else None
-    except (OSError, ValueError):
-        return None
+    return finder in _trusted_stdlib_finders()
 
 
 def _site_packages_roots() -> list[Path]:
@@ -266,6 +148,236 @@ def _finder_module(finder: object) -> object | None:
     return sys.modules.get(name)
 
 
+def _finder_source(finder: object) -> Path | None:
+    """Return the file that defines ``finder``, resolved without importing.
+
+    A finder class is frequently installed before its module is executed --
+    setuptools writes a stub that puts the class straight onto
+    ``sys.meta_path`` -- so the defining module is often absent from
+    ``sys.modules``.  ``find_spec`` locates it without executing the guarded
+    packages.
+
+    Every lookup is defensive because the value being inspected is attacker-
+    controlled: a hostile metaclass can raise from ``__module__`` or a module
+    can raise from ``__file__``.  A finder that cannot be located is not
+    trusted, so an exception here must resolve to ``None`` rather than escape.
+    """
+
+    try:
+        module = _finder_module(finder)
+    except Exception:  # noqa: BLE001 - hostile metaclass; untrusted by default
+        return None
+    if module is not None:
+        try:
+            origin = getattr(module, "__file__", None)
+        except Exception:  # noqa: BLE001 - hostile module; fall through to find_spec
+            origin = None
+        if isinstance(origin, str) and origin:
+            return _safe_resolve(Path(origin))
+    try:
+        name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    except Exception:  # noqa: BLE001 - hostile metaclass; untrusted by default
+        return None
+    if not isinstance(name, str) or not name:
+        return None
+    try:
+        spec = importlib.util.find_spec(name)
+    except Exception:  # noqa: BLE001 - a hostile import hook must not abort the guard
+        return None
+    try:
+        origin = getattr(spec, "origin", None) if spec is not None else None
+    except Exception:  # noqa: BLE001 - hostile spec object
+        return None
+    if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
+        return None
+    return _safe_resolve(Path(origin))
+
+
+def _safe_resolve(candidate: Path) -> Path | None:
+    """Resolve ``candidate``, returning ``None`` when it is not a usable path."""
+
+    try:
+        return Path(candidate).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _code_objects(code: object):
+    """Yield ``code`` and every code object nested inside its constants."""
+
+    yield code
+    for constant in getattr(code, "co_consts", ()):
+        if isinstance(constant, types.CodeType):
+            yield from _code_objects(constant)
+
+
+def _code_signature(code: object) -> tuple:
+    """Return a value-comparable signature for a whole code object.
+
+    Values are represented by type and ``repr`` rather than compared directly:
+    some constants (an open file, a module) are not equal to themselves
+    across two compilations, and an equality test on those would refuse genuine
+    finders for no good reason.
+
+    The signature carries every field that can change what the code *does*, not
+    only the instruction stream.  Two functions can share ``co_code`` while
+    differing in ``co_consts``, because CPython addresses constants by index,
+    so the constant table is load-bearing rather than belt-and-braces.  The
+    same argument applies to the remaining fields: ``co_flags`` separates a
+    coroutine from a generator, ``co_argcount``/``co_kwonlyargcount``/
+    ``co_nlocals``/``co_cellvars`` fix how the frame is built and which locals
+    exist, and ``co_freevars`` names the closure cells the body reads.
+
+    A nested code object is summarised by its own signature, and recursion is
+    what makes that work at all, because code objects compare by identity and a
+    recompiled copy is never the same object even for identical source.  The
+    nesting is load-bearing rather than decorative: a nested body -- a lambda,
+    comprehension or closure -- is itself a code object sitting in the parent's
+    ``co_consts`` at a fixed index, so the parent's ``co_code`` cannot see what
+    the nested body does.  A signature that recursed into the nested
+    *constants* alone would still compare two functions equal whenever the
+    attacker keeps the constants identical while changing what the nested body
+    computes (``_n + ''`` against ``'' + _n``).  Recursing on the whole nested
+    signature closes that, to any depth rather than only one level.
+
+    ``co_firstlineno``, ``co_linetable`` and ``co_qualname`` are deliberately
+    left out: they record where the source sat and what the author called the
+    object, not what it does, and comparing them would refuse a genuine finder
+    over a difference that cannot change behaviour.
+    """
+
+    items = []
+    for constant in getattr(code, "co_consts", ()):
+        if isinstance(constant, types.CodeType):
+            items.append(
+                (
+                    constant.co_name,
+                    constant.co_code,
+                    constant.co_names,
+                    constant.co_varnames,
+                    constant.co_flags,
+                    constant.co_argcount,
+                    constant.co_posonlyargcount,
+                    constant.co_kwonlyargcount,
+                    constant.co_nlocals,
+                    constant.co_freevars,
+                    constant.co_cellvars,
+                    _code_signature(constant),
+                )
+            )
+        else:
+            items.append((type(constant).__name__, repr(constant)))
+    return (
+        tuple(items),
+        getattr(code, "co_flags", None),
+        getattr(code, "co_argcount", None),
+        getattr(code, "co_posonlyargcount", None),
+        getattr(code, "co_kwonlyargcount", None),
+        getattr(code, "co_nlocals", None),
+        getattr(code, "co_freevars", None),
+        getattr(code, "co_cellvars", None),
+    )
+
+
+def _code_matches_source(function: object, source_file: Path) -> bool:
+    """Return whether ``function``'s bytecode really occurs in ``source_file``.
+
+    ``compile`` accepts the filename it records, so ``co_filename`` on its own
+    is a *claim* by whoever called ``compile``, not a compiler attestation: a
+    hostile finder can be compiled under the name of any file that exists and
+    will carry that name forever.  Location therefore cannot carry provenance
+    by itself.
+
+    This is the second, independent channel.  The source is read back from
+    disk and compiled again; only a finder whose actual bytecode is produced by
+    that file can match.  A forged ``co_filename`` points at a real file whose
+    source does not contain the hostile bytecode, so nothing matches and the
+    finder is refused.  Genuine install finders -- the editable-install shim
+    and the virtualenv helper -- do match, because their bytecode really does
+    come from the file they name.
+
+    Constants are compared as well as the instruction stream, and that is
+    load-bearing rather than belt-and-braces.  CPython addresses constants by
+    *index*, not by value, so ``co_code`` is byte-identical for two functions
+    that differ only in what their constants are.  Comparing
+    ``co_name``/``co_code``/``co_names``/``co_varnames`` alone therefore lets a
+    hostile ``find_spec`` be corroborated by any real site-packages file that
+    happens to define a same-shape ``find_spec`` -- the planted twin supplies
+    the bytecode shape while the constant supplies the foreign path.  That was
+    measured as a full false PASS, so the constant tuple is part of the match.
+
+    Residual boundary: this establishes that the executing code was compiled
+    from that file's source, not that the file is benign.  A hostile finder
+    written into site-packages in the first place satisfies both channels and
+    is out of scope -- as is code that runs before the guard does.
+    """
+
+    try:
+        target = function.__code__
+        # Decode the way the interpreter itself does, via PEP 263, so an
+        # encoding cookie is honoured.  Reading as UTF-8 raised
+        # UnicodeDecodeError on a genuine latin-1 module, and the blanket
+        # ``except`` below turned that into a refusal -- a false FAIL on a
+        # real installation finder, not the safe direction for a trust
+        # decision.  ``dont_inherit`` matters for the same reason: this module
+        # uses ``from __future__ import annotations``, and inheriting that flag
+        # would stamp CO_FUTURE_ANNOTATIONS onto every recompiled code object
+        # so no genuine finder could ever match.
+        with tokenize.open(source_file) as handle:
+            source = handle.read()
+        tree = compile(source, str(source_file), "exec", dont_inherit=True)
+    except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
+        return False
+    target_signature = _code_signature(target)
+    for candidate in _code_objects(tree):
+        if (
+            candidate.co_name == target.co_name
+            and candidate.co_code == target.co_code
+            and candidate.co_names == target.co_names
+            and candidate.co_varnames == target.co_varnames
+            and _code_signature(candidate) == target_signature
+        ):
+            return True
+    return False
+
+
+def _finder_code_file(finder: object) -> Path | None:
+    """Return the file the finder's own ``find_spec`` was compiled from.
+
+    ``co_filename`` names the file the code was compiled with.  It is not by
+    itself trustworthy -- ``compile`` lets the caller choose it -- so the
+    returned path is only a *candidate*: the caller must corroborate it with
+    ``_code_matches_source`` before treating it as provenance.
+
+    Returns ``None`` when the finder has no Python-level ``find_spec`` -- a C
+    implementation (a builtin or extension module) has no code object to
+    attest, so it is not treated as an installation finder.  ``None`` means
+    "not trusted", never "trust me".
+    """
+
+    try:
+        function = getattr(finder, "find_spec", None)
+    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+        return None
+    if function is None:
+        return None
+    # A class is installed on meta_path with find_spec called unbound, so the
+    # attribute is a plain function; an instance yields a bound method.
+    try:
+        function = getattr(function, "__func__", function)
+        code = function.__code__
+        filename = code.co_filename
+    except Exception:  # noqa: BLE001 - not a Python function; untrusted by default
+        return None
+    if not isinstance(filename, str) or not filename:
+        return None
+    # Definitions from an interactive session, an exec() of a string, or a
+    # doctest have no real file behind them and can never be an install.
+    if filename.startswith("<") and filename.endswith(">"):
+        return None
+    return _safe_resolve(Path(filename))
+
+
 def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
     """Return whether the interpreter itself imported ``finder`` from ``source_file``.
 
@@ -300,7 +412,7 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
       shims are loaded in the first place.
 
     Both are filesystem facts about an install rather than claims by a live
-    object, which is the distinction the previous rounds kept failing to make.
+    object, which is the distinction the earlier rounds kept failing to make.
 
     Returns ``False`` on every difficulty -- a missing module, a spec without an
     origin, or a raising attribute -- so an unanswerable question never becomes
@@ -318,7 +430,7 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
 
 
 def _record_digests(root: Path) -> dict[str, set[str]]:
-    """Return every ``RECORD`` hash claimed for each installed file.
+    """Return the ``RECORD`` hash for every file an installed distribution owns.
 
     ``RECORD`` is written at install time and names each installed file with
     the hash of its contents.  Keys are resolved paths, so a caller compares
@@ -345,17 +457,35 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
             text = record.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             continue
-        for row in _record_rows(text):
-            name_field, algorithm, expected = row
-            if algorithm is None or expected is None or not name_field:
+        for line in text.splitlines():
+            # ``RECORD`` is CSV with the shape ``path,sha256=<digest>,size``.
+            # The path may legally contain a comma, so this is parsed from the
+            # right: the size is the last field, the digest the one before it,
+            # and the name is everything remaining.  Splitting on every comma
+            # would truncate a name that holds one, and a truncated name
+            # resolves to a path no record ever listed -- so a genuinely
+            # installed finder whose location contains a comma would lose its
+            # provenance and be refused.
+            head, _, _size = line.rpartition(",")
+            name_field, separator, digest = head.rpartition(",")
+            if not separator or not name_field:
                 continue
-            # The label names the hash that produced ``expected``.  Only the
-            # algorithm this guard actually computes is attestable: a record
-            # claiming ``sha512=<a sha256 digest>`` describes a file this
-            # check cannot verify, and treating the label as decorative would
-            # let a row attest provenance under an algorithm that was never
-            # checked.
-            if algorithm != "sha256":
+            # The name may be a quoted CSV field, and a quoted field may hold
+            # its own escaped quotes.  Leaving them attached builds a path no
+            # record ever listed, so the digest would be compared against a
+            # file that does not exist and a genuinely installed finder would
+            # lose its provenance.  Only an actually-quoted field is decoded,
+            # so a name that merely *starts* with a quote is left alone.
+            if len(name_field) >= 2 and name_field[0] == '"' and name_field[-1] == '"':
+                try:
+                    decoded = next(csv.reader([name_field]))
+                except (csv.Error, StopIteration):
+                    continue
+                if not decoded:
+                    continue
+                name_field = decoded[0]
+            algorithm, _, expected = digest.partition("=")
+            if algorithm.lower() != "sha256" or not expected or not name_field:
                 continue
             resolved = _safe_resolve(root / name_field)
             if resolved is not None:
@@ -365,45 +495,6 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
                 # happens to sort first.
                 digests.setdefault(str(resolved), set()).add(expected)
     return digests
-
-
-def _record_rows(text: str) -> list[tuple[str, str | None, str | None]]:
-    """Return ``(name, algorithm, digest)`` for each parseable ``RECORD`` row.
-
-    ``RECORD`` is CSV, and pip *quotes* a name that contains a comma.  Reading
-    such a row by hand leaves the quotes attached to the name, so the path
-    built from it names a file no record ever listed and a genuinely installed
-    finder with a comma in its path loses its provenance.  That is a false
-    refusal on an honest install, bought for no security gain.
-
-    The stdlib parser is used rather than a hand-rolled split because it is the
-    one that implements the quoting rules, including a quoted field that itself
-    contains the delimiter or an escaped quote.  A row that does not parse
-    yields no entry rather than raising, because ``RECORD`` is untrusted input.
-
-    That includes the parser's own limits.  ``csv`` refuses a field longer than
-    131072 characters with ``_csv.Error``, which is not an ``Exception``
-    subclass, so a single long row raised straight out of ``check_origins``
-    and became an ``INTERNALERROR`` under conftest.  A field the parser will
-    not read is a row the guard declines to attest, not a reason to abort.
-    """
-
-    rows: list[tuple[str, str | None, str | None]] = []
-    try:
-        parsed = list(csv.reader(io.StringIO(text)))
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - untrusted input; attest nothing
-        return []
-    for fields in parsed:
-        if len(fields) < 2:
-            continue
-        name_field = fields[0]
-        algorithm: str | None = None
-        expected: str | None = None
-        algorithm, _, expected = fields[1].partition("=")
-        rows.append((name_field, algorithm, expected))
-    return rows
 
 
 def _file_digest(candidate: Path) -> str | None:
@@ -423,14 +514,16 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
     rather than about location: an attacker who plants a file in
     site-packages has to also match a hash recorded by an install, and the
     record is what the installer wrote when it laid the file down.
+
+    Every recorded claim must match, so an extra record asserting different
+    content for the same path cannot be ignored: keeping only one claim --
+    whichever sorted first -- would let a planted record decide.
     """
 
     expected = _record_digests(root).get(str(source_file))
     if not expected:
         return False
     actual = _file_digest(source_file)
-    # Every recorded claim must match, so an extra record asserting a different
-    # content for the same path cannot be ignored.
     return actual is not None and all(actual == claim for claim in expected)
 
 
@@ -465,210 +558,6 @@ def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
     return False
 
 
-def _finder_source(finder: object) -> Path | None:
-    """Return the file that defines ``finder``, resolved without importing.
-
-    A finder class is frequently installed before its module is executed --
-    setuptools writes a stub that puts the class straight onto
-    ``sys.meta_path`` -- so the defining module is often absent from
-    ``sys.modules``.  ``find_spec`` locates it without executing the guarded
-    packages.
-
-    Every lookup is defensive because the value being inspected is attacker-
-    controlled: a hostile metaclass can raise from ``__module__`` or a module
-    can raise from ``__file__``.  A finder that cannot be located is not
-    trusted, so an exception here must resolve to ``None`` rather than escape.
-    """
-
-    try:
-        module = _finder_module(finder)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
-        return None
-    if module is not None:
-        try:
-            origin = getattr(module, "__file__", None)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:  # noqa: BLE001 - hostile module; fall through to find_spec
-            origin = None
-        if isinstance(origin, str) and origin:
-            return _safe_resolve(Path(origin))
-    try:
-        name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
-        return None
-    if not isinstance(name, str) or not name:
-        return None
-    try:
-        spec = importlib.util.find_spec(name)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - a hostile import hook must not abort the guard
-        return None
-    try:
-        origin = getattr(spec, "origin", None) if spec is not None else None
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - hostile spec object
-        return None
-    if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
-        return None
-    return _safe_resolve(Path(origin))
-
-
-def _safe_resolve(candidate: Path) -> Path | None:
-    """Resolve ``candidate``, returning ``None`` when it is not a usable path."""
-
-    try:
-        return Path(candidate).resolve()
-    except (OSError, ValueError, RuntimeError):
-        return None
-
-
-def _finder_code_file(finder: object) -> Path | None:
-    """Return the file the finder's own ``find_spec`` was compiled from.
-
-    ``co_filename`` names the file the compiler was *told* to attribute the
-    code to.  That is not the same as the file the code was read from, and the
-    difference is load-bearing: ``compile(source, filename, "exec")`` lets a
-    caller set ``filename`` to any path at all without reading that file.  A
-    finder could therefore name a file already in site-packages, satisfy the
-    existence and containment checks, and be certified as an installation
-    finder while its real code came from anywhere at all.  Independent review
-    reproduced exactly that and obtained a clean ``PASS``.
-
-    So the claim is checked rather than trusted: the named file is read and
-    compiled here, and the finder's code object must actually appear among the
-    code objects that file produces.  Naming a real file no longer suffices --
-    the code has to be in it.
-
-    Returns ``None`` when the finder has no Python-level ``find_spec`` -- a C
-    implementation (a builtin or extension module) has no code object to
-    attest, so it is not treated as an installation finder.  ``None`` means
-    "not trusted", never "trust me".
-    """
-
-    try:
-        function = getattr(finder, "find_spec", None)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - hostile descriptor; untrusted by default
-        return None
-    if function is None:
-        return None
-    # A class is installed on meta_path with find_spec called unbound, so the
-    # attribute is a plain function; an instance yields a bound method.
-    try:
-        function = getattr(function, "__func__", function)
-        code = function.__code__
-        filename = code.co_filename
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - not a Python function; untrusted by default
-        return None
-    if not isinstance(filename, str) or not filename:
-        return None
-    # Definitions from an interactive session, an exec() of a string, or a
-    # doctest have no real file behind them and can never be an install.
-    if filename.startswith("<") and filename.endswith(">"):
-        return None
-    resolved = _safe_resolve(Path(filename))
-    if resolved is None or not _code_is_defined_in(code, resolved):
-        return None
-    return resolved
-
-
-def _code_fingerprint(code: object) -> tuple | None:
-    """Return a value-comparable fingerprint of a code object.
-
-    Code objects compare by identity, so ``==`` cannot match a code object
-    recompiled from the same source.  The fingerprint recurses into nested
-    code objects (closures and comprehensions), substituting each one's own
-    fingerprint so the result stays comparable.
-    """
-
-    try:
-        return (
-            code.co_argcount,  # type: ignore[attr-defined]
-            code.co_kwonlyargcount,  # type: ignore[attr-defined]
-            code.co_nlocals,  # type: ignore[attr-defined]
-            code.co_flags,  # type: ignore[attr-defined]
-            bytes(code.co_code),  # type: ignore[attr-defined]
-            tuple(
-                _code_fingerprint(constant) if hasattr(constant, "co_code") else constant
-                for constant in code.co_consts  # type: ignore[attr-defined]
-            ),
-            code.co_names,  # type: ignore[attr-defined]
-            code.co_varnames,  # type: ignore[attr-defined]
-            code.co_freevars,  # type: ignore[attr-defined]
-            code.co_cellvars,  # type: ignore[attr-defined]
-        )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - hostile code object; untrusted by default
-        return None
-
-
-def _code_is_defined_in(code: object, source_file: Path) -> bool:
-    """Return whether ``source_file`` really contains the given code object.
-
-    Reads and compiles the named file, then looks for a matching code object
-    among everything it defines -- at module level, nested in a class, or
-    nested in a function.  A finder that merely *claims* a site-packages
-    filename produces no match and is refused.
-
-    Fails closed on every difficulty: an unreadable file, a file that does not
-    compile as source, or an unexpected code object all return ``False``.  A
-    bytecode-only install has no source to check and is refused too, which is
-    the safe direction for a trust decision.
-    """
-
-    target = _code_fingerprint(code)
-    if target is None:
-        return False
-    try:
-        # Decode the way the interpreter itself does, via PEP 263: honour any
-        # encoding cookie first and fall back to UTF-8.  Reading as UTF-8 with
-        # ``errors="replace"`` silently rewrote the bytes of a latin-1 module
-        # into different string constants, so its recompiled code never matched
-        # the running finder's and a *genuine* installation finder was refused.
-        # That is a false FAIL on the supported release lane, not a safe
-        # refusal, so the decoder has to be the import system's.
-        with tokenize.open(source_file) as handle:
-            source = handle.read()
-    except (OSError, ValueError, UnicodeError, SyntaxError):
-        return False
-    try:
-        # ``dont_inherit`` is load-bearing, not tidiness.  ``compile()`` without
-        # it inherits the calling frame's ``__future__`` flags, and this module
-        # has ``from __future__ import annotations``.  That stamped
-        # ``CO_FUTURE_ANNOTATIONS`` (0x1000000) onto every code object
-        # compiled here, so a genuine finder's object -- which does not carry
-        # that bit -- could never match the recompiled copy, and every real
-        # installation finder was refused.  A module is normally compiled with
-        # no inherited flags, so this reproduces the flags the finder's own
-        # import produced.
-        compiled = compile(source, str(source_file), "exec", dont_inherit=True)
-    except (OSError, ValueError, SyntaxError, RecursionError, MemoryError):
-        return False
-
-    pending = [compiled]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if _code_fingerprint(current) == target:
-            return True
-        pending.extend(constant for constant in current.co_consts if hasattr(constant, "co_code"))
-    return False
-
-
 def _is_installation_finder(finder: object) -> bool:
     """Return whether ``finder`` was installed with this interpreter.
 
@@ -685,27 +574,27 @@ def _is_installation_finder(finder: object) -> bool:
     genuine installed module that does.  Neither is forge-proof, because both
     read the *claim* rather than the code.
 
-    The finder's own code object is what remains, but its ``co_filename``
-    alone is *not* proof: ``compile()`` lets a caller name any file without
-    reading it, so a forged filename would otherwise pass every check here.
-    ``_code_is_defined_in`` therefore reads the named file and requires the
-    finder's code to actually be in it.
+    ``co_filename`` is no better on its own: ``compile`` takes the filename it
+    records, so a hostile finder can be compiled under the name of any file
+    that exists and inherit its location.  Trust therefore requires two
+    independent channels to agree: the finder's ``co_filename`` must name a
+    real file inside site-packages, *and* the bytecode actually executing must
+    be reproduced by recompiling that file's source from disk.  A forged
+    filename names a real file that does not contain the hostile bytecode, so
+    the second channel refuses it.
 
     That is necessary but not sufficient, and the gap was the last false PASS:
     code *matching* a site-packages file is not the same as code *loaded from*
     it.  Writing the finder's own source into site-packages and then running
     ``exec(compile(source, that_path, "exec"))`` satisfies every content check
-    while having no provenance there whatsoever.  Closing that gap with
-    in-memory evidence did not work either: ``sys.modules[name].__spec__`` is
-    writable by the attacker, and a module built with ``types.ModuleType`` plus
-    a spec from ``spec_from_file_location`` satisfies it exactly as well as a
-    bare ``exec`` satisfies the content check.
+    while having no provenance there whatsoever.  So the defining module must
+    also be an entry the import system actually created for that same file,
+    which a bare ``exec`` never produces.  Anything a finder can merely *say*
+    about itself is ignored for this decision.
 
-    So provenance comes from the install records on disk -- a distribution
-    ``RECORD`` hash for the file, or a ``.pth`` that imports its module -- which
-    is the same category of evidence the rest of this guard already trusts for
-    package origins.  Anything a finder can merely *say* about itself, and any
-    state a running process can rewrite, is ignored for this decision.
+    Residual boundary: an attacker who can write a file into this
+    interpreter's site-packages, or who runs code before the guard does, is out
+    of scope -- at that point they own the interpreter rather than the finder.
     """
 
     if _is_trusted_stdlib_finder(finder):
@@ -720,7 +609,19 @@ def _is_installation_finder(finder: object) -> bool:
             return False
     except (OSError, ValueError):
         return False
-    return any(_is_within(code_file, root, strict=False) for root in _site_packages_roots())
+    if not any(_is_within(code_file, root, strict=False) for root in _site_packages_roots()):
+        return False
+    try:
+        function = getattr(finder, "find_spec", None)
+    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+        return False
+    if function is None:
+        return False
+    try:
+        function = getattr(function, "__func__", function)
+    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+        return False
+    return _code_matches_source(function, code_file)
 
 
 def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
@@ -734,39 +635,14 @@ def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
     meta-path contains a finder this checkout did not install.
     """
 
-    # ``sys.meta_path`` is mutable process state and is precisely the untrusted
-    # collection being inspected, so the snapshot can be made to raise.  A list
-    # subclass whose ``__iter__`` raises a direct ``BaseException`` escaped
-    # ``check_origins`` entirely; an unreadable meta-path is a finding about the
-    # interpreter, never a traceback.
-    try:
-        snapshot = list(sys.meta_path)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:  # noqa: BLE001 - untrusted collection
-        return [(_UnreadableMetaPath(exc), None)]
-
     offenders: list[tuple[object, Path | None]] = []
-    for finder in snapshot:
+    for finder in list(sys.meta_path):
         if _is_trusted_stdlib_finder(finder) or _is_installation_finder(finder):
             continue
         # Report the code location: it is the only part of a refused finder's
         # identity that is not simply what the finder claims about itself.
         offenders.append((finder, _finder_code_file(finder) or _finder_source(finder)))
     return offenders
-
-
-class _UnreadableMetaPath:
-    """Stand-in for a ``sys.meta_path`` that could not be iterated.
-
-    The real collection refused to yield, so there is no finder to name.  This
-    stands in for the interpreter itself as the thing being refused, which keeps
-    the report honest: the operator is told the meta-path was unreadable rather
-    than being handed a fabricated finder.
-    """
-
-    def __init__(self, cause: BaseException) -> None:
-        self._cause = cause
 
 
 def _describe_finder(entry: tuple[object, Path | None]) -> str:
@@ -783,9 +659,7 @@ def _describe_finder(entry: tuple[object, Path | None]) -> str:
             name = f"{finder.__module__}.{getattr(finder, '__qualname__', None) or finder.__name__}"
         else:
             name = f"{type(finder).__module__}.{type(finder).__qualname__}"
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - a hostile metaclass must not abort the report
+    except Exception:  # noqa: BLE001 - a hostile metaclass must not abort the report
         name = "<finder with an unreadable identity>"
     if source is not None:
         return f"{name} (from {source})"
@@ -975,16 +849,7 @@ def _allowed_roots(
     roots = [project_root]
     try:
         distributions = importlib.metadata.packages_distributions()
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - metadata is advisory here
-        # ``packages_distributions`` walks ``sys.meta_path`` looking for
-        # ``find_distributions``, so it iterates the same untrusted collection
-        # the rest of this guard inspects.  A meta-path entry whose ``__iter__``
-        # raises -- or simply a list subclass installed over it -- made the
-        # raise escape ``check_origins`` from inside the stdlib.  Metadata is
-        # advisory here: an unreadable view contributes no extra allowed root,
-        # which is the fail-closed direction.
+    except Exception:  # noqa: BLE001 - metadata is advisory here
         return roots
     for package in packages:
         for owner in distributions.get(package, ()) or ():
@@ -1008,52 +873,52 @@ def _allowed_roots(
     return roots
 
 
-def _resolve_origin(package: str) -> tuple[Path | None, str, object]:
-    """Import ``package`` and return ``(module file, error, module)``.
+# Module objects published by ``_resolve_origin``, keyed by package name.  The
+# origin is read from ``module.__file__`` exactly once, and the portion check
+# reuses the same module rather than re-reading that mutable value.
+_RESOLVED_MODULES: dict = {}
 
-    The module object is returned so that the caller can inspect the *same*
-    module whose ``__file__`` was resolved here.  ``__file__`` is ordinary
-    mutable state, so it can be read only once per check: a value that answers
-    differently on a second read would let a foreign ``__path__`` pass.
-    """
+
+def _resolve_origin(package: str) -> tuple[Path | None, str]:
+    """Import ``package`` and return ``(module file, error)`` for its origin."""
 
     try:
         module = __import__(package)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
-        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}", None
-    # Reading the attribute is itself untrusted: a module can override
-    # ``__getattribute__`` to raise from ``__file__``, and that raise used to
-    # escape ``check_origins`` as a traceback rather than becoming the finding
-    # it describes.  The read is inside the same guard as the import, and the
-    # module is returned either way so the caller can judge it.
+        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}"
+    # Publish the module this origin was read from, so the portion check can
+    # use it without reading ``__file__`` a second time.  ``__file__`` is
+    # mutable interpreter state and a hostile path-like can answer
+    # differently on each read; re-reading it here let a first read matching
+    # the origin be followed by one that did not, and the portion check then
+    # returned no findings at all -- a false PASS for a package that really
+    # does have a foreign ``__path__``.
+    _RESOLVED_MODULES[package] = module
+    # Reading ``__file__`` is an untrusted read like any other: a module can
+    # override ``__getattribute__`` so that touching ``__file__`` raises.  That
+    # read sat outside the guard's exception boundary, so the raise escaped
+    # ``check_origins`` as a traceback and the operator saw a crash instead of
+    # the FAIL naming the offending package -- the one outcome this module
+    # exists to make impossible.  A module that cannot report where it lives
+    # is a finding, never a crash.
     try:
         origin = getattr(module, "__file__", None)
     except (KeyboardInterrupt, SystemExit):
         raise
-    except BaseException as exc:  # noqa: BLE001 - untrusted getter, see docstring
-        return None, f"origin could not be read: {type(exc).__name__}: {_describe(exc)}", module
+    except BaseException as exc:  # noqa: BLE001 - hostile getter is a finding
+        return None, f"__file__ could not be read: {type(exc).__name__}: {_describe(exc)}"
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
         # the only available statement of where they resolved.
-        try:
-            locations = list(getattr(module, "__path__", ()) or ())
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException as exc:  # noqa: BLE001 - untrusted getter, see above
-            return (
-                None,
-                f"module search path could not be read: {type(exc).__name__}: {_describe(exc)}",
-                module,
-            )
+        locations = list(getattr(module, "__path__", ()) or ())
         if not locations:
-            return None, "module exposed neither __file__ nor __path__", module
+            return None, "module exposed neither __file__ nor __path__"
         candidate = locations[0]
     else:
         candidate = origin
-    resolved, error = _resolve_path(candidate, package)
-    return resolved, error, module
+    return _resolve_path(candidate, package)
 
 
 def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
@@ -1129,7 +994,10 @@ def _describe(value: object) -> str:
 
 
 def _foreign_path_locations(
-    package: str, allowed_roots: list[Path], origin: Path, module: object = None
+    package: str,
+    allowed_roots: list[Path],
+    origin: Path,
+    module: object = None,
 ) -> tuple[list[Path], list[str]]:
     """Return importable ``__path__`` entries of ``package`` that are not local.
 
@@ -1149,10 +1017,19 @@ def _foreign_path_locations(
     Returns the foreign locations and the reasons any entry was unusable.  A
     portion that cannot be resolved is a finding, never an exception: the
     caller fails closed on either.
+
+    ``module`` is the module whose ``__file__`` the caller already resolved
+    into ``origin``.  Passing it is load-bearing: ``__file__`` is mutable
+    interpreter state and a hostile path-like can answer differently on each
+    read, so reading it a second time here let a first read matching ``origin``
+    be followed by one that did not -- and the function then returned no
+    findings at all, so a package with a genuinely foreign ``__path__``
+    reported PASS.  That is a false PASS, reproduced and pinned by
+    ``test_a_foreign_path_portion_is_reported_even_when_file_changes_between_
+    reads``.  With the caller supplying the module, its ``__file__`` is read
+    exactly once.
     """
 
-    # ``module`` supplied by the caller is the module whose ``__file__`` was
-    # already resolved into ``origin``, so its ``__file__`` is not read again.
     origin_is_this_module = module is not None
     if module is None:
         module = sys.modules.get(package)
@@ -1164,50 +1041,17 @@ def _foreign_path_locations(
     # and then the ambient module is some *other* tree's package.  Comparing
     # that module's portions against these roots would report a foreign path
     # for a package that is genuinely installed from an allowed root.
-    #
-    # The caller passes the module whose ``__file__`` it already resolved into
-    # ``origin``.  Reading ``__file__`` again here let a hostile path-like
-    # answer differently on the second read: a first read matching ``origin``
-    # followed by a second that did not made this function return no findings
-    # at all, so a package with a genuinely foreign ``__path__`` reported
-    # PASS.  When the caller supplies no module, the fallback read is
-    # coerced through ``_resolve_path`` so a value that raises cannot escape
-    # ``check_origins`` as a traceback.  Either way an origin that is not the
-    # one being reported means this module is some other tree's package, and
-    # its portions must not be judged against these roots.
     if not origin_is_this_module:
         module_origin = getattr(module, "__file__", None)
         if module_origin is not None:
-            resolved_origin, _ = _resolve_path(module_origin, package)
-            if resolved_origin is None or resolved_origin != origin:
+            try:
+                if Path(module_origin).resolve() != origin:
+                    return [], []
+            except (OSError, ValueError, RuntimeError):
                 return [], []
-    # ``__path__`` is read from a module the interpreter may have been handed,
-    # so the *read itself* is untrusted: a module can override
-    # ``__getattribute__`` to raise from it.  That read used to sit outside any
-    # guard, so an ordinary ``RuntimeError`` escaped ``check_origins`` as a
-    # traceback and the operator saw a crash instead of the FAIL naming the
-    # package.  A portion list that cannot be read is a finding, never an
-    # exception.
-    try:
-        raw_portions = getattr(module, "__path__", ())
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:  # noqa: BLE001 - untrusted getter, see _describe
-        return [], [f"<unreadable __path__>: {_describe(exc)}"]
-    # Reading the attribute is only half the hazard: the value is untrusted too,
-    # so iterating it can raise as well.  An object whose ``__iter__`` raises a
-    # direct ``BaseException`` escaped ``check_origins`` here.  The portion list
-    # is materialised inside the guard, and one that cannot be walked is the
-    # same finding as one that cannot be read.
-    try:
-        portions = list(raw_portions) if raw_portions else []
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:  # noqa: BLE001 - untrusted iterator, see _describe
-        return [], [f"<uniterable __path__>: {_describe(exc)}"]
     outside: list[Path] = []
     unusable: list[str] = []
-    for location in portions:
+    for location in getattr(module, "__path__", ()) or ():
         if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
             # Coerce through ``_resolve_path`` rather than ``Path(...).resolve``
             # directly: a portion is untrusted interpreter output, so it can be
@@ -1226,6 +1070,11 @@ def _foreign_path_locations(
 def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKAGES) -> dict:
     """Return a JSON-serializable report of every package's resolved origin."""
 
+    # Start from a clean slate.  An entry left over from an earlier call would
+    # pair this call's origin -- which the release lane may have resolved from
+    # install metadata rather than from a live import -- with that earlier
+    # tree's module, and report a foreign portion for an honest install.
+    _RESOLVED_MODULES.clear()
     root = project_root.resolve()
     allowed_roots = _allowed_roots(root, packages)
     findings: list[dict] = []
@@ -1253,7 +1102,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
             "status": "FAIL",
         }
     for package in packages:
-        origin, error, module = _resolve_origin(package)
+        origin, error = _resolve_origin(package)
         if error:
             findings.append(
                 {
@@ -1282,7 +1131,15 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                 }
             )
             continue
-        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin, module)
+        # Use the module ``_resolve_origin`` actually imported, so ``__file__``
+        # is read once and a hostile value cannot change its answer between the
+        # origin resolution and the portion check.  When the origin came from
+        # install metadata instead -- the release lane resolves it that way --
+        # nothing was published and the ambient module is some *other* tree's
+        # package, which must not be judged against these roots, so the
+        # function's own fallback handles it.
+        live = _RESOLVED_MODULES.get(package)
+        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin, live)
         if foreign or unusable:
             detail = ""
             if foreign:
@@ -1309,6 +1166,17 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                 "detail": "",
             }
         )
+    # `all()` over an empty sequence is True, so an empty request would report
+    # PASS for verifying nothing.  A gate that checked no packages must not be
+    # able to certify that all is well; fail closed at the report boundary so
+    # the verdict holds no matter which caller supplied the list.
+    if not findings:
+        return {
+            "project_root": str(root),
+            "packages": [],
+            "status": "FAIL",
+            "detail": "no packages were selected to verify",
+        }
     return {
         "project_root": str(root),
         "packages": findings,

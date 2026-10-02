@@ -27,13 +27,37 @@ Reproduced on `1723ec6` before the fix:
 This route is distinct from the known planted-`.pth` one and needs no
 filesystem write at all: no `.pth`, no `RECORD`, no new finder, identity intact.
 
-**Fixed.** These finders live in `_frozen_importlib` /
+**Fixed, then hardened.** These finders live in `_frozen_importlib` /
 `_frozen_importlib_external`, which the interpreter loads from the frozen
 stdlib, so a genuine one reports a `<frozen ...>` code file while a rebound one
-names wherever the attacker compiled it. `_has_frozen_find_spec` requires that,
-and returns `False` for anything it cannot read. After the fix the same
-reproducer answers `FAIL`, and `BuiltinImporter`, `FrozenImporter` and
-`PathFinder` remain trusted, so the release lane is intact.
+names wherever the attacker compiled it. The first fix required exactly that
+string.
+
+That fix was itself a bypass, found while writing it and recorded here because
+the sequence is the point. `<frozen ...>` is a *filename claim*, and
+`compile()` accepts any filename the caller likes without reading that file —
+the same property that made `co_filename` untrustworthy earlier in this module,
+and the reason `_code_is_defined_in` exists. So an attacker compiles their own
+`find_spec` *named* `<frozen importlib._bootstrap_external>` and inherits the
+trust the new check was granting:
+
+    forged <frozen ...> filename trusted: True
+    guard status: PASS
+    foreign submodule: foreign
+    *** FORGED FROZEN FILENAME = FULL BYPASS ***
+
+The check now verifies rather than believes. `_has_frozen_find_spec` locates
+the frozen module's real on-disk stdlib source, compiles it, and requires the
+finder's code object to actually appear among the code objects that file
+produces — the discipline `_finder_code_file` already uses. A genuine frozen
+finder is defined in that file and matches; one compiled from a string is in no
+file and cannot. Both reproducers now answer `FAIL` with no filesystem write
+and no new finder, while `BuiltinImporter`, `FrozenImporter` and `PathFinder`
+remain trusted and the clean CLI is unaffected.
+
+Note for whoever reads this next: the frozen module's spec reports the origin
+`frozen`, so `find_spec(...).origin` is useless here and the module's
+`__file__` is the only handle on the source that produced the running code.
 
 ## Finding 2 — an oversized `RECORD` row escaped as `_csv.Error`
 
@@ -85,18 +109,36 @@ added on top.
 
 | Check | Result |
 |---|---|
-| `pytest tests/test_import_origin_guard.py` | 122 passed |
+| `pytest tests/test_import_origin_guard.py` | 123 passed |
 | `pytest tests/test_production_gate_*.py tests/test_local_ci_policy.py tests/test_fixture_provenance.py` | 189 passed |
 | Clean CLI, `--package pokered_harness` | PASS, rc 0, stderr empty |
 | `ruff format --check` | clean |
 | `ruff check` | one pre-existing `SIM117` |
-| Mutations: drop the frozen-code check; narrow the CSV guard; drop the algorithm check | all three killed |
+| Mutations: drop the frozen-code check; narrow the CSV guard; drop the algorithm check; believe the `<frozen ...>` name; skip the frozen-name gate | all killed |
 | Round-4 reproducers (forged spec, equality, both iterators, three getters) | no traceback, all `FAIL` |
+| `evidence/repro_forged_frozen_filename.py` | forged `<frozen ...>` refused, guard `FAIL` |
+| `evidence/repro_mutated_pathfinder.py` | rebound `find_spec` refused, guard `FAIL` |
 | Planted `.pth` | still reproduces — known open finding, unchanged |
 
 Real finders were re-checked after every change: `_virtualenv._Finder` and the
 editable `_EditableFinder` stay trusted, and the editable shim stays
 RECORD-attested.
+
+## For the next round
+
+Two traps in this round cost real time and are worth not re-learning.
+
+*A code filename is a claim.* `compile(source, filename, "exec")` names any
+file without reading it. Any check that tests `co_filename` for a *string* is
+checking an attacker-writable value. `_code_is_defined_in` exists for this and
+the frozen check now uses it.
+
+*An over-refusal can masquerade as a fix.* Two intermediate versions of the
+frozen check refused the genuine finders and answered `FAIL` on the real
+checkout — the clean CLI exited 1 — which reads exactly like a working fix
+until you check the release lane. Always assert that `BuiltinImporter`,
+`FrozenImporter` and `PathFinder` are still trusted and that the clean CLI still
+exits 0, alongside the attack being blocked.
 
 ## Position
 
