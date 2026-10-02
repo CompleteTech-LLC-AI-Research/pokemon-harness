@@ -125,6 +125,12 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return None
+    except ValueError:
+        # Valid JSON can still be refused by the interpreter itself: CPython
+        # caps integer string conversion, so a record holding a 5,000-digit
+        # integer raises ValueError from json.loads rather than
+        # JSONDecodeError.  A record that cannot be parsed is unattributable.
+        return None
     if not isinstance(payload, dict):
         # Valid JSON is not necessarily the object pip writes.  A record that
         # parses to a list or a scalar cannot name a source, so it is
@@ -244,6 +250,14 @@ def _allowed_roots(
                 located = _distribution(owner).locate_file(package)
             except (OSError, importlib.metadata.PackageNotFoundError):
                 continue
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:  # noqa: BLE001, S112 - untrusted metadata reader
+                # A distribution object is third-party code; any of its
+                # methods can raise anything.  An install whose location
+                # cannot be read contributes no allowed root, which is the
+                # fail-closed direction.
+                continue
             resolved, _ = _resolve_path(located, package)
             if resolved is not None:
                 roots.append(resolved)
@@ -295,6 +309,11 @@ def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
     passes an object that raises something unanticipated.  ``KeyboardInterrupt``
     and ``SystemExit`` are re-raised so an operator interrupt still stops the
     run rather than being recorded as a finding.
+
+    The message is rendered with ``_describe`` rather than an f-string: the
+    caught exception is itself untrusted, since it can come straight out of a
+    foreign ``__fspath__``, and ``str(exc)`` on such an object can raise.  A
+    detail line that is itself hostile must still produce a finding.
     """
 
     try:
@@ -302,7 +321,24 @@ def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - untrusted data, see docstring
-        return None, f"origin is not a usable path: {type(exc).__name__}: {exc}"
+        return None, f"origin is not a usable path: {_describe(exc)}"
+
+
+def _describe(value: object) -> str:
+    """Return a printable rendering of ``value`` that cannot itself raise.
+
+    Everything this module reports came from the interpreter or from install
+    metadata, so any of it may be an object with a hostile ``__str__``.  A
+    detail string that raises while being built turns the finding back into a
+    traceback, which is the exact failure this module exists to prevent.
+    """
+
+    try:
+        return str(value)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return f"<unprintable {type(value).__name__}>"
 
 
 def _foreign_namespace_locations(package: str, allowed_roots: list[Path]) -> list[Path]:
@@ -362,7 +398,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                     "status": "FAIL",
                     "detail": (
                         "namespace package also resolves outside this checkout: "
-                        + ", ".join(str(item) for item in foreign)
+                        + ", ".join(_describe(item) for item in foreign)
                     ),
                 }
             )

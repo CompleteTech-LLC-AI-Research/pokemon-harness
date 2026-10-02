@@ -6,6 +6,7 @@ selected tier silently measures that other tree.  These rows pin both
 directions: the guard must accept the tree under test and reject any other.
 """
 
+import contextlib
 import importlib
 import json
 import os
@@ -32,6 +33,25 @@ def _make_package(root: Path, package: str) -> Path:
     directory.mkdir(parents=True)
     (directory / "__init__.py").write_text("", encoding="utf-8")
     return directory
+
+
+@contextlib.contextmanager
+def _module_installed(name: str, module: types.ModuleType):
+    """Temporarily install ``module`` under ``name`` in ``sys.modules``.
+
+    Used by the rows that drive the real CLI, where pytest's ``monkeypatch``
+    fixture is not in scope.
+    """
+
+    original = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        yield module
+    finally:
+        if original is None:
+            del sys.modules[name]
+        else:
+            sys.modules[name] = original
 
 
 def test_repo_checkout_resolves_its_own_packages():
@@ -567,21 +587,150 @@ def test_resolve_path_does_not_swallow_an_interrupt(raised):
         origins._resolve_path(_HostileFspath(raised), "pkg")
 
 
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_is_within_does_not_swallow_an_interrupt(raised):
+    """``_is_within`` must re-raise rather than read a refused comparison as
+    "not within" and let the caller carry on.
+
+    Pinned directly: the namespace rows reach the interrupt through
+    ``_is_within`` first, but they still fail later in ``_resolve_path``, so
+    they do not distinguish the two sites.
+    """
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._is_within(_HostileFspath(raised), REPO_ROOT)
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_is_this_checkout_does_not_swallow_an_interrupt(raised):
+    """``_is_this_checkout`` must re-raise for the same reason."""
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._is_this_checkout(REPO_ROOT, _HostileFspath(raised))
+
+
+def test_describe_never_raises_on_a_hostile_value():
+    """A detail line built from untrusted data must itself be safe to build."""
+
+    class Unprintable:
+        def __str__(self):
+            raise AssertionError("str blew up")
+
+        def __repr__(self):
+            raise AssertionError("repr blew up")
+
+    rendered = origins._describe(Unprintable())
+
+    assert "unprintable" in rendered
+    assert "Unprintable" in rendered
+
+
+def test_cli_survives_a_portion_whose_str_also_raises(tmp_path, capsys):
+    """Formatting the finding must not resurrect the traceback it replaced.
+
+    A portion that is hostile in both ``__fspath__`` and ``__str__`` reached
+    ``str(item)`` while the detail was assembled, so the refusal crashed
+    exactly as the original bug did.
+    """
+
+    class HostileBoth:
+        def __fspath__(self):
+            raise AssertionError("fspath blew up")
+
+        def __str__(self):
+            raise AssertionError("str blew up")
+
+    module = types.ModuleType("hostile_str_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), HostileBoth()]
+    with _module_installed("hostile_str_ns", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "hostile_str_ns"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+
+
+def test_cli_survives_an_exception_whose_str_raises(tmp_path, capsys):
+    """A caught exception from a hostile ``__fspath__`` is itself untrusted."""
+
+    class ExplodingExc(BaseException):
+        def __str__(self):
+            raise AssertionError("exception formatting escaped")
+
+    class Hostile:
+        def __fspath__(self):
+            raise ExplodingExc()
+
+    module = types.ModuleType("hostile_exc_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), Hostile()]
+    with _module_installed("hostile_exc_ns", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "hostile_exc_ns"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+
+
+def test_installed_from_refuses_a_record_the_interpreter_will_not_parse():
+    """A valid-JSON integer past CPython's digit cap is still a refused record.
+
+    ``json.loads`` raises ``ValueError`` rather than ``JSONDecodeError`` once
+    the integer string conversion limit is exceeded, so catching only the
+    subclass let a record on disk abort the whole run.
+    """
+
+    oversized = '{"url": ' + ("9" * 5000) + "}"
+
+    class _Distribution:
+        def read_text(self, filename):
+            return oversized if filename == "direct_url.json" else None
+
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._installed_from("pyboy", Path("/anywhere")) is None
+    finally:
+        origins._distribution = original
+
+
+def test_install_location_reader_that_raises_contributes_no_root(tmp_path):
+    """``locate_file`` is third-party code and can raise anything.
+
+    An install whose location cannot be read contributes no allowed root,
+    which is the fail-closed direction: the run then refuses an origin it
+    cannot attribute rather than trusting an unverified root.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"url": tmp_path.as_uri()})
+
+        def locate_file(self, _package):
+            raise KeyError("locate")
+
+    original_pd = origins.importlib.metadata.packages_distributions
+    original_d = origins._distribution
+    origins.importlib.metadata.packages_distributions = lambda: {"widget": ["widget"]}
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._allowed_roots(tmp_path, ("widget",)) == [tmp_path]
+    finally:
+        origins.importlib.metadata.packages_distributions = original_pd
+        origins._distribution = original_d
+
+
 def test_cli_reports_a_hostile_fspath_as_a_failure_without_a_traceback(tmp_path, capsys):
     """The real CLI must print parseable JSON and exit non-zero, not raise."""
 
     module = types.ModuleType("hostile_cli_ns")
     module.__file__ = None
     module.__path__ = [str(tmp_path / "inside"), _HostileFspath(AssertionError("boom"))]
-    original = sys.modules.get("hostile_cli_ns")
-    sys.modules["hostile_cli_ns"] = module
-    try:
+    with _module_installed("hostile_cli_ns", module):
         returncode = main(["--project-root", str(tmp_path), "--package", "hostile_cli_ns"])
-    finally:
-        if original is None:
-            del sys.modules["hostile_cli_ns"]
-        else:
-            sys.modules["hostile_cli_ns"] = original
 
     assert returncode == 1
     report = json.loads(capsys.readouterr().out)
