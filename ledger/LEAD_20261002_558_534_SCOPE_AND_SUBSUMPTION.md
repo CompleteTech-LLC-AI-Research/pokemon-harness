@@ -24,11 +24,8 @@ against the issue, not against the hardening rounds.
 2. **A guard that fails loudly before the tier runs.** Same call site — it runs
    as part of collection preflight, ahead of the pytest collection commands.
    **Met.**
-3. **`run_local_ci.sh` and `production_gate.py` covered.** `production_gate.py`
-   re-exports `run_import_origin_preflight` as a facade attribute (line 623) and
-   the execution module invokes it. **`run_local_ci.sh` contains no reference
-   to the guard at any head** (`grep check_import_origins|import_origin` → no
-   match on both `origin/master` and `9084db8`). **Partially met** — see below.
+3. **`run_local_ci.sh` and `production_gate.py` covered.** **Met.** See the
+   correction below — my first pass at this criterion was wrong.
 4. **Demonstrated fail against a mis-pointed install and pass against the
    repaired one, both retained.** Measured directly (see below). **Met.**
 
@@ -79,10 +76,8 @@ Ancestry: `#555` and `#556` are ancestors of `#558`. `#548`, `#549`, `#551`,
 
 ## What remains open
 
-1. **`scripts/run_local_ci.sh` does not invoke the guard** (AC3). This is a
-   real gap against the issue text, and no amount of site-packages hardening
-   addresses it. It needs either a direct call or an explicit statement that
-   `run_local_ci.sh` reaches the guard through the gate.
+1. ~~**`scripts/run_local_ci.sh` does not invoke the guard** (AC3)~~ —
+   **CORRECTED, this was wrong.** See "Correction: AC3 is met" below.
 2. **The planted-`.pth` gap is unchanged** and, as recorded in
    `LEAD_20261002_558_ROUND8_PTH_REVERT.md`, is **not** fixable by attesting the
    `.pth` — inside the declared model the attacker controls both. It is
@@ -97,5 +92,47 @@ Ancestry: `#555` and `#556` are ancestors of `#558`. `#548`, `#549`, `#551`,
 
 ## Disposition
 
-- #534's criteria are met by #558 **except** the `run_local_ci.sh` arm of AC3.
+- #534's four acceptance criteria are met by #558, verified by measurement.
 - No PR merged, none marked ready. Release remains `PARTIAL`.
+
+## Correction: AC3 **is** met (`run_local_ci.sh` is covered)
+
+My first pass concluded AC3 was only partially met, on the grounds that
+`scripts/run_local_ci.sh` contains no literal reference to
+`check_import_origins`. **That reasoning was wrong**, and it mistook a missing
+*string* for a missing *call*. The guard is reached transitively:
+
+```
+run_local_ci.sh -> python scripts/production_gate.py --runtime-mode source --unit-only ...
+  -> production_gate_tiers.py:479  run_collection_preflight(...)
+    -> production_gate_execution.py:262  run_import_origin_preflight(...)
+      -> check_import_origins.py --project-root <repo>
+```
+
+Run live, with the exact flag combination `run_local_ci.sh` uses:
+
+```
+$ production_gate.py --runtime-mode source --unit-only --repeat-timing 5 --evidence-dir /tmp/pg_ev
+collection:
+  PASS import-origins: returncode=0 duration=0.7s
+    command: .../bin/python .../scripts/check_import_origins.py --project-root .../.scratch/rep557
+```
+
+And the failure direction, against a root this interpreter does not import:
+
+```
+$ check_import_origins.py --project-root /workspace/poke-harness/pokemon
+      "origin": ".../.scratch/rep557/vendor/pyboy-src/pyboy/__init__.py",
+      "detail": "resolves outside this checkout ... the interpreter is
+                 importing a different checkout",
+      "status": "FAIL"
+  "status": "FAIL"
+```
+
+rc=0 against the correct root, rc=1 against the mismatched one. That is AC4's
+"fail against a mis-pointed install, pass against the repaired one, both
+retained", on the exact path the documented local CI takes.
+
+The lesson worth keeping: absence of a literal string is not absence of a
+call. Tracing the call graph and running the real command settled a question
+that two greps had got wrong, and it changed a "real gap" into a closed one.
