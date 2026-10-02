@@ -2256,3 +2256,119 @@ def test_a_finder_compiled_from_a_vanished_file_inside_site_packages_is_refused(
         assert leaked.ORIGIN == "foreign"
     finally:
         sys.meta_path.remove(forged)
+
+
+def test_a_forged_co_filename_borrowing_an_existing_file_is_refused(tmp_path, monkeypatch):
+    """A name that exists is still only a claim; the bytecode must match it.
+
+    The rows above forge ``__file__``, or compile from a path that was never
+    created, so the ``is_file()`` existence check stops them.  ``compile``
+    also accepts the filename it records, which is the remaining hole: a
+    hostile finder compiled under the name of a real, already-present
+    site-packages file inherits that file's location, passes the existence
+    check, and would otherwise be trusted while serving modules from
+    anywhere on disk.
+
+    This is the mutation guard for ``_code_matches_source``.  The bytecode
+    the finder actually executes is recompiled from the borrowed file's real
+    source, so nothing matches and the finder is refused.  Deleting the
+    corroboration call restores the false green while every other row still
+    passes.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "borrowed_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "borrowed_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "borrowed_pkg" or name.startswith("borrowed_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    borrowed = site_root / "genuine_install_neighbour.py"
+    borrowed.write_text("# a real, already-present site-packages file\n", encoding="utf-8")
+    assert borrowed.is_file(), "the borrowed path must really exist"
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class BorrowedNameFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'borrowed_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    namespace = {
+        "__name__": "genuine_install_neighbour",
+        "importlib": importlib,
+    }
+    # Compile *from* a path that really exists, carrying no hostile source.
+    exec(compile(source, str(borrowed), "exec"), namespace)  # noqa: S102
+    forged = namespace["BorrowedNameFinder"]
+    forged.__module__ = "genuine_install_neighbour"
+    forged.__file__ = str(borrowed)
+
+    sys.meta_path.insert(0, forged)
+    try:
+        code_file = _finder_code_file(forged)
+        assert code_file is not None, "the compiled-from path must be reported"
+        assert Path(code_file).is_file(), "the premise is a path that does exist"
+        assert any(
+            _is_within(Path(code_file), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the borrowed path must be inside site-packages"
+
+        assert not _is_installation_finder(forged), (
+            "existing at a trusted location is not provenance; the bytecode must "
+            "come from that file"
+        )
+        report = check_origins(root, ("borrowed_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("borrowed_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+
+
+def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
+    """The new channel must refuse forgeries only, not real install finders.
+
+    Corroboration is load-bearing for the refusal above, so it also needs a
+    row in the other direction: a finder whose bytecode genuinely comes from
+    the site-packages file it names has to stay trusted, or every editable
+    install would be reported as a hostile meta-path entry.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = site_root / "genuine_install_finder_row.py"
+    genuine.write_text(
+        "class GenuineFinder:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    namespace: dict = {}
+    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
+    finder = namespace["GenuineFinder"]()
+    finder.__file__ = str(genuine)
+
+    try:
+        function = getattr(finder.find_spec, "__func__", finder.find_spec)
+        assert origins._code_matches_source(function, genuine), (
+            "bytecode compiled from this file must be recognised as coming from it"
+        )
+        assert _is_installation_finder(finder), (
+            "a genuine site-packages finder must keep its trust"
+        )
+    finally:
+        genuine.unlink()
