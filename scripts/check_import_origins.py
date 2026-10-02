@@ -912,7 +912,12 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
         # the only available statement of where they resolved.
-        locations = list(getattr(module, "__path__", ()) or ())
+        try:
+            locations = list(getattr(module, "__path__", ()) or ())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - hostile getter is a finding
+            return None, f"__path__ could not be read: {type(exc).__name__}: {_describe(exc)}"
         if not locations:
             return None, "module exposed neither __file__ nor __path__"
         candidate = locations[0]
@@ -1042,7 +1047,14 @@ def _foreign_path_locations(
     # that module's portions against these roots would report a foreign path
     # for a package that is genuinely installed from an allowed root.
     if not origin_is_this_module:
-        module_origin = getattr(module, "__file__", None)
+        try:
+            module_origin = getattr(module, "__file__", None)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001 - hostile module; fail closed
+            # A module that cannot say where it lives cannot corroborate this
+            # origin, so contribute no portions -- the fail-closed direction.
+            return [], []
         if module_origin is not None:
             try:
                 if Path(module_origin).resolve() != origin:
@@ -1051,7 +1063,16 @@ def _foreign_path_locations(
                 return [], []
     outside: list[Path] = []
     unusable: list[str] = []
-    for location in getattr(module, "__path__", ()) or ():
+    try:
+        portions = list(getattr(module, "__path__", ()) or ())
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - hostile module; a finding, not a crash
+        # The portions are how a package can smuggle a foreign submodule, so
+        # an unreadable ``__path__`` is exactly the condition being guarded.
+        # Report it instead of letting the getter's exception escape.
+        return [], [f"__path__ could not be read: {type(exc).__name__}: {_describe(exc)}"]
+    for location in portions:
         if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
             # Coerce through ``_resolve_path`` rather than ``Path(...).resolve``
             # directly: a portion is untrusted interpreter output, so it can be
