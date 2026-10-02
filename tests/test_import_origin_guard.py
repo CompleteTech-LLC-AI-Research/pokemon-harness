@@ -2661,3 +2661,89 @@ def test_a_genuine_latin1_finder_is_still_corroborated():
         )
     finally:
         genuine.unlink()
+
+
+def test_a_foreign_path_portion_is_reported_even_when_file_changes_between_reads(
+    tmp_path, monkeypatch
+):
+    """``__file__`` is read once per check, and a second read cannot skip it.
+
+    ``__file__`` is mutable interpreter state, and a hostile path-like can
+    answer differently on each read.  The origin was resolved from one read and
+    the portion check used to take a second: a first read matching the origin
+    followed by one that did not made the guard skip the portion check entirely,
+    so a package with a genuinely foreign ``__path__`` reported PASS.
+
+    Measured on this branch before the fix, with the suite green at 121
+    passed:
+
+        status         : PASS
+        __file__ reads : 2
+
+    The caller now passes the module whose ``__file__`` it already resolved, so
+    the value is read exactly once and the drifting answer cannot be used to
+    skip the check.
+
+    This is the mutation guard for that plumbing: removing the ``module``
+    argument, or ignoring it in the function, restores the second read and this
+    row reports PASS again.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "drifting_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    local_init = (package_dir / "__init__.py").resolve()
+    foreign = tmp_path / "outside" / "drifting_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "__init__.py").write_text("", encoding="utf-8")
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "drifting_pkg" or name.startswith("drifting_pkg."):
+            del sys.modules[name]
+
+    drifting = __import__("drifting_pkg")
+    # A genuinely foreign portion: this is the finding that must survive.
+    drifting.__path__ = [str(foreign)]
+
+    class Drifting:
+        """Local on the first read, foreign on every later read."""
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def __fspath__(self) -> str:
+            self.reads += 1
+            return str(local_init if self.reads == 1 else foreign / "__init__.py")
+
+    drifting_file = Drifting()
+    monkeypatch.setattr(drifting, "__file__", drifting_file, raising=False)
+
+    report = check_origins(root, ("drifting_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "path portion" in report["packages"][0]["detail"] or (
+        "resolves outside" in report["packages"][0]["detail"]
+    ), report
+    # One read only: a second read is exactly the hole this row closes.
+    assert drifting_file.reads <= 1, (
+        f"__file__ was read {drifting_file.reads} times; a second read can disagree"
+    )
+
+    class Hostile:
+        """A path-like whose conversion raises, which must not escape."""
+
+        def __fspath__(self) -> str:
+            raise RuntimeError("boom")
+
+        def __str__(self) -> str:
+            raise RuntimeError("boom-str")
+
+    monkeypatch.setattr(drifting, "__file__", Hostile(), raising=False)
+    hostile_report = check_origins(root, ("drifting_pkg",))
+
+    assert hostile_report["status"] == "FAIL", hostile_report
+    assert "not a usable path" in hostile_report["packages"][0]["detail"], (
+        hostile_report
+    )
