@@ -317,7 +317,7 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
     return False
 
 
-def _record_digests(root: Path) -> dict[str, set[str]]:
+def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
     """Return every ``RECORD`` hash claimed for each installed file.
 
     ``RECORD`` is written at install time and names each installed file with
@@ -330,12 +330,18 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
     file contains, the file is not consistently attested by an install, and
     picking whichever claim sorted first would let a planted record decide.
 
+    Each claim is an ``(algorithm, digest)`` pair rather than a bare digest,
+    because the algorithm is part of the claim.  A row reading
+    ``sha512=<a sha256 digest>`` is not evidence of anything, and the pair is
+    what lets the caller recompute the digest the record actually names
+    instead of either trusting the label or refusing the row outright.
+
     A missing or unreadable ``RECORD`` contributes nothing rather than
     aborting: an install that cannot be attested is refused, and refusing is
     the safe direction.
     """
 
-    digests: dict[str, set[str]] = {}
+    digests: dict[str, set[tuple[str, str]]] = {}
     try:
         records = sorted(root.glob("*.dist-info/RECORD"))
     except (OSError, ValueError):
@@ -349,13 +355,11 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
             name_field, algorithm, expected = row
             if algorithm is None or expected is None or not name_field:
                 continue
-            # The label names the hash that produced ``expected``.  Only the
-            # algorithm this guard actually computes is attestable: a record
-            # claiming ``sha512=<a sha256 digest>`` describes a file this
-            # check cannot verify, and treating the label as decorative would
-            # let a row attest provenance under an algorithm that was never
-            # checked.
-            if algorithm != "sha256":
+            # An empty hash field is how ``RECORD`` marks a file it installed
+            # without recording contents (a generated script, a compiled
+            # extension).  That is not evidence of provenance here, so it
+            # contributes no claim and the path stays unattested.
+            if not algorithm or not expected:
                 continue
             resolved = _safe_resolve(root / name_field)
             if resolved is not None:
@@ -363,7 +367,7 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
                 # first.  Two records may disagree about the same file, and
                 # the caller must not be able to win by writing one that
                 # happens to sort first.
-                digests.setdefault(str(resolved), set()).add(expected)
+                digests.setdefault(str(resolved), set()).add((algorithm, expected))
     return digests
 
 
@@ -409,11 +413,37 @@ def _record_rows(text: str) -> list[tuple[str, str | None, str | None]]:
 def _file_digest(candidate: Path) -> str | None:
     """Return the URL-safe base64 SHA-256 of ``candidate``, or ``None``."""
 
+    return _file_digest_for(candidate, "sha256")
+
+
+def _file_digest_for(candidate: Path, algorithm: str) -> str | None:
+    """Return the URL-safe base64 digest of ``candidate`` under ``algorithm``.
+
+    ``RECORD`` names the algorithm that produced each digest, and a record is
+    only evidence of a file's contents if the digest is actually recomputed
+    with the algorithm the record claims.  Restricting the guard to SHA-256
+    alone would be sound but is a false refusal on a real install: ``RECORD``
+    permits any algorithm ``hashlib`` guarantees, and wheel may ship SHA-512.
+    So the label is *honoured*, which is both strictly wider than trusting it
+    blindly and strictly narrower than discarding it.
+
+    Returns ``None`` for an unknown or unavailable algorithm, so a record
+    naming something this interpreter cannot compute attests nothing.
+    """
+
     try:
         data = candidate.read_bytes()
     except (OSError, ValueError):
         return None
-    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+    try:
+        hasher = hashlib.new(algorithm)
+    except (ValueError, TypeError):
+        return None
+    try:
+        hasher.update(data)
+        return base64.urlsafe_b64encode(hasher.digest()).rstrip(b"=").decode()
+    except (ValueError, TypeError):
+        return None
 
 
 def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
@@ -428,10 +458,16 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
     expected = _record_digests(root).get(str(source_file))
     if not expected:
         return False
-    actual = _file_digest(source_file)
     # Every recorded claim must match, so an extra record asserting a different
-    # content for the same path cannot be ignored.
-    return actual is not None and all(actual == claim for claim in expected)
+    # content for the same path cannot be ignored.  Each is recomputed with the
+    # algorithm it names: a claim this interpreter cannot check -- an unknown
+    # algorithm, or a digest that does not match -- fails the whole set rather
+    # than being quietly skipped.
+    for algorithm, digest in expected:
+        actual = _file_digest_for(source_file, algorithm)
+        if actual is None or actual != digest:
+            return False
+    return True
 
 
 def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:

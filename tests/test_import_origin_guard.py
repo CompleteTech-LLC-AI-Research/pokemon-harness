@@ -2982,13 +2982,16 @@ def test_an_oversized_record_row_is_a_refusal_not_a_crash(tmp_path):
         target.unlink(missing_ok=True)
 
 
-def test_a_record_naming_another_algorithm_attests_nothing(tmp_path):
-    """The algorithm label is part of the claim, not decoration.
+def test_a_record_names_the_algorithm_it_must_be_checked_with(tmp_path):
+    """The algorithm label is part of the claim, and is honoured either way.
 
-    ``RECORD`` rows are ``path,algorithm=digest,size``.  The guard computes one
-    algorithm -- SHA-256 -- so a row labelled ``sha512`` or ``md5`` describes a
-    digest this check never verified.  Discarding the label accepted a
-    SHA-256 digest under an algorithm that was never checked.
+    ``RECORD`` rows are ``path,algorithm=digest,size``.  Discarding the label
+    accepted a SHA-256 digest under an algorithm that was never checked; only
+    admitting ``sha256`` fixed that but created a false refusal, because
+    ``RECORD`` permits any algorithm ``hashlib`` guarantees and wheel may ship
+    SHA-512.  So the label selects the digest that is recomputed: a genuine
+    row attests whatever algorithm it names, and a row whose digest does not
+    match under the algorithm it names attests nothing.
     """
 
     site_root = _site_packages_roots()[0]
@@ -3004,20 +3007,36 @@ def test_a_record_naming_another_algorithm_attests_nothing(tmp_path):
     )
     size = target.stat().st_size
     try:
-        for algorithm in ("sha512", "md5", "SHA256", "sha1"):
+        for algorithm in ("sha256", "sha512", "sha384", "blake2b", "md5"):
+            genuine = (
+                base64.urlsafe_b64encode(hashlib.new(algorithm, target.read_bytes()).digest())
+                .rstrip(b"=")
+                .decode()
+            )
+            record.write_text(
+                f"algorithm_label_probe_module.py,{algorithm}={genuine},{size}\n",
+                encoding="utf-8",
+            )
+            assert _is_recorded_by_an_install(target, site_root), (
+                f"a row carrying a genuine {algorithm} digest must attest: "
+                "refusing it is a false refusal on a real install"
+            )
+            # The same digest under a *different* algorithm is a claim about
+            # contents that was never checked, so it must not attest.
             record.write_text(
                 f"algorithm_label_probe_module.py,{algorithm}={digest},{size}\n",
                 encoding="utf-8",
             )
-            assert not _is_recorded_by_an_install(target, site_root), (
-                f"a row labelled {algorithm} must not attest a sha256 digest"
-            )
+            if algorithm != "sha256":
+                assert not _is_recorded_by_an_install(target, site_root), (
+                    f"a {algorithm} row holding a sha256 digest must not attest"
+                )
         record.write_text(
-            f"algorithm_label_probe_module.py,sha256={digest},{size}\n",
+            f"algorithm_label_probe_module.py,notanalgorithm={digest},{size}\n",
             encoding="utf-8",
         )
-        assert _is_recorded_by_an_install(target, site_root), (
-            "the honest sha256 row must still attest"
+        assert not _is_recorded_by_an_install(target, site_root), (
+            "an algorithm this interpreter cannot compute attests nothing"
         )
     finally:
         record.unlink(missing_ok=True)

@@ -71,6 +71,15 @@ hostile-`RECORD` row used 100000 characters, so the suite never reached it.
 guard and returns no rows for input the parser will not read. A row the parser
 declines to read is a row the guard does not attest.
 
+**Correction, from round-7 review.** This entry originally claimed the
+oversized-row row killed a mutant that narrowed `except BaseException` to
+`except Exception`. It does not, and the claim was wrong:
+`issubclass(csv.Error, Exception)` is `True` on this interpreter, so the
+narrower handler catches it just the same. What actually fixes the escape is
+*materialising* the parse — the original bug was that the generator was
+iterated lazily, so the parse happened inside the caller's loop, outside the
+guard entirely. The test does kill removal of the guard, but not the narrowing.
+
 ## Finding 3 — the `RECORD` algorithm label was discarded
 
 `_record_rows` returned the declared algorithm and `_record_digests` threw it
@@ -114,7 +123,7 @@ added on top.
 | Clean CLI, `--package pokered_harness` | PASS, rc 0, stderr empty |
 | `ruff format --check` | clean |
 | `ruff check` | one pre-existing `SIM117` |
-| Mutations: drop the frozen-code check; narrow the CSV guard; drop the algorithm check; believe the `<frozen ...>` name; skip the frozen-name gate | all killed |
+| Mutations: drop the frozen-code check; believe the `<frozen ...>` name; skip the frozen-name gate; drop the algorithm check | killed |
 | Round-4 reproducers (forged spec, equality, both iterators, three getters) | no traceback, all `FAIL` |
 | `evidence/repro_forged_frozen_filename.py` | forged `<frozen ...>` refused, guard `FAIL` |
 | `evidence/repro_mutated_pathfinder.py` | rebound `find_spec` refused, guard `FAIL` |
