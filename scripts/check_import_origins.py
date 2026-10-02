@@ -195,9 +195,19 @@ def _safe_resolve(candidate: Path) -> Path | None:
 def _finder_code_file(finder: object) -> Path | None:
     """Return the file the finder's own ``find_spec`` was compiled from.
 
-    ``co_filename`` is written by the compiler, so it records where the code
-    executing as this finder really came from.  Unlike ``__module__`` and
-    ``module.__file__``, a finder cannot change it after the fact.
+    ``co_filename`` names the file the compiler was *told* to attribute the
+    code to.  That is not the same as the file the code was read from, and the
+    difference is load-bearing: ``compile(source, filename, "exec")`` lets a
+    caller set ``filename`` to any path at all without reading that file.  A
+    finder could therefore name a file already in site-packages, satisfy the
+    existence and containment checks, and be certified as an installation
+    finder while its real code came from anywhere at all.  Independent review
+    reproduced exactly that and obtained a clean ``PASS``.
+
+    So the claim is checked rather than trusted: the named file is read and
+    compiled here, and the finder's code object must actually appear among the
+    code objects that file produces.  Naming a real file no longer suffices --
+    the code has to be in it.
 
     Returns ``None`` when the finder has no Python-level ``find_spec`` -- a C
     implementation (a builtin or extension module) has no code object to
@@ -225,7 +235,87 @@ def _finder_code_file(finder: object) -> Path | None:
     # doctest have no real file behind them and can never be an install.
     if filename.startswith("<") and filename.endswith(">"):
         return None
-    return _safe_resolve(Path(filename))
+    resolved = _safe_resolve(Path(filename))
+    if resolved is None or not _code_is_defined_in(code, resolved):
+        return None
+    return resolved
+
+
+def _code_fingerprint(code: object) -> tuple | None:
+    """Return a value-comparable fingerprint of a code object.
+
+    Code objects compare by identity, so ``==`` cannot match a code object
+    recompiled from the same source.  The fingerprint recurses into nested
+    code objects (closures and comprehensions), substituting each one's own
+    fingerprint so the result stays comparable.
+    """
+
+    try:
+        return (
+            code.co_argcount,  # type: ignore[attr-defined]
+            code.co_kwonlyargcount,  # type: ignore[attr-defined]
+            code.co_nlocals,  # type: ignore[attr-defined]
+            code.co_flags,  # type: ignore[attr-defined]
+            bytes(code.co_code),  # type: ignore[attr-defined]
+            tuple(
+                _code_fingerprint(constant) if hasattr(constant, "co_code") else constant
+                for constant in code.co_consts  # type: ignore[attr-defined]
+            ),
+            code.co_names,  # type: ignore[attr-defined]
+            code.co_varnames,  # type: ignore[attr-defined]
+            code.co_freevars,  # type: ignore[attr-defined]
+            code.co_cellvars,  # type: ignore[attr-defined]
+        )
+    except Exception:  # noqa: BLE001 - hostile code object; untrusted by default
+        return None
+
+
+def _code_is_defined_in(code: object, source_file: Path) -> bool:
+    """Return whether ``source_file`` really contains the given code object.
+
+    Reads and compiles the named file, then looks for a matching code object
+    among everything it defines -- at module level, nested in a class, or
+    nested in a function.  A finder that merely *claims* a site-packages
+    filename produces no match and is refused.
+
+    Fails closed on every difficulty: an unreadable file, a file that does not
+    compile as source, or an unexpected code object all return ``False``.  A
+    bytecode-only install has no source to check and is refused too, which is
+    the safe direction for a trust decision.
+    """
+
+    target = _code_fingerprint(code)
+    if target is None:
+        return False
+    try:
+        source = source_file.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError, UnicodeError):
+        return False
+    try:
+        # ``dont_inherit`` is load-bearing, not tidiness.  ``compile()`` without
+        # it inherits the calling frame's ``__future__`` flags, and this module
+        # has ``from __future__ import annotations``.  That stamped
+        # ``CO_FUTURE_ANNOTATIONS`` (0x1000000) onto every code object
+        # compiled here, so a genuine finder's object -- which does not carry
+        # that bit -- could never match the recompiled copy, and every real
+        # installation finder was refused.  A module is normally compiled with
+        # no inherited flags, so this reproduces the flags the finder's own
+        # import produced.
+        compiled = compile(source, str(source_file), "exec", dont_inherit=True)
+    except (OSError, ValueError, SyntaxError, RecursionError, MemoryError):
+        return False
+
+    pending = [compiled]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if _code_fingerprint(current) == target:
+            return True
+        pending.extend(constant for constant in current.co_consts if hasattr(constant, "co_code"))
+    return False
 
 
 def _is_installation_finder(finder: object) -> bool:
@@ -244,14 +334,14 @@ def _is_installation_finder(finder: object) -> bool:
     genuine installed module that does.  Neither is forge-proof, because both
     read the *claim* rather than the code.
 
-    What cannot be forged is the finder's own code object.  ``co_filename`` is
-    recorded by the compiler from the file the code was actually compiled
-    from, so it names the finder's real implementation regardless of what the
-    finder claims about its module or its ``__file__``.  Trust therefore
-    requires that the executing ``find_spec`` was compiled from a real file
-    inside site-packages -- decided by the filesystem, not asserted by the
-    object being judged.  Anything a finder can merely *say* about itself is
-    ignored for this decision.
+    The finder's own code object is what remains, but its ``co_filename``
+    alone is *not* proof: ``compile()`` lets a caller name any file without
+    reading it, so a forged filename would otherwise pass every check here.
+    ``_code_is_defined_in`` therefore reads the named file and requires the
+    finder's code to actually be in it, so trust rests on the code being
+    physically present in site-packages rather than on a filename assertion.
+    Anything a finder can merely *say* about itself is ignored for this
+    decision.
     """
 
     if _is_trusted_stdlib_finder(finder):
@@ -516,26 +606,33 @@ def _allowed_roots(
     return roots
 
 
-def _resolve_origin(package: str) -> tuple[Path | None, str]:
-    """Import ``package`` and return ``(module file, error)`` for its origin."""
+def _resolve_origin(package: str) -> tuple[Path | None, str, object]:
+    """Import ``package`` and return ``(module file, error, module)``.
+
+    The module object is returned so that the caller can inspect the *same*
+    module whose ``__file__`` was resolved here.  ``__file__`` is ordinary
+    mutable state, so it can be read only once per check: a value that answers
+    differently on a second read would let a foreign ``__path__`` pass.
+    """
 
     try:
         module = __import__(package)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
-        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}"
+        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}", None
     origin = getattr(module, "__file__", None)
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
         # the only available statement of where they resolved.
         locations = list(getattr(module, "__path__", ()) or ())
         if not locations:
-            return None, "module exposed neither __file__ nor __path__"
+            return None, "module exposed neither __file__ nor __path__", module
         candidate = locations[0]
     else:
         candidate = origin
-    return _resolve_path(candidate, package)
+    resolved, error = _resolve_path(candidate, package)
+    return resolved, error, module
 
 
 def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
@@ -611,7 +708,7 @@ def _describe(value: object) -> str:
 
 
 def _foreign_path_locations(
-    package: str, allowed_roots: list[Path], origin: Path
+    package: str, allowed_roots: list[Path], origin: Path, module: object = None
 ) -> tuple[list[Path], list[str]]:
     """Return importable ``__path__`` entries of ``package`` that are not local.
 
@@ -633,7 +730,11 @@ def _foreign_path_locations(
     caller fails closed on either.
     """
 
-    module = sys.modules.get(package)
+    # ``module`` supplied by the caller is the module whose ``__file__`` was
+    # already resolved into ``origin``, so its ``__file__`` is not read again.
+    origin_is_this_module = module is not None
+    if module is None:
+        module = sys.modules.get(package)
     if module is None:
         return [], []
     # Judge the module that actually corresponds to the origin being reported.
@@ -642,13 +743,23 @@ def _foreign_path_locations(
     # and then the ambient module is some *other* tree's package.  Comparing
     # that module's portions against these roots would report a foreign path
     # for a package that is genuinely installed from an allowed root.
-    module_origin = getattr(module, "__file__", None)
-    if module_origin is not None:
-        try:
-            if Path(module_origin).resolve() != origin:
+    #
+    # The caller passes the module whose ``__file__`` it already resolved into
+    # ``origin``.  Reading ``__file__`` again here let a hostile path-like
+    # answer differently on the second read: a first read matching ``origin``
+    # followed by a second that did not made this function return no findings
+    # at all, so a package with a genuinely foreign ``__path__`` reported
+    # PASS.  When the caller supplies no module, the fallback read is
+    # coerced through ``_resolve_path`` so a value that raises cannot escape
+    # ``check_origins`` as a traceback.  Either way an origin that is not the
+    # one being reported means this module is some other tree's package, and
+    # its portions must not be judged against these roots.
+    if not origin_is_this_module:
+        module_origin = getattr(module, "__file__", None)
+        if module_origin is not None:
+            resolved_origin, _ = _resolve_path(module_origin, package)
+            if resolved_origin is None or resolved_origin != origin:
                 return [], []
-        except (OSError, ValueError, RuntimeError):
-            return [], []
     outside: list[Path] = []
     unusable: list[str] = []
     for location in getattr(module, "__path__", ()) or ():
@@ -697,7 +808,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
             "status": "FAIL",
         }
     for package in packages:
-        origin, error = _resolve_origin(package)
+        origin, error, module = _resolve_origin(package)
         if error:
             findings.append(
                 {
@@ -726,7 +837,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                 }
             )
             continue
-        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin)
+        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin, module)
         if foreign or unusable:
             detail = ""
             if foreign:

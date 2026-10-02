@@ -22,6 +22,7 @@ import pytest
 import scripts.check_import_origins as origins
 import scripts.production_gate as gate
 from scripts.check_import_origins import (
+    _code_is_defined_in,
     _finder_code_file,
     _finder_source,
     _is_installation_finder,
@@ -192,7 +193,7 @@ def test_check_origins_accepts_a_venv_installed_from_this_checkout(tmp_path, mon
         },
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
 
     report = check_origins(project)
@@ -242,7 +243,7 @@ def test_check_origins_accepts_pyboy_owned_by_its_own_distribution(tmp_path, mon
         lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
 
     report = check_origins(project)
@@ -284,7 +285,7 @@ def test_check_origins_rejects_a_foreign_pyboy_distribution(tmp_path, monkeypatc
         lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
 
     report = check_origins(project)
@@ -331,7 +332,7 @@ def test_check_origins_rejects_a_foreign_staging_directory(tmp_path, monkeypatch
         lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
 
     report = check_origins(project)
@@ -373,7 +374,7 @@ def test_check_origins_scopes_the_staging_rule_to_this_checkout(tmp_path, monkey
         lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
 
     report = check_origins(project)
@@ -420,7 +421,7 @@ def test_check_origins_rejects_pyboy_reporting_this_checkouts_revision(tmp_path,
         lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
     # The stale install reports exactly the revision this checkout pins.
     module = types.ModuleType("pyboy")
@@ -462,7 +463,7 @@ def test_check_origins_rejects_a_venv_installed_from_another_checkout(tmp_path, 
         },
     )
     monkeypatch.setattr(
-        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "", None)
     )
 
     report = check_origins(project)
@@ -489,7 +490,7 @@ def test_check_origins_rejects_a_competing_pyboy_distribution(tmp_path, monkeypa
         "packages_distributions",
         lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["PyBoy"]},
     )
-    monkeypatch.setattr(origins, "_resolve_origin", lambda name: (stock / "__init__.py", ""))
+    monkeypatch.setattr(origins, "_resolve_origin", lambda name: (stock / "__init__.py", "", None))
 
     report = check_origins(project)
 
@@ -1671,7 +1672,7 @@ def test_package_flag_still_admits_a_real_install(tmp_path, monkeypatch):
     monkeypatch.setattr(
         origins,
         "_resolve_origin",
-        lambda package: (package_dir / "__init__.py", ""),
+        lambda package: (package_dir / "__init__.py", "", None),
     )
 
     report = origins.check_origins(checkout, ("widget",))
@@ -2183,17 +2184,19 @@ def test_a_finder_compiled_from_a_vanished_file_inside_site_packages_is_refused(
     """Containment alone is not provenance; the file must still be there.
 
     Trust is decided by resolving the finder's ``co_filename`` and asking
-    whether it lands inside site-packages.  Resolution of a missing path
-    succeeds, so containment alone would also accept a filename that merely
-    *reads* as though it were installed -- for example a file the interpreter
-    compiled from and has since deleted, or a name a site-packages writer
-    never actually produced.
+    whether it lands inside site-packages *and* really contains the finder's
+    code.  Resolution of a missing path succeeds, so containment alone would
+    also accept a filename that merely *reads* as though it were installed --
+    for example a file the interpreter compiled from and has since deleted, or
+    a name a site-packages writer never actually produced.
 
     This row is the mutation guard for the ``is_file()`` check.  It compiles a
     finder from a path inside site-packages that does not exist, asserts the
     path really is contained, and then requires the finder to be refused
-    anyway.  Removing the existence check leaves the containment assertion
-    satisfied and the trust decision wrong, so the row fails.
+    anyway.  Requiring the code to be in the named file catches this one step
+    earlier than the containment check would, so the row pins the refusal and
+    the missing-file premise; the ``is_file()`` check stays as the second,
+    independent barrier for a file that exists but is not readable as one.
     """
 
     root = tmp_path / "root"
@@ -2237,11 +2240,23 @@ def test_a_finder_compiled_from_a_vanished_file_inside_site_packages_is_refused(
     sys.meta_path.insert(0, forged)
     try:
         code_file = _finder_code_file(forged)
-        assert code_file is not None, "the compiled-from path must be reported"
-        assert not Path(code_file).exists(), "the premise is a path that is gone"
-        assert any(
-            _is_within(Path(code_file), root_, strict=False) for root_ in _site_packages_roots()
-        ), "the vanished path must still be lexically inside site-packages"
+        # The filename is still read from ``co_filename``, and the path is
+        # still lexically inside site-packages -- but trust is no longer
+        # decided from that name.  Requiring the code to actually *be* in the
+        # named file refuses the finder one step earlier, at the missing file,
+        # so there is no containing file to report.  That is the stronger
+        # outcome: the vanished-path case is now covered by the existence of
+        # the file rather than by a later containment check that the premise
+        # would otherwise satisfy.
+        assert code_file is None, (
+            "a filename naming a file that does not exist must not be reported "
+            "as the finder's provenance"
+        )
+        claimed = Path(forged.find_spec.__func__.__code__.co_filename)
+        assert not claimed.exists(), "the premise is a path that is gone"
+        assert any(_is_within(claimed, root_, strict=False) for root_ in _site_packages_roots()), (
+            "the vanished path must still be lexically inside site-packages"
+        )
 
         assert not _is_installation_finder(forged), (
             "a filename inside site-packages that does not exist proves nothing"
@@ -2255,3 +2270,243 @@ def test_a_finder_compiled_from_a_vanished_file_inside_site_packages_is_refused(
         assert leaked.ORIGIN == "foreign"
     finally:
         sys.meta_path.remove(forged)
+
+
+def test_a_forged_co_filename_cannot_impersonate_a_real_installed_file(tmp_path, monkeypatch):
+    """A ``co_filename`` naming a real site-packages file is not provenance.
+
+    ``compile(source, filename, "exec")`` records whatever ``filename`` the
+    caller supplies without reading that file.  A finder can therefore name a
+    file that genuinely exists inside site-packages -- passing the existence
+    and containment checks -- while its code came from somewhere else entirely.
+
+    Trust is instead decided by requiring the finder's code to actually appear
+    in the file it names.  This row is the mutation guard for that check: it
+    borrows the name of a real installed ``.py`` file and requires the finder to
+    be refused anyway.  Dropping the code-presence check leaves every other
+    check satisfied and the trust decision wrong, so the row fails.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "forgedname_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "forgedname_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "forgedname_pkg" or name.startswith("forgedname_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    borrowed = sorted(path for path in site_root.glob("*.py") if path.is_file())
+    if not borrowed:
+        borrowed = sorted(path for path in site_root.rglob("*.py") if path.is_file())
+    assert borrowed, "this row needs a real existing .py file inside site-packages"
+    borrowed = borrowed[0]
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class ForgedNameFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'forgedname_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    namespace = {"__name__": "forgedname_module", "importlib": importlib}
+    # The attack: a real, existing site-packages path as co_filename, for code
+    # that file does not contain.
+    exec(compile(source, str(borrowed), "exec"), namespace)  # noqa: S102 - the attack
+    forged = namespace["ForgedNameFinder"]
+    forged.__module__ = "forgedname_module"
+
+    sys.meta_path.insert(0, forged)
+    try:
+        code = forged.find_spec.__func__.__code__
+        assert code.co_filename == str(borrowed)
+        assert Path(borrowed).is_file(), "the borrowed path must really exist"
+        assert any(
+            _is_within(Path(borrowed), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the borrowed file must really sit inside site-packages"
+        # The premise that makes this a forgery: the named file does not hold
+        # the finder's code.
+        assert not _code_is_defined_in(code, Path(borrowed)), (
+            "this row needs a file that exists but does not contain the code"
+        )
+
+        assert not _is_installation_finder(forged), (
+            "a co_filename naming an existing site-packages file is not provenance"
+        )
+        report = check_origins(root, ("forgedname_pkg",))
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("forgedname_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+
+
+def test_a_genuine_installation_finder_is_still_trusted():
+    """The code-presence check must not refuse the finders it exists to allow.
+
+    ``_virtualenv._Finder`` is installed by this checkout's own environment and
+    sits on ``sys.meta_path`` for every run, so refusing it would make the guard
+    report FAIL for the interpreter it is supposed to certify.
+
+    The check is a fingerprint comparison against the recompiled source, so it
+    is sensitive to the *caller's* compiler flags: ``compile()`` inherits the
+    calling frame's ``__future__`` flags, and this module has
+    ``from __future__ import annotations``.  Inheriting them stamped
+    ``CO_FUTURE_ANNOTATIONS`` onto every recompiled code object and no genuine
+    finder could ever match, which is a self-inflicted false FAIL rather than a
+    safe refusal.  This row pins the trusted outcome so that failure mode
+    cannot come back.
+    """
+
+    custom = [entry for entry in sys.meta_path if not _is_trusted_stdlib_finder(entry)]
+    assert custom, "expected this interpreter to have an installation finder"
+    for finder in custom:
+        code_file = _finder_code_file(finder)
+        assert code_file is not None, (
+            f"{finder!r} is installed by this checkout but reports no code file"
+        )
+        assert code_file.is_file(), f"{code_file} must exist"
+        assert any(_is_within(code_file, root, strict=False) for root in _site_packages_roots()), (
+            f"{code_file} is not inside this interpreter's site-packages"
+        )
+        assert _is_installation_finder(finder), (
+            f"{finder!r} must stay trusted; refusing it fails the release lane"
+        )
+
+
+def test_a_foreign_path_portion_is_reported_even_when_file_changes_between_reads(
+    tmp_path, monkeypatch
+):
+    """``__file__`` is read once per check, and a second read cannot skip it.
+
+    ``__file__`` is mutable state the interpreter reports, and a hostile
+    path-like can answer differently on each read.  The origin was resolved from
+    one read and the portion check used to take a second: a first read matching
+    the origin followed by a second that did not made the guard skip the portion
+    check entirely, so a package with a genuinely foreign ``__path__`` reported
+    PASS.  Independent review reproduced exactly that.
+
+    This row pins both halves.  The drifting value is read once, so the foreign
+    portion is still reported; and a value that raises is reported as a finding
+    rather than escaping ``check_origins`` as a traceback.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "drifting_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    local_init = (package_dir / "__init__.py").resolve()
+    foreign = tmp_path / "outside" / "drifting_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "__init__.py").write_text("", encoding="utf-8")
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "drifting_pkg" or name.startswith("drifting_pkg."):
+            del sys.modules[name]
+
+    drifting = __import__("drifting_pkg")
+    # A genuinely foreign portion: this is the finding that must survive.
+    drifting.__path__ = [str(foreign)]
+
+    class Drifting:
+        """Local on the first read, foreign on every later read."""
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def __fspath__(self) -> str:
+            self.reads += 1
+            return str(local_init if self.reads == 1 else foreign / "__init__.py")
+
+    drifting_file = Drifting()
+    monkeypatch.setattr(drifting, "__file__", drifting_file, raising=False)
+
+    report = check_origins(root, ("drifting_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "path portion" in report["packages"][0]["detail"] or (
+        "resolves outside" in report["packages"][0]["detail"]
+    ), report
+    # One read only: a second read is exactly the hole this row closes.
+    assert drifting_file.reads <= 1, (
+        f"__file__ was read {drifting_file.reads} times; a second read can disagree"
+    )
+
+    class Hostile:
+        """A path-like whose conversion raises, which must not escape."""
+
+        def __fspath__(self) -> str:
+            raise RuntimeError("boom")
+
+        def __str__(self) -> str:
+            raise RuntimeError("boom-str")
+
+    monkeypatch.setattr(drifting, "__file__", Hostile(), raising=False)
+    hostile_report = check_origins(root, ("drifting_pkg",))
+
+    assert hostile_report["status"] == "FAIL", hostile_report
+    assert "not a usable path" in hostile_report["packages"][0]["detail"], hostile_report
+
+
+def test_a_foreign_portion_that_cannot_be_rendered_is_still_reported(tmp_path, monkeypatch):
+    """The FAIL detail is built from the same untrusted data it reports.
+
+    A finding names the foreign ``__path__`` entries it found, and rendering one
+    of those calls ``str()`` on an object the interpreter -- not this guard --
+    controls.  If that rendering raises, the finding is lost and the traceback
+    that replaces it is precisely the failure this module exists to prevent:
+    the operator sees a crash instead of the FAIL naming the offending package.
+
+    This row pins the reporting half.  ``_describe`` is the only place that
+    coerces untrusted data to text, so the detail must survive an object whose
+    ``__str__`` and ``__repr__`` both raise, and the status must still be FAIL.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hostile_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "hostile_pkg" or name.startswith("hostile_pkg."):
+            del sys.modules[name]
+
+    hostile = __import__("hostile_pkg")
+
+    class Unprintable:
+        """A path-like that cannot be converted *or* rendered."""
+
+        def __fspath__(self) -> str:
+            raise RuntimeError("boom-fspath")
+
+        def __str__(self) -> str:
+            raise RuntimeError("boom-str")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("boom-repr")
+
+    # A portion the guard cannot resolve *and* cannot render: the reason text
+    # is itself built from the object, so this exercises both coercions.
+    hostile.__path__ = [Unprintable(), tmp_path / "outside" / "hostile_pkg"]
+
+    report = check_origins(root, ("hostile_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert detail, "a FAIL must carry a detail naming what was wrong"
+    # The rendering degrades to a placeholder; the finding is not lost.
+    assert "unprintable" in detail or "not a usable path" in detail, detail
+    # The report must stay JSON-serializable, since the CLI emits it verbatim.
+    json.dumps(report)
