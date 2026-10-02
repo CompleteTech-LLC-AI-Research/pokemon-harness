@@ -357,7 +357,9 @@ def _finder_code_file(finder: object) -> Path | None:
 
     try:
         function = getattr(finder, "find_spec", None)
-    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - hostile descriptor; untrusted by default
         return None
     if function is None:
         return None
@@ -367,7 +369,9 @@ def _finder_code_file(finder: object) -> Path | None:
         function = getattr(function, "__func__", function)
         code = function.__code__
         filename = code.co_filename
-    except Exception:  # noqa: BLE001 - not a Python function; untrusted by default
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - not a Python function; untrusted by default
         return None
     if not isinstance(filename, str) or not filename:
         return None
@@ -849,7 +853,14 @@ def _allowed_roots(
     roots = [project_root]
     try:
         distributions = importlib.metadata.packages_distributions()
-    except Exception:  # noqa: BLE001 - metadata is advisory here
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - metadata is advisory here
+        # ``packages_distributions`` imports helper modules, so a hostile
+        # meta-path finder can raise from it directly.  An interpreter whose
+        # finder refuses to be inspected gets no site-packages roots, which
+        # fails closed: the packages are then reported as foreign rather than
+        # being silently admitted.
         return roots
     for package in packages:
         for owner in distributions.get(package, ()) or ():
