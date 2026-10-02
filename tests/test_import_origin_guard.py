@@ -629,9 +629,12 @@ def test_is_this_checkout_refuses_a_symlinked_staging_root(tmp_path):
     (project / "build").symlink_to(sibling / "build", target_is_directory=True)
 
     assert origins._staging_root(project).resolve() == (sibling / "build").resolve()
-    assert not origins._is_this_checkout(
-        project, sibling / "build" / "pyboy-native-x"
+    assert not origins._is_within(
+        sibling / "build" / "pyboy-native-x",
+        origins._staging_root(project),
+        strict=True,
     )
+    assert not origins._is_this_checkout(project, sibling / "build" / "pyboy-native-x")
 
     # The native lane creates ``build/`` as a real directory, so the legitimate
     # shape must still be admitted once the symlink is gone.
@@ -896,3 +899,39 @@ def test_matrix_audit_ignores_the_nodeidless_origin_row(monkeypatch):
     assert audited == [real_nodeids]
     assert audit["status"] == "PASS"
     assert audit["collected"] == len(real_nodeids)
+
+
+def test_capacity_planning_ignores_the_nodeidless_origin_row():
+    """The capacity call site of the shared reader must not drift back.
+
+    ``collected_nodeids`` exists so that neither reader of the preflight
+    collection list can index positionally.  ``run_matrix_collection_audit``
+    has a row for that; this is its capacity-side twin.  Reinstating the
+    pre-PR positional index in ``planned_tier_nodeids`` drops the planned set
+    to empty, so ``register_blocked_rows`` records no BLOCKED rows and the
+    refusal silently vanishes from capacity accounting.  Mutation testing
+    showed that regression surviving the entire capacity suite.
+
+    The real tier manifest is used deliberately: a synthetic row set would
+    not exercise the classifier the production path actually calls.
+    """
+
+    this_file = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
+    planned_row = f"{this_file}::test_is_within_is_not_a_prefix_test"
+    collections = [
+        gate.CollectionResult("import-origins", [], "PASS", 0),
+        gate.CollectionResult(
+            "python-module",
+            ["pytest"],
+            "PASS",
+            0,
+            nodeids=(planned_row,),
+        ),
+    ]
+
+    planned, problem = gate.planned_tier_nodeids(collections, "unit", REPO_ROOT)
+
+    assert not problem, problem
+    assert tuple(planned) == (planned_row,), (
+        "the nodeidless origin row was mistaken for the collected tree"
+    )
