@@ -2025,17 +2025,23 @@ def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypa
 
     site_root = _site_packages_roots()[0]
     assert site_root.is_dir()
-    # A real, existing file inside site-packages -- exactly what the previous
+    # A real, existing *file* inside site-packages -- exactly what the previous
     # existence check was fooled by.
-    borrowed = site_root / "pyvenv.cfg"
-    if not borrowed.exists():
-        borrowed = next(site_root.glob("*.dist-info"), None)
-    genuine = sorted(site_root.glob("*.py"))
-    if borrowed is None or not Path(borrowed).exists():
-        borrowed = genuine[0] if genuine else borrowed
-    assert borrowed is not None and Path(borrowed).exists(), (
-        "this row needs a real existing file inside site-packages to borrow"
-    )
+    #
+    # The candidate must be a regular file, not merely a path that exists.
+    # Preferring `pyvenv.cfg` or a `*.dist-info` entry picks a *directory* in a
+    # typical venv, and a directory claim is rejected by the `is_file()` check
+    # for a reason unrelated to provenance.  The row would then pass no matter
+    # how trust was decided, so it would stop pinning the claim-vs-code
+    # distinction it exists to test.
+    genuine = sorted(path for path in site_root.glob("*.py") if path.is_file())
+    if not genuine:
+        genuine = sorted(
+            path for path in site_root.rglob("*.py") if path.is_file() and path.stat().st_size > 0
+        )
+    assert genuine, "this row needs a real existing .py file inside site-packages to borrow"
+    borrowed = genuine[0]
+    assert Path(borrowed).is_file(), "the borrowed path must be a regular file"
 
     bystander = types.ModuleType("innocent_bystander_module")
     bystander.__file__ = str(borrowed)
@@ -2083,3 +2089,169 @@ def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypa
         assert leaked.ORIGIN == "foreign"
     finally:
         sys.meta_path.remove(BorrowingFinder)
+
+
+def test_a_finder_compiled_without_a_source_file_cannot_borrow_a_claim(tmp_path, monkeypatch):
+    """No ``co_filename`` means no provenance, and a claim must not supply it.
+
+    Every earlier row defeats a finder that at least has a real code object, so
+    trust can be decided by comparing that object's file against site-packages.
+    A finder built by ``compile(src, "", "exec")`` or otherwise defined without
+    a source file has no such file to compare, and the honest answer is "not
+    trusted".
+
+    The tempting shortcut is to fall back to the finder's self-reported
+    ``__file__`` in exactly that case.  That reintroduces the whole bug this
+    guard was rewritten to remove: an attacker with no provenance at all simply
+    borrows a real installed module's name and inherits its trust.  This row is
+    the mutation guard for that fallback -- it fails if the no-provenance branch
+    ever starts consulting ``_finder_source``.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "noprovenance_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "noprovenance_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "noprovenance_pkg" or name.startswith("noprovenance_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = sorted(path for path in site_root.glob("*.py") if path.is_file())
+    if not genuine:
+        genuine = sorted(path for path in site_root.rglob("*.py") if path.is_file())
+    assert genuine, "this row needs a real installed module to borrow the name of"
+    borrowed = genuine[0]
+
+    bystander = types.ModuleType("innocent_noprovenance_module")
+    bystander.__file__ = str(borrowed)
+    monkeypatch.setitem(sys.modules, "innocent_noprovenance_module", bystander)
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class NoProvenanceFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'noprovenance_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    # An empty filename is what compile() records for code with no source file.
+    namespace = {"__name__": "innocent_noprovenance_module", "importlib": importlib}
+    exec(compile(source, "", "exec"), namespace)  # noqa: S102 - the attack itself
+    forged = namespace["NoProvenanceFinder"]
+    forged.__module__ = "innocent_noprovenance_module"
+
+    sys.meta_path.insert(0, forged)
+    try:
+        # The premise: there is genuinely no code file to judge, while the
+        # claim points at a real installed module inside site-packages.
+        assert _finder_code_file(forged) is None, (
+            "this row needs a finder whose find_spec has no source file"
+        )
+        claimed = _finder_source(forged)
+        assert claimed is not None, "the borrowed claim must be discoverable"
+        assert Path(claimed).is_file(), "the borrowed path must be a real file"
+        assert any(
+            _is_within(Path(claimed), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the borrowed file must really sit inside site-packages"
+
+        assert not _is_installation_finder(forged), (
+            "a finder with no code provenance must not be trusted on its claim"
+        )
+        report = check_origins(root, ("noprovenance_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("noprovenance_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+
+
+def test_a_finder_compiled_from_a_vanished_file_inside_site_packages_is_refused(
+    tmp_path, monkeypatch
+):
+    """Containment alone is not provenance; the file must still be there.
+
+    Trust is decided by resolving the finder's ``co_filename`` and asking
+    whether it lands inside site-packages.  Resolution of a missing path
+    succeeds, so containment alone would also accept a filename that merely
+    *reads* as though it were installed -- for example a file the interpreter
+    compiled from and has since deleted, or a name a site-packages writer
+    never actually produced.
+
+    This row is the mutation guard for the ``is_file()`` check.  It compiles a
+    finder from a path inside site-packages that does not exist, asserts the
+    path really is contained, and then requires the finder to be refused
+    anyway.  Removing the existence check leaves the containment assertion
+    satisfied and the trust decision wrong, so the row fails.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "vanished_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "vanished_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "vanished_pkg" or name.startswith("vanished_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    vanished = site_root / "vanished_installation_finder_module.py"
+    assert not vanished.exists(), "the compiled-from path must not exist"
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class VanishedFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'vanished_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    namespace = {
+        "__name__": "vanished_installation_finder_module",
+        "importlib": importlib,
+    }
+    # Compile *from* the non-existent site-packages path: this is the case a
+    # deleted-after-compile installation leaves behind.
+    exec(compile(source, str(vanished), "exec"), namespace)  # noqa: S102
+    forged = namespace["VanishedFinder"]
+    forged.__module__ = "vanished_installation_finder_module"
+
+    sys.meta_path.insert(0, forged)
+    try:
+        code_file = _finder_code_file(forged)
+        assert code_file is not None, "the compiled-from path must be reported"
+        assert not Path(code_file).exists(), "the premise is a path that is gone"
+        assert any(
+            _is_within(Path(code_file), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the vanished path must still be lexically inside site-packages"
+
+        assert not _is_installation_finder(forged), (
+            "a filename inside site-packages that does not exist proves nothing"
+        )
+        report = check_origins(root, ("vanished_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("vanished_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
