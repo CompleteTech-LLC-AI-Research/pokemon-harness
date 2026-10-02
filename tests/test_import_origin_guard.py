@@ -22,8 +22,11 @@ import pytest
 import scripts.check_import_origins as origins
 import scripts.production_gate as gate
 from scripts.check_import_origins import (
+    _finder_code_file,
+    _finder_source,
     _is_installation_finder,
     _is_trusted_stdlib_finder,
+    _is_within,
     _site_packages_roots,
     check_origins,
     main,
@@ -1858,7 +1861,12 @@ def test_meta_path_finder_outside_site_packages_is_refused(tmp_path, monkeypatch
     assert report["status"] == "FAIL", report
     detail = report["packages"][0]["detail"]
     assert "meta_path" in detail, detail
-    assert str(finder_file.resolve()) in detail, detail
+    # The detail reports where the finder's code really came from, which for a
+    # test-defined class is this test file -- not the ``__file__`` it claims.
+    assert "ForeignFinder" in detail, detail
+    assert str(finder_file.resolve()) not in detail, (
+        "the refusal must not repeat the finder's own unverified __file__ claim"
+    )
 
 
 def test_standard_and_installation_finders_are_still_trusted():
@@ -1986,3 +1994,91 @@ def test_a_hostile_finder_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch
 
     assert report["status"] == "FAIL", report
     assert "meta_path" in report["packages"][0]["detail"], report
+
+
+def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
+    """A genuine site-packages ``__file__`` must not authenticate a stranger.
+
+    Requiring the claimed file merely to *exist* was the second attempt at this
+    check, and review defeated it: a finder can claim the module name of a real
+    installed package, whose ``__file__`` genuinely is inside site-packages and
+    genuinely does exist.  Existence proves the borrowed file is real, not that
+    it defines this finder.
+
+    The only unforgeable statement is where the executing ``find_spec`` code was
+    compiled from, so that is what trust is decided on.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "borrow_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "borrow_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "borrow_pkg" or name.startswith("borrow_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    # A real, existing file inside site-packages -- exactly what the previous
+    # existence check was fooled by.
+    borrowed = site_root / "pyvenv.cfg"
+    if not borrowed.exists():
+        borrowed = next(site_root.glob("*.dist-info"), None)
+    genuine = sorted(site_root.glob("*.py"))
+    if borrowed is None or not Path(borrowed).exists():
+        borrowed = genuine[0] if genuine else borrowed
+    assert borrowed is not None and Path(borrowed).exists(), (
+        "this row needs a real existing file inside site-packages to borrow"
+    )
+
+    bystander = types.ModuleType("innocent_bystander_module")
+    bystander.__file__ = str(borrowed)
+    monkeypatch.setitem(sys.modules, "innocent_bystander_module", bystander)
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+
+    class BorrowingFinder:
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            if name == "borrow_pkg.leaked":
+                return importlib.util.spec_from_file_location(name, foreign_file)
+            return None
+
+    BorrowingFinder.__module__ = "innocent_bystander_module"
+    sys.meta_path.insert(0, BorrowingFinder)
+    try:
+        # The borrowed claim looks exactly like a real install: an existing
+        # file inside site-packages.  Assert that directly, so the row cannot
+        # pass merely because some *other* part of the check happened to
+        # reject this finder.
+        claimed = _finder_source(BorrowingFinder)
+        assert claimed is not None, "the borrowed claim must be discoverable"
+        assert Path(claimed).exists(), "the borrowed file must really exist"
+        assert any(
+            _is_within(Path(claimed), site_root, strict=False)
+            for site_root in _site_packages_roots()
+        ), "the borrowed file must really sit inside site-packages"
+        assert str(Path(claimed).resolve()) == str(Path(borrowed).resolve())
+
+        # What actually differs is where the finder's own code came from.
+        assert _finder_code_file(BorrowingFinder) != Path(claimed).resolve(), (
+            "the executing find_spec code must not appear to come from the borrowed file"
+        )
+
+        assert not _is_installation_finder(BorrowingFinder), (
+            "borrowing a real installed module's file must not confer trust"
+        )
+        report = check_origins(root, ("borrow_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("borrow_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(BorrowingFinder)
