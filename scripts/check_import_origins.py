@@ -192,6 +192,42 @@ def _safe_resolve(candidate: Path) -> Path | None:
         return None
 
 
+def _finder_code_file(finder: object) -> Path | None:
+    """Return the file the finder's own ``find_spec`` was compiled from.
+
+    ``co_filename`` is written by the compiler, so it records where the code
+    executing as this finder really came from.  Unlike ``__module__`` and
+    ``module.__file__``, a finder cannot change it after the fact.
+
+    Returns ``None`` when the finder has no Python-level ``find_spec`` -- a C
+    implementation (a builtin or extension module) has no code object to
+    attest, so it is not treated as an installation finder.  ``None`` means
+    "not trusted", never "trust me".
+    """
+
+    try:
+        function = getattr(finder, "find_spec", None)
+    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+        return None
+    if function is None:
+        return None
+    # A class is installed on meta_path with find_spec called unbound, so the
+    # attribute is a plain function; an instance yields a bound method.
+    try:
+        function = getattr(function, "__func__", function)
+        code = function.__code__
+        filename = code.co_filename
+    except Exception:  # noqa: BLE001 - not a Python function; untrusted by default
+        return None
+    if not isinstance(filename, str) or not filename:
+        return None
+    # Definitions from an interactive session, an exec() of a string, or a
+    # doctest have no real file behind them and can never be an install.
+    if filename.startswith("<") and filename.endswith(">"):
+        return None
+    return _safe_resolve(Path(filename))
+
+
 def _is_installation_finder(finder: object) -> bool:
     """Return whether ``finder`` was installed with this interpreter.
 
@@ -201,28 +237,34 @@ def _is_installation_finder(finder: object) -> bool:
     defining file's *location*, never its name, so a renamed or lookalike
     module does not inherit trust and a genuine install finder is not refused.
 
-    The file must additionally *exist*.  ``module.__file__`` is ordinary
-    mutable state: a finder defined anywhere can register a module object
-    under a trusted name whose ``__file__`` names a site-packages path that was
-    never written, and a purely lexical comparison would believe it.  Requiring
-    the resolved path to be a real file inside site-packages means the trust
-    decision is attested by the filesystem rather than asserted by the object
-    being judged -- the same "location only, never self-report" rule the rest
-    of this guard is built on.  A spoofed name resolves to nothing and is
-    refused.
+    Location alone is not evidence, because ``__file__`` is ordinary mutable
+    state that the finder controls.  Two earlier attempts at this check were
+    defeated in review: a finder could claim a trusted module name with a
+    ``__file__`` that does not exist, and then borrow the ``__file__`` of a
+    genuine installed module that does.  Neither is forge-proof, because both
+    read the *claim* rather than the code.
+
+    What cannot be forged is the finder's own code object.  ``co_filename`` is
+    recorded by the compiler from the file the code was actually compiled
+    from, so it names the finder's real implementation regardless of what the
+    finder claims about its module or its ``__file__``.  Trust therefore
+    requires that the executing ``find_spec`` was compiled from a real file
+    inside site-packages -- decided by the filesystem, not asserted by the
+    object being judged.  Anything a finder can merely *say* about itself is
+    ignored for this decision.
     """
 
     if _is_trusted_stdlib_finder(finder):
         return True
-    source = _finder_source(finder)
-    if source is None:
+    code_file = _finder_code_file(finder)
+    if code_file is None:
         return False
     try:
-        if not source.is_file():
+        if not code_file.is_file():
             return False
     except (OSError, ValueError):
         return False
-    return any(_is_within(source, root, strict=False) for root in _site_packages_roots())
+    return any(_is_within(code_file, root, strict=False) for root in _site_packages_roots())
 
 
 def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
@@ -240,7 +282,9 @@ def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
     for finder in list(sys.meta_path):
         if _is_trusted_stdlib_finder(finder) or _is_installation_finder(finder):
             continue
-        offenders.append((finder, _finder_source(finder)))
+        # Report the code location: it is the only part of a refused finder's
+        # identity that is not simply what the finder claims about itself.
+        offenders.append((finder, _finder_code_file(finder) or _finder_source(finder)))
     return offenders
 
 
