@@ -648,6 +648,24 @@ def test_is_this_checkout_refuses_a_symlinked_staging_root(tmp_path):
     assert origins._is_this_checkout(project, project / "build" / "pyboy-native-x")
 
 
+def test_is_this_checkout_refuses_an_unresolvable_source(tmp_path):
+    """An unresolvable recorded source is refused, not raised.
+
+    ``_is_this_checkout`` resolves both operands itself.  Its ``source`` is
+    interpreter- or metadata-supplied data, and ``Path.resolve`` raises
+    ``ValueError`` on an embedded NUL, so without the guard this escapes
+    ``check_origins`` as a traceback instead of producing a finding.  Only
+    ``_installed_from`` feeds it in production, and that helper now returns
+    ``None`` before resolving an unusable path -- which is exactly why this
+    guard looked untestable and survived mutation.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+
+    assert not origins._is_this_checkout(project, project / "bad\x00source")
+
+
 def test_cli_exit_codes_encode_the_verdict(tmp_path):
     _make_package(tmp_path / "elsewhere", "moved_pkg")
     project = tmp_path / "project"
