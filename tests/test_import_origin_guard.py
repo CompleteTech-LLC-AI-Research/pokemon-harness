@@ -794,6 +794,37 @@ def test_suite_allows_collection_when_origins_match(monkeypatch):
     conftest._enforce_local_import_origins()
 
 
+def test_pytest_configure_enforces_local_import_origins(monkeypatch):
+    """The hook itself must keep calling the guard, not just the helper.
+
+    The two rows above exercise ``_enforce_local_import_origins`` directly, so
+    they stay green if the call inside ``pytest_configure`` is dropped: the
+    helper would keep working while a bare ``pytest`` run stopped refusing to
+    collect against a foreign checkout.  Mutation testing showed that
+    regression surviving this whole file, so the wiring is pinned here too.
+    """
+
+    from tests import conftest
+
+    enforced: list[None] = []
+    monkeypatch.setattr(
+        conftest,
+        "_enforce_local_import_origins",
+        lambda: enforced.append(None),
+    )
+
+    class _Config:
+        def __init__(self) -> None:
+            self.markers: list[str] = []
+
+        def addinivalue_line(self, name: str, line: str) -> None:
+            self.markers.append(f"{name}: {line}")
+
+    conftest.pytest_configure(_Config())
+
+    assert enforced == [None], "pytest_configure stopped calling the import-origin guard"
+
+
 def test_a_failing_origin_preflight_stops_before_collection_runs(tmp_path, monkeypatch):
     """Fail closed: a foreign interpreter must not reach the pytest entry points."""
 
@@ -917,7 +948,9 @@ def test_capacity_planning_ignores_the_nodeidless_origin_row():
     """
 
     this_file = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
-    planned_row = f"{this_file}::test_is_within_is_not_a_prefix_test"
+    # Name a test that actually exists, so a reader grepping for this row finds
+    # a real target rather than a label that is nowhere in the file.
+    planned_row = f"{this_file}::{test_is_within_resolves_before_comparing.__name__}"
     collections = [
         gate.CollectionResult("import-origins", [], "PASS", 0),
         gate.CollectionResult(
