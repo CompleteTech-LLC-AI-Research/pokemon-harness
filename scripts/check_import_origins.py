@@ -57,19 +57,31 @@ from urllib.parse import unquote, urlparse
 REQUIRED_PACKAGES = ("pokered_harness", "pyboy")
 
 
-def _is_within(candidate: Path, root: Path) -> bool:
-    """Return whether ``candidate`` is ``root`` or lives beneath it."""
+def _is_within(candidate: Path, root: Path, *, strict: bool = False) -> bool:
+    """Return whether ``candidate`` is ``root`` or lives beneath it.
 
-    # Resolve both sides before comparing.  A lexical comparison would treat
-    # ``<checkout>/build/pyboy-native-link`` as inside ``<checkout>/build``
-    # even when that name is a symlink into a sibling worktree, and would
-    # compare ``<checkout>/build/../../elsewhere`` as inside without ever
-    # applying the traversal.  Provenance is a statement about where a file
-    # really is, so the paths must be real before they are compared.
+    Both sides are resolved first.  A lexical comparison would treat
+    ``<checkout>/build/pyboy-native-link`` as inside ``<checkout>/build``
+    even when that name is a symlink into a sibling worktree, and would
+    compare ``<checkout>/build/../../elsewhere`` as inside without ever
+    applying the traversal.  Provenance is a statement about where a file
+    really is, so the paths must be real before they are compared.
+
+    ``strict`` additionally refuses a root that was not itself a real
+    directory in the checkout.  Resolving is necessary but not sufficient: if
+    ``<checkout>/build`` is a symlink into another worktree then resolving it
+    yields that other worktree's build tree, and every source beneath it then
+    compares as "inside" while living somewhere else entirely.  The staging
+    root must therefore still be a real subdirectory of the checkout after
+    resolution.
+    """
+
+    resolved_root = Path(root).resolve()
+    if strict and Path(root).is_symlink():
+        return False
     candidate = Path(candidate).resolve()
-    root = Path(root).resolve()
     try:
-        candidate.relative_to(root)
+        candidate.relative_to(resolved_root)
     except ValueError:
         return False
     return True
@@ -164,7 +176,7 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
     source = Path(source).resolve()
     if source == root:
         return True
-    return _is_within(source, _staging_root(root))
+    return _is_within(source, _staging_root(root), strict=True)
 
 
 def _allowed_roots(project_root: Path) -> list[Path]:

@@ -610,6 +610,36 @@ def test_check_origins_reports_an_unimportable_package(tmp_path):
     assert "import failed" in report["packages"][0]["detail"]
 
 
+def test_is_this_checkout_refuses_a_symlinked_staging_root(tmp_path):
+    """Resolving ``build/`` is not enough when ``build/`` itself is a symlink.
+
+    ``_is_this_checkout`` resolves both operands before comparing.  When
+    ``<checkout>/build`` is itself a symlink into a sibling worktree, resolving
+    it yields *that* worktree's build tree, and every source beneath it then
+    compares as "inside this checkout" while physically living elsewhere.
+    ``_is_within`` is only correct if the containment root is also a real
+    subdirectory of the checkout.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    sibling = tmp_path / "other-worktree"
+    (sibling / "build" / "pyboy-native-x").mkdir(parents=True)
+
+    (project / "build").symlink_to(sibling / "build", target_is_directory=True)
+
+    assert origins._staging_root(project).resolve() == (sibling / "build").resolve()
+    assert not origins._is_this_checkout(
+        project, sibling / "build" / "pyboy-native-x"
+    )
+
+    # The native lane creates ``build/`` as a real directory, so the legitimate
+    # shape must still be admitted once the symlink is gone.
+    (project / "build").unlink()
+    (project / "build" / "pyboy-native-x").mkdir(parents=True)
+    assert origins._is_this_checkout(project, project / "build" / "pyboy-native-x")
+
+
 def test_cli_exit_codes_encode_the_verdict(tmp_path):
     _make_package(tmp_path / "elsewhere", "moved_pkg")
     project = tmp_path / "project"
