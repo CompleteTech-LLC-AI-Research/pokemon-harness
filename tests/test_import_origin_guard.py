@@ -1681,3 +1681,71 @@ def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert returncode == 1
     assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
+
+
+def test_regular_package_refuses_a_foreign_path_portion(tmp_path, monkeypatch):
+    """A regular package with a foreign ``__path__`` entry must FAIL.
+
+    A checkout-local ``__init__.py`` does not make a package trusted.  Python
+    lets a regular package carry more than one ``__path__`` entry --
+    ``pkgutil.extend_path``, an explicit ``__path__`` extension, or a
+    ``.pth``-installed entry all do it -- and the interpreter imports
+    submodules from every one of them.  So a submodule missing locally still
+    imports from the foreign portion while the top-level origin looks correct.
+
+    That is the exact false PASS #534 exists to prevent, and the earlier guard
+    reported PASS here because it inspected ``__path__`` only for namespace
+    packages.
+    """
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    package_dir = root / "split_reg"
+    package_dir.mkdir(parents=True)
+    # A REGULAR package: it has __init__.py, so __file__ is not None.
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = outside / "split_reg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "split_reg" or name.startswith("split_reg."):
+            del sys.modules[name]
+
+    package = importlib.import_module("split_reg")
+    assert getattr(package, "__file__", None) is not None, "expected a regular package"
+    package.__path__.append(str(foreign))
+
+    report = check_origins(root, ("split_reg",))
+
+    assert report["status"] == "FAIL", report
+    assert "also resolves outside this checkout" in report["packages"][0]["detail"]
+    assert str(foreign.resolve()) in report["packages"][0]["detail"]
+
+    # The foreign portion really is importable, so this row is not vacuous.
+    leaked = importlib.import_module("split_reg.leaked")
+    assert leaked.ORIGIN == "foreign"
+
+
+def test_unusable_path_portion_is_a_finding_not_a_crash(tmp_path, monkeypatch):
+    """A malformed ``__path__`` entry must become a FAIL, not raise.
+
+    A package's own origin goes through ``_resolve_path``, which reports an
+    unusable path as a finding.  A malformed *portion* has to fail the same
+    way: a path an interpreter reports is data, and one that cannot be resolved
+    must not escape the guard as a traceback.
+    """
+
+    root = tmp_path / "root"
+    (root / "ok_ns").mkdir(parents=True)
+    good = root / "ok_ns" / "portion"
+    good.mkdir()
+    module = types.ModuleType("broken_ns")
+    module.__file__ = None
+    module.__path__ = [str(good), "/bad\x00origin"]
+    monkeypatch.setitem(sys.modules, "broken_ns", module)
+
+    report = check_origins(root, ("broken_ns",))
+
+    assert report["status"] == "FAIL", report
+    assert "not usable" in report["packages"][0]["detail"]
