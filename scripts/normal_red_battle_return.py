@@ -9,6 +9,7 @@ Colosseum has no map warps: actual room return remains map 240.
 
 from __future__ import annotations
 
+from scripts.normal_red_link_journal import mark_phase
 from tests._mcp_trade_records_rom_drivers_support import _digests, _records_from_payload
 
 
@@ -86,6 +87,7 @@ async def finish_battle_return(
             continue
         restored = states
         break
+    mark_phase(pair, "restoration_wait_end")
     assert restored is not None, "post-battle restoration/room return frame bound"
     await pair.release_buttons()
     positions = [(state["overworld"]["x"], state["overworld"]["y"]) for state in restored]

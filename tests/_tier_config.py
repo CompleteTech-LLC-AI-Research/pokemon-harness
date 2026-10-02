@@ -76,6 +76,7 @@ UNIT_MODULES = frozenset(
         "test_normal_journey_capture.py",
         "test_normal_club_journey_capture.py",
         "test_normal_red_link_admission.py",
+        "test_normal_red_link_timing.py",
         "test_battle_item_evidence_inventory.py",
         "test_battle_item_evidence_medicine.py",
         "test_battle_item_evidence_targets.py",

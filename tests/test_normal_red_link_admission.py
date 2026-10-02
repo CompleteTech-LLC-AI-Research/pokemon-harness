@@ -37,7 +37,9 @@ def test_new_capture_has_strict_metadata_and_preserves_legacy_manifest():
     assert admission.SCENARIO not in {row["id"] for row in legacy["fixtures"]}
 
 
-@pytest.mark.parametrize("contents", [b"", b"wrong fixture", b"x" * 200548])
+@pytest.mark.parametrize(
+    "contents", [b"", b"wrong fixture", b"x" * 200548], ids=["empty", "wrong-size", "wrong-digest"]
+)
 def test_wrong_or_missing_state_fails_before_rom_read(tmp_path, contents):
     path = tmp_path / "red" / f"{admission.SCENARIO}.state"
     path.parent.mkdir()

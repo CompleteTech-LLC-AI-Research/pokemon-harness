@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from scripts.normal_red_link_journal import mark_phase
 from tests._mcp_battle_phase_rom_drive_support import (
     _assert_terminal_return,
     _boundary_button,
@@ -202,9 +203,13 @@ async def complete_battle(pair, journal, *, budget_frames=18000):
     # Public one-frame owner stepping needs the documented TCP frame barrier
     # for the guarded save/serial rendezvous. LocalPair ignores this knob.
     await pair.link_up(arm_barrier=True)
+    mark_phase(pair, "link_up_done")
     await _drive_to_link_menu(client)
+    mark_phase(pair, "link_menu_done")
     await _select_colosseum(client)
+    mark_phase(pair, "colosseum_selected")
     await _enter_battle(client)
+    mark_phase(pair, "battle_entered")
     terminal = [None, None]
     last_live = [None, None]
     replacement_open = [False, False]
@@ -212,6 +217,8 @@ async def complete_battle(pair, journal, *, budget_frames=18000):
     last_input = [-8, -8]
     frames = 0
     while frames < budget_frames:
+        if frames % 1000 == 0:
+            mark_phase(pair, f"battle_frames_{frames}")
         states = [await pair.state(owner) for owner in range(2)]
         journal.write(json.dumps({"frames": frames, "states": states}) + "\n")
         journal.flush()
@@ -248,6 +255,7 @@ async def complete_battle(pair, journal, *, budget_frames=18000):
             break
         await pair.step(4)
         frames += 4
+    mark_phase(pair, f"battle_loop_end_frames_{frames}")
     assert all(state is not None for state in terminal), ("battle frame bound", frames)
     assert any(replacement_completed), ("no witnessed nonterminal replacement", replacement_open)
     return {
