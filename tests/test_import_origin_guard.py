@@ -2409,7 +2409,7 @@ def test_a_same_shape_twin_in_site_packages_cannot_corroborate_a_forged_finder(
     shape, the constant supplies the foreign path.  Measured on #556, that
     produced ``PASS`` with a foreign submodule loading.
 
-    This is the mutation guard for ``_const_signature``.  Without it the
+    This is the mutation guard for ``_code_signature``.  Without it the
     hostile finder is corroborated; with it, nothing matches.
     """
 
@@ -2475,7 +2475,7 @@ def test_a_same_shape_twin_in_site_packages_cannot_corroborate_a_forged_finder(
 def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
     """Constant comparison recurses, and must not refuse a real installer.
 
-    ``_const_signature`` walks nested code objects so a closure or
+    ``_code_signature`` walks nested code objects so a closure or
     comprehension inside ``find_spec`` is covered.  A real installer written
     that way has to keep its trust, or the extra strictness becomes a false
     red on ordinary editable installs.
@@ -2499,7 +2499,7 @@ def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
     finder.__file__ = str(genuine)
     try:
         function = getattr(finder.find_spec, "__func__", finder.find_spec)
-        assert origins._const_signature(function.__code__), "constants are captured"
+        assert origins._code_signature(function.__code__), "constants are captured"
         assert _is_installation_finder(finder), (
             "a genuine nested finder must keep its trust"
         )
@@ -2524,7 +2524,7 @@ def test_a_nested_code_twin_with_equal_constants_is_still_refused(
     in the hostile one: same constant ``''``, same result, different nested
     bytecode.  Every field compared at the top level is equal.
 
-    This is the mutation guard for the nested half of ``_const_signature``:
+    This is the mutation guard for the nested half of ``_code_signature``:
     folding a nested code object's own ``co_code``/``co_names``/``co_varnames``
     into its signature.  Removing that fold makes the signature constants-only
     again, the twin is corroborated, and this row fails (verified: the mutant
@@ -2579,11 +2579,32 @@ def test_a_nested_code_twin_with_equal_constants_is_still_refused(
         assert forged.__code__.co_code == genuine.__code__.co_code
         assert forged.__code__.co_names == genuine.__code__.co_names
         assert forged.__code__.co_varnames == genuine.__code__.co_varnames
-        assert origins._const_signature(
-            forged.__code__
-        ) != origins._const_signature(genuine.__code__), (
-            "the signature must distinguish a nested body that differs"
-        )
+        # Every field the signature reads *besides* the nested recursion is
+        # equal here, so the whole decision rests on recursing into the nested
+        # code object. Assert that directly: comparing only the nested
+        # constant tables would NOT distinguish this pair, which is the entire
+        # gap #557 left open.
+        def _nested_constant_tables(code: object) -> tuple:
+            return tuple(
+                tuple(
+                    (type(item).__name__, repr(item))
+                    for item in getattr(constant, "co_consts", ())
+                )
+                for constant in getattr(code, "co_consts", ())
+                if isinstance(constant, types.CodeType)
+            )
+
+        assert _nested_constant_tables(forged.__code__) == _nested_constant_tables(
+            genuine.__code__
+        ), "the premise: nested constants are identical, only bytecode differs"
+        assert (
+            origins._code_signature(forged.__code__)
+            != origins._code_signature(genuine.__code__)
+        ), "the signature must distinguish a nested body that differs"
+        for field in ("co_flags", "co_argcount", "co_nlocals", "co_freevars"):
+            assert getattr(forged.__code__, field) == getattr(
+                genuine.__code__, field
+            ), f"the premise: {field} is equal on both"
 
         assert not _is_installation_finder(holder), (
             "a nested-code twin with equal constants must not corroborate"

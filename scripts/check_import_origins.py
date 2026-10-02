@@ -203,26 +203,39 @@ def _code_objects(code: object):
             yield from _code_objects(constant)
 
 
-def _const_signature(code: object) -> tuple:
-    """Return a comparable signature for a code object's constants.
+def _code_signature(code: object) -> tuple:
+    """Return a value-comparable signature for a whole code object.
 
     Values are represented by type and ``repr`` rather than compared directly:
     some constants (an open file, a module) are not equal to themselves
     across two compilations, and an equality test on those would refuse genuine
     finders for no good reason.
 
-    A nested code object is summarised by its *own* ``co_name``, ``co_code``,
-    ``co_names`` and ``co_varnames`` as well as recursing into its constants,
-    and that nesting is load-bearing rather than decorative.  A nested body --
-    a lambda, comprehension or closure -- is itself a code object sitting in
-    the parent's ``co_consts`` at a fixed index, so the parent's ``co_code``
-    cannot see what the nested body does.  Recursing into the nested
-    *constants* alone therefore still leaves a gap: a signature that ignores
-    the nested bytecode compares two functions equal whenever the attacker
-    keeps the constants identical while changing what the nested body computes
-    (``_n + ''`` against ``'' + _n``).  Folding the nested bytecode in closes
-    that, and the signature still recurses so a nested body is covered to any
-    depth rather than only one level.
+    The signature carries every field that can change what the code *does*, not
+    only the instruction stream.  Two functions can share ``co_code`` while
+    differing in ``co_consts``, because CPython addresses constants by index,
+    so the constant table is load-bearing rather than belt-and-braces.  The
+    same argument applies to the remaining fields: ``co_flags`` separates a
+    coroutine from a generator, ``co_argcount``/``co_kwonlyargcount``/
+    ``co_nlocals``/``co_cellvars`` fix how the frame is built and which locals
+    exist, and ``co_freevars`` names the closure cells the body reads.
+
+    A nested code object is summarised by its own signature, and recursion is
+    what makes that work at all, because code objects compare by identity and a
+    recompiled copy is never the same object even for identical source.  The
+    nesting is load-bearing rather than decorative: a nested body -- a lambda,
+    comprehension or closure -- is itself a code object sitting in the parent's
+    ``co_consts`` at a fixed index, so the parent's ``co_code`` cannot see what
+    the nested body does.  A signature that recursed into the nested
+    *constants* alone would still compare two functions equal whenever the
+    attacker keeps the constants identical while changing what the nested body
+    computes (``_n + ''`` against ``'' + _n``).  Recursing on the whole nested
+    signature closes that, to any depth rather than only one level.
+
+    ``co_firstlineno``, ``co_linetable`` and ``co_qualname`` are deliberately
+    left out: they record where the source sat and what the author called the
+    object, not what it does, and comparing them would refuse a genuine finder
+    over a difference that cannot change behaviour.
     """
 
     items = []
@@ -234,12 +247,28 @@ def _const_signature(code: object) -> tuple:
                     constant.co_code,
                     constant.co_names,
                     constant.co_varnames,
-                    _const_signature(constant),
+                    constant.co_flags,
+                    constant.co_argcount,
+                    constant.co_posonlyargcount,
+                    constant.co_kwonlyargcount,
+                    constant.co_nlocals,
+                    constant.co_freevars,
+                    constant.co_cellvars,
+                    _code_signature(constant),
                 )
             )
         else:
             items.append((type(constant).__name__, repr(constant)))
-    return tuple(items)
+    return (
+        tuple(items),
+        getattr(code, "co_flags", None),
+        getattr(code, "co_argcount", None),
+        getattr(code, "co_posonlyargcount", None),
+        getattr(code, "co_kwonlyargcount", None),
+        getattr(code, "co_nlocals", None),
+        getattr(code, "co_freevars", None),
+        getattr(code, "co_cellvars", None),
+    )
 
 
 def _code_matches_source(function: object, source_file: Path) -> bool:
@@ -291,14 +320,14 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
         tree = compile(source, str(source_file), "exec", dont_inherit=True)
     except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
         return False
-    target_constants = _const_signature(target)
+    target_signature = _code_signature(target)
     for candidate in _code_objects(tree):
         if (
             candidate.co_name == target.co_name
             and candidate.co_code == target.co_code
             and candidate.co_names == target.co_names
             and candidate.co_varnames == target.co_varnames
-            and _const_signature(candidate) == target_constants
+            and _code_signature(candidate) == target_signature
         ):
             return True
     return False
