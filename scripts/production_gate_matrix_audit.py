@@ -26,6 +26,7 @@ from scripts.production_gate_model import (
     Counts,
     TierResult,
     _normalize_nodeid,
+    collected_nodeids,
 )
 
 
@@ -54,13 +55,7 @@ def run_matrix_collection_audit(
             "reason": f"matrix auditor could not be loaded: {type(exc).__name__}: {exc}",
         }
 
-    # The preflight list also carries the import-origin probe (#534), which
-    # collects no test node ids.  Positional indexing would read that entry and
-    # audit an empty matrix, so read the collected ids explicitly.
-    nodeids = next(
-        (item.nodeids for item in collection_list if item.nodeids),
-        (),
-    )
+    nodeids = collected_nodeids(collection_list)
     errors = tuple(
         collection.reason
         for collection in collection_list

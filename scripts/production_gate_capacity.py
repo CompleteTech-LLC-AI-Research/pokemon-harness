@@ -41,6 +41,7 @@ from scripts.production_gate_model import (
     RuntimeGateResult,
     TierResult,
     _normalize_nodeid,
+    collected_nodeids,
 )
 
 
@@ -87,9 +88,7 @@ def planned_tier_nodeids(
     classifier, matches, error = _tier_row_manifest(str(project_root))
     if classifier is None or error:
         return (), error or "tier configuration is unavailable"
-    # The import-origin preflight carries no collected node ids; the planned-row
-    # audit must read them from a real pytest collection entry point instead.
-    nodeids = next((item.nodeids for item in collections if item.nodeids), ())
+    nodeids = collected_nodeids(collections)
     selectors = SMOKE_SELECTORS if name == "smoke" else ()
     planned: set[str] = set()
     for nodeid in nodeids:

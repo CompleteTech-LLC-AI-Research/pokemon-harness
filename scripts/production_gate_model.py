@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -414,6 +414,20 @@ class CollectionResult:
     duration_seconds: float = 0.0
     output_tail: str = ""
     reason: str = ""
+
+
+def collected_nodeids(
+    collections: Iterable[CollectionResult],
+) -> tuple[str, ...]:
+    """Return the test node ids carried by the preflight collection list.
+
+    The list also holds non-pytest rows: the import-origin preflight (#534)
+    collects no node ids.  Readers must therefore select the collected entry
+    explicitly instead of indexing positionally, or they silently audit or
+    plan against an empty tree.
+    """
+
+    return next((item.nodeids for item in collections if item.nodeids), ())
 
 
 @dataclass
