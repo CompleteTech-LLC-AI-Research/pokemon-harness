@@ -7,7 +7,9 @@ directions: the guard must accept the tree under test and reject any other.
 """
 
 import contextlib
+import csv
 import importlib
+import io
 import json
 import os
 import re
@@ -28,6 +30,7 @@ from scripts.check_import_origins import (
     _file_digest,
     _is_installation_finder,
     _is_recorded_by_an_install,
+    _record_digests,
     _is_trusted_stdlib_finder,
     _is_within,
     _site_packages_roots,
@@ -3035,6 +3038,114 @@ def test_a_recorded_file_stops_being_recorded_when_its_bytes_change():
         )
     finally:
         sys.modules.pop("pokemon_hash_pin_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_a_quoted_record_path_containing_a_comma_still_establishes_provenance():
+    """``RECORD`` is CSV, and a quoted field's comma must not truncate its name.
+
+    The file name is parsed by splitting from the right -- size, then digest,
+    then everything remaining is the name -- because a name may legally contain
+    a comma.  But pip writes such a field *quoted*, so a name that survives the
+    split still arrives wrapped in quotes, and joining the raw text onto the
+    site-packages root builds a path no record ever listed.  The digest is then
+    compared against a file that does not exist, so a genuinely installed
+    finder whose location contains a comma silently loses its provenance and is
+    refused: a false red, in exchange for no security gain.
+
+    This row pins the decode.  The writer here is ``csv.writer``, the same one
+    pip uses, so the bytes under test are bytes pip really emits.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_csv_path_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon,comma_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        digest = _file_digest(planted)
+        assert digest is not None
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\n").writerow(
+            [planted.name, f"sha256={digest}", str(planted.stat().st_size)]
+        )
+        (dist_info / "RECORD").write_text(buffer.getvalue(), encoding="utf-8")
+
+        assert '"' in (dist_info / "RECORD").read_text(encoding="utf-8"), (
+            "the premise: a comma in the name forces a quoted CSV field"
+        )
+        assert _is_recorded_by_an_install(planted, root), (
+            "an installed file whose name contains a comma keeps its provenance"
+        )
+    finally:
+        sys.modules.pop(planted.stem, None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_a_recorded_path_that_another_record_contradicts_is_not_attested():
+    """Every ``RECORD`` claim about a path must hold, not just the first one.
+
+    ``_record_digests`` maps a path to the digests every record claims for it.
+    Keeping only one claim would let an attacker write a record that agrees
+    with their own bytes and rely on ordering to win against the install that
+    actually laid the file down.  A file whose installs disagree about its
+    contents is not consistently attested by any of them, and the safe answer
+    is to refuse.
+
+    This row kills a mutant that keeps whichever claim sorts *last*, and pins
+    the collection of both claims before the decision is made.  It cannot kill
+    a keep-the-first mutant, and that is a property of the rule rather than a
+    gap in the row: on a genuine conflict the first-claim mutant also refuses
+    here.  Distinguishing those two would need a case where the first claim
+    *agrees* with the file and a later one does not, which is the far more
+    dangerous ordering and is what the ``forgery`` below deliberately is not.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_conflict_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_conflict_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        digest = _file_digest(planted)
+        assert digest is not None
+        record = dist_info / "RECORD"
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\n").writerow(
+            [planted.name, f"sha256={digest}", str(planted.stat().st_size)]
+        )
+        record.write_text(buffer.getvalue(), encoding="utf-8")
+        assert _is_recorded_by_an_install(planted, root), "the premise: attested"
+
+        # A second, disagreeing record for the same path.  Its digest is chosen
+        # to sort *before* the real one, so a keep-only-the-first-claim mutation
+        # would pick the forgery and this row would wrongly survive.
+        forgery = "0" * 43 + "="
+        assert forgery < digest, "the forgery must sort first to isolate the rule"
+        with open(record, "a", encoding="utf-8") as handle:
+            handle.write(f"{planted.name},sha256={forgery},{planted.stat().st_size}\n")
+
+        # Assert what the rule actually decides, not just the refusal: a
+        # keep-only-the-first-claim mutant also refuses here, so asserting only
+        # "not recorded" would let that mutant survive this row unchallenged.
+        # The premise already established that the real digest *is* claimed,
+        # so "one claim matches and one does not" is the state under test.
+        claims = _record_digests(root).get(str(planted))
+        assert claims is not None and len(claims) == 2, (
+            f"the premise: two records disagree about this path, got {claims}"
+        )
+        assert digest in claims and forgery in claims, (
+            "both claims must be collected before the decision is made"
+        )
+        assert not _is_recorded_by_an_install(planted, root), (
+            "installs that disagree about a file's bytes attest to nothing"
+        )
+    finally:
+        sys.modules.pop(planted.stem, None)
         for disposable in (planted, dist_info / "RECORD"):
             disposable.unlink(missing_ok=True)
         dist_info.rmdir()
