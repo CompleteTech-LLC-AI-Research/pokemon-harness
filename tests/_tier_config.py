@@ -62,6 +62,7 @@ REAL_ROM_MODULES = frozenset(
 # a guard against a test silently falling into the wrong production tier.
 UNIT_MODULES = frozenset(
     {
+        "test_normal_red_profile_support.py",
         "test_agent_sync.py",
         "test_pyboy_main_components.py",
         "test_battle_coverage_accounting.py",
