@@ -197,20 +197,25 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
     return False
 
 
-def _record_digests(root: Path) -> dict[str, str]:
-    """Return the ``RECORD`` hash for every file an installed distribution owns.
+def _record_digests(root: Path) -> dict[str, set[str]]:
+    """Return every ``RECORD`` hash claimed for each installed file.
 
     ``RECORD`` is written at install time and names each installed file with
     the hash of its contents.  Keys are resolved paths, so a caller compares
     resolved paths on both sides and cannot be misled by a relative or
     ``..``-laden spelling of the same file.
 
+    The value is a *set* because several records may claim the same path.  The
+    caller has to satisfy all of them: if one record disagrees about what a
+    file contains, the file is not consistently attested by an install, and
+    picking whichever claim sorted first would let a planted record decide.
+
     A missing or unreadable ``RECORD`` contributes nothing rather than
     aborting: an install that cannot be attested is refused, and refusing is
     the safe direction.
     """
 
-    digests: dict[str, str] = {}
+    digests: dict[str, set[str]] = {}
     try:
         records = sorted(root.glob("*.dist-info/RECORD"))
     except (OSError, ValueError):
@@ -221,16 +226,25 @@ def _record_digests(root: Path) -> dict[str, str]:
         except (OSError, ValueError):
             continue
         for line in text.splitlines():
-            parts = line.split(",")
-            if len(parts) < 2:
+            # ``RECORD`` is CSV with the shape ``path,sha256=<digest>,size``.
+            # The path may legally contain a comma, so this is parsed from the
+            # right: the size is the last field, the digest the one before it,
+            # and the name is everything remaining.  Splitting on every comma
+            # would truncate a name that holds one.
+            head, _, _size = line.rpartition(",")
+            name_field, separator, digest = head.rpartition(",")
+            if not separator or not name_field:
                 continue
-            name, _, digest = parts[0], parts[1], parts[1]
             algorithm, _, expected = digest.partition("=")
-            if algorithm.lower() != "sha256" or not expected or not name:
+            if algorithm.lower() != "sha256" or not expected or not name_field:
                 continue
-            resolved = _safe_resolve(root / name)
+            resolved = _safe_resolve(root / name_field)
             if resolved is not None:
-                digests.setdefault(str(resolved), expected)
+                # Collect *every* claim about a path rather than keeping the
+                # first.  Two records may disagree about the same file, and
+                # the caller must not be able to win by writing one that
+                # happens to sort first.
+                digests.setdefault(str(resolved), set()).add(expected)
     return digests
 
 
@@ -254,10 +268,12 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
     """
 
     expected = _record_digests(root).get(str(source_file))
-    if expected is None:
+    if not expected:
         return False
     actual = _file_digest(source_file)
-    return actual is not None and actual == expected
+    # Every recorded claim must match, so an extra record asserting a different
+    # content for the same path cannot be ignored.
+    return actual is not None and all(actual == claim for claim in expected)
 
 
 def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:

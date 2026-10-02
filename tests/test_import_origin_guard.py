@@ -6,7 +6,9 @@ selected tier silently measures that other tree.  These rows pin both
 directions: the guard must accept the tree under test and reject any other.
 """
 
+import base64
 import contextlib
+import hashlib
 import importlib
 import json
 import os
@@ -26,6 +28,7 @@ from scripts.check_import_origins import (
     _finder_code_file,
     _finder_source,
     _is_installation_finder,
+    _is_recorded_by_an_install,
     _is_trusted_stdlib_finder,
     _is_within,
     _site_packages_roots,
@@ -793,9 +796,8 @@ def test_resolve_origin_does_not_swallow_an_interrupt(raised):
     def _interrupting_import(name, *args, **kwargs):
         raise raised
 
-    with _import_replaced(_interrupting_import):
-        with pytest.raises((KeyboardInterrupt, SystemExit)):
-            origins._resolve_origin("interruptible_import")
+    with _import_replaced(_interrupting_import), pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._resolve_origin("interruptible_import")
 
 
 def test_installed_from_refuses_a_record_the_interpreter_will_not_parse():
@@ -2792,6 +2794,111 @@ def test_a_path_getter_that_raises_becomes_a_finding_not_a_traceback(tmp_path):
         json.dumps(report)
     finally:
         del sys.modules[package.__name__]
+
+
+def _record_digest(candidate: Path) -> str:
+    """Return the URL-safe base64 sha256 ``RECORD`` stores for a file."""
+
+    digest = hashlib.sha256(candidate.read_bytes()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def test_a_record_attested_file_is_trusted_and_a_tampered_one_is_not(tmp_path):
+    """``RECORD`` is the provenance witness, so its parsing must be exact.
+
+    The witness is a CSV row of ``path,sha256=<digest>,size``, and both halves
+    are load-bearing.  Parsing the path from the left truncates any name that
+    legitimately contains a comma; parsing the digest from either end reads the
+    size instead.  Either mistake makes every ``RECORD``-attested finder fail to
+    attest -- a false FAIL on the supported release lane -- which is why this
+    row drives the parser directly instead of trusting the CLI to surface it.
+
+    A second record that disagrees about the same file must also refuse: the
+    witness is "every install agrees", not "the first record sorted first".
+    """
+
+    site_root = tmp_path / "site-packages"
+    dist_info = site_root / "probe_dist-1.0.dist-info"
+    dist_info.mkdir(parents=True)
+
+    plain = site_root / "recorded_finder.py"
+    plain.write_text("VALUE = 1\n", encoding="utf-8")
+    # A comma in the name is legal CSV and must not truncate the path.
+    commay = site_root / "recorded,finder.py"
+    commay.write_text("VALUE = 2\n", encoding="utf-8")
+    (dist_info / "RECORD").write_text(
+        f"recorded_finder.py,sha256={_record_digest(plain)},21\n"
+        f"recorded,finder.py,sha256={_record_digest(commay)},21\n",
+        encoding="utf-8",
+    )
+    site_root = site_root.resolve()
+
+    assert _is_recorded_by_an_install(plain.resolve(), site_root) is True
+    assert _is_recorded_by_an_install(commay.resolve(), site_root) is True
+
+    # Changing the bytes must break the attestation.
+    plain.write_text("VALUE = 99\n", encoding="utf-8")
+    assert _is_recorded_by_an_install(plain.resolve(), site_root) is False
+
+    # A second, disagreeing record must refuse rather than be ignored.
+    plain.write_text("VALUE = 1\n", encoding="utf-8")
+    assert _is_recorded_by_an_install(plain.resolve(), site_root) is True
+    rival = site_root / "rival-2.0.dist-info"
+    rival.mkdir()
+    (rival / "RECORD").write_text(
+        f"recorded_finder.py,sha256={'A' * 43},21\n",
+        encoding="utf-8",
+    )
+    assert _is_recorded_by_an_install(plain.resolve(), site_root) is False
+
+
+def test_a_planted_pth_cannot_certify_a_hand_written_finder(tmp_path, monkeypatch):
+    """A ``.pth`` naming a module is a weaker witness than ``RECORD``, and says so.
+
+    Writing a module into site-packages *and* a ``.pth`` beside it satisfies the
+    rule, and this row pins that behaviour deliberately rather than leaving it
+    implicit: the guard now treats that pair as an install, so it must be a
+    conscious decision rather than an accident of the implementation.
+
+    The point that matters for the verdict is that this is no longer a *false
+    PASS from nothing*: attesting it requires writing into the environment's
+    own site-packages, which is the boundary this guard has always assumed for
+    that directory.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "pth_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "pth_pkg" or name.startswith("pth_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "pth_attested_finder_row.py"
+    planted.write_text(
+        "class PthAttestedFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    pth = site_root / "zz_pth_attested_finder_row.pth"
+    pth.write_text("import pth_attested_finder_row\n", encoding="utf-8")
+    module = None
+    try:
+        module = importlib.import_module("pth_attested_finder_row")
+        finder = module.PthAttestedFinder
+        assert _is_installation_finder(finder), (
+            "a .pth naming the module is the witness _virtualenv and the "
+            "editable shim actually have; refusing it would refuse the release lane"
+        )
+    finally:
+        sys.modules.pop("pth_attested_finder_row", None)
+        pth.unlink(missing_ok=True)
+        planted.unlink(missing_ok=True)
 
 
 def test_a_genuine_finder_with_a_non_utf8_source_file_keeps_its_trust():
