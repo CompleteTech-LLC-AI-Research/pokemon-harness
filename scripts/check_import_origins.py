@@ -74,14 +74,24 @@ def _is_within(candidate: Path, root: Path, *, strict: bool = False) -> bool:
     compares as "inside" while living somewhere else entirely.  The staging
     root must therefore still be a real subdirectory of the checkout after
     resolution.
+
+    A path that cannot be resolved at all compares as *not* within.  Both
+    sides are data reported by the interpreter or by install metadata rather
+    than paths this checkout chose, and the comparison must stay total:
+    letting ``Path.resolve`` raise turned a finding into an ``INTERNALERROR``
+    traceback.  Refusing is the fail-closed direction, because "within this
+    checkout" is the claim being disproved.
     """
 
-    resolved_root = Path(root).resolve()
+    try:
+        resolved_root = Path(root).resolve()
+        resolved_candidate = Path(candidate).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
     if strict and Path(root).is_symlink():
         return False
-    candidate = Path(candidate).resolve()
     try:
-        candidate.relative_to(resolved_root)
+        resolved_candidate.relative_to(resolved_root)
     except ValueError:
         return False
     return True
@@ -93,7 +103,9 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     ``direct_url.json`` is written by pip for both editable and local installs
     and names the directory the install was produced from.  A distribution
     without that record cannot be attributed to a checkout, so it contributes
-    no allowed site-packages root.
+    no allowed site-packages root.  A record naming a path that cannot be
+    resolved is treated the same way: the install is unattributable, not
+    crashing the run.
     """
 
     try:
@@ -110,12 +122,18 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     url = payload.get("url")
     if not isinstance(url, str):
         return None
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
     if parsed.scheme != "file":
         return None
     if parsed.netloc not in ("", "localhost"):
         return None
-    return Path(unquote(parsed.path)).resolve()
+    try:
+        return Path(unquote(parsed.path)).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _normalise_distribution_name(name: str) -> str:
@@ -172,8 +190,11 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
 
     if source is None:
         return False
-    root = project_root.resolve()
-    source = Path(source).resolve()
+    try:
+        root = project_root.resolve()
+        source = Path(source).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
     if source == root:
         return True
     return _is_within(source, _staging_root(root), strict=True)
@@ -210,7 +231,9 @@ def _allowed_roots(
                 located = _distribution(owner).locate_file(package)
             except (OSError, importlib.metadata.PackageNotFoundError):
                 continue
-            roots.append(Path(located).resolve())
+            resolved, _ = _resolve_path(Path(located), package)
+            if resolved is not None:
+                roots.append(resolved)
     return roots
 
 
@@ -251,9 +274,7 @@ def _resolve_path(candidate: Path, package: str) -> tuple[Path | None, str]:
         return None, f"origin is not a usable path: {type(exc).__name__}: {exc}"
 
 
-def _foreign_namespace_locations(
-    package: str, allowed_roots: list[Path]
-) -> list[Path]:
+def _foreign_namespace_locations(package: str, allowed_roots: list[Path]) -> list[Path]:
     """Return namespace portions of ``package`` that resolve outside the checkout.
 
     A namespace package exposes no ``__file__``, so every entry of its
@@ -262,6 +283,11 @@ def _foreign_namespace_locations(
     additional portion outside the checkout -- exactly the shape a shared
     environment produces when ``sys.path`` mixes two worktrees, where a
     subpackage missing locally still imports from the foreign portion.
+
+    A portion that will not resolve is reported as the path it claims to be,
+    unresolved.  It is certainly not inside any allowed root, so the caller
+    fails closed -- and the detail stays readable instead of raising out of
+    ``check_origins`` as a traceback.
     """
 
     module = sys.modules.get(package)
@@ -269,10 +295,9 @@ def _foreign_namespace_locations(
         return []
     outside = []
     for location in getattr(module, "__path__", ()) or ():
-        if not any(
-            _is_within(location, allowed, strict=False) for allowed in allowed_roots
-        ):
-            outside.append(Path(location).resolve())
+        if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
+            resolved, _ = _resolve_path(Path(location), package)
+            outside.append(resolved if resolved is not None else Path(location))
     return outside
 
 

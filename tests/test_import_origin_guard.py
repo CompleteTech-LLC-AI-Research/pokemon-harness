@@ -458,6 +458,10 @@ def test_check_origins_rejects_a_competing_pyboy_distribution(tmp_path, monkeypa
         ({"dir_info": {}, "url": None}, "null url"),
         ({"dir_info": {}, "url": 17}, "non-string url"),
         ("not json at all", "malformed json"),
+        (
+            {"dir_info": {}, "url": "file:///tmp/checkout%00elsewhere"},
+            "percent-encoded NUL makes the recorded path unresolvable",
+        ),
     ],
 )
 def test_installed_from_refuses_an_unattributable_record(payload, reason):
@@ -483,6 +487,32 @@ def test_installed_from_refuses_an_unattributable_record(payload, reason):
         assert origins._installed_from("pyboy", Path("/anywhere")) is None, reason
     finally:
         origins._distribution = original
+
+
+def test_is_this_checkout_refuses_an_unresolvable_source(monkeypatch):
+    """A recorded source that cannot be resolved must not raise out of the guard.
+
+    ``_installed_from`` is guarded, so a malformed ``direct_url.json`` record
+    already resolves to ``None`` and never reaches this function.  But
+    ``_is_this_checkout`` also resolves ``project_root`` and ``source``, and a
+    path can be malformed anywhere downstream of the metadata reader.  When it
+    raised, the traceback escaped ``check_origins`` as an ``INTERNALERROR``
+    rather than becoming a finding.
+
+    Refusing is the fail-closed direction: "this install came from this
+    checkout" is the claim being proved, and an unresolvable path cannot
+    prove it.
+    """
+
+    source = Path("/tmp/outside\x00checkout")
+
+    assert origins._is_this_checkout(REPO_ROOT, source) is False
+
+
+def test_is_this_checkout_refuses_an_unresolvable_project_root():
+    """The checkout side is equally untrusted; refusing is still fail-closed."""
+
+    assert origins._is_this_checkout(Path("/tmp/root\x00here"), Path("/tmp/x")) is False
 
 
 def test_installed_from_accepts_a_plain_local_record():
@@ -1045,9 +1075,9 @@ def test_namespace_package_refuses_a_foreign_path_portion(tmp_path, monkeypatch)
 
     package = importlib.import_module("split_pkg")
     assert getattr(package, "__file__", None) is None, "expected a namespace package"
-    assert str(foreign) in [
-        str(Path(item).resolve() / "sub") for item in package.__path__
-    ], "the foreign portion must actually be reachable"
+    assert str(foreign) in [str(Path(item).resolve() / "sub") for item in package.__path__], (
+        "the foreign portion must actually be reachable"
+    )
 
     report = check_origins(root, ("split_pkg",))
 
@@ -1070,6 +1100,36 @@ def test_namespace_package_inside_the_checkout_still_passes(tmp_path, monkeypatc
     report = check_origins(tmp_path, ("solo_ns",))
 
     assert report["status"] == "PASS", report
+
+
+def test_unusable_namespace_portion_is_a_finding_not_a_crash(tmp_path, monkeypatch):
+    """An unusable ``__path__`` portion must be reported, not raised.
+
+    ``test_unusable_origin_is_a_finding_not_a_crash`` pins the ``__file__``
+    path only.  A namespace package never reaches it, so the same
+    ``Path.resolve`` hazard was still reachable through ``__path__``: the
+    namespace rows then crashed with ``ValueError: embedded null character``
+    out of ``check_origins`` instead of producing a finding.
+
+    The namespace finding names the offending portion rather than reusing the
+    ``not a usable path`` wording, because an unresolvable portion is still a
+    foreign portion and the caller reports it on that channel.  What matters
+    is that it is a finding naming the package, at the verdict level, with no
+    exception escaping.
+    """
+
+    module = types.ModuleType("bad_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), "/tmp/bad\x00port/ns"]
+    monkeypatch.setitem(sys.modules, "bad_ns", module)
+
+    report = check_origins(tmp_path, ("bad_ns",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["package"] == "bad_ns"
+    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+
+
 def test_unusable_origin_is_a_finding_not_a_crash(monkeypatch):
     """A path the interpreter cannot resolve must be reported, not raised.
 
@@ -1163,4 +1223,3 @@ def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert returncode == 1
     assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
-
