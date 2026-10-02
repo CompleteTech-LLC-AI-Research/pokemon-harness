@@ -139,6 +139,98 @@ def _communicate_after_termination(process: subprocess.Popen[str]) -> str:
         return partial or ""
 
 
+def run_import_origin_preflight(
+    *,
+    project_root: Path,
+    python_executable: Path,
+    environment: dict[str, str],
+    timeout_seconds: float,
+    raw_output_directory: Path | None = None,
+) -> CollectionResult:
+    """Verify the selected interpreter imports this checkout's own source.
+
+    Many worktrees share one virtual environment, so an editable install can
+    resolve ``pokered_harness`` or the vendored ``pyboy`` to a tree other than
+    the one under test.  Collection would still succeed and every selected tier
+    would then measure that other tree, so this must fail before any tier runs
+    rather than after.
+    """
+
+    command = [
+        str(python_executable),
+        str(Path(__file__).resolve().parent / "check_import_origins.py"),
+        "--project-root",
+        str(project_root),
+    ]
+    started = time.monotonic()
+    child_environment = dict(environment)
+    child_environment["PYTHONWARNINGS"] = "ignore"
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=project_root,
+            env=child_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **_process_creation_kwargs(),
+        )
+    except OSError as exc:
+        return CollectionResult(
+            name="import-origins",
+            command=command,
+            status="FAIL",
+            returncode=None,
+            duration_seconds=time.monotonic() - started,
+            reason=f"could not start import-origin preflight: {type(exc).__name__}: {exc}",
+        )
+    try:
+        output, _ = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _entry._terminate_process(process)
+        output = _entry._communicate_after_termination(process)
+        return CollectionResult(
+            name="import-origins",
+            command=command,
+            status="FAIL",
+            returncode=124,
+            duration_seconds=time.monotonic() - started,
+            output_tail=output[-8000:],
+            reason=f"import-origin preflight timed out after {timeout_seconds:.1f}s",
+        )
+
+    returncode = int(process.returncode) if process.returncode is not None else 125
+    if raw_output_directory is not None:
+        _retain_raw_output(
+            raw_output_directory,
+            "import-origins.log",
+            output if isinstance(output, str) else "",
+        )
+    if returncode == 0:
+        return CollectionResult(
+            name="import-origins",
+            command=command,
+            status="PASS",
+            returncode=0,
+            duration_seconds=time.monotonic() - started,
+            output_tail=output[-8000:],
+        )
+    return CollectionResult(
+        name="import-origins",
+        command=command,
+        status="FAIL",
+        returncode=returncode,
+        duration_seconds=time.monotonic() - started,
+        output_tail=output[-8000:],
+        reason=(
+            "the selected interpreter imports source from outside the checkout "
+            f"under test ({project_root}); every selected tier would measure "
+            "that other tree. Reinstall the editable package against this "
+            "checkout, or select an interpreter bound to it."
+        ),
+    )
+
+
 def _pytest_console_script(python_executable: Path) -> Path | None:
     """Find the pytest console script belonging to ``python_executable``."""
 
@@ -166,6 +258,14 @@ def run_collection_preflight(
     marker-tier subprocesses: a collection failure must remain visible even
     when a selected tier happens to contain no affected tests.
     """
+
+    origin_result = _entry.run_import_origin_preflight(
+        project_root=project_root,
+        python_executable=python_executable,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+        raw_output_directory=raw_output_directory,
+    )
 
     commands: list[tuple[str, list[str]]] = [
         (
@@ -211,8 +311,25 @@ def run_collection_preflight(
         )
 
     with tempfile.TemporaryDirectory(prefix="pokered-collection-") as directory:
-        results: list[CollectionResult] = []
+        results: list[CollectionResult] = [origin_result]
         for index, (name, command) in enumerate(commands):
+            # A foreign interpreter would make every collected node id describe
+            # another tree, so stop here rather than spend a full collection
+            # producing evidence that cannot be trusted.
+            if origin_result.status != "PASS":
+                results.append(
+                    CollectionResult(
+                        name=name,
+                        command=command,
+                        status="NOT_STARTED",
+                        returncode=None,
+                        reason=(
+                            "not started because the import-origin preflight "
+                            f"reported {origin_result.status}"
+                        ),
+                    )
+                )
+                continue
             if any(result.status == "INTERRUPTED" for result in results):
                 results.append(
                     CollectionResult(
@@ -251,12 +368,20 @@ def run_collection_preflight(
             )
 
     if all(result.status == "PASS" for result in results):
-        first, second = results
-        first_nodes = set(first.nodeids)
-        second_nodes = set(second.nodeids)
-        if first_nodes != second_nodes:
-            missing_from_second = sorted(first_nodes - second_nodes)
-            missing_from_first = sorted(second_nodes - first_nodes)
+        collected = {
+            result.name: set(result.nodeids)
+            for result in results
+            if result.name in {"python-module", "pytest-console"}
+        }
+        module_nodes = collected.get("python-module")
+        console_nodes = collected.get("pytest-console")
+        if (
+            module_nodes is not None
+            and console_nodes is not None
+            and (module_nodes != console_nodes)
+        ):
+            missing_from_second = sorted(module_nodes - console_nodes)
+            missing_from_first = sorted(console_nodes - module_nodes)
             reason = (
                 "pytest collection entry points selected different test trees: "
                 f"missing_from_console={missing_from_second!r}; "

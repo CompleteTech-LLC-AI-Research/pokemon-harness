@@ -119,6 +119,7 @@ UNIT_MODULES = frozenset(
         "test_gate_capacity_main.py",
         "test_gate_capacity_policy.py",
         "test_gate_early_smoke.py",
+        "test_import_origin_guard.py",
         "test_gate_failure_retention.py",
         "test_link_orchestrator.py",
         "test_link_pair.py",

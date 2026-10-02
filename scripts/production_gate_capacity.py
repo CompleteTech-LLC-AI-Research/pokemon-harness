@@ -41,6 +41,7 @@ from scripts.production_gate_model import (
     RuntimeGateResult,
     TierResult,
     _normalize_nodeid,
+    collected_nodeids,
 )
 
 
@@ -87,7 +88,7 @@ def planned_tier_nodeids(
     classifier, matches, error = _tier_row_manifest(str(project_root))
     if classifier is None or error:
         return (), error or "tier configuration is unavailable"
-    nodeids = collections[0].nodeids if collections else ()
+    nodeids = collected_nodeids(collections)
     selectors = SMOKE_SELECTORS if name == "smoke" else ()
     planned: set[str] = set()
     for nodeid in nodeids:
