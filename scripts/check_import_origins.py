@@ -224,6 +224,31 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
     return Path(origin).resolve(), ""
 
 
+def _foreign_namespace_locations(
+    package: str, allowed_roots: list[Path]
+) -> list[Path]:
+    """Return namespace portions of ``package`` that resolve outside the checkout.
+
+    A namespace package exposes no ``__file__``, so every entry of its
+    ``__path__`` is a place the interpreter will import from.  Crediting only
+    ``__path__[0]`` passes a package whose in-checkout portion shadows an
+    additional portion outside the checkout -- exactly the shape a shared
+    environment produces when ``sys.path`` mixes two worktrees, where a
+    subpackage missing locally still imports from the foreign portion.
+    """
+
+    module = sys.modules.get(package)
+    if module is None or getattr(module, "__file__", None) is not None:
+        return []
+    outside = []
+    for location in getattr(module, "__path__", ()) or ():
+        if not any(
+            _is_within(location, allowed, strict=False) for allowed in allowed_roots
+        ):
+            outside.append(Path(location).resolve())
+    return outside
+
+
 def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKAGES) -> dict:
     """Return a JSON-serializable report of every package's resolved origin."""
 
@@ -243,6 +268,20 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
             )
             continue
         assert origin is not None  # guaranteed when ``error`` is empty
+        foreign = _foreign_namespace_locations(package, allowed_roots)
+        if foreign:
+            findings.append(
+                {
+                    "package": package,
+                    "origin": str(origin),
+                    "status": "FAIL",
+                    "detail": (
+                        "namespace package also resolves outside this checkout: "
+                        + ", ".join(str(item) for item in foreign)
+                    ),
+                }
+            )
+            continue
         inside = any(_is_within(origin, allowed) for allowed in allowed_roots)
         findings.append(
             {

@@ -6,6 +6,7 @@ selected tier silently measures that other tree.  These rows pin both
 directions: the guard must accept the tree under test and reject any other.
 """
 
+import importlib
 import json
 import os
 import re
@@ -974,3 +975,55 @@ def test_capacity_planning_ignores_the_nodeidless_origin_row():
     assert tuple(planned) == (planned_row,), (
         "the nodeidless origin row was mistaken for the collected tree"
     )
+
+
+def test_namespace_package_refuses_a_foreign_path_portion(tmp_path, monkeypatch):
+    """A namespace portion outside the checkout must fail even when the first
+    portion is inside it.
+
+    ``sys.path`` ordering means an in-checkout portion listed first does not
+    make the package trusted: a subpackage that is missing locally still
+    imports from the foreign portion.  Crediting ``__path__[0]`` alone let a
+    genuinely foreign import report PASS.
+    """
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    (root / "split_pkg").mkdir(parents=True)
+    # No ``__init__.py`` on either side: both are namespace portions.
+    foreign = outside / "split_pkg" / "sub"
+    foreign.mkdir(parents=True)
+    (foreign / "foreign_mod.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(outside))
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "split_pkg" or name.startswith("split_pkg."):
+            del sys.modules[name]
+
+    package = importlib.import_module("split_pkg")
+    assert getattr(package, "__file__", None) is None, "expected a namespace package"
+    assert str(foreign) in [
+        str(Path(item).resolve() / "sub") for item in package.__path__
+    ], "the foreign portion must actually be reachable"
+
+    report = check_origins(root, ("split_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "also resolves outside this checkout" in report["packages"][0]["detail"]
+
+
+def test_namespace_package_inside_the_checkout_still_passes(tmp_path, monkeypatch):
+    """The refusal above must not reject an ordinary single-root namespace."""
+
+    package_dir = tmp_path / "solo_ns"
+    package_dir.mkdir()
+    (package_dir / "inner").mkdir()
+    (package_dir / "inner" / "mod.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in list(sys.modules):
+        if name == "solo_ns" or name.startswith("solo_ns."):
+            del sys.modules[name]
+
+    report = check_origins(tmp_path, ("solo_ns",))
+
+    assert report["status"] == "PASS", report
