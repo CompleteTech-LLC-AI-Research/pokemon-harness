@@ -220,6 +220,31 @@ runtime or test changes over the historical result. The working tree should
 be clean; ignored BYO assets may be present outside the tracked source. Use
 the same activated interpreter for installation, tests, the gate, and MCP.
 
+The install above must be **editable** (`pip install -e`). That is the only
+install shape the import-origin guard admits, and the guard runs as a
+preflight before test collection, so a non-editable install of a wheel built
+from this checkout is refused by design rather than by accident:
+
+```
+$ python -m pip wheel --no-deps -w ./wheelhouse .
+$ python -m venv /tmp/wvenv && /tmp/wvenv/bin/python -m pip install --no-deps ./wheelhouse/*.whl
+$ cat /tmp/wvenv/lib/python3.11/site-packages/pokered_harness-*.dist-info/direct_url.json
+{"archive_info": {}, "url": "file:///.../wheelhouse/pokered_harness-0.1.0-py3-none-any.whl"}
+```
+
+pip records the **wheel file** in `direct_url.json`, not the source tree, so
+the distribution cannot be attributed to this checkout and contributes no
+allowed root. Widening the guard to accept a `.whl` path would let any wheel
+on disk become an allowed root, which is the provenance guarantee the guard
+exists to provide; see #554.
+
+This does not affect the wheel packaging lane. `scripts/run_local_ci.sh`
+verifies wheel contents and a clean wheel installation using
+`bootstrap_pyboy.py --mode source --check`, which does not invoke the
+import-origin guard. Only the collection preflight in
+`scripts/production_gate_execution.py` does, and it always runs against the
+checkout's own editable environment.
+
 The required Python version is 3.11 or newer. NumPy is pinned to 2.4.6 on
 Python 3.11 and 2.5.2 on Python 3.12+, including the Cython build dependencies.
 On Windows PowerShell, create
