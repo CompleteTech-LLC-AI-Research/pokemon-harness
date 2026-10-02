@@ -202,6 +202,45 @@ def _code_objects(code: object):
             yield from _code_objects(constant)
 
 
+def _const_signature(code: object) -> tuple:
+    """Return a comparable signature for a code object's constants.
+
+    Values are represented by type and ``repr`` rather than compared directly:
+    some constants (an open file, a module) are not equal to themselves
+    across two compilations, and an equality test on those would refuse genuine
+    finders for no good reason.
+
+    A nested code object is summarised by its *own* ``co_name``, ``co_code``,
+    ``co_names`` and ``co_varnames`` as well as recursing into its constants,
+    and that nesting is load-bearing rather than decorative.  A nested body --
+    a lambda, comprehension or closure -- is itself a code object sitting in
+    the parent's ``co_consts`` at a fixed index, so the parent's ``co_code``
+    cannot see what the nested body does.  Recursing into the nested
+    *constants* alone therefore still leaves a gap: a signature that ignores
+    the nested bytecode compares two functions equal whenever the attacker
+    keeps the constants identical while changing what the nested body computes
+    (``_n + ''`` against ``'' + _n``).  Folding the nested bytecode in closes
+    that, and the signature still recurses so a nested body is covered to any
+    depth rather than only one level.
+    """
+
+    items = []
+    for constant in getattr(code, "co_consts", ()):
+        if isinstance(constant, types.CodeType):
+            items.append(
+                (
+                    constant.co_name,
+                    constant.co_code,
+                    constant.co_names,
+                    constant.co_varnames,
+                    _const_signature(constant),
+                )
+            )
+        else:
+            items.append((type(constant).__name__, repr(constant)))
+    return tuple(items)
+
+
 def _code_matches_source(function: object, source_file: Path) -> bool:
     """Return whether ``function``'s bytecode really occurs in ``source_file``.
 
@@ -218,6 +257,21 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
     finder is refused.  Genuine install finders -- the editable-install shim
     and the virtualenv helper -- do match, because their bytecode really does
     come from the file they name.
+
+    Constants are compared as well as the instruction stream, and that is
+    load-bearing rather than belt-and-braces.  CPython addresses constants by
+    *index*, not by value, so ``co_code`` is byte-identical for two functions
+    that differ only in what their constants are.  Comparing
+    ``co_name``/``co_code``/``co_names``/``co_varnames`` alone therefore lets a
+    hostile ``find_spec`` be corroborated by any real site-packages file that
+    happens to define a same-shape ``find_spec`` -- the planted twin supplies
+    the bytecode shape while the constant supplies the foreign path.  That was
+    measured as a full false PASS, so the constant tuple is part of the match.
+
+    Residual boundary: this establishes that the executing code was compiled
+    from that file's source, not that the file is benign.  A hostile finder
+    written into site-packages in the first place satisfies both channels and
+    is out of scope -- as is code that runs before the guard does.
     """
 
     try:
@@ -226,12 +280,14 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
         tree = compile(source, str(source_file), "exec")
     except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
         return False
+    target_constants = _const_signature(target)
     for candidate in _code_objects(tree):
         if (
             candidate.co_name == target.co_name
             and candidate.co_code == target.co_code
             and candidate.co_names == target.co_names
             and candidate.co_varnames == target.co_varnames
+            and _const_signature(candidate) == target_constants
         ):
             return True
     return False
