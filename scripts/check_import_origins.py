@@ -49,6 +49,7 @@ import importlib.util
 import json
 import re
 import sys
+import tokenize
 import types
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -276,8 +277,18 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
 
     try:
         target = function.__code__
-        source = source_file.read_text(encoding="utf-8")
-        tree = compile(source, str(source_file), "exec")
+        # Decode the way the interpreter itself does, via PEP 263, so an
+        # encoding cookie is honoured.  Reading as UTF-8 raised
+        # UnicodeDecodeError on a genuine latin-1 module, and the blanket
+        # ``except`` below turned that into a refusal -- a false FAIL on a
+        # real installation finder, not the safe direction for a trust
+        # decision.  ``dont_inherit`` matters for the same reason: this module
+        # uses ``from __future__ import annotations``, and inheriting that flag
+        # would stamp CO_FUTURE_ANNOTATIONS onto every recompiled code object
+        # so no genuine finder could ever match.
+        with tokenize.open(source_file) as handle:
+            source = handle.read()
+        tree = compile(source, str(source_file), "exec", dont_inherit=True)
     except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
         return False
     target_constants = _const_signature(target)
