@@ -54,6 +54,27 @@ def _module_installed(name: str, module: types.ModuleType):
             sys.modules[name] = original
 
 
+@contextlib.contextmanager
+def _import_replaced(replacement):
+    """Temporarily swap the built-in ``__import__`` for ``replacement``.
+
+    ``_resolve_origin`` imports the package it is auditing, so the only way to
+    drive a hostile loader is to replace the importer itself.  ``monkeypatch``
+    is not in scope for the rows that drive the real CLI, and patching
+    ``builtins.__import__`` for the duration of a test is safe here because
+    the guard is single-threaded.
+    """
+
+    import builtins
+
+    original = builtins.__import__
+    builtins.__import__ = replacement
+    try:
+        yield
+    finally:
+        builtins.__import__ = original
+
+
 def test_repo_checkout_resolves_its_own_packages():
     """The guarded checkout must satisfy its own guard.
 
@@ -671,6 +692,57 @@ def test_cli_survives_an_exception_whose_str_raises(tmp_path, capsys):
     assert returncode == 1
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "FAIL"
+
+
+def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
+    """A loader that fails with an unprintable exception is still a finding.
+
+    ``_describe`` hardened the path-conversion and namespace reporting sites,
+    but the import-failure detail was assembled with a bare f-string.  A
+    package loader is third-party code, so it can raise an exception whose own
+    ``__str__`` raises, and the refusal then died with a traceback and no
+    JSON at all -- the same class of escape the rest of the module fixes.
+    """
+
+    class ExplodingImportError(ImportError):
+        def __str__(self):
+            raise AssertionError("import error formatting escaped")
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _failing_import(name, *args, **kwargs):
+        if name == "unprintable_import":
+            raise ExplodingImportError("nope")
+        return real_import(name, *args, **kwargs)
+
+    with _module_installed("unprintable_import", types.ModuleType("unprintable_import")):
+        with _import_replaced(_failing_import):
+            returncode = main(["--project-root", str(tmp_path), "--package", "unprintable_import"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["origin"] is None
+    assert "import failed" in report["packages"][0]["detail"]
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_resolve_origin_does_not_swallow_an_interrupt(raised):
+    """An operator interrupt during an import must stop the run.
+
+    ``_resolve_origin`` catches ``BaseException`` because a loader can raise
+    anything, and that catch must not become a way for ``Ctrl-C`` to be
+    recorded as a failed import.
+    """
+
+    def _interrupting_import(name, *args, **kwargs):
+        raise raised
+
+    with _import_replaced(_interrupting_import):
+        with pytest.raises((KeyboardInterrupt, SystemExit)):
+            origins._resolve_origin("interruptible_import")
 
 
 def test_installed_from_refuses_a_record_the_interpreter_will_not_parse():

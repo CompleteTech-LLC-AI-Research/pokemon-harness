@@ -269,8 +269,10 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
 
     try:
         module = __import__(package)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
-        return None, f"import failed: {type(exc).__name__}: {exc}"
+        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}"
     origin = getattr(module, "__file__", None)
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
