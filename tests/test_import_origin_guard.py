@@ -752,6 +752,39 @@ def test_cli_survives_an_exception_whose_str_raises(tmp_path, capsys):
     assert report["status"] == "FAIL"
 
 
+def test_a_hostile_path_getter_cannot_abort_the_guard(tmp_path):
+    """A namespace package whose ``__path__`` raises must be a finding.
+
+    ``_resolve_origin`` guards the ``__file__`` read, but the namespace
+    fallback read ``__path__`` two lines later sat outside any guard, so a
+    module whose ``__getattribute__`` raises a direct ``BaseException``
+    escaped ``check_origins`` entirely.  ``_foreign_path_locations`` had the
+    same unguarded read, and the ``__file__`` corroboration inside it a
+    third.  All three now convert the raise into a reported finding.
+    """
+
+    class ExplodingPath(BaseException):
+        pass
+
+    class BadModule(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "__path__":
+                raise ExplodingPath("path boom")
+            return super().__getattribute__(name)
+
+    package = tmp_path / "path_crash_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    module = BadModule("path_crash_pkg")
+    module.__file__ = str(package / "__init__.py")
+    with _module_installed("path_crash_pkg", module):
+        report = check_origins(tmp_path, ("path_crash_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "__path__ could not be read" in report["packages"][0]["detail"], report
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
@@ -2004,9 +2037,7 @@ def test_a_hostile_finder_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch
     assert "meta_path" in report["packages"][0]["detail"], report
 
 
-def test_a_hostile_finder_raising_base_exception_cannot_abort_the_guard(
-    tmp_path, monkeypatch
-):
+def test_a_hostile_finder_raising_base_exception_cannot_abort_the_guard(tmp_path, monkeypatch):
     """A ``BaseException`` from a hostile metaclass must not escape either.
 
     The row above raises ``RuntimeError``, which ``except Exception`` already
