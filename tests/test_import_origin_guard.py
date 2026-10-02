@@ -2598,6 +2598,202 @@ def test_source_copied_into_site_packages_does_not_certify_an_execed_finder(tmp_
         planted.unlink(missing_ok=True)
 
 
+def test_a_forged_module_and_spec_do_not_certify_an_uncertified_finder(tmp_path, monkeypatch):
+    """``sys.modules[name].__spec__`` is attacker-writable, so it is no evidence.
+
+    The previous attempt to supply load provenance asked the defining module's
+    spec to name the file.  Independent review showed the whole pair can be
+    written by hand: build a module with ``types.ModuleType``, attach a spec
+    from ``importlib.util.spec_from_file_location`` -- which sets
+    ``has_location=True`` -- and every check the guard made is satisfied while
+    the import system never loaded anything from that file.  The guard reported
+    PASS, ``cli_rc`` was 0, and a foreign submodule loaded afterwards.
+
+    This row pins the replacement: provenance comes from install records on disk
+    (``RECORD`` hash, or a ``.pth`` that imports the module), which a running
+    process cannot rewrite into a different claim.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "forged_spec_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = tmp_path / "outside" / "forged_spec_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "forged_spec_pkg" or name.startswith("forged_spec_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "forged_spec_finder_row.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "import importlib.util\n"
+        "class ForgedSpecFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'forged_spec_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    planted.write_text(source, encoding="utf-8")
+    forged = None
+    try:
+        namespace = {"__name__": "forged_spec_finder_row"}
+        exec(compile(source, str(planted), "exec"), namespace)  # noqa: S102
+        forged = namespace["ForgedSpecFinder"]
+
+        # The forgery: a module the import system never created, carrying a
+        # file-location spec pointing at the planted file.
+        planted_module = types.ModuleType("forged_spec_finder_row")
+        planted_module.__file__ = str(planted)
+        planted_module.__spec__ = importlib.util.spec_from_file_location(
+            "forged_spec_finder_row", planted
+        )
+        sys.modules["forged_spec_finder_row"] = planted_module
+        try:
+            # The premise: every in-memory signal the earlier check relied on is
+            # satisfied, so this row really isolates the new provenance rule.
+            assert planted_module.__spec__.has_location is True
+            assert planted_module.__spec__.origin == str(planted)
+            assert Path(planted).is_file()
+            assert any(
+                _is_within(Path(planted), root_, strict=False) for root_ in _site_packages_roots()
+            ), "the planted file must really sit inside site-packages"
+            assert _finder_code_file(forged) is not None, (
+                "this row needs the content check to pass so it isolates provenance"
+            )
+
+            assert not _is_installation_finder(forged), (
+                "a hand-written module and spec are not load provenance"
+            )
+            sys.meta_path.insert(0, forged)
+            report = check_origins(root, ("forged_spec_pkg",))
+
+            assert report["status"] == "FAIL", report
+            assert "meta_path" in report["packages"][0]["detail"], report
+            json.dumps(report)
+
+            leaked = importlib.import_module("forged_spec_pkg.leaked")
+            assert leaked.ORIGIN == "foreign"
+        finally:
+            sys.modules.pop("forged_spec_finder_row", None)
+    finally:
+        if forged is not None:
+            sys.meta_path.remove(forged)
+        planted.unlink(missing_ok=True)
+
+
+def test_a_finder_descriptor_raising_base_exception_becomes_a_finding(tmp_path):
+    """A custom ``BaseException`` from a descriptor must not escape the guard.
+
+    The hostile-descriptor rows in this file raise ordinary ``Exception``
+    subclasses, which ``except Exception`` already covers.  ``find_spec`` is
+    read from an object the interpreter does not control, so a metaclass can
+    raise a direct ``BaseException`` subclass instead.  That escaped
+    ``check_origins`` as a traceback with no JSON report -- exactly the outcome
+    this module exists to make impossible.
+    """
+
+    class HostileSignal(BaseException):
+        pass
+
+    class Meta(type):
+        @property
+        def find_spec(cls):
+            raise HostileSignal("descriptor failure")
+
+    class Finder(metaclass=Meta):
+        pass
+
+    root = tmp_path / "root"
+    (root / "descriptor_pkg").mkdir(parents=True)
+    (root / "descriptor_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    sys.meta_path.insert(0, Finder)
+    try:
+        report = check_origins(root, ("descriptor_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        sys.meta_path.remove(Finder)
+
+
+def test_a_finder_module_getter_raising_base_exception_becomes_a_finding(tmp_path):
+    """A hostile ``__module__`` getter must degrade to a placeholder name.
+
+    ``_describe_finder`` builds the name the operator reads in the refusal, so
+    a metaclass that raises a custom ``BaseException`` from ``__module__``
+    turned the FAIL back into a traceback.  The review that found it exercised
+    the CLI as well as the API, and observed an empty stdout with the raise on
+    stderr.
+    """
+
+    class Fatal(BaseException):
+        pass
+
+    class Meta(type):
+        def __getattribute__(cls, name):
+            if name == "__module__":
+                raise Fatal("module getter fatal")
+            return super().__getattribute__(name)
+
+    class Finder(metaclass=Meta):
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            return None
+
+    root = tmp_path / "root"
+    (root / "module_getter_pkg").mkdir(parents=True)
+    (root / "module_getter_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    sys.meta_path.insert(0, Finder)
+    try:
+        report = check_origins(root, ("module_getter_pkg",))
+
+        assert report["status"] == "FAIL", report
+        detail = report["packages"][0]["detail"]
+        assert "meta_path" in detail, detail
+        assert "<finder with an unreadable identity>" in detail, detail
+        json.dumps(report)
+    finally:
+        sys.meta_path.remove(Finder)
+
+
+def test_a_path_getter_that_raises_becomes_a_finding_not_a_traceback(tmp_path):
+    """Reading ``__path__`` is untrusted, and a raising getter must fail closed.
+
+    ``_resolve_origin`` guards the ``__file__`` read only when ``__file__`` is
+    absent, so a module with a usable ``__file__`` and a hostile ``__path__``
+    reached the portion check and raised out of the guard.  Independent review
+    reproduced this with an ordinary ``RuntimeError`` and observed a traceback
+    instead of a JSON FAIL.
+    """
+
+    class RaisingPath(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "__path__":
+                raise RuntimeError("search path getter failed")
+            return super().__getattribute__(name)
+
+    root = tmp_path / "root"
+    package = RaisingPath("path_getter_pkg")
+    package.__file__ = str(root / "path_getter_pkg" / "__init__.py")
+    sys.modules[package.__name__] = package
+    try:
+        report = check_origins(root, (package.__name__,))
+
+        assert report["status"] == "FAIL", report
+        assert "unreadable __path__" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        del sys.modules[package.__name__]
+
+
 def test_a_genuine_finder_with_a_non_utf8_source_file_keeps_its_trust():
     """Reading source as UTF-8 refuses a real latin-1 installation finder.
 
@@ -2608,6 +2804,12 @@ def test_a_genuine_finder_with_a_non_utf8_source_file_keeps_its_trust():
     a false FAIL on the supported release lane, not a safe refusal.
 
     This row pins the decoder: source is read the way the interpreter reads it.
+
+    The module is planted in site-packages and imported for real, so the only
+    thing standing between it and trust is the ``_pth`` rule -- the same
+    attestation a real ``_virtualenv`` / ``__editable__`` shim gets.  Writing
+    that ``.pth`` is what makes this a genuine installer shim rather than the
+    planted-file shape the provenance rows must refuse.
     """
     site_root = _site_packages_roots()[0]
     assert site_root.is_dir()
@@ -2624,6 +2826,8 @@ def test_a_genuine_finder_with_a_non_utf8_source_file_keeps_its_trust():
             "        return None\n"
         ).encode("latin-1")
     )
+    pth = site_root / "zz_latin1_encoded_finder_row.pth"
+    pth.write_text("import latin1_encoded_finder_row\n", encoding="utf-8")
     try:
         module = importlib.import_module("latin1_encoded_finder_row")
         code = module.Latin1Finder.find_spec.__func__.__code__
@@ -2639,6 +2843,7 @@ def test_a_genuine_finder_with_a_non_utf8_source_file_keeps_its_trust():
         )
     finally:
         sys.modules.pop("latin1_encoded_finder_row", None)
+        pth.unlink(missing_ok=True)
         latin.unlink(missing_ok=True)
 
 
