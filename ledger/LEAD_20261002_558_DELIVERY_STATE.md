@@ -169,3 +169,63 @@ Only after #558 has an independent approval and is merged:
 
 Release status stays PARTIAL. Most remaining issues still require a real-ROM
 result or an operator-controlled CPU allocation that is not available here.
+
+## Subsequent work on the same head
+
+### `ef61d3d` — PEP 263 decoding, a false FAIL found by comparing with #551
+
+#551 solves the same decision differently. Comparing the two found a defect in
+this branch: `read_text(encoding="utf-8")` raises `UnicodeDecodeError` on a
+genuine latin-1 module, and the blanket `except` turned it into a refusal.
+`tokenize.open` plus `compile(..., dont_inherit=True)` fixed both that and the
+`CO_FUTURE_ANNOTATIONS` inheritance problem. Pinned by
+`test_a_genuine_latin1_finder_is_still_corroborated`, which fails alone when
+reverted.
+
+### `4cf5a61` — adopt #551's full field set
+
+`_const_signature` became `_code_signature` and now compares every
+behaviour-bearing field at every level of nesting: `co_flags`, `co_argcount`,
+`co_posonlyargcount`, `co_kwonlyargcount`, `co_nlocals`, `co_freevars`,
+`co_cellvars`, alongside `co_name`/`co_code`/`co_names`/`co_varnames` and the
+constant table. `co_firstlineno`, `co_linetable` and `co_qualname` are
+deliberately excluded as behaviour-neutral.
+
+This closes the omitted-field question structurally rather than empirically.
+
+The nested mutation guard had to be sharpened in the same commit. Renaming made
+its assertion satisfiable by the top-level fields alone, so it stopped guarding
+the nested half — an earlier mutation attempt passed it. It now asserts that
+the nested constant tables are equal and that every non-recursive field is
+equal, so the decision provably rests on the nested recursion.
+
+An earlier mutation attempt in this session was itself faulty: it removed the
+nested field lines but kept the recursive call, so it tested nothing. Redone
+correctly, it reproduces #557's shape exactly and is bypassable end to end
+(`TRUSTED: True`, guard `PASS`, foreign submodule loaded), and the nested row
+kills it alone: `1 failed, 103 passed`.
+
+| Check on `4cf5a61` | Result |
+|---|---|
+| guard + fixture provenance | 121 passed, 0 failed, 0 errors |
+| genuine/editable/install/latin-1 rows | 28 passed |
+| nested-code bypass | TRUSTED False, guard FAIL |
+| const-collision bypass | TRUSTED False, guard FAIL |
+| forged `co_filename` (`exploit`) | ATTACK DEFEATED |
+| forged `co_filename` (`exploit2`) | ATTACK DEFEATED |
+| own checkout `check_origins` | PASS |
+| CLI `--project-root .` | rc=0 |
+| `ruff check` both files | clean |
+
+Hosted CI on `0b819d9` completed `success` (run 37057990673). CI on `4cf5a61`
+was in progress when this entry was written.
+
+### Still outstanding
+
+The #551 consolidation itself is not done. #551's `__path__` containment scope
+for a regular package is real scope that #558 does not contain, and it is the
+reason #551 exists. Carrying it across means porting roughly 1500 lines of a
+differently structured rewrite of the same guard, which is a larger change than
+the field-set adoption above and deserves its own verification pass.
+
+The independent review blocker is unchanged: #558 still has zero reviews.
