@@ -794,6 +794,42 @@ def test_suite_allows_collection_when_origins_match(monkeypatch):
     conftest._enforce_local_import_origins()
 
 
+def test_suite_hook_actually_calls_the_import_origin_guard(monkeypatch):
+    """``pytest_configure`` must invoke the guard, not merely define it.
+
+    The two rows above exercise ``_enforce_local_import_origins`` directly, so
+    they all pass while the call inside ``pytest_configure`` is deleted.  That
+    mutant silently un-refuses every bare ``pytest`` run in this workspace,
+    which is the exact condition #534 exists to prevent.  Mutation testing
+    showed ``pass  # MUTATED`` at the hook surviving both the guard suite and a
+    153-test wide lane, so this pins the wiring rather than the helper.
+    """
+
+    from tests import conftest
+
+    calls: list[str] = []
+
+    class RecordingConfig:
+        def __init__(self) -> None:
+            self.lines: list[tuple[str, str]] = []
+
+        def addinivalue_line(self, name: str, line: str) -> None:
+            self.lines.append((name, line))
+
+    monkeypatch.setattr(
+        conftest,
+        "_enforce_local_import_origins",
+        lambda: calls.append("guard"),
+    )
+
+    conftest.pytest_configure(RecordingConfig())
+
+    assert calls == ["guard"], (
+        "pytest_configure did not call _enforce_local_import_origins; a bare "
+        "pytest run would no longer refuse a foreign checkout (#534)"
+    )
+
+
 def test_a_failing_origin_preflight_stops_before_collection_runs(tmp_path, monkeypatch):
     """Fail closed: a foreign interpreter must not reach the pytest entry points."""
 
@@ -917,7 +953,10 @@ def test_capacity_planning_ignores_the_nodeidless_origin_row():
     """
 
     this_file = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
-    planned_row = f"{this_file}::test_is_within_is_not_a_prefix_test"
+    # Name a row that really exists in this file, so a reader who greps for
+    # the referenced test finds it.  ``classify_test`` keys tier membership on
+    # the module, so the choice does not change the planned set.
+    planned_row = f"{this_file}::test_is_within_resolves_before_comparing"
     collections = [
         gate.CollectionResult("import-origins", [], "PASS", 0),
         gate.CollectionResult(
