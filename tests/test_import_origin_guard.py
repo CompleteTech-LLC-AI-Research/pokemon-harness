@@ -608,6 +608,49 @@ def test_resolve_path_does_not_swallow_an_interrupt(raised):
         origins._resolve_path(_HostileFspath(raised), "pkg")
 
 
+@pytest.mark.parametrize("empty", ["", b""], ids=["str", "bytes"])
+def test_cli_refuses_an_empty_origin(tmp_path, capsys, empty):
+    """An empty ``__file__`` proves nothing and must not be credited (#552).
+
+    ``Path("")`` is not malformed: it resolves cleanly to the process CWD,
+    which is normally inside the checkout, so the guard used to report PASS
+    and name the checkout as the origin.  That is the exact false-PASS class
+    #534 exists to prevent -- the origin is unproven, not verified.
+    """
+
+    module = types.ModuleType("empty_origin")
+    module.__file__ = empty
+    with _module_installed("empty_origin", module):
+        returncode = main(["--project-root", str(tmp_path), "--package", "empty_origin"])
+
+    assert returncode == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["origin"] is None
+    assert "empty" in report["packages"][0]["detail"]
+
+
+def test_empty_origin_check_does_not_treat_a_falsy_pathlike_as_empty():
+    """The empty check must not misread a real path as an empty one.
+
+    A path-like object with ``__len__`` returning 0 is falsy but perfectly
+    usable, so a bare ``if not candidate`` would refuse it.  The check is
+    scoped to ``str``/``bytes`` for that reason.
+    """
+
+    class FalsyButReal:
+        def __len__(self):
+            return 0
+
+        def __fspath__(self):
+            return str(REPO_ROOT / "src" / "pokered_harness" / "__init__.py")
+
+    resolved, error = origins._resolve_path(FalsyButReal(), "pkg")
+
+    assert error == ""
+    assert resolved == (REPO_ROOT / "src" / "pokered_harness" / "__init__.py").resolve()
+
+
 @pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
 def test_is_within_does_not_swallow_an_interrupt(raised):
     """``_is_within`` must re-raise rather than read a refused comparison as

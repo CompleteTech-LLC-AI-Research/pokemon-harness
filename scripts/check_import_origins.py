@@ -316,9 +316,24 @@ def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
     caught exception is itself untrusted, since it can come straight out of a
     foreign ``__fspath__``, and ``str(exc)`` on such an object can raise.  A
     detail line that is itself hostile must still produce a finding.
+
+    An empty candidate is refused before conversion.  ``Path("")`` is not
+    malformed -- it resolves cleanly to the process CWD, which is normally
+    inside this checkout -- so it would otherwise be credited here and turn an
+    origin that says nothing about where the package came from into a PASS.
+    The guard is meant to *prove* a package was imported from this tree, and
+    an empty ``__file__`` proves no such thing.
+
+    The test is scoped to ``str``/``bytes`` on purpose.  A path-like object
+    with ``__len__`` returning 0 is falsy but perfectly usable, so a bare
+    ``if not candidate`` would refuse a real path.  It also sits inside the
+    ``try`` so a candidate that raises while being interrogated is reported
+    as a finding rather than escaping.
     """
 
     try:
+        if isinstance(candidate, (str, bytes)) and not candidate:
+            return None, "origin is an empty path"
         return Path(candidate).resolve(), ""
     except (KeyboardInterrupt, SystemExit):
         raise
