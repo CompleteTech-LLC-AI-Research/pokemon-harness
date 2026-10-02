@@ -10,6 +10,7 @@ import base64
 import contextlib
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from scripts.check_import_origins import (
     _is_trusted_stdlib_finder,
     _is_within,
     _site_packages_roots,
+    _trusted_stdlib_finders,
     check_origins,
     main,
 )
@@ -2764,6 +2766,132 @@ def test_a_finder_module_getter_raising_base_exception_becomes_a_finding(tmp_pat
         json.dumps(report)
     finally:
         sys.meta_path.remove(Finder)
+
+
+def test_a_finder_equal_to_a_stdlib_finder_is_not_trusted(tmp_path, monkeypatch):
+    """Trust is decided by identity, never by membership.
+
+    ``finder in <set>`` consults the candidate's own ``__hash__`` and
+    ``__eq__``, and a metaclass can supply both.  An object that hashes equal to
+    ``BuiltinImporter`` and compares equal to everything is "in" a set holding
+    the real one while being a different object entirely -- so it was trusted
+    before the disk provenance code ran at all.  No site-packages write, no
+    ``.pth``, no ``RECORD``: independent review obtained PASS, rc 0, and a
+    foreign submodule that loaded afterwards.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "pokered_harness"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = tmp_path / "outside" / "foreign_probe.py"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "pokered_harness" or name.startswith("pokered_harness."):
+            del sys.modules[name]
+
+    class ImpostorMeta(type):
+        def __hash__(cls):
+            import importlib._bootstrap as bootstrap
+
+            return hash(bootstrap.BuiltinImporter)
+
+        def __eq__(cls, other):
+            return True
+
+        def find_spec(cls, name, path=None, target=None):
+            if name == "pokered_harness.foreign_probe":
+                return importlib.util.spec_from_file_location(name, str(foreign))
+            return None
+
+    class Impostor(metaclass=ImpostorMeta):
+        pass
+
+    # The premise: equality membership accepts it, identity does not.
+    assert Impostor in _trusted_stdlib_finders(), (
+        "this row needs the metaclass to forge set membership"
+    )
+    assert not _is_trusted_stdlib_finder(Impostor), (
+        "trust must come from identity; a forged __eq__ is not evidence"
+    )
+
+    sys.meta_path.insert(0, Impostor)
+    try:
+        report = check_origins(root, ("pokered_harness",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+        json.dumps(report)
+
+        leaked = importlib.import_module("pokered_harness.foreign_probe")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(Impostor)
+
+
+def test_a_hostile_meta_path_iterator_becomes_a_finding(tmp_path):
+    """``sys.meta_path`` is the untrusted collection, so walking it can raise.
+
+    Two places walk it: this module's own snapshot, and
+    ``importlib.metadata.packages_distributions`` inside ``_allowed_roots``,
+    which iterates ``sys.meta_path`` looking for ``find_distributions``.  The
+    stdlib call is the one that escaped -- a list subclass with a raising
+    ``__iter__`` produced a traceback out of ``check_origins`` with no JSON.
+    """
+
+    class Fatal(BaseException):
+        pass
+
+    class HostileMetaPath(list):
+        def __iter__(self):
+            raise Fatal("meta_path iteration boom")
+
+    root = tmp_path / "root"
+    (root / "iter_pkg").mkdir(parents=True)
+    (root / "iter_pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    original = sys.meta_path
+    sys.meta_path = HostileMetaPath(original)
+    try:
+        report = check_origins(root, ("iter_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        sys.meta_path = original
+
+
+def test_a_hostile_path_iterator_becomes_a_finding(tmp_path):
+    """A ``__path__`` whose *iteration* raises is as untrusted as its read.
+
+    The attribute read was already guarded, but the value it returns was then
+    iterated outside any handler, so an object with a raising ``__iter__``
+    escaped.  Reading is only half the hazard.
+    """
+
+    class Fatal(BaseException):
+        pass
+
+    class HostilePath:
+        def __iter__(self):
+            raise Fatal("path iteration broke")
+
+    root = tmp_path / "root"
+    package = types.ModuleType("hostile_iter_pkg")
+    package.__file__ = str(root / "hostile_iter_pkg" / "__init__.py")
+    package.__path__ = HostilePath()
+    sys.modules[package.__name__] = package
+    try:
+        report = check_origins(root, (package.__name__,))
+
+        assert report["status"] == "FAIL", report
+        assert "uniterable __path__" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        del sys.modules[package.__name__]
 
 
 def test_a_path_getter_that_raises_becomes_a_finding_not_a_traceback(tmp_path):

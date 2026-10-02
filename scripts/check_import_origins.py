@@ -82,9 +82,21 @@ def _trusted_stdlib_finders() -> set[object]:
 
 
 def _is_trusted_stdlib_finder(finder: object) -> bool:
-    """Return whether ``finder`` is one of the interpreter's own finders."""
+    """Return whether ``finder`` *is* one of the interpreter's own finders.
 
-    return finder in _trusted_stdlib_finders()
+    Identity, not membership.  ``finder in <set>`` consults the candidate's own
+    ``__hash__`` and ``__eq__``, and a metaclass can supply both: an object
+    hashing equal to ``BuiltinImporter`` and comparing equal to everything is
+    "in" a set containing it while being a completely different object.
+    Independent review built exactly that, and it was trusted before the disk
+    provenance code ran at all -- no site-packages write, no ``.pth``, no
+    ``RECORD`` -- so the guard reported PASS, returned rc 0, and served a
+    submodule from outside the checkout.
+
+    ``is`` cannot be spoofed from the candidate's side.
+    """
+
+    return any(finder is trusted for trusted in _trusted_stdlib_finders())
 
 
 def _site_packages_roots() -> list[Path]:
@@ -596,14 +608,39 @@ def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
     meta-path contains a finder this checkout did not install.
     """
 
+    # ``sys.meta_path`` is mutable process state and is precisely the untrusted
+    # collection being inspected, so the snapshot can be made to raise.  A list
+    # subclass whose ``__iter__`` raises a direct ``BaseException`` escaped
+    # ``check_origins`` entirely; an unreadable meta-path is a finding about the
+    # interpreter, never a traceback.
+    try:
+        snapshot = list(sys.meta_path)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - untrusted collection
+        return [(_UnreadableMetaPath(exc), None)]
+
     offenders: list[tuple[object, Path | None]] = []
-    for finder in list(sys.meta_path):
+    for finder in snapshot:
         if _is_trusted_stdlib_finder(finder) or _is_installation_finder(finder):
             continue
         # Report the code location: it is the only part of a refused finder's
         # identity that is not simply what the finder claims about itself.
         offenders.append((finder, _finder_code_file(finder) or _finder_source(finder)))
     return offenders
+
+
+class _UnreadableMetaPath:
+    """Stand-in for a ``sys.meta_path`` that could not be iterated.
+
+    The real collection refused to yield, so there is no finder to name.  This
+    stands in for the interpreter itself as the thing being refused, which keeps
+    the report honest: the operator is told the meta-path was unreadable rather
+    than being handed a fabricated finder.
+    """
+
+    def __init__(self, cause: BaseException) -> None:
+        self._cause = cause
 
 
 def _describe_finder(entry: tuple[object, Path | None]) -> str:
@@ -812,7 +849,16 @@ def _allowed_roots(
     roots = [project_root]
     try:
         distributions = importlib.metadata.packages_distributions()
-    except Exception:  # noqa: BLE001 - metadata is advisory here
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - metadata is advisory here
+        # ``packages_distributions`` walks ``sys.meta_path`` looking for
+        # ``find_distributions``, so it iterates the same untrusted collection
+        # the rest of this guard inspects.  A meta-path entry whose ``__iter__``
+        # raises -- or simply a list subclass installed over it -- made the
+        # raise escape ``check_origins`` from inside the stdlib.  Metadata is
+        # advisory here: an unreadable view contributes no extra allowed root,
+        # which is the fail-closed direction.
         return roots
     for package in packages:
         for owner in distributions.get(package, ()) or ():
@@ -1022,9 +1068,20 @@ def _foreign_path_locations(
         raise
     except BaseException as exc:  # noqa: BLE001 - untrusted getter, see _describe
         return [], [f"<unreadable __path__>: {_describe(exc)}"]
+    # Reading the attribute is only half the hazard: the value is untrusted too,
+    # so iterating it can raise as well.  An object whose ``__iter__`` raises a
+    # direct ``BaseException`` escaped ``check_origins`` here.  The portion list
+    # is materialised inside the guard, and one that cannot be walked is the
+    # same finding as one that cannot be read.
+    try:
+        portions = list(raw_portions) if raw_portions else []
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - untrusted iterator, see _describe
+        return [], [f"<uniterable __path__>: {_describe(exc)}"]
     outside: list[Path] = []
     unusable: list[str] = []
-    for location in raw_portions or ():
+    for location in portions:
         if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
             # Coerce through ``_resolve_path`` rather than ``Path(...).resolve``
             # directly: a portion is untrusted interpreter output, so it can be
