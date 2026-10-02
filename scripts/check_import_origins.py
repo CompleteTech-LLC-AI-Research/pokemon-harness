@@ -44,6 +44,8 @@ mismatch or resolution failure, ``2`` on usage errors.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -384,46 +386,140 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
     a false PASS: writing the finder's own source into site-packages and then
     running ``exec(compile(source, that_path, "exec"))`` produces a finder whose
     code matches that file exactly while having no provenance in it at all.
-    Independent review reproduced this twice, by two different routes, and each
-    time the guard reported ``PASS`` and a foreign submodule loaded afterwards.
+    Independent review reproduced this four times, by four different routes, and
+    each time the guard reported ``PASS`` and a foreign submodule loaded
+    afterwards.
 
-    Content matching is therefore not sufficient on its own, and this check
-    supplies what it cannot: the defining module must be a real entry in
-    ``sys.modules`` whose spec names the same file.  Code produced by a bare
-    ``exec`` is never a module the import system created, so it has no such
-    entry and cannot pass here.
+    Every *in-memory* witness is forgeable, so none is consulted here.  The
+    first attempt asked ``sys.modules[name].__spec__`` to name the file, and
+    review showed the whole pair is attacker-writable: create a module with
+    ``types.ModuleType``, attach a spec from
+    ``importlib.util.spec_from_file_location`` -- which sets
+    ``has_location=True`` -- and the guard certifies a finder the import system
+    never loaded, then lets it serve a submodule from another tree.  Nothing
+    about ``__spec__`` distinguishes that from a real install.
 
-    A planted ``sys.modules`` entry does not help an attacker either: the
-    module's spec must name the same file *and* that file's ``__init__`` /
-    submodule relationship is re-checked by the caller through the code
-    fingerprint, so forging the pair means writing the file, which is the
-    threat model the site-packages location already assumes.  What this removes
-    is the cheap attack that needed no import at all.
+    So provenance is decided on disk instead, from the records pip and the
+    environment leave behind, which a running process cannot rewrite into a
+    different claim:
+
+    * a distribution's ``RECORD`` lists the file with a SHA-256 of its
+      contents, so the bytes the finder runs from are the bytes an install
+      wrote; or
+    * a ``.pth`` file in the same site-packages directory imports the defining
+      module by name, which is how ``_virtualenv`` and the ``__editable__``
+      shims are loaded in the first place.
+
+    Both are filesystem facts about an install rather than claims by a live
+    object, which is the distinction the earlier rounds kept failing to make.
 
     Returns ``False`` on every difficulty -- a missing module, a spec without an
     origin, or a raising attribute -- so an unanswerable question never becomes
     trust.
     """
 
-    module = _finder_module(finder)
-    if module is None:
+    for root in _site_packages_roots():
+        if not _is_within(source_file, root, strict=False):
+            continue
+        if _is_recorded_by_an_install(source_file, root):
+            return True
+        if _is_imported_by_a_pth(source_file, root):
+            return True
+    return False
+
+
+def _record_digests(root: Path) -> dict[str, str]:
+    """Return the ``RECORD`` hash for every file an installed distribution owns.
+
+    ``RECORD`` is written at install time and names each installed file with
+    the hash of its contents.  Keys are resolved paths, so a caller compares
+    resolved paths on both sides and cannot be misled by a relative or
+    ``..``-laden spelling of the same file.
+
+    A missing or unreadable ``RECORD`` contributes nothing rather than
+    aborting: an install that cannot be attested is refused, and refusing is
+    the safe direction.
+    """
+
+    digests: dict[str, str] = {}
+    try:
+        records = sorted(root.glob("*.dist-info/RECORD"))
+    except (OSError, ValueError):
+        return digests
+    for record in records:
+        try:
+            text = record.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        for line in text.splitlines():
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            name, _, digest = parts[0], parts[1], parts[1]
+            algorithm, _, expected = digest.partition("=")
+            if algorithm.lower() != "sha256" or not expected or not name:
+                continue
+            resolved = _safe_resolve(root / name)
+            if resolved is not None:
+                digests.setdefault(str(resolved), expected)
+    return digests
+
+
+def _file_digest(candidate: Path) -> str | None:
+    """Return the URL-safe base64 SHA-256 of ``candidate``, or ``None``."""
+
+    try:
+        data = candidate.read_bytes()
+    except (OSError, ValueError):
+        return None
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
+    """Return whether an installed distribution recorded this exact file.
+
+    The ``RECORD`` hash is what makes the check a statement about provenance
+    rather than about location: an attacker who plants a file in
+    site-packages has to also match a hash recorded by an install, and the
+    record is what the installer wrote when it laid the file down.
+    """
+
+    expected = _record_digests(root).get(str(source_file))
+    if expected is None:
+        return False
+    actual = _file_digest(source_file)
+    return actual is not None and actual == expected
+
+
+def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
+    """Return whether a ``.pth`` file in ``root`` imports the defining module.
+
+    ``_virtualenv`` and the ``__editable__`` shim are not owned by any
+    distribution's ``RECORD``: they are dropped into site-packages and
+    activated by a ``.pth`` file that imports them by name.  Requiring that a
+    ``.pth`` in the *same* directory names the module is what distinguishes a
+    real environment shim from a module an attacker merely wrote there.
+    """
+
+    if source_file.name == "__init__.py":
+        stem = source_file.parent.name
+    else:
+        stem = source_file.stem
+    if not stem or not stem.isidentifier():
         return False
     try:
-        spec = getattr(module, "__spec__", None)
-        if spec is None:
-            return False
-        origin = getattr(spec, "origin", None)
-        if not isinstance(origin, str) or not origin:
-            return False
-        # A namespace or synthetic spec carries no file-backed origin.
-        if getattr(spec, "has_location", False) is not True:
-            return False
-        resolved = _safe_resolve(Path(origin))
-        return resolved is not None and resolved == source_file
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:  # noqa: BLE001 - untrusted spec; untrusted by default
+        entries = sorted(root.glob("*.pth"))
+    except (OSError, ValueError):
         return False
+    needle = f"import {stem}"
+    for entry in entries:
+        try:
+            text = entry.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+        if needle in text:
+            return True
+    return False
 
 
 def _is_installation_finder(finder: object) -> bool:
