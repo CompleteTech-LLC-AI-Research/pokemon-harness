@@ -14,6 +14,7 @@ import re
 import runpy
 import subprocess
 import sys
+import tokenize
 import types
 from pathlib import Path
 
@@ -2596,3 +2597,46 @@ def test_a_nested_code_twin_with_equal_constants_is_still_refused(
             twin.unlink()
         except OSError:
             pass
+
+
+def test_a_genuine_latin1_finder_is_still_corroborated():
+    """Decoding must follow PEP 263, or a real finder is refused.
+
+    Reading the named file as UTF-8 raises ``UnicodeDecodeError`` on a genuine
+    module that declares a latin-1 encoding cookie and holds non-ASCII bytes.
+    The corroboration step catches every exception and refuses, so the finder
+    lost its trust for a reason that has nothing to do with provenance.  That is
+    a false FAIL on the supported install lane, which is the wrong direction to
+    fail: the guard would report an honest install as untrusted.
+
+    This row pins the fix.  ``tokenize.open`` is the import system's own
+    decoder, so the cookie is honoured and the recompiled code matches the
+    running one.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = site_root / "genuine_latin1_finder_row.py"
+    source = (
+        "# -*- coding: latin-1 -*-\n"
+        "def find_spec(self, fullname, path=None, target=None):\n"
+        "    tag = 'café'\n"
+        "    return None\n"
+    )
+    genuine.write_bytes(source.encode("latin-1"))
+    try:
+        with tokenize.open(genuine) as handle:
+            decoded = handle.read()
+        namespace: dict = {}
+        exec(compile(decoded, str(genuine), "exec", dont_inherit=True), namespace)  # noqa: S102
+        function = namespace["find_spec"]
+
+        # The premise: plain UTF-8 reading cannot decode this module at all.
+        with pytest.raises(UnicodeDecodeError):
+            genuine.read_text(encoding="utf-8")
+
+        assert origins._code_matches_source(function, genuine), (
+            "a genuine latin-1 finder must still corroborate against its source"
+        )
+    finally:
+        genuine.unlink()
