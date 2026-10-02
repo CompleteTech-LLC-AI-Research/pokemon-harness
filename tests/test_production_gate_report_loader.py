@@ -372,10 +372,17 @@ def test_relative_roots_are_anchored_to_the_inspected_project(tmp_path, monkeypa
     )
 
 
-def test_collection_preflight_requires_the_selected_environment_console_script(tmp_path):
+def test_collection_preflight_requires_the_selected_environment_console_script(
+    tmp_path, monkeypatch
+):
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
     python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        gate,
+        "run_import_origin_preflight",
+        lambda **_kwargs: gate.CollectionResult("import-origins", [], "PASS", 0),
+    )
 
     results = gate.run_collection_preflight(
         project_root=tmp_path,
@@ -384,7 +391,11 @@ def test_collection_preflight_requires_the_selected_environment_console_script(t
         timeout_seconds=1,
     )
 
-    assert {result.name for result in results} == {"python-module", "pytest-console"}
+    assert {result.name for result in results} == {
+        "import-origins",
+        "python-module",
+        "pytest-console",
+    }
     console = next(result for result in results if result.name == "pytest-console")
     assert console.status == "FAIL"
     assert "not found beside" in console.reason
@@ -396,6 +407,11 @@ def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeyp
     python.write_text("", encoding="utf-8")
     console = python.parent / "pytest"
     console.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        gate,
+        "run_import_origin_preflight",
+        lambda **_kwargs: gate.CollectionResult("import-origins", [], "PASS", 0),
+    )
 
     calls = []
 
@@ -415,7 +431,11 @@ def test_collection_preflight_runs_module_and_console_commands(tmp_path, monkeyp
         environment={},
     )
 
-    assert [result.name for result in results] == ["python-module", "pytest-console"]
+    assert [result.name for result in results] == [
+        "import-origins",
+        "python-module",
+        "pytest-console",
+    ]
     assert [call["command"] for call in calls] == [
         [
             str(python),
@@ -452,6 +472,11 @@ def test_collection_preflight_rejects_different_entry_point_test_trees(tmp_path,
     python.parent.mkdir(parents=True)
     python.write_text("", encoding="utf-8")
     (python.parent / "pytest").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        gate,
+        "run_import_origin_preflight",
+        lambda **_kwargs: gate.CollectionResult("import-origins", [], "PASS", 0),
+    )
 
     def fake_run_collection_command(**kwargs):
         nodeids = (
@@ -475,7 +500,7 @@ def test_collection_preflight_rejects_different_entry_point_test_trees(tmp_path,
         environment={},
     )
 
-    assert [result.status for result in results] == ["FAIL", "FAIL"]
+    assert [result.status for result in results] == ["FAIL", "FAIL", "FAIL"]
     assert all("different test trees" in result.reason for result in results)
 
 

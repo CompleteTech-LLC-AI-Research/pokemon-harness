@@ -620,6 +620,7 @@ from scripts.production_gate_execution import (
     fixture_manifest_provenance_problems,  # noqa: F401  (retained facade attribute: gate.fixture_manifest_provenance_problems)
     run_collection_preflight,  # noqa: F401  (retained facade attribute: gate.run_collection_preflight)
     run_fixture_manifest_validation,  # noqa: F401  (retained facade attribute: gate.run_fixture_manifest_validation)
+    run_import_origin_preflight,  # noqa: F401  (retained facade attribute: gate.run_import_origin_preflight)
     run_pytest_once,  # noqa: F401  (retained facade attribute: gate.run_pytest_once)
 )
 from scripts.production_gate_matrix import (

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
 from pokered_harness.symbols.loader import SymbolTable, load_sym_text
 from scripts import coverage_report as coverage
+from scripts.check_import_origins import check_origins
 from tests._gate_capacity_support import runtime_gate_stubs  # noqa: F401
 from tests._mcp_timed_remote_support import failure_snapshots  # noqa: F401
 from tests._probe_timed_rom_pair_support import spawned_probe_args  # noqa: F401
@@ -45,6 +47,38 @@ def pytest_configure(config: pytest.Config) -> None:
     }
     for marker in MARKERS:
         config.addinivalue_line("markers", f"{marker}: {descriptions[marker]}")
+
+    _enforce_local_import_origins()
+
+
+def _enforce_local_import_origins() -> None:
+    """Refuse to collect when this interpreter imports another checkout.
+
+    Many worktrees in this workspace share one virtual environment, so an
+    editable install can resolve ``pokered_harness`` or the vendored ``pyboy``
+    to a different tree.  Collection would still succeed and every result would
+    silently describe that other tree, in whichever direction it errs.  Failing
+    here means an agent cannot mistake such a run for evidence about this
+    checkout.  See #534.
+    """
+
+    project_root = Path(__file__).resolve().parent.parent
+    report = check_origins(project_root)
+    if report["status"] == "PASS":
+        return
+    offenders = "\n".join(
+        f"  {item['package']}: {item['origin'] or '<unresolved>'}"
+        + (f" ({item['detail']})" if item["detail"] else "")
+        for item in report["packages"]
+        if item["status"] != "PASS"
+    )
+    raise pytest.UsageError(
+        "refusing to collect: the selected interpreter does not import this "
+        f"checkout ({project_root}).\n{offenders}\n"
+        "Every result from this run would describe another tree. Reinstall the "
+        "editable package against this checkout, or select an interpreter "
+        "bound to it."
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

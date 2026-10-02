@@ -404,6 +404,15 @@ def raw_pytest_output(monkeypatch):
 
     class CompletedPytest:
         def __init__(self, command, *, env, **kwargs):
+            # Model only real pytest collection/tier children, which are the
+            # ones that write a report through ``POKERED_GATE_REPORT``.  The
+            # only non-report gate child, the import-origin preflight, is
+            # stubbed by the test below, so this double never fabricates a
+            # verdict for it.
+            if "POKERED_GATE_REPORT" not in env:
+                raise AssertionError(
+                    f"unexpected non-pytest gate child reached this double: {command}"
+                )
             report_path = Path(env["POKERED_GATE_REPORT"])
             collection = "--collect-only" in command
             failed = report_path.stem == "timing-2"
@@ -448,6 +457,17 @@ def test_dual_gate_retains_complete_private_logs_and_sanitized_evidence(
     monkeypatch.setattr(gate, "runtime_problems", lambda *args, **kwargs: [])
     monkeypatch.setattr(gate, "environment_policy_problems", lambda **kwargs: [])
     monkeypatch.setattr(gate, "_pytest_console_script", lambda path: path.parent / "pytest")
+    # This test's subject is private-log retention and credential
+    # sanitization, not import provenance.  Its interpreter is a placeholder
+    # path under tmp_path, so the real origin preflight cannot succeed there;
+    # stub it so the evidence assertions below measure what they claim to.
+    monkeypatch.setattr(
+        gate,
+        "run_import_origin_preflight",
+        lambda **kwargs: gate.CollectionResult(
+            name="import-origins", command=[], status="PASS", returncode=0
+        ),
+    )
     monkeypatch.setattr(
         gate,
         "run_fixture_manifest_validation",
@@ -477,7 +497,9 @@ def test_dual_gate_retains_complete_private_logs_and_sanitized_evidence(
         assert timing["returncodes"] == [0, 1, 0, 0, 0]
     for mode in ("source", "cython"):
         paths = list((raw_directory / mode).glob("*.log"))
-        assert len(paths) == 8  # Both collection entrypoints, unit, five timing iterations.
+        # Both collection entrypoints, unit, five timing iterations.  The
+        # origin preflight is stubbed above and therefore retains no log.
+        assert len(paths) == 8
         for path in paths:
             stem = {"collection-python-module": "0", "collection-pytest-console": "1"}.get(
                 path.stem, path.stem
