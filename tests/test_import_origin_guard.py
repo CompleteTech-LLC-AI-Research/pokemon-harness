@@ -1215,3 +1215,15 @@ def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert returncode == 1
     assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
+
+    # The behaviour above is pinned on its own by
+    # ``test_package_flag_still_admits_a_real_install``.  This row additionally
+    # pins the wording the CLI shows, because the flag silently changes meaning
+    # if the help ever reverts to calling it additive.
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+    assert excinfo.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "replaces" in help_text
+    assert "not adds to" in help_text
+    assert "additional distribution name" not in help_text
