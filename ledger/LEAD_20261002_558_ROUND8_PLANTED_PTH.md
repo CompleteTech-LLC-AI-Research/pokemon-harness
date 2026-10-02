@@ -1,5 +1,14 @@
 # #558 round 8: a planted `.pth` certified provenance — found while reviewing #551
 
+> **WITHDRAWN 2026-10-02 — do not act on this file.**
+> Round 8 (`722ecb2`) is reverted. The bypass described below is real, but the
+> fix does not close it: an attacker inside the declared threat model can write
+> the `dist-info/RECORD` that attests the planted `.pth` just as easily, so the
+> end-to-end result is an identical full bypass. The change also false-reds the
+> non-`RECORD` `_virtualenv`/`__editable__` shims the `.pth` channel exists to
+> support. See `LEAD_20261002_558_ROUND8_PTH_REVERT.md` for both measurements.
+> #558 is unmerged and still needs independent review.
+
 Date: 2026-10-02
 Branch: `lead/556-const-collision` → PR #558
 Repair head: `722ecb2` (predecessors `ccb8982`, `594c8fa`, `613428b`, `0d7d848`)
