@@ -2073,6 +2073,42 @@ def test_a_hostile_finder_raising_base_exception_cannot_abort_the_guard(tmp_path
     assert "meta_path" in report["packages"][0]["detail"], report
 
 
+def test_a_hostile_finder_descriptor_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A ``find_spec`` descriptor raising ``BaseException`` must be a finding.
+
+    Two sites leaked this.  ``_finder_code_file`` guarded its descriptor
+    lookups with ``except Exception``.  And ``_allowed_roots`` wrapped
+    ``importlib.metadata.packages_distributions()`` the same way -- but that
+    call imports helper modules, so a hostile finder raises straight out of
+    it before any distribution is even examined.  Both now catch
+    ``BaseException``; the metadata one returns no site-packages roots, which
+    fails closed.
+    """
+
+    class ExplodingDescriptor(BaseException):
+        pass
+
+    class HostileDescriptor:
+        @property
+        def find_spec(self):
+            raise ExplodingDescriptor("descriptor boom")
+
+    root = tmp_path / "root"
+    package_dir = root / "descriptor_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "descriptor_pkg" or name.startswith("descriptor_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(sys, "meta_path", [HostileDescriptor(), *sys.meta_path])
+
+    report = check_origins(root, ("descriptor_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
 def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
     """A genuine site-packages ``__file__`` must not authenticate a stranger.
 
