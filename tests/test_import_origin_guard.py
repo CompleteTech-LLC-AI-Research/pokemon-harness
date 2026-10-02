@@ -2393,3 +2393,206 @@ def test_an_empty_package_request_fails_closed(tmp_path):
     assert report["status"] == "FAIL", report
     assert report["packages"] == [], report
     assert report["detail"] == "no packages were selected to verify", report
+
+
+def test_a_same_shape_twin_in_site_packages_cannot_corroborate_a_forged_finder(
+    tmp_path, monkeypatch
+):
+    """Bytecode shape is not provenance when constants differ.
+
+    CPython addresses constants by *index*, so two functions that differ only
+    in what their constants are compile to byte-identical ``co_code``.
+    Comparing ``co_name``/``co_code``/``co_names``/``co_varnames`` therefore
+    lets any real site-packages file that happens to define a same-shape
+    ``find_spec`` vouch for a hostile one: the planted twin supplies the
+    shape, the constant supplies the foreign path.  Measured on #556, that
+    produced ``PASS`` with a foreign submodule loading.
+
+    This is the mutation guard for ``_const_signature``.  Without it the
+    hostile finder is corroborated; with it, nothing matches.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "twin_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "twin_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "twin_pkg" or name.startswith("twin_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    twin = site_root / "benign_shape_neighbour.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    benign_file = "/nonexistent/benign/target.py"
+    shape = (
+        "import importlib.util\n"
+        "def find_spec(self, fullname, path=None, target=None):\n"
+        "    if fullname == 'twin_pkg.leaked':\n"
+        "        return importlib.util.spec_from_file_location(fullname, %r)\n"
+        "    return None\n"
+    )
+    # A genuine-looking file whose find_spec has the *same shape* as the
+    # hostile one below, differing only in the path constant.
+    twin.write_text(shape % benign_file, encoding="utf-8")
+
+    namespace = {"importlib": importlib}
+    exec(compile(shape % foreign_file, str(twin), "exec"), namespace)  # noqa: S102
+    forged = namespace["find_spec"]
+    holder = type("TwinShapeFinder", (), {"find_spec": staticmethod(forged)})()
+    holder.__module__ = "benign_shape_neighbour"
+    holder.__file__ = str(twin)
+
+    sys.meta_path.insert(0, holder)
+    try:
+        benign_namespace: dict = {}
+        exec(compile(twin.read_text(encoding="utf-8"), str(twin), "exec"), benign_namespace)  # noqa: S102
+        benign = benign_namespace["find_spec"]
+        assert benign.__code__.co_code == forged.__code__.co_code, (
+            "the premise is that co_code is identical for both"
+        )
+        assert benign.__code__.co_consts != forged.__code__.co_consts, (
+            "the premise is that co_consts is what distinguishes them"
+        )
+
+        assert not _is_installation_finder(holder), (
+            "a same-shape twin must not corroborate a finder serving a "
+            "different constant"
+        )
+        report = check_origins(root, ("twin_pkg",))
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+    finally:
+        sys.meta_path.remove(holder)
+
+
+def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
+    """Constant comparison recurses, and must not refuse a real installer.
+
+    ``_const_signature`` walks nested code objects so a closure or
+    comprehension inside ``find_spec`` is covered.  A real installer written
+    that way has to keep its trust, or the extra strictness becomes a false
+    red on ordinary editable installs.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = site_root / "genuine_nested_finder_row.py"
+    genuine.write_text(
+        "class NestedFinder:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        names = [name for name in (fullname,) if name]\n"
+        "        if not names:\n"
+        "            return None\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    namespace: dict = {}
+    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
+    finder = namespace["NestedFinder"]()
+    finder.__file__ = str(genuine)
+    try:
+        function = getattr(finder.find_spec, "__func__", finder.find_spec)
+        assert origins._const_signature(function.__code__), "constants are captured"
+        assert _is_installation_finder(finder), (
+            "a genuine nested finder must keep its trust"
+        )
+    finally:
+        genuine.unlink()
+
+
+def test_a_nested_code_twin_with_equal_constants_is_still_refused(
+    tmp_path, monkeypatch
+):
+    """The constant signature must cover nested BYTECODE, not just constants.
+
+    A constant-only signature has a residual gap that this row pins shut.  A
+    nested body -- a lambda, comprehension or closure -- is itself a code
+    object sitting in the parent's ``co_consts`` at a fixed index, so the
+    parent's ``co_code`` cannot see what the nested body does.  If the attacker
+    writes the nested body so its *constants* stay identical while its
+    *bytecode* differs, a signature that recurses only into constants compares
+    equal and the hostile finder is corroborated.
+
+    Here the nested lambda is ``_n + ''`` in the planted file and ``'' + _n``
+    in the hostile one: same constant ``''``, same result, different nested
+    bytecode.  Every field compared at the top level is equal.
+
+    This is the mutation guard for the nested half of ``_const_signature``:
+    folding a nested code object's own ``co_code``/``co_names``/``co_varnames``
+    into its signature.  Removing that fold makes the signature constants-only
+    again, the twin is corroborated, and this row fails (verified: the mutant
+    is bypassable end to end, guard PASS with a foreign submodule loading).
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "nested_twin_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "nested_twin_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "nested_twin_pkg" or name.startswith("nested_twin_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    twin = site_root / "nested_twin_neighbour.py"
+    shape = (
+        "import importlib.util\n"
+        "def find_spec(self, fullname, path=None, target=None):\n"
+        "    inner = lambda _n: %s\n"
+        "    if fullname == 'nested_twin_pkg.leaked':\n"
+        "        return importlib.util.spec_from_file_location(\n"
+        "            fullname, inner(__import__('os').environ['LEAKED_PATH']))\n"
+        "    return None\n"
+    )
+    twin.write_text(shape % "_n + ''", encoding="utf-8")
+
+    namespace: dict = {}
+    # The hostile twin differs ONLY in the nested body; the served path comes
+    # from the environment, so it is never a constant in either function.
+    exec(compile(shape % "'' + _n", str(twin), "exec"), namespace)  # noqa: S102
+    forged = namespace["find_spec"]
+    holder = type("NestedTwinFinder", (), {"find_spec": staticmethod(forged)})()
+    holder.__module__ = "nested_twin_neighbour"
+    holder.__file__ = str(twin)
+
+    monkeypatch.setenv("LEAKED_PATH", str((foreign / "leaked.py").resolve()))
+    sys.meta_path.insert(0, holder)
+    try:
+        genuine_namespace: dict = {}
+        exec(compile(twin.read_text(encoding="utf-8"), str(twin), "exec"), genuine_namespace)  # noqa: S102
+        genuine = genuine_namespace["find_spec"]
+
+        # Pin the premise: the top-level fields #556 compares are all equal,
+        # and so is the nested constant table. Only the nested bytecode differs.
+        assert forged.__code__.co_code == genuine.__code__.co_code
+        assert forged.__code__.co_names == genuine.__code__.co_names
+        assert forged.__code__.co_varnames == genuine.__code__.co_varnames
+        assert origins._const_signature(
+            forged.__code__
+        ) != origins._const_signature(genuine.__code__), (
+            "the signature must distinguish a nested body that differs"
+        )
+
+        assert not _is_installation_finder(holder), (
+            "a nested-code twin with equal constants must not corroborate"
+        )
+        report = check_origins(root, ("nested_twin_pkg",))
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+    finally:
+        sys.meta_path.remove(holder)
+        try:
+            twin.unlink()
+        except OSError:
+            pass
