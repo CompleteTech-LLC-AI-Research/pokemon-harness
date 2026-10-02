@@ -674,6 +674,12 @@ def _allowed_roots(
     return roots
 
 
+# Module objects published by ``_resolve_origin``, keyed by package name.  The
+# origin is read from ``module.__file__`` exactly once, and the portion check
+# reuses the same module rather than re-reading that mutable value.
+_RESOLVED_MODULES: dict = {}
+
+
 def _resolve_origin(package: str) -> tuple[Path | None, str]:
     """Import ``package`` and return ``(module file, error)`` for its origin."""
 
@@ -683,6 +689,14 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
         raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
         return None, f"import failed: {type(exc).__name__}: {_describe(exc)}"
+    # Publish the module this origin was read from, so the portion check can
+    # use it without reading ``__file__`` a second time.  ``__file__`` is
+    # mutable interpreter state and a hostile path-like can answer
+    # differently on each read; re-reading it here let a first read matching
+    # the origin be followed by one that did not, and the portion check then
+    # returned no findings at all -- a false PASS for a package that really
+    # does have a foreign ``__path__``.
+    _RESOLVED_MODULES[package] = module
     origin = getattr(module, "__file__", None)
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
@@ -769,7 +783,10 @@ def _describe(value: object) -> str:
 
 
 def _foreign_path_locations(
-    package: str, allowed_roots: list[Path], origin: Path
+    package: str,
+    allowed_roots: list[Path],
+    origin: Path,
+    module: object = None,
 ) -> tuple[list[Path], list[str]]:
     """Return importable ``__path__`` entries of ``package`` that are not local.
 
@@ -789,9 +806,22 @@ def _foreign_path_locations(
     Returns the foreign locations and the reasons any entry was unusable.  A
     portion that cannot be resolved is a finding, never an exception: the
     caller fails closed on either.
+
+    ``module`` is the module whose ``__file__`` the caller already resolved
+    into ``origin``.  Passing it is load-bearing: ``__file__`` is mutable
+    interpreter state and a hostile path-like can answer differently on each
+    read, so reading it a second time here let a first read matching ``origin``
+    be followed by one that did not -- and the function then returned no
+    findings at all, so a package with a genuinely foreign ``__path__``
+    reported PASS.  That is a false PASS, reproduced and pinned by
+    ``test_a_foreign_path_portion_is_reported_even_when_file_changes_between_
+    reads``.  With the caller supplying the module, its ``__file__`` is read
+    exactly once.
     """
 
-    module = sys.modules.get(package)
+    origin_is_this_module = module is not None
+    if module is None:
+        module = sys.modules.get(package)
     if module is None:
         return [], []
     # Judge the module that actually corresponds to the origin being reported.
@@ -800,13 +830,14 @@ def _foreign_path_locations(
     # and then the ambient module is some *other* tree's package.  Comparing
     # that module's portions against these roots would report a foreign path
     # for a package that is genuinely installed from an allowed root.
-    module_origin = getattr(module, "__file__", None)
-    if module_origin is not None:
-        try:
-            if Path(module_origin).resolve() != origin:
+    if not origin_is_this_module:
+        module_origin = getattr(module, "__file__", None)
+        if module_origin is not None:
+            try:
+                if Path(module_origin).resolve() != origin:
+                    return [], []
+            except (OSError, ValueError, RuntimeError):
                 return [], []
-        except (OSError, ValueError, RuntimeError):
-            return [], []
     outside: list[Path] = []
     unusable: list[str] = []
     for location in getattr(module, "__path__", ()) or ():
@@ -828,6 +859,11 @@ def _foreign_path_locations(
 def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKAGES) -> dict:
     """Return a JSON-serializable report of every package's resolved origin."""
 
+    # Start from a clean slate.  An entry left over from an earlier call would
+    # pair this call's origin -- which the release lane may have resolved from
+    # install metadata rather than from a live import -- with that earlier
+    # tree's module, and report a foreign portion for an honest install.
+    _RESOLVED_MODULES.clear()
     root = project_root.resolve()
     allowed_roots = _allowed_roots(root, packages)
     findings: list[dict] = []
@@ -884,7 +920,17 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
                 }
             )
             continue
-        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin)
+        # Use the module ``_resolve_origin`` actually imported, so ``__file__``
+        # is read once and a hostile value cannot change its answer between the
+        # origin resolution and the portion check.  When the origin came from
+        # install metadata instead -- the release lane resolves it that way --
+        # nothing was published and the ambient module is some *other* tree's
+        # package, which must not be judged against these roots, so the
+        # function's own fallback handles it.
+        live = _RESOLVED_MODULES.get(package)
+        foreign, unusable = _foreign_path_locations(
+            package, allowed_roots, origin, live
+        )
         if foreign or unusable:
             detail = ""
             if foreign:
