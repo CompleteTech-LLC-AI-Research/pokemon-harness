@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.util
 import json
 import re
 import sys
@@ -55,6 +56,173 @@ from urllib.parse import unquote, urlparse
 # measures.  ``pokered_harness`` is the harness under test and ``pyboy`` is the
 # vendored emulator it drives; a stale copy of either invalidates a release.
 REQUIRED_PACKAGES = ("pokered_harness", "pyboy")
+
+
+def _trusted_stdlib_finders() -> set[object]:
+    """Return the import machinery finders that ship with the interpreter.
+
+    Identity, not name, is the test: these are the exact objects CPython
+    installs on a fresh ``sys.meta_path``, and nothing a site-packages
+    package can define can impersonate them.
+    """
+
+    import importlib._bootstrap as bootstrap
+    import importlib._bootstrap_external as bootstrap_external
+
+    return {
+        bootstrap.BuiltinImporter,
+        bootstrap.FrozenImporter,
+        bootstrap_external.PathFinder,
+    }
+
+
+def _is_trusted_stdlib_finder(finder: object) -> bool:
+    """Return whether ``finder`` is one of the interpreter's own finders."""
+
+    return finder in _trusted_stdlib_finders()
+
+
+def _site_packages_roots() -> list[Path]:
+    """Return the interpreter's own site-packages directories.
+
+    These are the only third-party locations a legitimate install finder can
+    be loaded from.  The editable install that ``pip install -e ".[dev]"``
+    writes, ``_virtualenv``, and vendored wheels all land here; a finder
+    defined anywhere else was injected by the environment, not by an install
+    of this checkout.
+    """
+
+    import site
+
+    def _extend(getter, sink: list[str]) -> None:
+        """Append a site directory list, ignoring an unavailable one."""
+
+        if not callable(getter):
+            return
+        try:
+            sink.extend(getter())
+        except Exception:  # noqa: BLE001 - layout is advisory here
+            return
+
+    def _append_one(getter, sink: list[str]) -> None:
+        """Append a single site directory, ignoring an unavailable one."""
+
+        if not callable(getter):
+            return
+        try:
+            sink.append(getter())
+        except Exception:  # noqa: BLE001 - no user site on this layout
+            return
+
+    candidates: list[str] = []
+    _extend(getattr(site, "getsitepackages", None), candidates)
+    _append_one(getattr(site, "getusersitepackages", None), candidates)
+
+    roots: list[Path] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            roots.append(Path(candidate).resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return roots
+
+
+def _finder_module(finder: object) -> object | None:
+    """Return the module object that defines ``finder``, if it is loaded."""
+
+    name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    if not isinstance(name, str):
+        return None
+    return sys.modules.get(name)
+
+
+def _finder_source(finder: object) -> Path | None:
+    """Return the file that defines ``finder``, resolved without importing.
+
+    A finder class is frequently installed before its module is executed --
+    setuptools writes a stub that puts the class straight onto
+    ``sys.meta_path`` -- so the defining module is often absent from
+    ``sys.modules``.  ``find_spec`` locates it without executing the guarded
+    packages.
+    """
+
+    module = _finder_module(finder)
+    if module is not None:
+        origin = getattr(module, "__file__", None)
+        if isinstance(origin, str) and origin:
+            return _safe_resolve(Path(origin))
+    name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    if not isinstance(name, str) or not name:
+        return None
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError, AttributeError):
+        return None
+    origin = getattr(spec, "origin", None) if spec is not None else None
+    if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
+        return None
+    return _safe_resolve(Path(origin))
+
+
+def _safe_resolve(candidate: Path) -> Path | None:
+    """Resolve ``candidate``, returning ``None`` when it is not a usable path."""
+
+    try:
+        return Path(candidate).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _is_installation_finder(finder: object) -> bool:
+    """Return whether ``finder`` was installed with this interpreter.
+
+    A custom finder is legitimate when an install of this checkout put it
+    there: the editable-install shim and the virtual-environment helper both
+    live in this interpreter's own site-packages.  The check is on the
+    defining file's *location*, never its name, so a renamed or lookalike
+    module does not inherit trust and a genuine install finder is not refused.
+    """
+
+    if _is_trusted_stdlib_finder(finder):
+        return True
+    source = _finder_source(finder)
+    if source is None:
+        return False
+    return any(_is_within(source, root, strict=False) for root in _site_packages_roots())
+
+
+def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
+    """Return installed finders that may intercept the checked packages.
+
+    ``sys.meta_path`` finders are consulted before ``PathFinder``, so one
+    placed ahead of it can return a spec for a submodule from any directory in
+    the filesystem.  No amount of origin or ``__path__`` checking observes
+    that, which is how a foreign submodule can load after the guard reported
+    PASS.  The guard therefore refuses to certify an interpreter whose
+    meta-path contains a finder this checkout did not install.
+    """
+
+    offenders: list[tuple[object, Path | None]] = []
+    for finder in list(sys.meta_path):
+        if _is_trusted_stdlib_finder(finder) or _is_installation_finder(finder):
+            continue
+        offenders.append((finder, _finder_source(finder)))
+    return offenders
+
+
+def _describe_finder(entry: tuple[object, Path | None]) -> str:
+    """Return a stable, human-readable name for a refused finder."""
+
+    finder, source = entry
+    if isinstance(finder, type):
+        name = f"{finder.__module__}.{getattr(finder, '__qualname__', finder.__name__)}"
+    else:
+        name = f"{type(finder).__module__}.{type(finder).__qualname__}"
+    if source is not None:
+        return f"{name} (from {source})"
+    return f"{name} (from an unidentifiable location)"
 
 
 def _is_within(candidate: Path, root: Path, *, strict: bool = False) -> bool:
@@ -421,6 +589,29 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
     root = project_root.resolve()
     allowed_roots = _allowed_roots(root, packages)
     findings: list[dict] = []
+    # A meta-path finder this checkout did not install can place a submodule
+    # anywhere, and it runs before PathFinder, so every origin and __path__
+    # check below would still read PASS while foreign code loaded.  Refuse the
+    # interpreter itself rather than certifying a provenance it cannot
+    # establish.
+    intruders = _untrusted_meta_path_finders()
+    if intruders:
+        return {
+            "project_root": str(root),
+            "packages": [
+                {
+                    "package": "<interpreter>",
+                    "origin": None,
+                    "status": "FAIL",
+                    "detail": (
+                        "untrusted sys.meta_path finder(s) can import a checked "
+                        "package's submodules from outside this checkout: "
+                        + ", ".join(_describe_finder(item) for item in intruders)
+                    ),
+                }
+            ],
+            "status": "FAIL",
+        }
     for package in packages:
         origin, error = _resolve_origin(package)
         if error:

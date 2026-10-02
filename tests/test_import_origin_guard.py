@@ -21,7 +21,12 @@ import pytest
 
 import scripts.check_import_origins as origins
 import scripts.production_gate as gate
-from scripts.check_import_origins import check_origins, main
+from scripts.check_import_origins import (
+    _is_installation_finder,
+    _is_trusted_stdlib_finder,
+    check_origins,
+    main,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -1749,3 +1754,130 @@ def test_unusable_path_portion_is_a_finding_not_a_crash(tmp_path, monkeypatch):
 
     assert report["status"] == "FAIL", report
     assert "not usable" in report["packages"][0]["detail"]
+
+
+def test_meta_path_finder_cannot_smuggle_a_foreign_submodule(tmp_path, monkeypatch):
+    """A ``sys.meta_path`` finder must not be able to defeat the guard.
+
+    Location checks cannot see a finder.  ``PathFinder`` only ever searches a
+    parent's ``__path__``, but a finder earlier on ``sys.meta_path`` may
+    return a spec for a submodule from any location at all, and
+    ``importlib._bootstrap`` consults those finders *before* ``PathFinder``
+    does.  So a package whose origin and every ``__path__`` portion are local
+    can still have its submodules imported from another tree.
+
+    This is the false PASS the guard exists to prevent, reached by a route the
+    ``__path__`` checks cannot observe.
+    """
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    package_dir = root / "smuggle_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = outside / "smuggle_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "smuggle_pkg" or name.startswith("smuggle_pkg."):
+            del sys.modules[name]
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+
+    class SmugglingFinder:
+        """Route one submodule to a foreign file, ignoring every other name."""
+
+        def find_spec(self, name, path=None, target=None):
+            # The ``target`` parameter is part of the finder protocol and must
+            # not be shadowed by a local variable: an earlier draft of this
+            # probe reused the name for the foreign path, which silently made
+            # the finder return None and the row pass vacuously.
+            if name == "smuggle_pkg.leaked":
+                return importlib.util.spec_from_file_location(name, foreign_file)
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [SmugglingFinder(), *sys.meta_path])
+
+    report = check_origins(root, ("smuggle_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert "meta_path" in detail, detail
+    assert "SmugglingFinder" in detail, detail
+
+    # The escape really works, so the row is not asserting a hypothetical.
+    leaked = importlib.import_module("smuggle_pkg.leaked")
+    assert leaked.ORIGIN == "foreign"
+    assert str(foreign.resolve()) in leaked.__file__
+
+
+def test_meta_path_finder_outside_site_packages_is_refused(tmp_path, monkeypatch):
+    """The refusal is about *where* the finder lives, not its name.
+
+    A finder defined outside the interpreter's own site-packages is an
+    environment-installed hook: an ad-hoc ``.pth`` file, a stale editable
+    install from another checkout, or a sitecustomize injected into the
+    environment.  None of those belong to the checkout under test, so none may
+    be trusted to place a checked package's submodules.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hooked_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    finder_file = outside / "custom_finder.py"
+    finder_file.write_text(
+        "class ForeignFinder:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setitem(sys.modules, "custom_finder", None)
+    for name in list(sys.modules):
+        if name == "hooked_pkg" or name.startswith("hooked_pkg."):
+            del sys.modules[name]
+
+    module = types.ModuleType("custom_finder")
+    module.__file__ = str(finder_file)
+    foreign_finder = type(
+        "ForeignFinder",
+        (),
+        {"find_spec": lambda self, name, path=None, target=None: None},
+    )
+    foreign_finder.__module__ = "custom_finder"
+    monkeypatch.setitem(sys.modules, "custom_finder", module)
+    monkeypatch.setattr(sys, "meta_path", [foreign_finder, *sys.meta_path])
+
+    report = check_origins(root, ("hooked_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert "meta_path" in detail, detail
+    assert str(finder_file.resolve()) in detail, detail
+
+
+def test_standard_and_installation_finders_are_still_trusted():
+    """The release lane depends on custom finders and must keep working.
+
+    ``pip install -e ".[dev]"`` installs an ``__editable__..._finder`` onto
+    ``sys.meta_path``, and a virtual environment installs ``_virtualenv._Finder``.
+    Refusing every non-stdlib finder would refuse the supported release lane,
+    so finders whose defining module lives in the interpreter's own
+    site-packages remain trusted.  This row is the control that keeps the
+    refusal from being simply "reject anything custom".
+    """
+
+    report = check_origins(REPO_ROOT)
+
+    assert report["status"] == "PASS", report
+    custom = [entry for entry in sys.meta_path if not _is_trusted_stdlib_finder(entry)]
+    assert custom, "expected the editable install to install a custom finder"
+    for entry in custom:
+        assert _is_installation_finder(entry), (
+            f"{entry!r} should be recognised as an installation finder, "
+            "otherwise the release lane is refused"
+        )
