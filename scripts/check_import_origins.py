@@ -179,7 +179,10 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
     return _is_within(source, _staging_root(root), strict=True)
 
 
-def _allowed_roots(project_root: Path) -> list[Path]:
+def _allowed_roots(
+    project_root: Path,
+    packages: tuple[str, ...] = REQUIRED_PACKAGES,
+) -> list[Path]:
     """Return every directory whose contents legitimately serve this checkout.
 
     Mirrors ``bootstrap_pyboy._runtime_roots``: a distribution's own
@@ -187,6 +190,11 @@ def _allowed_roots(project_root: Path) -> list[Path]:
     checkout as its source, and only for that distribution's own package
     directory.  Never the whole site-packages tree, which would let an
     unrelated copy of the package shadow the pinned one.
+
+    ``packages`` names the import origins actually being checked, so an
+    explicit ``--package`` run still admits a legitimate install of *that*
+    package.  Restricting the lookup to the defaults made the narrowed check
+    refuse the release lane, which installs both packages outside the checkout.
     """
 
     roots = [project_root]
@@ -194,7 +202,7 @@ def _allowed_roots(project_root: Path) -> list[Path]:
         distributions = importlib.metadata.packages_distributions()
     except Exception:  # noqa: BLE001 - metadata is advisory here
         return roots
-    for package in REQUIRED_PACKAGES:
+    for package in packages:
         for owner in distributions.get(package, ()) or ():
             if not _is_this_checkout(project_root, _installed_from(owner, project_root)):
                 continue
@@ -220,8 +228,27 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
         locations = list(getattr(module, "__path__", ()) or ())
         if not locations:
             return None, "module exposed neither __file__ nor __path__"
-        return Path(locations[0]).resolve(), ""
-    return Path(origin).resolve(), ""
+        candidate = Path(locations[0])
+    else:
+        candidate = Path(origin)
+    return _resolve_path(candidate, package)
+
+
+def _resolve_path(candidate: Path, package: str) -> tuple[Path | None, str]:
+    """Return ``candidate`` resolved, or the error that made it unusable.
+
+    A path an interpreter reports is data, and a path can be malformed rather
+    than merely foreign: an embedded NUL raises from ``Path.resolve``.  Letting
+    that escape turned a finding into a traceback, so a bare ``pytest`` run
+    died with an ``INTERNALERROR`` instead of the explicit refusal that names
+    the offending package.  An unusable origin is a finding like any other, so
+    report it and let the caller fail closed.
+    """
+
+    try:
+        return candidate.resolve(), ""
+    except (OSError, ValueError, RuntimeError) as exc:
+        return None, f"origin is not a usable path: {type(exc).__name__}: {exc}"
 
 
 def _foreign_namespace_locations(
@@ -253,7 +280,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
     """Return a JSON-serializable report of every package's resolved origin."""
 
     root = project_root.resolve()
-    allowed_roots = _allowed_roots(root) if packages == REQUIRED_PACKAGES else [root]
+    allowed_roots = _allowed_roots(root, packages)
     findings: list[dict] = []
     for package in packages:
         origin, error = _resolve_origin(package)
@@ -321,7 +348,10 @@ def main(argv: list[str] | None = None) -> int:
         "--package",
         action="append",
         dest="packages",
-        help="additional distribution name to verify (repeatable)",
+        help=(
+            "distribution name to verify *instead of* the defaults "
+            "(repeatable; replaces -- not adds to -- pokered_harness and pyboy)"
+        ),
     )
     arguments = parser.parse_args(argv)
 

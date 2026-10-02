@@ -1070,3 +1070,97 @@ def test_namespace_package_inside_the_checkout_still_passes(tmp_path, monkeypatc
     report = check_origins(tmp_path, ("solo_ns",))
 
     assert report["status"] == "PASS", report
+def test_unusable_origin_is_a_finding_not_a_crash(monkeypatch):
+    """A path the interpreter cannot resolve must be reported, not raised.
+
+    ``Path.resolve`` raises ``ValueError`` on an embedded NUL, and the reported
+    ``__file__`` is data the interpreter controls.  Letting that escape made a
+    bare ``pytest`` run die with an ``INTERNALERROR`` traceback instead of the
+    explicit refusal that names the package.  Observed before this row:
+    ``ValueError: embedded null byte`` escaped ``check_origins`` entirely.
+    """
+
+    module = types.ModuleType("pokered_harness")
+    module.__file__ = "/tmp/bad\x00name/__init__.py"
+    monkeypatch.setitem(sys.modules, "pokered_harness", module)
+
+    report = check_origins(REPO_ROOT, ("pokered_harness",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["origin"] is None
+    assert "not a usable path" in report["packages"][0]["detail"]
+
+
+def test_cli_reports_an_unusable_origin_as_a_failure(tmp_path, monkeypatch, capsys):
+    """The CLI must exit 1 with a verdict, not crash, on an unusable origin."""
+
+    module = types.ModuleType("pokered_harness")
+    module.__file__ = "/tmp/bad\x00name/__init__.py"
+    monkeypatch.setitem(sys.modules, "pokered_harness", module)
+
+    returncode = main(["--project-root", str(tmp_path), "--package", "pokered_harness"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert returncode == 1
+    assert payload["status"] == "FAIL"
+    assert payload["packages"][0]["origin"] is None
+
+
+def test_package_flag_still_admits_a_real_install(tmp_path, monkeypatch):
+    """An explicit ``--package`` run must consult that package's real install.
+
+    ``--package`` narrows *which* origins are reported, not which locations are
+    legitimate.  Restricting the allowed roots to the default packages made a
+    narrowed check refuse the release lane, where both packages are installed
+    outside the checkout.
+    """
+
+    checkout = tmp_path / "checkout"
+    site = tmp_path / "venv" / "site-packages"
+    package_dir = site / "widget"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    class _Distribution:
+        def read_text(self, name):
+            if name == "direct_url.json":
+                return json.dumps({"dir_info": {}, "url": f"file://{checkout}"})
+            return None
+
+        def locate_file(self, name):
+            return site / name
+
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"widget": ["widget"]},
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "distribution",
+        lambda name: _Distribution(),
+    )
+    monkeypatch.setattr(
+        origins,
+        "_resolve_origin",
+        lambda package: (package_dir / "__init__.py", ""),
+    )
+
+    report = origins.check_origins(checkout, ("widget",))
+
+    assert report["status"] == "PASS", report
+
+
+def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
+    """``--package`` is a replacement, and must report only what it checked."""
+
+    module = types.ModuleType("widget")
+    module.__file__ = str(tmp_path / "widget" / "__init__.py")
+    returncode = main(
+        ["--project-root", str(tmp_path), "--package", "widget", "--package", "gadget"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert returncode == 1
+    assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
+
