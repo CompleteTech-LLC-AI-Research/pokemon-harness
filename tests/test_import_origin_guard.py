@@ -489,6 +489,101 @@ def test_installed_from_refuses_an_unattributable_record(payload, reason):
         origins._distribution = original
 
 
+@pytest.mark.parametrize("junk", [None, 7, 42, object()])
+def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path, monkeypatch, junk):
+    """A ``__path__`` entry that is not a path must be reported, not raised.
+
+    The unresolvable-path rows pin ``ValueError`` from ``Path.resolve``.  A
+    value that is not a path at all fails earlier and differently:
+    ``Path(...)`` raises ``TypeError``, which no ``except (OSError,
+    ValueError, RuntimeError)`` clause catches.  That escaped ``check_origins``
+    as a traceback, the same INTERNALERROR the NUL rows were added to stop.
+
+    The portion belongs in the foreign list regardless: it cannot be shown to
+    be inside any allowed root, and "inside this checkout" is the claim being
+    disproved.
+    """
+
+    module = types.ModuleType("junk_ns")
+    module.__file__ = None
+    module.__path__ = [str(tmp_path / "inside"), junk]
+    monkeypatch.setitem(sys.modules, "junk_ns", module)
+
+    report = check_origins(tmp_path, ("junk_ns",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["package"] == "junk_ns"
+    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+
+
+@pytest.mark.parametrize("junk", [7, 42, 3.5, object()])
+def test_origin_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path, monkeypatch, junk):
+    """A ``__file__`` that is not a path must be a finding, not a traceback.
+
+    ``_resolve_path`` owns the only coercion of untrusted data to a ``Path``,
+    so a wrong-typed ``__file__`` is reported on the same channel as a
+    wrong-shaped one.  ``None`` is deliberately excluded: it is the documented
+    namespace-package signal and takes the ``__path__`` branch instead.
+    """
+
+    module = types.ModuleType("junk_file")
+    module.__file__ = junk
+    monkeypatch.setitem(sys.modules, "junk_file", module)
+
+    report = check_origins(tmp_path, ("junk_file",))
+
+    assert report["status"] == "FAIL"
+    assert report["packages"][0]["detail"].startswith("origin is not a usable path")
+
+
+def test_install_location_that_is_not_a_path_is_dropped_not_raised(tmp_path, monkeypatch):
+    """``locate_file`` returning ``None`` must drop the root, not raise.
+
+    Dropping is the fail-closed direction: the run then refuses an origin it
+    cannot attribute, rather than admitting one on an unverified root.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"url": tmp_path.as_uri()})
+
+        def locate_file(self, _package):
+            return None
+
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"widget": ["widget"]},
+    )
+    monkeypatch.setattr(origins, "_distribution", lambda _name: _Distribution())
+
+    assert origins._allowed_roots(tmp_path, ("widget",)) == [tmp_path]
+
+
+@pytest.mark.parametrize("payload", ["[]", '"a string"', "42", "null", "true"])
+def test_installed_from_refuses_a_wrong_shaped_record(payload):
+    """Valid JSON that is not an object cannot name a source.
+
+    pip writes an object here, but the record is on-disk data and must be
+    total: ``payload.get`` on a list raised ``AttributeError`` out of the
+    guard.  Unattributable is the correct answer, exactly as for a missing
+    record.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            return payload if filename == "direct_url.json" else None
+
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._installed_from("pyboy", Path("/anywhere")) is None
+    finally:
+        origins._distribution = original
+
+
 def test_is_this_checkout_refuses_an_unresolvable_source(monkeypatch):
     """A recorded source that cannot be resolved must not raise out of the guard.
 

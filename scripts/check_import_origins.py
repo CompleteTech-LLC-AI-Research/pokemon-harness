@@ -80,13 +80,15 @@ def _is_within(candidate: Path, root: Path, *, strict: bool = False) -> bool:
     than paths this checkout chose, and the comparison must stay total:
     letting ``Path.resolve`` raise turned a finding into an ``INTERNALERROR``
     traceback.  Refusing is the fail-closed direction, because "within this
-    checkout" is the claim being disproved.
+    checkout" is the claim being disproved.  A value that is not a path at all
+    is refused for the same reason: ``Path(...)`` raises ``TypeError``, which
+    is a failure of the data, not of this checkout.
     """
 
     try:
         resolved_root = Path(root).resolve()
         resolved_candidate = Path(candidate).resolve()
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, TypeError, ValueError, RuntimeError):
         return False
     if strict and Path(root).is_symlink():
         return False
@@ -118,6 +120,11 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        # Valid JSON is not necessarily the object pip writes.  A record that
+        # parses to a list or a scalar cannot name a source, so it is
+        # unattributable rather than a crash.
         return None
     url = payload.get("url")
     if not isinstance(url, str):
@@ -193,7 +200,7 @@ def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
     try:
         root = project_root.resolve()
         source = Path(source).resolve()
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, TypeError, ValueError, RuntimeError):
         return False
     if source == root:
         return True
@@ -231,7 +238,7 @@ def _allowed_roots(
                 located = _distribution(owner).locate_file(package)
             except (OSError, importlib.metadata.PackageNotFoundError):
                 continue
-            resolved, _ = _resolve_path(Path(located), package)
+            resolved, _ = _resolve_path(located, package)
             if resolved is not None:
                 roots.append(resolved)
     return roots
@@ -251,26 +258,31 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
         locations = list(getattr(module, "__path__", ()) or ())
         if not locations:
             return None, "module exposed neither __file__ nor __path__"
-        candidate = Path(locations[0])
+        candidate = locations[0]
     else:
-        candidate = Path(origin)
+        candidate = origin
     return _resolve_path(candidate, package)
 
 
-def _resolve_path(candidate: Path, package: str) -> tuple[Path | None, str]:
+def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
     """Return ``candidate`` resolved, or the error that made it unusable.
 
     A path an interpreter reports is data, and a path can be malformed rather
-    than merely foreign: an embedded NUL raises from ``Path.resolve``.  Letting
-    that escape turned a finding into a traceback, so a bare ``pytest`` run
-    died with an ``INTERNALERROR`` instead of the explicit refusal that names
-    the offending package.  An unusable origin is a finding like any other, so
-    report it and let the caller fail closed.
+    than merely foreign.  It can also be the wrong *type* entirely: an
+    embedded NUL raises from ``Path.resolve``, and a value that is not a path
+    at all raises from ``Path(...)`` before this function is ever reached.
+    Both let a finding escape as a traceback, so a bare ``pytest`` run died
+    with an ``INTERNALERROR`` instead of the explicit refusal that names the
+    offending package.
+
+    Conversion therefore happens *inside* the guard, and is the only place in
+    the module that coerces untrusted data to a ``Path``.  An unusable origin
+    is a finding like any other, so report it and let the caller fail closed.
     """
 
     try:
-        return candidate.resolve(), ""
-    except (OSError, ValueError, RuntimeError) as exc:
+        return Path(candidate).resolve(), ""
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
         return None, f"origin is not a usable path: {type(exc).__name__}: {exc}"
 
 
@@ -287,7 +299,9 @@ def _foreign_namespace_locations(package: str, allowed_roots: list[Path]) -> lis
     A portion that will not resolve is reported as the path it claims to be,
     unresolved.  It is certainly not inside any allowed root, so the caller
     fails closed -- and the detail stays readable instead of raising out of
-    ``check_origins`` as a traceback.
+    ``check_origins`` as a traceback.  A portion that is not a path at all is
+    reported as itself, which keeps the finding readable without ever
+    coercing untrusted data outside ``_resolve_path``.
     """
 
     module = sys.modules.get(package)
@@ -296,8 +310,8 @@ def _foreign_namespace_locations(package: str, allowed_roots: list[Path]) -> lis
     outside = []
     for location in getattr(module, "__path__", ()) or ():
         if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
-            resolved, _ = _resolve_path(Path(location), package)
-            outside.append(resolved if resolved is not None else Path(location))
+            resolved, _ = _resolve_path(location, package)
+            outside.append(resolved if resolved is not None else location)
     return outside
 
 
