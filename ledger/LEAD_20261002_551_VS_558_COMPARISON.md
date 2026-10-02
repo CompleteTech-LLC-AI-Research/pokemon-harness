@@ -94,19 +94,41 @@ that is the finding recorded in
 Both heads are unblocked on review grounds only. Neither has an independent
 review, which is the single blocker on both.
 
-Recommendation, on the evidence above:
+### Correction, 2026-10-02
+
+The recommendation below was wrong, and later work corrected it. Kept in place
+with the correction rather than rewritten, because the error is the useful part.
+
+**" #551's `__path__` containment scope is not covered by #558" is false.** The
+scope is present in #558 and behaves identically on both heads. A regular
+package whose `__path__` is extended to a foreign directory by
+`pkgutil.extend_path` is reported `FAIL` with the foreign portion named, on
+`0baf52e` and on this branch.
+
+What #558 did *not* have was #551's hardening of that same check against a
+mutable `__file__`, and that turned out to be a live false PASS rather than a
+missing feature. Recorded as
+`LEAD_20261002_558_BLOCKING_DRIFTING_FILE_TWIN.md` and fixed on the branch.
+
+It was found by porting #551's own test row
+`test_a_foreign_path_portion_is_reported_even_when_file_changes_between_reads`
+and running it against both trees — not by any attack written against #558. The
+lesson is that comparing two implementations means running their tests against
+each other, not only running probes.
+
+The recommendation that survives:
 
 - #558 should absorb #551 rather than compete with it. #551's fingerprint is
   the stronger shape, and folding `co_flags`, `co_freevars`, `co_cellvars`,
   `co_argcount` and `co_nlocals` into #558's signature costs nothing and closes
   the whole omitted-field question rather than arguing it empirically per
-  corpus.
-- #551's `__path__` containment scope for a regular package is not covered by
-  #558 and must be carried across; it is the reason #551 exists.
+  corpus. **Done**, in `4cf5a61`.
+- A large line-count consolidation is *not* required. The two heads converge
+  much faster than a diff of their sizes suggests, because they agree on
+  behaviour and differ in shape.
 
 Neither may merge before that consolidation and an independent review of the
 resulting head. Doing this now, while both are unmerged and unapproved, is
 cheaper than reconciling two merged PRs that both rewrote the same guard.
 
 Release status stays PARTIAL.
-
