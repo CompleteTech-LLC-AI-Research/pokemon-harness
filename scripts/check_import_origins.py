@@ -202,6 +202,30 @@ def _code_objects(code: object):
             yield from _code_objects(constant)
 
 
+def _constant_signature(code: object):
+    """Return a comparable summary of ``code``'s constant table.
+
+    CPython addresses constants by *index*, not by value, so the marshalled
+    ``co_code`` of two functions is byte-identical when they differ only in
+    what their constants *are*.  Comparing ``co_code`` alone therefore cannot
+    tell a genuine ``find_spec`` from a hostile one that merely has the same
+    bytecode shape and serves a different path.
+
+    Nested code objects are reduced to their own constant signature rather
+    than compared by identity, because the recompiled copy is a different
+    object even when the source is identical.  Comparing code objects with
+    ``==`` would always fail for them, which is why the signature recurses
+    instead.
+    """
+
+    return tuple(
+        _constant_signature(item)
+        if isinstance(item, types.CodeType)
+        else (type(item).__name__, repr(item))
+        for item in getattr(code, "co_consts", ())
+    )
+
+
 def _code_matches_source(function: object, source_file: Path) -> bool:
     """Return whether ``function``'s bytecode really occurs in ``source_file``.
 
@@ -218,6 +242,18 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
     finder is refused.  Genuine install finders -- the editable-install shim
     and the virtualenv helper -- do match, because their bytecode really does
     come from the file they name.
+
+    Bytecode alone is not enough to compare, because CPython addresses
+    constants by index: two functions whose ``co_code`` is byte-identical can
+    still embed different values, and a hostile ``find_spec`` sharing the shape
+    of a genuine one would otherwise corroborate while serving a foreign path.
+    The constant table is therefore part of the comparison, summarised
+    recursively so a nested code object's own constants count too.
+
+    This is a strong corroboration, not a proof of provenance.  It closes the
+    case where a hostile finder differs from a genuine one only in the values it
+    serves; it does not claim to defeat an attacker who can make the named file
+    itself contain the hostile source.
     """
 
     try:
@@ -226,12 +262,14 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
         tree = compile(source, str(source_file), "exec")
     except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
         return False
+    target_signature = _constant_signature(target)
     for candidate in _code_objects(tree):
         if (
             candidate.co_name == target.co_name
             and candidate.co_code == target.co_code
             and candidate.co_names == target.co_names
             and candidate.co_varnames == target.co_varnames
+            and _constant_signature(candidate) == target_signature
         ):
             return True
     return False

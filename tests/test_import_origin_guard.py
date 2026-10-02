@@ -2374,6 +2374,130 @@ def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
         genuine.unlink()
 
 
+def test_a_same_bytecode_finder_with_a_foreign_constant_is_refused(tmp_path, monkeypatch):
+    """Matching bytecode shape is not matching provenance.
+
+    CPython addresses constants by index, so two functions whose ``co_code``
+    is byte-identical can embed different values.  A hostile ``find_spec``
+    that has the same bytecode *shape* as a genuine ``find_spec`` already
+    present in site-packages therefore matches on ``co_code``, ``co_names``
+    and ``co_varnames`` while serving an entirely different path.
+
+    Corroborating on bytecode alone accepted such a finder and the guard
+    reported PASS while a foreign submodule loaded.  This row pins the
+    refusal; deleting the constant comparison from the corroboration restores
+    that false green while every other row still passes.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "shape_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "shape_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "shape_pkg" or name.startswith("shape_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    neighbour = site_root / "shape_neighbour_finder.py"
+    # The genuine neighbour serves a harmless path of the same length, so the
+    # hostile twin differs from it *only* in the value of its constant.
+    harmless = "x" * len(str((foreign / "leaked.py").resolve()))
+    template = (
+        "class ShapeNeighbour:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname == 'shape_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(fullname, "
+        "{path!r})\n"
+        "        return None\n"
+    )
+    neighbour.write_text(template.format(path=harmless), encoding="utf-8")
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    hostile_source = template.format(path=foreign_file)
+    namespace: dict = {"importlib": importlib}
+    # Compile under the neighbour's real filename: same shape, foreign target.
+    exec(compile(hostile_source, str(neighbour), "exec"), namespace)  # noqa: S102
+    forged = namespace["ShapeNeighbour"]()
+    forged.__file__ = str(neighbour)
+
+    genuine_tree = compile(neighbour.read_text(encoding="utf-8"), str(neighbour), "exec")
+    genuine_find_specs = [
+        code
+        for code in origins._code_objects(genuine_tree)
+        if code.co_name == "find_spec"
+    ]
+    assert len(genuine_find_specs) == 1, genuine_find_specs
+    genuine_code = genuine_find_specs[0]
+    hostile_code = forged.find_spec.__code__
+    assert genuine_code.co_code == hostile_code.co_code, (
+        "the premise is that the two share a bytecode shape"
+    )
+    assert genuine_code.co_consts != hostile_code.co_consts, (
+        "the premise is that only the served constant differs"
+    )
+
+    sys.meta_path.insert(0, forged)
+    try:
+        assert not _is_installation_finder(forged), (
+            "a matching bytecode shape with a different constant is not "
+            "corroborated by the file it borrows its name from"
+        )
+        report = check_origins(root, ("shape_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("shape_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+        neighbour.unlink()
+
+
+def test_a_genuine_finder_is_still_trusted_when_its_constants_are_compared():
+    """The stricter comparison must not refuse a real install finder.
+
+    Comparing the constant table is what closes the same-shape forgery above,
+    so it needs a row in the other direction: a finder whose bytecode and
+    constants genuinely come from the site-packages file it names has to stay
+    trusted, or every editable install would be reported as a hostile
+    meta-path entry.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = site_root / "genuine_install_constant_row.py"
+    genuine.write_text(
+        "class GenuineConstantFinder:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname == 'anything':\n"
+        "            return importlib.util.spec_from_file_location(fullname, path)\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    namespace: dict = {"importlib": importlib}
+    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
+    finder = namespace["GenuineConstantFinder"]()
+    finder.__file__ = str(genuine)
+
+    try:
+        function = getattr(finder.find_spec, "__func__", finder.find_spec)
+        assert origins._code_matches_source(function, genuine), (
+            "bytecode and constants compiled from this file must be recognised"
+        )
+        assert _is_installation_finder(finder), (
+            "a genuine site-packages finder must keep its trust"
+        )
+    finally:
+        genuine.unlink()
+
+
 def test_an_empty_package_request_fails_closed(tmp_path):
     """Verifying zero packages must never be reported as a pass.
 
