@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.jpg" alt="An abstract grid of glowing teal, amber and violet tiles forming a game world with a small blue probe following a path, above a console-like panel of memory cells." width="100%"></p>
+
 # pokered-harness
 
 `pokered-harness` is a memory-first automation harness for Pokémon Red,
