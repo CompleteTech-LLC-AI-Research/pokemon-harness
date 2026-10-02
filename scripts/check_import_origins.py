@@ -134,7 +134,12 @@ def _site_packages_roots() -> list[Path]:
 def _finder_module(finder: object) -> object | None:
     """Return the module object that defines ``finder``, if it is loaded."""
 
-    name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    try:
+        name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
+        return None
     if not isinstance(name, str):
         return None
     return sys.modules.get(name)
@@ -370,6 +375,57 @@ def _finder_code_file(finder: object) -> Path | None:
     return _safe_resolve(Path(filename))
 
 
+def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
+    """Return whether the interpreter itself imported ``finder`` from ``source_file``.
+
+    Matching the finder's code against the bytes of a site-packages file proves
+    only that *equivalent code exists there*, never that the running finder was
+    loaded from there.  Those are different claims, and the gap between them is
+    a false PASS: writing the finder's own source into site-packages and then
+    running ``exec(compile(source, that_path, "exec"))`` produces a finder whose
+    code matches that file exactly while having no provenance in it at all.
+    Independent review reproduced this twice, by two different routes, and each
+    time the guard reported ``PASS`` and a foreign submodule loaded afterwards.
+
+    Content matching is therefore not sufficient on its own, and this check
+    supplies what it cannot: the defining module must be a real entry in
+    ``sys.modules`` whose spec names the same file.  Code produced by a bare
+    ``exec`` is never a module the import system created, so it has no such
+    entry and cannot pass here.
+
+    A planted ``sys.modules`` entry does not help an attacker either: the
+    module's spec must name the same file *and* that file's ``__init__`` /
+    submodule relationship is re-checked by the caller through the code
+    fingerprint, so forging the pair means writing the file, which is the
+    threat model the site-packages location already assumes.  What this removes
+    is the cheap attack that needed no import at all.
+
+    Returns ``False`` on every difficulty -- a missing module, a spec without an
+    origin, or a raising attribute -- so an unanswerable question never becomes
+    trust.
+    """
+
+    module = _finder_module(finder)
+    if module is None:
+        return False
+    try:
+        spec = getattr(module, "__spec__", None)
+        if spec is None:
+            return False
+        origin = getattr(spec, "origin", None)
+        if not isinstance(origin, str) or not origin:
+            return False
+        # A namespace or synthetic spec carries no file-backed origin.
+        if getattr(spec, "has_location", False) is not True:
+            return False
+        resolved = _safe_resolve(Path(origin))
+        return resolved is not None and resolved == source_file
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted spec; untrusted by default
+        return False
+
+
 def _is_installation_finder(finder: object) -> bool:
     """Return whether ``finder`` was installed with this interpreter.
 
@@ -395,6 +451,15 @@ def _is_installation_finder(finder: object) -> bool:
     filename names a real file that does not contain the hostile bytecode, so
     the second channel refuses it.
 
+    That is necessary but not sufficient, and the gap was the last false PASS:
+    code *matching* a site-packages file is not the same as code *loaded from*
+    it.  Writing the finder's own source into site-packages and then running
+    ``exec(compile(source, that_path, "exec"))`` satisfies every content check
+    while having no provenance there whatsoever.  So the defining module must
+    also be an entry the import system actually created for that same file,
+    which a bare ``exec`` never produces.  Anything a finder can merely *say*
+    about itself is ignored for this decision.
+
     Residual boundary: an attacker who can write a file into this
     interpreter's site-packages, or who runs code before the guard does, is out
     of scope -- at that point they own the interpreter rather than the finder.
@@ -404,6 +469,8 @@ def _is_installation_finder(finder: object) -> bool:
         return True
     code_file = _finder_code_file(finder)
     if code_file is None:
+        return False
+    if not _finder_was_imported_from(finder, code_file):
         return False
     try:
         if not code_file.is_file():
@@ -697,7 +764,19 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
     # returned no findings at all -- a false PASS for a package that really
     # does have a foreign ``__path__``.
     _RESOLVED_MODULES[package] = module
-    origin = getattr(module, "__file__", None)
+    # Reading ``__file__`` is an untrusted read like any other: a module can
+    # override ``__getattribute__`` so that touching ``__file__`` raises.  That
+    # read sat outside the guard's exception boundary, so the raise escaped
+    # ``check_origins`` as a traceback and the operator saw a crash instead of
+    # the FAIL naming the offending package -- the one outcome this module
+    # exists to make impossible.  A module that cannot report where it lives
+    # is a finding, never a crash.
+    try:
+        origin = getattr(module, "__file__", None)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - hostile getter is a finding
+        return None, f"__file__ could not be read: {type(exc).__name__}: {_describe(exc)}"
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
         # the only available statement of where they resolved.
@@ -928,9 +1007,7 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
         # package, which must not be judged against these roots, so the
         # function's own fallback handles it.
         live = _RESOLVED_MODULES.get(package)
-        foreign, unusable = _foreign_path_locations(
-            package, allowed_roots, origin, live
-        )
+        foreign, unusable = _foreign_path_locations(package, allowed_roots, origin, live)
         if foreign or unusable:
             detail = ""
             if foreign:
