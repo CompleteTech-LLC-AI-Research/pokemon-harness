@@ -83,17 +83,49 @@ disposition for the failures measured so far:
 - **2 were my measurement error** and disappear on the documented interpreter.
 - **1 is load-flaky** and needs a quiet window.
 
+Second pass, on the documented interpreter, added one more unmeasurable case
+(`test_duplicate_connection_preserves_existing_epoch_and_execution[listen]`,
+`FF` in one worktree and `..` in another minutes apart), bringing the
+non-deterministic set to 2.
+
 **Not a single deterministic source defect was found in the measured files.**
 That is a materially different position from the issue's "11 unit-tier and 201
 timing-tier failures" and should be re-stated before anyone repairs code.
+
+## Addendum: `test_mcp_timed_remote_owner.py` re-measured
+
+The gap flagged above is now closed. On the documented interpreter this file
+shows **1 failure, not 30** — the other 29 were the missing async plugin.
+
+```
+tests/test_mcp_timed_remote_owner.py   FAILED=1   Read-only=0
+  test_duplicate_connection_preserves_existing_epoch_and_execution[listen]
+```
+
+I then tried to separate a real defect from host contention, and the evidence
+says contention. Same tree, same interpreter, back to back:
+
+```
+in the master worktree:   FF   FF   FF   FF     (load 5.18)
+in the primary checkout:  FF   ..                (load 4.44)
+```
+
+Identical code, identical interpreter, opposite results minutes apart. The
+support module budgets each request at `BOUND = 5.0` seconds
+(`tests/_mcp_timed_remote_support.py:18`), and the failures are
+`TimedOwnerError: request deadline expired` at `mcp_timed_owner.py:142` — the
+budget being missed, not a wrong value being produced. On a 4-core host running
+at load 4–5, that is contention, and it is the same missing CPU allocation
+#85/#86 describe.
+
+I am not recording this as a source defect and I am not recording it as clean.
+It is **unmeasurable on this host**, and it needs the same quiet CPU window
+that #164 already lacked.
 
 ## What is NOT established
 
 - The 201 **timing-tier** failures were not re-measured. They are the larger
   half of #253 and are not covered by this note.
-- `test_mcp_timed_remote_owner.py` showed 30 failures on the scratch venv, but
-  those were dominated by the missing async plugin and were **not** re-measured
-  on the documented interpreter. They must be before any conclusion is drawn.
 - Nothing here closes #253.
 
 ## Disposition
