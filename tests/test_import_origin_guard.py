@@ -2004,6 +2004,44 @@ def test_a_hostile_finder_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch
     assert "meta_path" in report["packages"][0]["detail"], report
 
 
+def test_a_hostile_finder_raising_base_exception_cannot_abort_the_guard(
+    tmp_path, monkeypatch
+):
+    """A ``BaseException`` from a hostile metaclass must not escape either.
+
+    The row above raises ``RuntimeError``, which ``except Exception`` already
+    caught.  A metaclass is arbitrary code and need not stay inside
+    ``Exception``: raising a direct ``BaseException`` subclass bypassed every
+    such clause in ``_finder_source`` and escaped ``check_origins`` with a
+    traceback, which is the exact crash mode the preflight exists to prevent.
+    """
+
+    class ExplodingBase(BaseException):
+        """Not an ``Exception``; that distinction is the whole point of the row."""
+
+    class ExplodingMeta(type):
+        @property
+        def __module__(cls):
+            raise ExplodingBase("metaclass refuses to name itself")
+
+    root = tmp_path / "root"
+    package_dir = root / "base_exception_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "base_exception_pkg" or name.startswith("base_exception_pkg."):
+            del sys.modules[name]
+
+    hostile = ExplodingMeta("HostileFinder", (), {"find_spec": lambda self, *a: None})
+    monkeypatch.setattr(sys, "meta_path", [hostile, *sys.meta_path])
+
+    report = check_origins(root, ("base_exception_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "meta_path" in report["packages"][0]["detail"], report
+
+
 def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
     """A genuine site-packages ``__file__`` must not authenticate a stranger.
 

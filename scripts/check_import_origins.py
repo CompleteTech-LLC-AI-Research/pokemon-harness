@@ -165,28 +165,28 @@ def _finder_source(finder: object) -> Path | None:
 
     try:
         module = _finder_module(finder)
-    except Exception:  # noqa: BLE001 - hostile metaclass; untrusted by default
+    except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
         return None
     if module is not None:
         try:
             origin = getattr(module, "__file__", None)
-        except Exception:  # noqa: BLE001 - hostile module; fall through to find_spec
+        except BaseException:  # noqa: BLE001 - hostile module; fall through to find_spec
             origin = None
         if isinstance(origin, str) and origin:
             return _safe_resolve(Path(origin))
     try:
         name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
-    except Exception:  # noqa: BLE001 - hostile metaclass; untrusted by default
+    except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
         return None
     if not isinstance(name, str) or not name:
         return None
     try:
         spec = importlib.util.find_spec(name)
-    except Exception:  # noqa: BLE001 - a hostile import hook must not abort the guard
+    except BaseException:  # noqa: BLE001 - a hostile import hook must not abort the guard
         return None
     try:
         origin = getattr(spec, "origin", None) if spec is not None else None
-    except Exception:  # noqa: BLE001 - hostile spec object
+    except BaseException:  # noqa: BLE001 - hostile spec object
         return None
     if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
         return None
@@ -659,7 +659,7 @@ def _describe_finder(entry: tuple[object, Path | None]) -> str:
             name = f"{finder.__module__}.{getattr(finder, '__qualname__', None) or finder.__name__}"
         else:
             name = f"{type(finder).__module__}.{type(finder).__qualname__}"
-    except Exception:  # noqa: BLE001 - a hostile metaclass must not abort the report
+    except BaseException:  # noqa: BLE001 - a hostile metaclass must not abort the report
         name = "<finder with an unreadable identity>"
     if source is not None:
         return f"{name} (from {source})"
