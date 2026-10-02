@@ -105,23 +105,6 @@ def _distribution_lookup(table):
     return lookup
 
 
-def _pin_vendored_revision(project: Path, revision: str) -> None:
-    """Write the vendored PyBoy revision marker ``project`` pins."""
-
-    marker = project / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(f"{revision}\n", encoding="utf-8")
-
-
-def _fake_revision_marker(monkeypatch, revision: str | None) -> None:
-    """Make the imported ``pyboy`` report ``revision`` (or nothing at all)."""
-
-    module = types.ModuleType("pyboy")
-    if revision is not None:
-        module.__pokered_harness_revision__ = revision
-    monkeypatch.setitem(sys.modules, "pyboy", module)
-
-
 def test_check_origins_accepts_a_venv_installed_from_this_checkout(tmp_path, monkeypatch):
     """The release lane: CI installs into a venv outside the checkout.
 
@@ -174,17 +157,17 @@ def test_check_origins_accepts_pyboy_owned_by_its_own_distribution(tmp_path, mon
     fix admitted only ``pokered-harness``-owned site-packages and so failed
     the real CI run with ``pyboy`` reported as outside the checkout.
 
-    The install source cannot be the discriminator: the native lane builds from
-    a *staged copy* of ``vendor/pyboy-src`` in a temporary directory, so
-    ``direct_url.json`` records a throwaway path that never equals the
-    checkout.  What separates it from a stock PyBoy is that it reports this
-    checkout's vendored revision, which is what this row pins.
+    The install source is not the checkout itself: the native lane builds from
+    a *staged copy* of ``vendor/pyboy-src`` so no generated C or object files
+    can be reused, and ``direct_url.json`` records that staging path.  It is
+    still a legitimate install of this checkout because the staging directory
+    lives inside this checkout's own ``build/`` tree, which is what this row
+    pins.  Location, not a self-reported revision, is the discriminator.
     """
 
     project = tmp_path / "checkout"
     project.mkdir()
-    _pin_vendored_revision(project, "rev-from-this-checkout")
-    staged = tmp_path / "build" / "pyboy-native-abc" / "pyboy-src"
+    staged = project / "build" / "pyboy-native-abc" / "pyboy-src"
     staged.mkdir(parents=True)
     site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
     installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
@@ -209,7 +192,6 @@ def test_check_origins_accepts_pyboy_owned_by_its_own_distribution(tmp_path, mon
     monkeypatch.setattr(
         origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
     )
-    _fake_revision_marker(monkeypatch, "rev-from-this-checkout")
 
     report = check_origins(project)
 
@@ -221,15 +203,16 @@ def test_check_origins_rejects_a_foreign_pyboy_distribution(tmp_path, monkeypatc
 
     The companion to the row above: admitting a separately distributed
     ``pyboy`` is only safe while it is traceable to this checkout.  One built
-    from a sibling worktree records that other directory *and* pins that
-    worktree's own vendored revision, so it fails both tests — which is the
-    original #534 defect, not a loosened one.
+    from a sibling worktree records that other directory, which is neither this
+    checkout nor a staging directory beneath it.
     """
 
     project = tmp_path / "checkout"
     project.mkdir()
-    _pin_vendored_revision(project, "rev-from-this-checkout")
     other = tmp_path / "other-worktree"
+    # The other checkout staged its own build inside *its own* build/ tree.
+    # Sharing the directory name is not sharing provenance.
+    (other / "build" / "pyboy-native-abc" / "pyboy-src").mkdir(parents=True)
     site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
     installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
     for name, directory in installed.items():
@@ -251,7 +234,57 @@ def test_check_origins_rejects_a_foreign_pyboy_distribution(tmp_path, monkeypatc
     monkeypatch.setattr(
         origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
     )
-    _fake_revision_marker(monkeypatch, "rev-from-the-other-worktree")
+
+    report = check_origins(project)
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"][1]["package"] == "pyboy"
+
+
+def test_check_origins_rejects_pyboy_reporting_this_checkouts_revision(tmp_path, monkeypatch):
+    """A self-reported revision must not admit another checkout's install.
+
+    The vendored PyBoy revision is a compile-time constant: every worktree at
+    the same pin carries it, and an installed copy could report any value it
+    liked.  Admitting an install on that basis let a ``pyboy`` from a sibling
+    worktree pass the guard, which is the #534 defect.  Location is the only
+    evidence the guard may use, so this row pins that refusal even when the
+    imported module claims the right revision.
+    """
+
+    project = tmp_path / "checkout"
+    project.mkdir()
+    revision = "fd765b1808ac9cb192b42ae971987158ff36ae48"
+    marker = project / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(f"{revision}\n", encoding="utf-8")
+    other = tmp_path / "other-worktree"
+    other.mkdir()
+    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    installed = {name: site_packages / name for name in ("pokered_harness", "pyboy")}
+    for name, directory in installed.items():
+        _make_package(directory.parent, name)
+    distributions = {
+        **_fake_install(
+            ["pokered-harness"], {"pokered_harness": installed["pokered_harness"]}, project
+        ),
+        **_fake_install(["pyboy"], {"pyboy": installed["pyboy"]}, other),
+    }
+    monkeypatch.setattr(
+        origins.importlib.metadata, "distribution", _distribution_lookup(distributions)
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"pokered_harness": ["pokered-harness"], "pyboy": ["pyboy"]},
+    )
+    monkeypatch.setattr(
+        origins, "_resolve_origin", lambda name: (installed[name] / "__init__.py", "")
+    )
+    # The stale install reports exactly the revision this checkout pins.
+    module = types.ModuleType("pyboy")
+    module.__pokered_harness_revision__ = revision
+    monkeypatch.setitem(sys.modules, "pyboy", module)
 
     report = check_origins(project)
 
@@ -320,6 +353,62 @@ def test_check_origins_rejects_a_competing_pyboy_distribution(tmp_path, monkeypa
     report = check_origins(project)
 
     assert report["status"] == "FAIL", report
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ({"dir_info": {}, "url": "https://example.invalid/checkout"}, "https scheme"),
+        ({"dir_info": {}, "url": "ssh://localhost/checkout"}, "non-file scheme"),
+        ({"dir_info": {}, "url": "file://evil-host/checkout"}, "foreign netloc"),
+        ({"dir_info": {}}, "missing url key"),
+        ({"dir_info": {}, "url": None}, "null url"),
+        ({"dir_info": {}, "url": 17}, "non-string url"),
+        ("not json at all", "malformed json"),
+    ],
+)
+def test_installed_from_refuses_an_unattributable_record(payload, reason):
+    """Only a plain ``file://`` record of a real local directory attributes.
+
+    A remote or host-qualified URL names a location this process never
+    verified, so it must contribute no allowed site-packages root.  These
+    branches are load-bearing for failing closed, and ``_fake_install`` only
+    ever builds well-formed ``file://`` URLs, so without these rows the scheme
+    and netloc guards were never exercised.
+    """
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return payload if isinstance(payload, str) else json.dumps(payload)
+
+    assert origins._installed_from is not None  # the helper under test
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._installed_from("pyboy", Path("/anywhere")) is None, reason
+    finally:
+        origins._distribution = original
+
+
+def test_installed_from_accepts_a_plain_local_record():
+    """The positive case, so the refusals above are not vacuous."""
+
+    source = Path(__file__).resolve().parent.parent
+
+    class _Distribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"dir_info": {"editable": True}, "url": f"file://{source}"})
+
+    original = origins._distribution
+    origins._distribution = lambda _name: _Distribution()
+    try:
+        assert origins._installed_from("pokered-harness", source) == source
+    finally:
+        origins._distribution = original
 
 
 def test_check_origins_rejects_a_package_from_another_checkout(tmp_path, monkeypatch):

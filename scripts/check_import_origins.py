@@ -15,21 +15,27 @@ An origin counts as this checkout's when it either
 
 The second case is the release lane: CI runs ``pip install -e ".[dev]"`` into a
 virtual environment created outside the checkout, so ``pyboy`` legitimately
-resolves to ``<venv>/site-packages/pyboy``.  Two independent things can make an
-install traceable, because the release lane installs the vendored emulator in
-two different ways:
+resolves to ``<venv>/site-packages/pyboy``.  An install is traceable only
+through the directory pip recorded in ``direct_url.json``, which for a local
+install is always the literal source tree that was built.  There are two
+legitimate source directories:
 
-* pip recorded ``project_root`` as the install source in ``direct_url.json``.
-  This covers the editable harness install and any plain local install.
-* the package reports this checkout's vendored PyBoy revision.  The native CI
-  lane builds ``pyboy`` from a *staged copy* of ``vendor/pyboy-src`` under a
-  temporary directory, so its recorded install source is a throwaway path that
-  never equals ``project_root``.  A stock PyBoy would not carry this checkout's
-  revision marker, so requiring the marker still separates the two.  This is
-  the same signal ``bootstrap_pyboy.py`` already treats as authoritative.
+* ``project_root`` itself, for the editable harness install and any plain local
+  install of the checkout.
+* a staging directory *inside* this checkout's own ``build/`` tree, used by the
+  native CI lane, which builds ``pyboy`` from a staged copy of
+  ``vendor/pyboy-src`` so no generated C or object files can be reused.  The
+  staged path is still physically inside the checkout, so location alone
+  separates it from a sibling worktree.
+
+Nothing the imported package says about itself is used as evidence.  The
+vendored revision marker is a compile-time constant carried by every worktree
+at the same pin, so it cannot distinguish two checkouts and an installed copy
+could report any value it liked.  Provenance is decided by location only, which
+is the property an installed copy cannot fabricate about itself.
 
 A stale worktree satisfies neither: its install records that other directory,
-and its vendored revision does not match this checkout's.
+which is neither this checkout nor a staging directory beneath this checkout.
 
 Exit codes: ``0`` when every package traces to ``project_root``, ``1`` on any
 mismatch or resolution failure, ``2`` on usage errors.
@@ -121,30 +127,34 @@ def _distribution(distribution_name: str):
     raise importlib.metadata.PackageNotFoundError(distribution_name)
 
 
-def _vendored_revision(project_root: Path) -> str | None:
-    """Return the vendored PyBoy revision this checkout pins, if readable."""
+def _staging_root(project_root: Path) -> Path:
+    """Return the checkout-local staging directory used by the native build."""
 
-    revision_file = project_root / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION"
-    try:
-        return revision_file.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
+    return project_root / "build"
 
 
-def _reports_revision(package: str, expected: str) -> bool:
-    """Return whether the imported ``package`` reports ``expected``.
+def _is_this_checkout(project_root: Path, source: Path | None) -> bool:
+    """Return whether a recorded install source belongs to this checkout.
 
-    ``bootstrap_pyboy`` already requires this marker to match the vendored
-    revision, so a copy that reports a different one is not this checkout's
-    emulator.  A module that cannot be imported, or that does not expose the
-    marker, reports ``False`` and is therefore not admitted on this basis.
+    Two locations qualify, and both are decided by the filesystem rather than
+    by anything the installed distribution reports about itself:
+
+    * ``project_root`` -- an editable or plain local install of the checkout.
+    * a directory inside this checkout's own ``build/`` tree -- the native lane
+      stages ``vendor/pyboy-src`` there before building it, and pip records
+      that staging path as the install source.  Requiring the recorded source
+      to be *physically inside this checkout* is what a stale worktree cannot
+      satisfy, because its own ``build/`` tree belongs to that other checkout.
+
+    Anything else, including a missing record, an unresolvable path, or a
+    staging directory that merely shares a name, is refused.
     """
 
-    try:
-        imported = __import__(package)
-    except BaseException:  # noqa: BLE001 - an unimportable package is not a match
+    if source is None:
         return False
-    return getattr(imported, "__pokered_harness_revision__", None) == expected
+    if source == project_root:
+        return True
+    return _is_within(source, _staging_root(project_root))
 
 
 def _allowed_roots(project_root: Path) -> list[Path]:
@@ -158,23 +168,13 @@ def _allowed_roots(project_root: Path) -> list[Path]:
     """
 
     roots = [project_root]
-    # A separately installed distribution is admitted when it records this
-    # checkout as its install source *or* carries this checkout's vendored
-    # PyBoy revision.  See the module docstring for why both are needed.
-    revision = _vendored_revision(project_root)
-
-    def _belongs_to_this_checkout(owner: str, package: str) -> bool:
-        if _installed_from(owner, project_root) == project_root:
-            return True
-        return package == "pyboy" and revision is not None and _reports_revision(package, revision)
-
     try:
         distributions = importlib.metadata.packages_distributions()
     except Exception:  # noqa: BLE001 - metadata is advisory here
         return roots
     for package in REQUIRED_PACKAGES:
         for owner in distributions.get(package, ()) or ():
-            if not _belongs_to_this_checkout(owner, package):
+            if not _is_this_checkout(project_root, _installed_from(owner, project_root)):
                 continue
             try:
                 located = _distribution(owner).locate_file(package)
