@@ -4,7 +4,7 @@
 
 Independent review of `947e3ec`
 (`ledger/REVIEW_551_947e3ec_indep.md`, SHA256
-`a29a5d8f...` — see the copy committed alongside this file) returned REQUEST CHANGES. CI was green
+`7177d72ff42dde33b9650957857848bfcb8004dcec3adb1dad87ccea5362e143`) returned REQUEST CHANGES. CI was green
 and three of four mutations were killed, but the reviewer found a third route to the same false
 PASS. It also pointed out precisely why my previous fix was insufficient:
 
