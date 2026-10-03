@@ -206,7 +206,13 @@ def _code_objects(code: object):
     """Yield ``code`` and every code object nested inside its constants."""
 
     yield code
-    for constant in getattr(code, "co_consts", ()):
+    try:
+        constants = getattr(code, "co_consts", ())
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - hostile code object; nothing to descend
+        return
+    for constant in constants:
         if isinstance(constant, types.CodeType):
             yield from _code_objects(constant)
 
@@ -247,36 +253,50 @@ def _code_signature(code: object) -> tuple:
     """
 
     items = []
-    for constant in getattr(code, "co_consts", ()):
-        if isinstance(constant, types.CodeType):
-            items.append(
-                (
-                    constant.co_name,
-                    constant.co_code,
-                    constant.co_names,
-                    constant.co_varnames,
-                    constant.co_flags,
-                    constant.co_argcount,
-                    constant.co_posonlyargcount,
-                    constant.co_kwonlyargcount,
-                    constant.co_nlocals,
-                    constant.co_freevars,
-                    constant.co_cellvars,
-                    _code_signature(constant),
+    try:
+        for constant in getattr(code, "co_consts", ()):
+            if isinstance(constant, types.CodeType):
+                items.append(
+                    (
+                        constant.co_name,
+                        constant.co_code,
+                        constant.co_names,
+                        constant.co_varnames,
+                        constant.co_flags,
+                        constant.co_argcount,
+                        constant.co_posonlyargcount,
+                        constant.co_kwonlyargcount,
+                        constant.co_nlocals,
+                        constant.co_freevars,
+                        constant.co_cellvars,
+                        _code_signature(constant),
+                    )
                 )
-            )
-        else:
-            items.append((type(constant).__name__, repr(constant)))
-    return (
-        tuple(items),
-        getattr(code, "co_flags", None),
-        getattr(code, "co_argcount", None),
-        getattr(code, "co_posonlyargcount", None),
-        getattr(code, "co_kwonlyargcount", None),
-        getattr(code, "co_nlocals", None),
-        getattr(code, "co_freevars", None),
-        getattr(code, "co_cellvars", None),
-    )
+            else:
+                items.append((type(constant).__name__, repr(constant)))
+        return (
+            tuple(items),
+            getattr(code, "co_flags", None),
+            getattr(code, "co_argcount", None),
+            getattr(code, "co_posonlyargcount", None),
+            getattr(code, "co_kwonlyargcount", None),
+            getattr(code, "co_nlocals", None),
+            getattr(code, "co_freevars", None),
+            getattr(code, "co_cellvars", None),
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - hostile code object; refuse to match it
+        # A fresh object each call: it compares equal only to itself, so an
+        # unreadable code object can never match another one -- not even a
+        # second unreadable one, which a shared sentinel would have matched.
+        return _unreadable_signature()
+
+
+def _unreadable_signature() -> object:
+    """Return a signature value that cannot equal any other signature."""
+
+    return object()
 
 
 def _code_matches_source(function: object, source_file: Path) -> bool:
@@ -326,18 +346,26 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
         with tokenize.open(source_file) as handle:
             source = handle.read()
         tree = compile(source, str(source_file), "exec", dont_inherit=True)
-    except Exception:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - unreadable/undecodable/uncompilable; untrusted
         return False
-    target_signature = _code_signature(target)
+    try:
+        target_signature = _code_signature(target)
+    except BaseException:  # noqa: BLE001 - hostile code object; untrusted by default
+        return False
     for candidate in _code_objects(tree):
-        if (
-            candidate.co_name == target.co_name
-            and candidate.co_code == target.co_code
-            and candidate.co_names == target.co_names
-            and candidate.co_varnames == target.co_varnames
-            and _code_signature(candidate) == target_signature
-        ):
-            return True
+        try:
+            if (
+                candidate.co_name == target.co_name
+                and candidate.co_code == target.co_code
+                and candidate.co_names == target.co_names
+                and candidate.co_varnames == target.co_varnames
+                and _code_signature(candidate) == target_signature
+            ):
+                return True
+        except BaseException:  # noqa: BLE001, S112 - hostile code object; untrusted
+            continue
     return False
 
 
@@ -617,13 +645,13 @@ def _is_installation_finder(finder: object) -> bool:
         return False
     try:
         function = getattr(finder, "find_spec", None)
-    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+    except BaseException:  # noqa: BLE001 - hostile descriptor; untrusted by default
         return False
     if function is None:
         return False
     try:
         function = getattr(function, "__func__", function)
-    except Exception:  # noqa: BLE001 - hostile descriptor; untrusted by default
+    except BaseException:  # noqa: BLE001 - hostile descriptor; untrusted by default
         return False
     return _code_matches_source(function, code_file)
 

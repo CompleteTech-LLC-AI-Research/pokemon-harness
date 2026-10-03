@@ -832,6 +832,79 @@ def test_a_hostile_site_module_cannot_abort_the_guard(tmp_path):
     assert report["status"] == "FAIL", report
 
 
+def test_an_unreadable_finder_descriptor_refuses_installation_trust(
+    tmp_path, monkeypatch
+):
+    """``_is_installation_finder``'s own descriptor reads must refuse, not escape.
+
+    Round 3 repaired the descriptor reads in ``_finder_code_file``, but the
+    same pair in ``_is_installation_finder`` (``find_spec``, then ``__func__``)
+    was still guarded with ``except Exception``.  Reaching them requires a
+    finder that already looks installed, which is why the round-3 meta-path
+    row passes on the unfixed source and cannot catch this.
+    """
+
+    class ExplodingDescriptor(BaseException):
+        pass
+
+    class HostileFinder:
+        @property
+        def find_spec(self):
+            raise ExplodingDescriptor("descriptor boom")
+
+        def __repr__(self):
+            return "<hostile finder>"
+
+    code_file = tmp_path / "installed.py"
+    code_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(origins, "_finder_code_file", lambda _finder: code_file)
+    monkeypatch.setattr(
+        origins, "_finder_was_imported_from", lambda _finder, _code_file: True
+    )
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [tmp_path])
+    monkeypatch.setattr(origins, "_is_within", lambda *_a, **_k: True)
+
+    assert origins._is_installation_finder(HostileFinder()) is False
+
+
+def test_an_unreadable_code_object_cannot_abort_the_guard():
+    """Code-object introspection must refuse an unreadable code object.
+
+    ``_code_matches_source`` reads ``function.__code__`` and compares code
+    signatures, and both walks -- ``_code_objects`` and ``_code_signature`` --
+    read ``co_consts`` and the per-field attributes unguarded, while
+    ``function`` is the very object a hostile ``find_spec`` descriptor
+    supplied.  A code-like object whose ``co_consts`` raises a direct
+    ``BaseException`` subclass therefore escaped ``check_origins``.
+
+    Two unreadable signatures must never compare equal to each other, or two
+    hostile objects would corroborate one another into a false match, so the
+    refusal value is built fresh on every call.
+    """
+
+    class ExplodingConsts(BaseException):
+        pass
+
+    class HostileCode:
+        co_name = "find_spec"
+
+        @property
+        def co_consts(self):
+            raise ExplodingConsts("co_consts boom")
+
+    def genuine() -> None:
+        return None
+
+    assert origins._code_signature(HostileCode()) != origins._code_signature(
+        HostileCode()
+    )
+    assert isinstance(origins._code_signature(genuine.__code__), tuple)
+    # The walk yields the object itself, then stops rather than raising.
+    walked = list(origins._code_objects(HostileCode()))
+    assert walked[0].co_name == "find_spec"
+    assert len(walked) == 1
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
