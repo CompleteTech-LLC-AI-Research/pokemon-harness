@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import csv
 import hashlib
 import importlib.metadata
@@ -56,6 +57,13 @@ import tokenize
 import types
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+# ``shake_128`` and ``shake_256`` are extendable-output functions: ``hashlib``
+# guarantees them, so ``RECORD`` may legitimately name either, but their
+# ``digest()`` requires an output length where every fixed-size algorithm takes
+# none.  Detecting them by name keeps ``_file_digest`` from probing with a
+# length it would then have to catch an exception to undo.
+_VARIABLE_LENGTH_ALGORITHMS = frozenset({"shake_128", "shake_256"})
 
 # The distributions whose import origins decide what the suite actually
 # measures.  ``pokered_harness`` is the harness under test and ``pyboy`` is the
@@ -600,13 +608,19 @@ def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
     return digests
 
 
-def _file_digest(candidate: Path, algorithm: str = "sha256") -> str | None:
+def _file_digest(
+    candidate: Path, algorithm: str = "sha256", expected_length: int | None = None
+) -> str | None:
     """Return the URL-safe base64 digest of ``candidate``, or ``None``.
 
     The digest is recomputed under ``algorithm`` rather than a hardcoded
     SHA-256, because ``RECORD`` names the algorithm that produced each claim.
     Returns ``None`` for an unknown or unavailable algorithm, so a record
     naming something this interpreter cannot compute attests nothing.
+
+    ``expected_length`` is the caller's own decoded digest length.  It is
+    needed only by ``shake_128``/``shake_256``, whose ``digest()`` requires an
+    output size, and is ignored by every fixed-size algorithm.
     """
 
     try:
@@ -619,7 +633,22 @@ def _file_digest(candidate: Path, algorithm: str = "sha256") -> str | None:
         return None
     try:
         hasher.update(data)
-        return base64.urlsafe_b64encode(hasher.digest()).rstrip(b"=").decode()
+        # ``shake_128`` and ``shake_256`` are the two algorithms ``RECORD``
+        # permits that ``hashlib`` guarantees but whose ``digest()`` takes a
+        # required output length.  Calling it bare raises ``TypeError``, which
+        # the guard would otherwise swallow into ``None`` -- so a perfectly
+        # valid ``shake_128=`` row would attest nothing and the file would be
+        # refused.  That is the same false refusal of a genuine install this
+        # change exists to remove, so the digest is requested at the record's
+        # own encoded length.  A length the algorithm rejects still yields
+        # ``None``, which fails closed as before.
+        if algorithm in _VARIABLE_LENGTH_ALGORITHMS:
+            if expected_length is None:
+                return None
+            raw = hasher.digest(expected_length)
+        else:
+            raw = hasher.digest()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
     except (ValueError, TypeError):
         return None
 
@@ -643,7 +672,17 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
     if not expected:
         return False
     for algorithm, digest in expected:
-        actual = _file_digest(source_file, algorithm)
+        # ``shake_128``/``shake_256`` need an output length, and the record
+        # states it implicitly by how long the digest it carries is.  The
+        # length is derived from that claim rather than assumed, so the file is
+        # hashed at exactly the size the record says it was hashed at, and a
+        # record whose digest is too short for its algorithm simply fails to
+        # match instead of being honoured at some other size.
+        try:
+            recorded_length = len(base64.urlsafe_b64decode(digest + "=" * (-len(digest) % 4)))
+        except (ValueError, binascii.Error):
+            recorded_length = None
+        actual = _file_digest(source_file, algorithm, recorded_length)
         if actual is None or actual != digest:
             return False
     return True

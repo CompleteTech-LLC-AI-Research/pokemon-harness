@@ -6,8 +6,10 @@ selected tier silently measures that other tree.  These rows pin both
 directions: the guard must accept the tree under test and reject any other.
 """
 
+import base64
 import contextlib
 import csv
+import hashlib
 import importlib
 import io
 import json
@@ -3882,6 +3884,70 @@ def test_a_record_naming_a_non_sha256_algorithm_still_establishes_provenance(alg
         )
     finally:
         sys.modules.pop("pokemon_record_algo_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "output_length"), [("shake_128", 16), ("shake_128", 32), ("shake_256", 64)]
+)
+def test_a_record_naming_a_variable_length_algorithm_still_establishes_provenance(
+    algorithm, output_length
+):
+    """SHAKE is the one ``RECORD`` algorithm that needs an output length.
+
+    ``shake_128`` and ``shake_256`` are extendable-output functions, so
+    ``hashlib`` guarantees them and ``RECORD`` may name either -- but their
+    ``digest()`` takes a required length where every fixed-size algorithm takes
+    none.  Calling it bare raises ``TypeError``, which the guard's own
+    ``except`` turns into ``None``: the file then has no claim and is refused.
+
+    That is precisely the false refusal of a genuine install that honouring the
+    label exists to remove, so the record's own digest length is what the file
+    is hashed at.  Honouring the label is still conditional on recomputing it:
+    a mangled digest, and a record whose length disagrees with the one it
+    claims, are both still refused.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_record_shake_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_record_shake_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        data = planted.read_bytes()
+        hasher = hashlib.new(algorithm)
+        hasher.update(data)
+        digest = base64.urlsafe_b64encode(hasher.digest(output_length)).rstrip(b"=").decode()
+        assert len(base64.urlsafe_b64decode(digest + "=" * (-len(digest) % 4))) == output_length, (
+            "the premise: the record carries a digest of exactly this length"
+        )
+        recorded = dist_info / "RECORD"
+        recorded.write_text(
+            f"pokemon_record_shake_row_module.py,{algorithm}={digest},{planted.stat().st_size}\n",
+            encoding="utf-8",
+        )
+
+        assert _is_recorded_by_an_install(planted, root), (
+            f"a genuine {algorithm} RECORD must establish provenance at its own length"
+        )
+
+        # A record whose digest is the right algorithm at the right length but
+        # the wrong *bytes* is still refused: honouring the label never means
+        # believing it, only recomputing under it.
+        flipped = "B" if digest[0] != "B" else "C"
+        other_digest = flipped + digest[1:]
+        recorded.write_text(
+            f"pokemon_record_shake_row_module.py,{algorithm}={other_digest},"
+            f"{planted.stat().st_size}\n",
+            encoding="utf-8",
+        )
+        assert not _is_recorded_by_an_install(planted, root), (
+            "a record whose digest does not match the bytes must be refused"
+        )
+    finally:
+        sys.modules.pop("pokemon_record_shake_row_module", None)
         for disposable in (planted, dist_info / "RECORD"):
             disposable.unlink(missing_ok=True)
         dist_info.rmdir()
