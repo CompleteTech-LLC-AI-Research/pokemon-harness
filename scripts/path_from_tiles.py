@@ -43,16 +43,16 @@ BLOCK_HEIGHT = 4
 # constants/tileset_constants.asm.
 TILESET_BLOCKSET = {
     0: "overworld.bst",
-    1: "reds_house.bst",   # RedsHouse1
-    2: "pokecenter.bst",   # Mart shares pokecenter.bst (same block data)
+    1: "reds_house.bst",  # RedsHouse1
+    2: "pokecenter.bst",  # Mart shares pokecenter.bst (same block data)
     3: "forest.bst",
-    4: "reds_house.bst",   # RedsHouse2
-    5: "gym.bst",          # Dojo shares gym.bst
+    4: "reds_house.bst",  # RedsHouse2
+    5: "gym.bst",  # Dojo shares gym.bst
     6: "pokecenter.bst",
     7: "gym.bst",
     8: "house.bst",
-    9: "gate.bst",         # ForestGate shares gate.bst
-    10: "gate.bst",        # Museum shares gate.bst
+    9: "gate.bst",  # ForestGate shares gate.bst
+    10: "gate.bst",  # Museum shares gate.bst
     11: "underground.bst",
     12: "gate.bst",
     13: "ship.bst",
@@ -86,9 +86,7 @@ def find_pret_root() -> Path:
     for c in candidates:
         if c and Path(c).is_dir():
             return Path(c)
-    raise FileNotFoundError(
-        "can't find pret/pokered; set POKERED_PRET_ROOT env var"
-    )
+    raise FileNotFoundError("can't find pret/pokered; set POKERED_PRET_ROOT env var")
 
 
 def load_blockset(tileset_id: int, pret_root: Path) -> list[bytes]:
@@ -102,8 +100,9 @@ def load_blockset(tileset_id: int, pret_root: Path) -> list[bytes]:
     return [data[i : i + 16] for i in range(0, len(data), 16)]
 
 
-def read_sprite_blockers(session: Session,
-                          expand_npc_neighbors: bool = False) -> set[tuple[int, int]]:
+def read_sprite_blockers(
+    session: Session, expand_npc_neighbors: bool = False
+) -> set[tuple[int, int]]:
     """Return a set of (x, y) step cells occupied by static sprites.
 
     Map-object sprites (NPCs, item balls, etc.) are stored in
@@ -195,9 +194,7 @@ def read_passable_tiles(session: Session) -> set[int]:
     return passable
 
 
-def read_overworld_map(
-    session: Session, width_blocks: int, height_blocks: int
-) -> list[list[int]]:
+def read_overworld_map(session: Session, width_blocks: int, height_blocks: int) -> list[list[int]]:
     """Return the block grid for the current map (no border), indexed [y][x]."""
     mem = session._pyboy.memory
     base = session.symbols.addr_of("wOverworldMap")
@@ -212,9 +209,7 @@ def read_overworld_map(
     return blocks
 
 
-def expand_to_tile_grid(
-    blocks: list[list[int]], blockset: list[bytes]
-) -> list[list[int]]:
+def expand_to_tile_grid(blocks: list[list[int]], blockset: list[bytes]) -> list[list[int]]:
     """Return a (height_blocks*4) x (width_blocks*4) grid of tile ids."""
     h_blocks = len(blocks)
     w_blocks = len(blocks[0]) if h_blocks else 0
@@ -233,9 +228,9 @@ def expand_to_tile_grid(
             # Block layout inside a .bst entry is row-major 4x4.
             for ty in range(BLOCK_HEIGHT):
                 for tx in range(BLOCK_WIDTH):
-                    tiles[by * BLOCK_HEIGHT + ty][bx * BLOCK_WIDTH + tx] = (
-                        pattern[ty * BLOCK_WIDTH + tx]
-                    )
+                    tiles[by * BLOCK_HEIGHT + ty][bx * BLOCK_WIDTH + tx] = pattern[
+                        ty * BLOCK_WIDTH + tx
+                    ]
     return tiles
 
 
@@ -363,9 +358,11 @@ def astar(
                 if pair_collisions and tile_grid is not None:
                     cur_feet = cell_feet_tile(x, y)
                     nb_feet = cell_feet_tile(nx, ny)
-                    if (cur_feet is not None and nb_feet is not None
-                            and frozenset({cur_feet, nb_feet})
-                                in pair_collisions):
+                    if (
+                        cur_feet is not None
+                        and nb_feet is not None
+                        and frozenset({cur_feet, nb_feet}) in pair_collisions
+                    ):
                         continue
                 key = (nx, ny)
                 if ng < best_g.get(key, 1 << 30):
@@ -400,23 +397,35 @@ def astar(
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--state", required=True)
-    p.add_argument("--goal-xy", type=str, default=None,
-                   help='target tile coord within current map (e.g. "3,43")')
+    p.add_argument(
+        "--goal-xy",
+        type=str,
+        default=None,
+        help='target tile coord within current map (e.g. "3,43")',
+    )
     p.add_argument("--save-path-to", type=str, default=None)
-    p.add_argument("--dump-grid", action="store_true",
-                   help="also print the walkability grid for debugging")
-    p.add_argument("--expand-npc-neighbors", action="store_true",
-                   help="Conservatively mark tiles adjacent to every "
-                        "NPC as impassable. Avoids plans that pass "
-                        "next to a wandering NPC who could walk into "
-                        "the player's next tile. Over-approximates — "
-                        "loses walkable space in NPC-dense areas.")
-    p.add_argument("--extra-blockers", type=str, default=None,
-                   help='semicolon-separated list of x,y tiles to treat '
-                        'as impassable in addition to the game\'s sprite '
-                        'blockers (e.g. "15,8;16,9;17,8"). Useful for '
-                        'known trainer-pen tiles the pathfinder would '
-                        'otherwise route us into.')
+    p.add_argument(
+        "--dump-grid", action="store_true", help="also print the walkability grid for debugging"
+    )
+    p.add_argument(
+        "--expand-npc-neighbors",
+        action="store_true",
+        help="Conservatively mark tiles adjacent to every "
+        "NPC as impassable. Avoids plans that pass "
+        "next to a wandering NPC who could walk into "
+        "the player's next tile. Over-approximates — "
+        "loses walkable space in NPC-dense areas.",
+    )
+    p.add_argument(
+        "--extra-blockers",
+        type=str,
+        default=None,
+        help="semicolon-separated list of x,y tiles to treat "
+        "as impassable in addition to the game's sprite "
+        'blockers (e.g. "15,8;16,9;17,8"). Useful for '
+        "known trainer-pen tiles the pathfinder would "
+        "otherwise route us into.",
+    )
     args = p.parse_args()
 
     if not args.goal_xy:
@@ -429,7 +438,8 @@ def main() -> int:
     sym = os.environ["POKERED_SYM_PATH"]
     print(f"loading rom {rom}", flush=True)
     s = Session.from_files(
-        rom, sym,
+        rom,
+        sym,
         expected_rom_sha1=os.environ.get("POKERED_ROM_SHA1"),
     )
     print(f"loading state {args.state}", flush=True)
@@ -457,8 +467,7 @@ def main() -> int:
     # Collision list.
     passable_tiles = read_passable_tiles(s)
     print(
-        "passable tile ids: "
-        + ", ".join(f"0x{t:02x}" for t in sorted(passable_tiles)),
+        "passable tile ids: " + ", ".join(f"0x{t:02x}" for t in sorted(passable_tiles)),
         flush=True,
     )
 
@@ -466,7 +475,8 @@ def main() -> int:
     # block movement into their cell regardless of tile walkability
     # (trainer NPCs, trainers with sight lines, Poke Ball pickups, etc).
     sprite_blockers = read_sprite_blockers(
-        s, expand_npc_neighbors=args.expand_npc_neighbors,
+        s,
+        expand_npc_neighbors=args.expand_npc_neighbors,
     )
     # Caller-injected blockers (route-specific trainer-pen avoidance).
     if args.extra_blockers:
@@ -478,12 +488,10 @@ def main() -> int:
                 ex, ey = part.split(",")
                 sprite_blockers.add((int(ex), int(ey)))
             except ValueError:
-                print(f"  WARN bad --extra-blockers entry: {part!r}",
-                      flush=True)
+                print(f"  WARN bad --extra-blockers entry: {part!r}", flush=True)
     if sprite_blockers:
         print(
-            "sprite blockers: "
-            + ", ".join(f"({x},{y})" for x, y in sorted(sprite_blockers)),
+            "sprite blockers: " + ", ".join(f"({x},{y})" for x, y in sorted(sprite_blockers)),
             flush=True,
         )
 
@@ -561,10 +569,7 @@ def main() -> int:
                 return False
             return tile_grid[ty][tx] in passable_tiles
 
-    passable_grid = [
-        [step_passable(x, y) for x in range(w_steps)]
-        for y in range(h_steps)
-    ]
+    passable_grid = [[step_passable(x, y) for x in range(w_steps)] for y in range(h_steps)]
     walkable = sum(1 for row in passable_grid for v in row if v)
     total = w_steps * h_steps
     print(f"walkable step cells: {walkable}/{total}", flush=True)
@@ -608,11 +613,14 @@ def main() -> int:
 
     pair_collisions = _PAIR_COLLISIONS.get(tileset_id)
     if pair_collisions:
-        print(f"pair-collisions active for tileset 0x{tileset_id:02x}: "
-              f"{len(pair_collisions)} rules", flush=True)
+        print(
+            f"pair-collisions active for tileset 0x{tileset_id:02x}: {len(pair_collisions)} rules",
+            flush=True,
+        )
     print(f"running A* from ({px},{py}) to {goal}", flush=True)
-    path = astar(passable_grid, (px, py), goal, tile_grid=tile_grid,
-                  pair_collisions=pair_collisions)
+    path = astar(
+        passable_grid, (px, py), goal, tile_grid=tile_grid, pair_collisions=pair_collisions
+    )
     if path is None:
         print("NO PATH FOUND", flush=True)
         return 1

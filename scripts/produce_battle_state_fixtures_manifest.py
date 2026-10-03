@@ -201,5 +201,3 @@ def _validate_fixture(version: str, path: Path, boundary: str) -> dict:
 def _resolve_root(value, repo_root: Path) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else repo_root / path
-
-

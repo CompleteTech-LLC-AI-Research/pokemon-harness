@@ -33,6 +33,7 @@ fix requires implementing honest navigation through Route 3 / Mt. Moon
 ``cerulean_pc.state`` milestone is visually blue-washed but
 functionally placed on the PC warp tile.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,13 +49,12 @@ from pokered_harness.mcp_server import register_default_hooks
 from pokered_harness.session import Session
 
 CERULEAN_CITY = 0x03
-ROUTE_3 = 0x0e
+ROUTE_3 = 0x0E
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--start", required=True,
-                   help="State to resume from (e.g. route3_entry.state)")
+    p.add_argument("--start", required=True, help="State to resume from (e.g. route3_entry.state)")
     p.add_argument("--outdir", default="walkthrough_to_cerulean")
     args = p.parse_args()
 
@@ -72,10 +72,12 @@ def main() -> int:
     mem = session._pyboy.memory  # type: ignore[attr-defined]
 
     gs = drv.gs()
-    print(f"start: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
-          flush=True)
+    print(
+        f"start: map=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
+        flush=True,
+    )
 
     # Step 1: set blackout destination to Cerulean City.
     mem[session.symbols.addr_of("wLastBlackoutMap")] = CERULEAN_CITY
@@ -95,8 +97,7 @@ def main() -> int:
             drv.press("up")
             drv.press("right")
     gs = drv.gs()
-    print(f"  walked east to ({gs.overworld.x},{gs.overworld.y})",
-          flush=True)
+    print(f"  walked east to ({gs.overworld.x},{gs.overworld.y})", flush=True)
 
     # Step 3: clear Repel so wild encounters can fire.
     mem[session.symbols.addr_of("wRepelRemainingSteps")] = 0
@@ -108,6 +109,7 @@ def main() -> int:
     # wOutOfBattleBlackout, triggering the fly-warp blackout flow to
     # whatever map is in wLastBlackoutMap (Cerulean City).
     from pokered_harness.state.party import _OFFSET_HP, _OFFSET_STATUS
+
     base = session.symbols.addr_of("wPartyMons")
     mem[base + _OFFSET_HP + 0] = 0
     mem[base + _OFFSET_HP + 1] = 1
@@ -122,13 +124,11 @@ def main() -> int:
     for i in range(200):
         gs = drv.gs()
         if gs.overworld.map_id != ROUTE_3:
-            print(f"  step {i}: off route3 at map=0x"
-                  f"{gs.overworld.map_id:02x}", flush=True)
+            print(f"  step {i}: off route3 at map=0x{gs.overworld.map_id:02x}", flush=True)
             fainted_warped = True
             break
         if gs.battle.active:
-            print(f"  step {i}: battle.active; driving faint sequence",
-                  flush=True)
+            print(f"  step {i}: battle.active; driving faint sequence", flush=True)
             for _ in range(300):
                 g = drv.gs()
                 if g.overworld.map_id != ROUTE_3:
@@ -138,8 +138,7 @@ def main() -> int:
             break
         # Cycle through directions; more iterations = more grass-step
         # rolls for encounter.
-        d = ("right", "up", "left", "down",
-             "up", "right", "down", "left")[i % 8]
+        d = ("right", "up", "left", "down", "up", "right", "down", "left")[i % 8]
         before = (gs.overworld.x, gs.overworld.y)
         drv.press(d)
         if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
@@ -157,9 +156,11 @@ def main() -> int:
     session.step(300, render=True)
     gs = drv.gs()
     m = gs.party.mons[0] if gs.party.mons else None
-    print(f"  after warp: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})"
-          + (f" HP={m.hp}/{m.max_hp}" if m else ""), flush=True)
+    print(
+        f"  after warp: map=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y})" + (f" HP={m.hp}/{m.max_hp}" if m else ""),
+        flush=True,
+    )
 
     # Drive through any post-blackout dialog.
     for _ in range(40):
@@ -173,12 +174,11 @@ def main() -> int:
     # ~(19, 18) — step UP to warp into PC.
     mem[session.symbols.addr_of("wRepelRemainingSteps")] = 255
     import full_to_brock as ftb
+
     seed = outdir / "_cerulean_to_pc.state"
     seed.write_bytes(session.save_state())
     try:
-        path = ftb.run_pathfinder(seed, "19,18",
-                                  outdir / "_cerulean_to_pc.txt",
-                                  rom, sym, sha1)
+        path = ftb.run_pathfinder(seed, "19,18", outdir / "_cerulean_to_pc.txt", rom, sym, sha1)
         print(f"  cerulean->PC A* {len(path)} steps", flush=True)
         ftb.walk_path(drv, path, label="cerulean_to_pc")
     except RuntimeError as e:
@@ -191,8 +191,10 @@ def main() -> int:
             break
     session.step(120, render=True)
     gs = drv.gs()
-    print(f"  at PC attempt: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    print(
+        f"  at PC attempt: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})",
+        flush=True,
+    )
 
     # Talk to the nurse to trigger the heal animation. This is the
     # fix for Yellow's post-blackout palette wash: the heal interaction
@@ -217,10 +219,12 @@ def main() -> int:
         drv.press("b", step=30)
     session.step(300, render=True)
     gs = drv.gs()
-    print(f"  post heal: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
-          flush=True)
+    print(
+        f"  post heal: map=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
+        flush=True,
+    )
 
     # Save milestone.
     out = outdir / "milestones" / "cerulean_pc.state"

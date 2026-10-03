@@ -4,6 +4,7 @@ Extracted from ``scripts/grind.py`` (see issue #154). Holds the map/move
 constants, :class:`GrindResult`, and the navigation, battle, and heal-loop
 helpers used by :func:`grind_to` in the ``grind`` entry point.
 """
+
 from __future__ import annotations
 
 import sys
@@ -49,19 +50,19 @@ VIRIDIAN_NORTH_EXIT = (17, 0)
 # Tail Whip, Thunder Wave without Thunderbolt) are intentionally excluded
 # so the battle AI prefers damaging picks.
 DAMAGING_MOVE_IDS = {
-    33,   # Tackle
-    10,   # Scratch
-    98,   # Quick Attack
-    40,   # Poison Sting
-    73,   # Leech Seed (drain ~ damage)
-    22,   # Vine Whip
-    52,   # Ember
-    55,   # Water Gun
-    84,   # ThunderShock
-    85,   # Thunderbolt
-    86,   # Thunder Wave (kept — can still chip)
-    24,   # Double Kick
-    29,   # Headbutt (Pidgey fallback)
+    33,  # Tackle
+    10,  # Scratch
+    98,  # Quick Attack
+    40,  # Poison Sting
+    73,  # Leech Seed (drain ~ damage)
+    22,  # Vine Whip
+    52,  # Ember
+    55,  # Water Gun
+    84,  # ThunderShock
+    85,  # Thunderbolt
+    86,  # Thunder Wave (kept — can still chip)
+    24,  # Double Kick
+    29,  # Headbutt (Pidgey fallback)
 }
 
 # Common "gym-relevant learn-move" IDs we grind toward.
@@ -72,6 +73,7 @@ MOVE_DOUBLE_KICK = 24
 @dataclass
 class GrindResult:
     """Summary stats for the caller's log."""
+
     start_level: int
     final_level: int
     battles: int
@@ -106,8 +108,9 @@ def _clear_repel(drv) -> None:
         return
 
 
-def _pathfind(drv, session: Session, outdir: Path, goal_xy: str,
-              label: str, rom: str, sym: str, sha1: str) -> str:
+def _pathfind(
+    drv, session: Session, outdir: Path, goal_xy: str, label: str, rom: str, sym: str, sha1: str
+) -> str:
     """Save a seed state, invoke the A* pathfinder subprocess, return the
     direction string.  Wraps ``full_to_brock.run_pathfinder`` with the
     scratch-state boilerplate."""
@@ -133,9 +136,13 @@ def _safe_walk(drv, path: str, *, label: str, stop_map_ids=()) -> str:
 # post-battle state so the caller can act on a faint.
 
 
-def _battle_turn(drv: rtb.Driver, *, flee_below_hp_frac: float = 0.55,
-                  force_fight: bool = False,
-                  allow_learn: bool = False) -> bool:
+def _battle_turn(
+    drv: rtb.Driver,
+    *,
+    flee_below_hp_frac: float = 0.55,
+    force_fight: bool = False,
+    allow_learn: bool = False,
+) -> bool:
     """Drive one battle menu turn.
 
     If pre-turn HP is below ``flee_below_hp_frac`` * max and this isn't
@@ -184,9 +191,7 @@ def _battle_turn(drv: rtb.Driver, *, flee_below_hp_frac: float = 0.55,
         hp_frac = party_hp_frac
 
     gs = drv.gs()
-    flee = (not force_fight
-            and hp_frac < flee_below_hp_frac
-            and gs.battle.kind == 1)
+    flee = not force_fight and hp_frac < flee_below_hp_frac and gs.battle.kind == 1
 
     if flee:
         print(f"    [battle] FLEE hp_frac={hp_frac:.2f}", flush=True)
@@ -304,9 +309,9 @@ def _battle_turn(drv: rtb.Driver, *, flee_below_hp_frac: float = 0.55,
     return False
 
 
-def _resolve_battle_no_blackout_mash(drv: rtb.Driver,
-                                      *, max_turns: int = 80,
-                                      allow_learn: bool = True) -> bool:
+def _resolve_battle_no_blackout_mash(
+    drv: rtb.Driver, *, max_turns: int = 80, allow_learn: bool = True
+) -> bool:
     """Drive battle to completion. Returns True if the lead mon fainted
     (caller should handle blackout), False otherwise.
 
@@ -328,16 +333,14 @@ def _resolve_battle_no_blackout_mash(drv: rtb.Driver,
             _drive_post_battle_dialogs(drv, allow_learn=allow_learn)
             return True
         force_fight = flee_attempts >= 2
-        fled = _battle_turn(drv, force_fight=force_fight,
-                            allow_learn=allow_learn)
+        fled = _battle_turn(drv, force_fight=force_fight, allow_learn=allow_learn)
         if fled:
             flee_attempts += 1
     _drive_post_battle_dialogs(drv, allow_learn=allow_learn)
     return False
 
 
-def _drive_post_battle_dialogs(drv: rtb.Driver,
-                                allow_learn: bool = True) -> None:
+def _drive_post_battle_dialogs(drv: rtb.Driver, allow_learn: bool = True) -> None:
     """After the battle ends, advance any level-up / EXP / move-learn
     dialogs. Exits once joyIgnore clears AND no text box is rendering.
 
@@ -380,8 +383,7 @@ def _drive_post_battle_dialogs(drv: rtb.Driver,
 # --- Heal-loop primitive ---------------------------------------------------
 
 
-def _force_blackout_heal(drv: rtb.Driver, session: Session,
-                         max_iterations: int = 20) -> bool:
+def _force_blackout_heal(drv: rtb.Driver, session: Session, max_iterations: int = 20) -> bool:
     """Deliberately trigger a wild battle, force-fight, and accept the
     faint. In Gen 1 a blackout teleports the party to the last-visited
     PokéCenter (Viridian here, after the grinder's first successful
@@ -451,8 +453,10 @@ def walk_to_viridian_and_heal(
     """
     gs = drv.gs()
     start_map = gs.overworld.map_id
-    print(f"  [heal] starting from map=0x{start_map:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    print(
+        f"  [heal] starting from map=0x{start_map:02x} xy=({gs.overworld.x},{gs.overworld.y})",
+        flush=True,
+    )
 
     # 1) Get to Viridian. From some Route 2 tiles (notably (5, 48)) the
     #    player sits below a one-way ledge in a small trapped pocket —
@@ -471,17 +475,21 @@ def walk_to_viridian_and_heal(
         path = None
         for attempt in range(4):
             try:
-                path = _pathfind(drv, session, outdir, "8,71",
-                                  f"grind_r2_south_{attempt}",
-                                  rom, sym, sha1)
-                print(f"  [heal] route2→south A* attempt {attempt+1}: "
-                      f"{len(path)} steps", flush=True)
+                path = _pathfind(
+                    drv, session, outdir, "8,71", f"grind_r2_south_{attempt}", rom, sym, sha1
+                )
+                print(
+                    f"  [heal] route2→south A* attempt {attempt + 1}: {len(path)} steps", flush=True
+                )
                 break
             except RuntimeError as e:
                 gs2 = drv.gs()
-                print(f"  [heal] route2 pathfind attempt {attempt+1} "
-                      f"at ({gs2.overworld.x},{gs2.overworld.y}) "
-                      f"failed: {e}", flush=True)
+                print(
+                    f"  [heal] route2 pathfind attempt {attempt + 1} "
+                    f"at ({gs2.overworld.x},{gs2.overworld.y}) "
+                    f"failed: {e}",
+                    flush=True,
+                )
                 # Ledge-pocket escape: step DOWN 3× (one-way safe). If we
                 # didn't move at all, we really are walled — give up.
                 moved_any = False
@@ -503,17 +511,17 @@ def walk_to_viridian_and_heal(
                     # take a grass-step from a fully-walled tile to
                     # trigger an encounter, so it just spun for ~100k
                     # presses before giving up.
-                    print("  [heal] ledge-escape made no progress; "
-                          "bailing — caller will Option-B-recover",
-                          flush=True)
+                    print(
+                        "  [heal] ledge-escape made no progress; "
+                        "bailing — caller will Option-B-recover",
+                        flush=True,
+                    )
                     return False
                 session.step(60, render=True)
         if path is None:
-            print("  [heal] no route2 path after 4 attempts; bailing",
-                  flush=True)
+            print("  [heal] no route2 path after 4 attempts; bailing", flush=True)
             return False
-        _safe_walk(drv, path, label="grind_r2_south",
-                    stop_map_ids=(M_VIRIDIAN,))
+        _safe_walk(drv, path, label="grind_r2_south", stop_map_ids=(M_VIRIDIAN,))
         # Cross the south border warp.
         for _ in range(4):
             if drv.gs().overworld.map_id == M_VIRIDIAN:
@@ -521,10 +529,19 @@ def walk_to_viridian_and_heal(
             drv.press("down")
     elif start_map in (M_REDS_1F, M_REDS_2F, M_PALLET):
         # Blackout landed us at home. Use the existing recovery plumbing.
-        print(f"  [heal] blacked out on 0x{start_map:02x}; navigate back "
-              "up via navigate_to_viridian_with_retry", flush=True)
+        print(
+            f"  [heal] blacked out on 0x{start_map:02x}; navigate back "
+            "up via navigate_to_viridian_with_retry",
+            flush=True,
+        )
         ok = ftb.navigate_to_viridian_with_retry(
-            drv, outdir, rom, sym, sha1, session, max_attempts=5,
+            drv,
+            outdir,
+            rom,
+            sym,
+            sha1,
+            session,
+            max_attempts=5,
         )
         if not ok:
             return False
@@ -532,18 +549,15 @@ def walk_to_viridian_and_heal(
     session.step(60, render=True)
     map_now = drv.gs().overworld.map_id
     if map_now != M_VIRIDIAN:
-        print(f"  [heal] WARN not in Viridian after south-walk "
-              f"(map=0x{map_now:02x})", flush=True)
+        print(f"  [heal] WARN not in Viridian after south-walk (map=0x{map_now:02x})", flush=True)
         return False
 
     # 2) A* from current Viridian xy to the PC door, then cross the warp.
     ftb._activate_repel(drv)
     try:
-        path = _pathfind(drv, session, outdir, "23,25", "grind_to_pc",
-                          rom, sym, sha1)
+        path = _pathfind(drv, session, outdir, "23,25", "grind_to_pc", rom, sym, sha1)
         print(f"  [heal] viridian→PC A* {len(path)} steps", flush=True)
-        _safe_walk(drv, path, label="grind_to_pc",
-                    stop_map_ids=(M_VIRIDIAN_POKECENTER,))
+        _safe_walk(drv, path, label="grind_to_pc", stop_map_ids=(M_VIRIDIAN_POKECENTER,))
     except RuntimeError as e:
         print(f"  [heal] pc pathfind failed: {e}", flush=True)
     # Step UP across the door warp if we didn't transition yet.
@@ -553,8 +567,9 @@ def walk_to_viridian_and_heal(
         drv.press("up")
     session.step(60, render=True)
     if drv.gs().overworld.map_id != M_VIRIDIAN_POKECENTER:
-        print(f"  [heal] WARN failed to enter PC "
-              f"(map=0x{drv.gs().overworld.map_id:02x})", flush=True)
+        print(
+            f"  [heal] WARN failed to enter PC (map=0x{drv.gs().overworld.map_id:02x})", flush=True
+        )
         return False
 
     # 3) Talk to nurse — mirror heal_at_viridian_pokecenter's internal
@@ -587,20 +602,30 @@ def walk_to_viridian_and_heal(
     session.step(60, render=True)
     gs = drv.gs()
     m = gs.party.mons[0] if gs.party.mons else None
-    print(f"  [heal] healed: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"HP={m.hp}/{m.max_hp}" if m else "no party",
-          flush=True)
+    print(
+        f"  [heal] healed: map=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"HP={m.hp}/{m.max_hp}"
+        if m
+        else "no party",
+        flush=True,
+    )
 
     # 5) Walk back north to Route 2. A* to (17, 0) then UP to warp.
     ftb._activate_repel(drv)
     try:
-        path = _pathfind(drv, session, outdir,
-                          f"{VIRIDIAN_NORTH_EXIT[0]},{VIRIDIAN_NORTH_EXIT[1]}",
-                          "grind_vi_to_r2", rom, sym, sha1)
+        path = _pathfind(
+            drv,
+            session,
+            outdir,
+            f"{VIRIDIAN_NORTH_EXIT[0]},{VIRIDIAN_NORTH_EXIT[1]}",
+            "grind_vi_to_r2",
+            rom,
+            sym,
+            sha1,
+        )
         print(f"  [heal] viridian→r2 A* {len(path)} steps", flush=True)
-        _safe_walk(drv, path, label="grind_vi_to_r2",
-                    stop_map_ids=(M_ROUTE_2,))
+        _safe_walk(drv, path, label="grind_vi_to_r2", stop_map_ids=(M_ROUTE_2,))
     except RuntimeError as e:
         print(f"  [heal] vi→r2 pathfind failed: {e}", flush=True)
     for _ in range(6):
@@ -609,20 +634,25 @@ def walk_to_viridian_and_heal(
         drv.press("up")
     session.step(60, render=True)
     gs = drv.gs()
-    print(f"  [heal] back on route2: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    print(
+        f"  [heal] back on route2: map=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y})",
+        flush=True,
+    )
     return gs.overworld.map_id == M_ROUTE_2
 
 
 # --- Grass-walking / encounter roll ---------------------------------------
 
 
-def _ensure_in_grass(drv: rtb.Driver,
-                      session: Session | None = None,
-                      outdir: Path | None = None,
-                      rom: str | None = None,
-                      sym: str | None = None,
-                      sha1: str | None = None) -> bool:
+def _ensure_in_grass(
+    drv: rtb.Driver,
+    session: Session | None = None,
+    outdir: Path | None = None,
+    rom: str | None = None,
+    sym: str | None = None,
+    sha1: str | None = None,
+) -> bool:
     """Get into the Route 2 grass patch (y<=52). Tries the canonical
     hardcoded corridor first (matches ``level_up.ensure_in_grass``),
     and falls back to A* if that bumps into trees.
@@ -632,13 +662,13 @@ def _ensure_in_grass(drv: rtb.Driver,
     # spawn is exactly (8, 71). Anywhere else it may stall — handled by
     # the A* fallback below.
     path = (
-        ["up"] * 9       # (8, 71) -> (8, 62)
-        + ["left"]       # (8, 62) -> (7, 62)
-        + ["up"] * 5     # (7, 62) -> (7, 57)
-        + ["left"] * 2   # (7, 57) -> (5, 57)
-        + ["up"]         # (5, 57) -> (5, 56)
-        + ["left"]       # (5, 56) -> (4, 56)
-        + ["up"] * 5     # (4, 56) -> (4, 51)  -- into grass
+        ["up"] * 9  # (8, 71) -> (8, 62)
+        + ["left"]  # (8, 62) -> (7, 62)
+        + ["up"] * 5  # (7, 62) -> (7, 57)
+        + ["left"] * 2  # (7, 57) -> (5, 57)
+        + ["up"]  # (5, 57) -> (5, 56)
+        + ["left"]  # (5, 56) -> (4, 56)
+        + ["up"] * 5  # (4, 56) -> (4, 51)  -- into grass
         + ["right"] * 2  # (4, 51) -> (6, 51)
     )
     stall = 0
@@ -662,8 +692,7 @@ def _ensure_in_grass(drv: rtb.Driver,
             stall = 0
 
     gs = drv.gs()
-    if (gs.overworld.map_id == M_ROUTE_2
-            and GRASS_Y_MIN <= gs.overworld.y <= GRASS_Y_MAX):
+    if gs.overworld.map_id == M_ROUTE_2 and GRASS_Y_MIN <= gs.overworld.y <= GRASS_Y_MAX:
         return True
 
     # Fallback: A* to a known grass tile. Only runs if we got stuck.
@@ -671,15 +700,13 @@ def _ensure_in_grass(drv: rtb.Driver,
         return False
     try:
         _clear_repel(drv)  # don't want Repel on while pathing INTO grass
-        path_str = _pathfind(drv, session, outdir, "6,51",
-                              "grind_to_grass", rom, sym, sha1)
+        path_str = _pathfind(drv, session, outdir, "6,51", "grind_to_grass", rom, sym, sha1)
         print(f"  [grind] A* into-grass {len(path_str)} steps", flush=True)
         _safe_walk(drv, path_str, label="grind_to_grass")
     except RuntimeError as e:
         print(f"  [grind] into-grass pathfind failed: {e}", flush=True)
     gs = drv.gs()
-    return (gs.overworld.map_id == M_ROUTE_2
-            and GRASS_Y_MIN <= gs.overworld.y <= GRASS_Y_MAX)
+    return gs.overworld.map_id == M_ROUTE_2 and GRASS_Y_MIN <= gs.overworld.y <= GRASS_Y_MAX
 
 
 def _walk_until_battle(drv: rtb.Driver, max_steps: int = 40) -> bool:
@@ -746,6 +773,7 @@ def _walk_until_battle(drv: rtb.Driver, max_steps: int = 40) -> bool:
             stuck_count = 0
         last_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
     return drv.gs().battle.active
+
 
 # ``full_to_brock`` imports this module back (``import grind``) at import time,
 # so these are bound after the definitions above to avoid handing a partially

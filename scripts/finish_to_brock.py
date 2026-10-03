@@ -4,6 +4,7 @@ play the rest: grass → Forest gate → forest → Pewter → Brock.
 Uses the pathfinder iteratively (recompute after each battle that
 shifts position). Auto-resolves battles with Vine Whip preference.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,12 +33,21 @@ def pathfind(session: Session, goal_xy: tuple[int, int]) -> str | None:
     try:
         env = dict(os.environ)
         r = subprocess.run(
-            [sys.executable, "-u",
-             str(Path(__file__).parent / "path_from_tiles.py"),
-             "--state", tf_path,
-             "--goal-xy", f"{goal_xy[0]},{goal_xy[1]}",
-             "--save-path-to", out_path],
-            env=env, capture_output=True, text=True, timeout=30,
+            [
+                sys.executable,
+                "-u",
+                str(Path(__file__).parent / "path_from_tiles.py"),
+                "--state",
+                tf_path,
+                "--goal-xy",
+                f"{goal_xy[0]},{goal_xy[1]}",
+                "--save-path-to",
+                out_path,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
             check=False,
         )
         if r.returncode != 0:
@@ -61,13 +71,16 @@ def select_vine_whip_move(drv) -> None:
         if pref in moves:
             i = moves.index(pref)
             if i < len(pp) and pp[i] > 0:
-                slot = i; break
+                slot = i
+                break
     if slot is None:
         for i, mid in enumerate(moves):
             if mid in rtb.DAMAGING_MOVE_IDS and i < len(pp) and pp[i] > 0:
-                slot = i; break
+                slot = i
+                break
     if slot is None:
-        drv.press("a"); return  # Struggle
+        drv.press("a")
+        return  # Struggle
     for _ in range(slot):
         drv.press("down")
     drv.press("a")
@@ -95,14 +108,20 @@ def resolve_battle_vw(drv, max_turns: int = 60) -> None:
         select_vine_whip_move(drv)
         for _ in range(100):
             gs = drv.gs()
-            if not gs.battle.active: return
+            if not gs.battle.active:
+                return
             if drv.sym.read_u8(drv.mem, "wMaxMenuItem") == 3 and not drv.joy_locked():
                 break
             drv.press("a")
 
 
-def apply_path_with_recompute(drv, label: str, goal_xy: tuple[int, int] | None,
-                              goal_map_ids: tuple[int, ...], max_attempts: int = 8) -> bool:
+def apply_path_with_recompute(
+    drv,
+    label: str,
+    goal_xy: tuple[int, int] | None,
+    goal_map_ids: tuple[int, ...],
+    max_attempts: int = 8,
+) -> bool:
     """Apply a path. After each battle-interrupt, recompute from current state."""
     for attempt in range(max_attempts):
         gs = drv.gs()
@@ -157,79 +176,114 @@ def main() -> int:
     s.step(60, render=True)
     drv = rtb.Driver(s)
     gs = drv.gs()
-    print(f"START: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp} "
-          f"moves={list(gs.party.mons[0].moves)}", flush=True)
+    print(
+        f"START: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp} "
+        f"moves={list(gs.party.mons[0].moves)}",
+        flush=True,
+    )
 
     # Phase 1: Route 2 grass → Forest South Gate entry at (3, 43)
     print("\n=== Phase 1: Route 2 grass → Forest South Gate ===", flush=True)
     ok = apply_path_with_recompute(
-        drv, "to_gate", goal_xy=(3, 43),
+        drv,
+        "to_gate",
+        goal_xy=(3, 43),
         goal_map_ids=(0x32,),
     )
     if not ok:
-        print("FAILED Phase 1", flush=True); return 1
+        print("FAILED Phase 1", flush=True)
+        return 1
     # Push UP to enter the gate (warp)
     for _ in range(5):
-        if drv.gs().overworld.map_id == 0x32: break
+        if drv.gs().overworld.map_id == 0x32:
+            break
         drv.press("up")
     (outdir / "milestones" / "phase1_gate.state").write_bytes(s.save_state())
     s._pyboy.screen.image.save(outdir / "shots" / "phase1_gate.png")
-    print(f"Phase 1 done: map=0x{drv.gs().overworld.map_id:02x} "
-          f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})", flush=True)
+    print(
+        f"Phase 1 done: map=0x{drv.gs().overworld.map_id:02x} "
+        f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})",
+        flush=True,
+    )
 
     # Phase 2: through gate → into forest (0x33)
     print("\n=== Phase 2: gate → forest interior ===", flush=True)
     for d in ["right", "up", "up", "up"]:
-        if drv.gs().overworld.map_id == 0x33: break
-        if drv.gs().battle.active: resolve_battle_vw(drv); continue
+        if drv.gs().overworld.map_id == 0x33:
+            break
+        if drv.gs().battle.active:
+            resolve_battle_vw(drv)
+            continue
         drv.press(d)
     # push extra UP in case we need
     for _ in range(5):
-        if drv.gs().overworld.map_id == 0x33: break
+        if drv.gs().overworld.map_id == 0x33:
+            break
         drv.press("up")
     (outdir / "milestones" / "phase2_forest.state").write_bytes(s.save_state())
     s._pyboy.screen.image.save(outdir / "shots" / "phase2_forest.png")
-    print(f"Phase 2 done: map=0x{drv.gs().overworld.map_id:02x} "
-          f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})", flush=True)
+    print(
+        f"Phase 2 done: map=0x{drv.gs().overworld.map_id:02x} "
+        f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})",
+        flush=True,
+    )
 
     # Phase 3: forest → north gate (map 0x2F)
     print("\n=== Phase 3: forest → Forest North Gate ===", flush=True)
     ok = apply_path_with_recompute(
-        drv, "forest", goal_xy=(1, 0),
-        goal_map_ids=(0x2F,), max_attempts=12,
+        drv,
+        "forest",
+        goal_xy=(1, 0),
+        goal_map_ids=(0x2F,),
+        max_attempts=12,
     )
     if not ok:
-        print("FAILED Phase 3", flush=True); return 1
+        print("FAILED Phase 3", flush=True)
+        return 1
     # push UP through north gate
     for _ in range(5):
-        if drv.gs().overworld.map_id == 0x2F: break
+        if drv.gs().overworld.map_id == 0x2F:
+            break
         drv.press("up")
     (outdir / "milestones" / "phase3_north_gate.state").write_bytes(s.save_state())
     s._pyboy.screen.image.save(outdir / "shots" / "phase3_north_gate.png")
-    print(f"Phase 3 done: map=0x{drv.gs().overworld.map_id:02x} "
-          f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})", flush=True)
+    print(
+        f"Phase 3 done: map=0x{drv.gs().overworld.map_id:02x} "
+        f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})",
+        flush=True,
+    )
 
     # Phase 4: north gate → Route 2 north half → Pewter (map 0x02)
     print("\n=== Phase 4: north gate → Pewter ===", flush=True)
     # walk up through the gate to Route 2 north
     for _ in range(15):
-        if drv.gs().overworld.map_id != 0x2F: break
+        if drv.gs().overworld.map_id != 0x2F:
+            break
         drv.press("up")
     # continue up into Pewter
     for _ in range(60):
-        if drv.gs().overworld.map_id == 0x02: break
-        if drv.gs().battle.active: resolve_battle_vw(drv); continue
+        if drv.gs().overworld.map_id == 0x02:
+            break
+        if drv.gs().battle.active:
+            resolve_battle_vw(drv)
+            continue
         before = (drv.gs().overworld.x, drv.gs().overworld.y)
         drv.press("up")
         if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
-            drv.press("left"); drv.press("up")
+            drv.press("left")
+            drv.press("up")
             if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
-                drv.press("right"); drv.press("right"); drv.press("up")
+                drv.press("right")
+                drv.press("right")
+                drv.press("up")
     (outdir / "milestones" / "phase4_pewter.state").write_bytes(s.save_state())
     s._pyboy.screen.image.save(outdir / "shots" / "phase4_pewter.png")
-    print(f"Phase 4 done: map=0x{drv.gs().overworld.map_id:02x} "
-          f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})", flush=True)
+    print(
+        f"Phase 4 done: map=0x{drv.gs().overworld.map_id:02x} "
+        f"xy=({drv.gs().overworld.x},{drv.gs().overworld.y})",
+        flush=True,
+    )
 
     # Phase 5: Pewter → Brock
     print("\n=== Phase 5: Brock Gym + battle ===", flush=True)
@@ -239,10 +293,12 @@ def main() -> int:
 
     gs = drv.gs()
     print("\n=== FINAL ===", flush=True)
-    print(f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"badges=0x{gs.progress.badges_raw:02x} "
-          f"party[0]=L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
-          flush=True)
+    print(
+        f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"badges=0x{gs.progress.badges_raw:02x} "
+        f"party[0]=L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
+        flush=True,
+    )
     if got_badge and (gs.progress.badges_raw & 0x01):
         print("\n*** BOULDER BADGE OBTAINED ***", flush=True)
         return 0
