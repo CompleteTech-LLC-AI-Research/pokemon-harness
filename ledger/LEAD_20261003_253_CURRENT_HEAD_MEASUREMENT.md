@@ -59,6 +59,13 @@ reachable from here. This is unchanged from the 2026-10-02 finding.
 
 ### Cause B -- the actual #253 defect, confirmed in isolation
 
+> **SUPERSEDED IN PART.** The threshold mechanism described below was REFUTED by
+> independent review. `force=True` already bypasses `_threshold` in the blocked
+> path, and lowering the threshold measurably *slows* the pair. The real binding
+> constraint is the `enforce_completeness` watermark clamp. See
+> `ledger/REVIEW_253_LOCKSTEP_INDEPENDENT_b0f09461.md`. The counts in this
+> section stand; only the mechanism is wrong.
+
 Isolated re-runs (not under gate load) reproduce cause B, so these are genuine
 defects rather than host-load flakes:
 
