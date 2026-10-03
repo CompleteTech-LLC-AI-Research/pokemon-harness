@@ -1040,6 +1040,46 @@ def test_an_unreadable_distribution_record_cannot_abort_the_guard(monkeypatch):
     )
 
 
+def test_the_guard_refuses_rather_than_traceback_on_any_escape(tmp_path, monkeypatch):
+    """``check_origins`` must always answer, even for an unguarded read.
+
+    Eight review rounds each widened one more hostile read, and rounds 5, 7
+    and 8 all turned out to have repaired an *adjacent* read rather than the
+    reported one.  Widening read N therefore never proved that read N+1 was
+    safe, and this module cannot enumerate every value an attacker controls.
+
+    So the entry point carries the guarantee instead: anything that escapes the
+    analysis is converted into the same machine-readable FAIL every other
+    refusal produces.  A guard that answers with a traceback is fail-open,
+    because a caller gating on ``status`` sees nothing at all.
+
+    ``KeyboardInterrupt`` and ``SystemExit`` must still escape, so an operator
+    can always stop the run.
+    """
+
+    class Exploding(BaseException):
+        pass
+
+    def explode(*_args, **_kwargs):
+        raise Exploding("novel read boom")
+
+    monkeypatch.setattr(origins, "_allowed_roots", explode)
+
+    report = check_origins(tmp_path, ("anything",))
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"][0]["package"] == "<guard>"
+    assert "could not complete" in report["packages"][0]["detail"]
+
+    def raise_interrupt(*_args, **_kwargs):
+        raise interrupt
+
+    for interrupt in (KeyboardInterrupt(), SystemExit()):
+        monkeypatch.setattr(origins, "_allowed_roots", raise_interrupt)
+        with pytest.raises(type(interrupt)):
+            check_origins(tmp_path, ("anything",))
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
