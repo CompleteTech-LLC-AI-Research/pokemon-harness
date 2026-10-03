@@ -137,9 +137,9 @@ the shared-memory probe and the gate logic are untouched.
 The complete candidate diff is three code files plus this ledger:
 
 ```
-.github/workflows/release-hygiene.yml  |  2 +
-scripts/run_local_ci.sh                 |  2 +
-tests/test_local_ci_policy.py           | 173 +
+.github/workflows/release-hygiene.yml    (2 lines: one per Ruff lane)
+scripts/run_local_ci.sh                   (2 lines: one per Ruff lane)
+tests/test_local_ci_policy.py             (the lint-coverage test and helpers)
 ledger/LEAD_20261003_106_LOCAL_CI_FAILURE_ATTRIBUTION.md
 ```
 
