@@ -106,7 +106,7 @@ def _site_packages_roots() -> list[Path]:
             return
         try:
             sink.extend(getter())
-        except Exception:  # noqa: BLE001 - layout is advisory here
+        except BaseException:  # noqa: BLE001 - layout is advisory here
             return
 
     def _append_one(getter, sink: list[str]) -> None:
@@ -116,7 +116,7 @@ def _site_packages_roots() -> list[Path]:
             return
         try:
             sink.append(getter())
-        except Exception:  # noqa: BLE001 - no user site on this layout
+        except BaseException:  # noqa: BLE001 - no user site on this layout
             return
 
     candidates: list[str] = []

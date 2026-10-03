@@ -785,6 +785,53 @@ def test_a_hostile_path_getter_cannot_abort_the_guard(tmp_path):
     assert "__path__ could not be read" in report["packages"][0]["detail"], report
 
 
+def test_a_hostile_site_module_cannot_abort_the_guard(tmp_path):
+    """``site`` getters are untrusted input too, and must fail closed.
+
+    ``_site_packages_roots`` reads ``site.getsitepackages()`` and
+    ``site.getusersitepackages()``.  Both calls were guarded with
+    ``except Exception``, but ``site`` is an ordinary module attribute and a
+    process that replaced it -- or a test that does -- can raise a direct
+    ``BaseException`` subclass.  That escaped ``check_origins`` as a
+    traceback, with no machine-readable finding at all.
+
+    The repaired guards return no install roots, which makes every consumer
+    treat the finder as untrusted: ``_finder_is_installed`` falls through to
+    ``False`` and ``_is_trusted_finder`` returns ``False``.  The guard
+    therefore refuses instead of crashing.
+    """
+
+    class ExplodingSite(BaseException):
+        pass
+
+    real_site = sys.modules.get("site")
+
+    def boom(*_args, **_kwargs):
+        raise ExplodingSite("site getter boom")
+
+    hostile_site = types.ModuleType("site")
+    hostile_site.getsitepackages = boom
+    hostile_site.getusersitepackages = boom
+
+    package = tmp_path / "site_boom_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    module = types.ModuleType("site_boom_pkg")
+    module.__file__ = str(package / "__init__.py")
+    sys.modules["site"] = hostile_site
+    try:
+        with _module_installed("site_boom_pkg", module):
+            report = check_origins(tmp_path, ("site_boom_pkg",))
+    finally:
+        if real_site is None:
+            del sys.modules["site"]
+        else:
+            sys.modules["site"] = real_site
+
+    assert report["status"] == "FAIL", report
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
