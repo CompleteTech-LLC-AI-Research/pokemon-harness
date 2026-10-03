@@ -82,3 +82,32 @@ row goes red.
 This defect is on the current head `16d102e` and must be fixed on the branch.
 Separately, issue #570 (the guard pins `_BENCHMARK`, so it protects one file and
 not the lane) is unchanged and still must land.
+
+## End-to-end proof that `16d102e` introduced this (added after measurement)
+
+Worktree `/home/agent/wt566p` at head `16d102e`, own venv `.venv-rv566`,
+Ruff `0.14.0`, pytest `9.1.1`.
+
+1. Baseline, unmodified head: the row **passes**.
+2. Plant `#  ruff: noqa` as line 1 of the real
+   `scripts/benchmark_matrix_concurrency.py`:
+   - `ruff check --select F821` on that file -> **exit 0, entirely unlinted**
+   - the guarding row -> **still passes**
+3. Same mutated benchmark, but with the **pre-`16d102e`** policy file
+   (`fceb11c3:tests/test_local_ci_policy.py`, which has no `maybe_directive`):
+
+       AssertionError: scripts/benchmark_matrix_concurrency.py carries a
+       file-level suppression at ['1: #  ruff: noqa']; ...
+       1 failed, 2 warnings in 52.04s
+
+So `16d102e` converted a row that correctly rejects this bypass into one that
+accepts it. The shortcut did not merely fail to add coverage — it removed
+coverage the branch already had.
+
+Methodological note: per-file Ruff directives are honored only for **real files**,
+not for `--stdin-filename`. Any probe of this row that goes through stdin cannot
+by itself demonstrate that a planted per-file directive silences the file. That
+is why the mutation had to be planted in the actual benchmark file.
+
+The worktree was restored clean afterward; `tests/test_local_ci_policy_old.py`
+is the only leftover and is untracked scratch.
