@@ -548,3 +548,46 @@ Flake8 alias, spaced and unspaced alias, spaced and unspaced `# fmt: off`,
 spaced and unspaced `# yapf: disable`), 6/6 inert comments allowed. Bare
 `# noqa` and `# noqa: F821` were measured and found **not** to silence the
 file, so they are correctly allowed and are absent from the row's asserted list.
+
+## Scope limit found after push: #570
+
+Issue #570 was filed against head `c198489` while this round was in flight, and
+its central claim is **correct**. It was reproduced here on the pushed head
+`16d102e2`, independently of the issue's own measurements.
+
+The in-file-suppression row pins one path:
+
+    tests/test_local_ci_policy.py:472
+    _BENCHMARK = "scripts/benchmark_matrix_concurrency.py"
+
+The escape is a property of any file Ruff reads, not of the benchmark, and the
+main check lane enumerates 52 paths. Reproduced on `scripts/production_gate.py`
+— a file named in both `run_local_ci.sh` and `release-hygiene.yml` — by planting
+a blanket `# ruff: noqa` after its `__future__` import, alongside a real
+`def _probe(): return _undefined_zzz`:
+
+    ruff check --output-format=json scripts/production_gate.py -> rc=0
+    F821 reported: False        total diagnostics: 0
+    pytest tests/test_local_ci_policy.py                      -> 19 passed
+
+So the lane is green while a genuine undefined name ships. #570 also reports the
+same escape on `scripts/bootstrap_pyboy.py` and
+`src/pokered_harness/_mcp_facade_entry.py`; those were not re-run here, and the
+one file that was is enough to establish the class.
+
+**This is a scope decision, not a defect in the row.** The row is correct about
+what it asserts. Generalising it is not a two-line change on this tree, and the
+issue says so with its own evidence, which also checks out here: 32 generated
+fragments carry a file-level directive (31 × `# ruff: noqa: F821`, 1 ×
+`# ruff: noqa: F401`), and deleting the directive from
+`tests/_sentinel_support_part1.py` produces **105 errors**. Those fragments are
+assembled from a merged monolith and reference names the assembled module
+supplies, so the ignores are load-bearing rather than an opt-out.
+
+Whether a generated fragment may hold a blanket ignore, and on what evidence,
+is a policy call that belongs in its own change with its own justification.
+Folding it into a focused #106 fix would smuggle that decision in unexamined —
+the same reason this document records attribution rather than closing #106.
+
+#570 stays open and is the correct home for that work. #566 stays scoped to the
+benchmark, and its lane coverage claim is stated as one file, not all of them.
