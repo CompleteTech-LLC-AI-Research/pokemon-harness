@@ -43,6 +43,16 @@ from typing import Any
 REPORT_SCHEMA_VERSION = 1
 DEFAULT_WORKER_COUNTS = (1, 2, 4)
 RUNTIMES = ("source", "native")
+# A worker policy governs the declared trade/battle matrix as a whole.  A run
+# that measured only one of them has no evidence about the other, so it may
+# report measurements but must not select a policy.
+REQUIRED_SELECTION_TIERS = ("battle", "trade")
+# The slowest legitimate arm must not be killed by this harness.  At workers=1
+# the gate may spend 19 x 900 s on trade plus 19 x 1200 s on battle before any
+# failure, so an arm bound below that would interrupt a valid slow baseline and
+# report an unsupported "unselected".  This is a harness ceiling on our own
+# child process, not a relaxation of any per-row deadline the gate enforces.
+DEFAULT_ARM_TIMEOUT_SECONDS = 43200.0
 # ``production_gate.py`` spells the compiled runtime ``cython`` (see
 # ``production_gate_model.RUNTIME_MODES``).  This benchmark reports it as
 # ``native`` because that is the name used throughout the issue and the
@@ -152,12 +162,28 @@ class ArmResult:
 
     @property
     def passing_per_hour(self) -> float:
-        """Return throughput, keeping every required row in the denominator.
+        """Return throughput over the arm's whole declared work.
 
-        The denominator is the arm's whole wall time and the numerator counts
-        only passing rows, so a configuration that skips work to finish sooner
-        scores lower rather than higher.
+        The numerator is every row the arm was required to produce, not only
+        the passing ones, so an arm that skipped or failed work to finish
+        sooner scores *lower* rather than higher.  Dividing passing rows by
+        wall time alone would report an arm that completed 18 of 19 rows in
+        ten seconds as roughly ten times faster than one that completed all
+        nineteen in a hundred seconds.
+
+        ``clean_passing_per_hour`` remains available for reporting the raw
+        passing-row rate, but it is never used to rank arms or select a policy.
         """
+
+        if self.wall_seconds <= 0:
+            return 0.0
+        if self.required_rows <= 0:
+            return 0.0
+        return self.required_rows / self.wall_seconds * SECONDS_PER_HOUR
+
+    @property
+    def clean_passing_per_hour(self) -> float:
+        """Return the passing-row rate, for reporting only."""
 
         if self.wall_seconds <= 0:
             return 0.0
@@ -552,10 +578,28 @@ def select_policy(
     Refuses to select when a declared worker count is missing an arm, when any
     arm is incomplete, when any arm failed a row, when arms are not comparable,
     or when nothing beat the workers=1 reference.
+
+    The workers=1 arm is required whenever a policy is selected.  The current
+    shipped default is 1, so a recommendation is only evidence if it is
+    measured against that default; comparing 4 against 2 would show an
+    improvement over nothing in particular.
     """
 
     declared = list(dict.fromkeys(int(w) for w in worker_counts))
     reasons: list[str] = []
+    reference_workers = min(declared)
+    if reference_workers != 1:
+        reasons.append(
+            f"the workers=1 reference is required to select a policy; declared "
+            f"worker counts start at {reference_workers}"
+        )
+    measured_tiers = {tier for result in results for tier in result.plan.tiers}
+    missing_tiers = sorted(set(REQUIRED_SELECTION_TIERS) - measured_tiers)
+    if missing_tiers:
+        reasons.append(
+            f"selection requires the full {list(REQUIRED_SELECTION_TIERS)} matrix; "
+            f"not measured: {missing_tiers}"
+        )
     for runtime in RUNTIMES:
         for workers in declared:
             if not any(
@@ -798,7 +842,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--worker-counts", default=",".join(str(w) for w in DEFAULT_WORKER_COUNTS))
     parser.add_argument("--tiers", default="trade,battle")
-    parser.add_argument("--arm-timeout-seconds", type=float, default=3600.0)
+    parser.add_argument("--arm-timeout-seconds", type=float, default=DEFAULT_ARM_TIMEOUT_SECONDS)
     parser.add_argument("--format", choices=("text", "json"), default="text")
     return parser
 

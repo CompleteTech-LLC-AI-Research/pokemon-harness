@@ -1016,8 +1016,14 @@ input roots, the declared tiers, wall time, reaped child CPU seconds, per-case
 durations with nearest-rank percentiles, deadline headroom, resource pressure,
 and the counts of passing, failed, incomplete, interrupted, and unstarted rows.
 
-Failed, incomplete, interrupted, and unstarted rows stay in the denominator.
-A configuration that skips work to finish sooner scores lower, not higher.
+Failed, incomplete, interrupted, and unstarted rows all count toward an arm's
+required total, and throughput divides that total by the arm's wall time, so a
+shrinking numerator cannot flatter a configuration. Note that this alone does
+not penalise an arm that *finished early by skipping* — such an arm can still
+post a high per-hour figure. What prevents one from being selected is that
+`select_policy` refuses any arm with an incomplete, interrupted, unstarted, or
+failed row. The separate passing-row rate is reported as context and is never
+used to rank arms or choose a policy.
 
 ### When a policy is selected
 
@@ -1033,6 +1039,11 @@ valid result and never a defect:
   individual rows passed;
 - the arm has no admitted capacity ceiling. Selection measures a worker count
   against a CPU budget, so `--capacity-policy` is required to select;
+- the `workers=1` arm is absent. The shipped default is 1, so a recommendation
+  is only evidence if it is measured against that default;
+- the run did not measure both `trade` and `battle`. A worker policy governs
+  the declared matrix as a whole, so a single-tier run reports measurements but
+  cannot select a policy;
 - an arm produced no passing row;
 - an arm ran at an effective worker count different from the one it requested,
   which means the capacity policy clamped it;

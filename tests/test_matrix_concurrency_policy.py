@@ -55,9 +55,10 @@ def _arm(
     wall: float = 100.0,
     effective: int | None = None,
     gate_passed: bool = True,
+    tiers=("trade", "battle"),
 ):
     return bench.ArmResult(
-        plan=_plan(runtime, workers),
+        plan=_plan(runtime, workers, tiers),
         completed_passing=passing,
         failed=failed,
         incomplete=incomplete,
@@ -594,7 +595,7 @@ class TestGateVerdictIsRecordedOnBothPaths:
         return {
             "tiers": [
                 {
-                    "name": "trade",
+                    "name": tier,
                     "status": "PASS",
                     "duration_seconds": 42.0,
                     "counts": {"passed": 19, "failed": 0, "errors": 0},
@@ -602,12 +603,13 @@ class TestGateVerdictIsRecordedOnBothPaths:
                         {
                             "status": "PASSED",
                             "duration_seconds": 2.0,
-                            "deadline_seconds": 900.0,
+                            "deadline_seconds": 900.0 if tier == "trade" else 1200.0,
                             "counts": {"passed": 1, "failed": 0, "errors": 0},
                         }
                         for _ in range(19)
                     ],
                 }
+                for tier in ("trade", "battle")
             ],
             "capacity": {"admission": {"max_concurrent_pairs": 8}},
         }
@@ -675,7 +677,9 @@ class TestGateVerdictIsRecordedOnBothPaths:
         arms = []
         for workers, wall in ((1, 120.0), (2, 90.0), (4, 80.0)):
             for runtime in ("source", "native"):
-                plan = _plan(runtime=runtime, workers=workers, tiers=("trade",))
+                plan = _plan(
+                    runtime=runtime, workers=workers, tiers=("trade", "battle")
+                )
                 arm = bench.run_arm(
                     plan,
                     project_root=tmp_path,
@@ -751,3 +755,80 @@ class TestDeadlineHeadroomIsPerRow:
         }
         _, headroom = bench.case_durations(report, ("trade",))
         assert headroom == pytest.approx(-50.0)
+
+
+class TestSelectionCannotBypassTheShippedDefault:
+    """A policy is only evidence if measured against workers=1."""
+
+    def test_selection_without_a_workers_one_reference_is_refused(self):
+        # Comparing 4 against 2 shows an improvement over nothing in
+        # particular; the shipped default is 1.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt in ("source", "native")
+            for w, wall in ((2, 100.0), (4, 60.0))
+        ]
+        selection = bench.select_policy(arms, worker_counts=(2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("workers=1 reference" in r for r in selection["reasons"])
+
+    def test_a_partial_tier_set_cannot_select_a_matrix_policy(self):
+        # Trade-only arms have no evidence about battle performance or
+        # correctness, so they must not select a matrix-wide worker policy.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall, tiers=("trade",))
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0), (4, 80.0))
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("not measured" in r for r in selection["reasons"])
+
+    def test_the_full_tier_set_still_selects(self):
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall, tiers=("trade", "battle"))
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0), (4, 80.0))
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "selected"
+        assert selection["policy"]["matrix_workers"] == 4
+
+
+class TestThroughputCountsAllRequiredWork:
+    """Skipped work must never look faster."""
+
+    def test_unstarted_work_is_not_rewarded_as_speed(self):
+        # 18 of 19 required rows produced in 10 s looks ~9x faster per hour than
+        # 19 of 19 in 100 s.  Counting required rows alone cannot see this,
+        # because both arms carry 19 required rows; what protects the result is
+        # that the selector refuses any arm that skipped a row.
+        complete = _arm(passing=19, failed=0, wall=100.0)
+        skipped = _arm(passing=18, not_started=1, wall=10.0)
+        assert skipped.required_rows == complete.required_rows == 19
+        assert complete.clean_pass is True
+        assert skipped.complete is False
+        selection = bench.select_policy(
+            [complete, _arm(runtime="native", workers=1, wall=100.0)],
+            worker_counts=(1, 2, 4),
+        )
+        assert selection["outcome"] == "unselected"
+
+    def test_a_failed_row_is_counted_in_required_work(self):
+        complete = _arm(passing=19, failed=0, wall=100.0)
+        partial = _arm(passing=18, failed=1, wall=10.0)
+        # Both carry 19 required rows; the failed row is attempted work, so
+        # throughput counts it.  The arm that genuinely spent less wall time
+        # doing the same required work is correctly reported as faster, and the
+        # selector separately refuses it for the failure.
+        assert partial.required_rows == complete.required_rows == 19
+        assert partial.clean_pass is False
+        assert partial.passing_per_hour > complete.passing_per_hour
+
+    def test_the_passing_only_rate_is_still_reported_separately(self):
+        partial = _arm(passing=18, not_started=1, wall=10.0)
+        # clean_passing_per_hour divides only passing rows by wall time and is
+        # reported for context, never used to rank or select.  The two differ,
+        # so a reader can see that a row was skipped.
+        assert partial.clean_passing_per_hour < partial.passing_per_hour
+        assert partial.required_rows == 19
