@@ -431,6 +431,19 @@ def _accumulate_case(totals: dict[str, int], case: Any) -> None:
     if status == "INTERRUPTED":
         totals["interrupted"] += 1
         return
+    if status == "TIMEOUT":
+        # A row the gate killed at its per-row deadline is attempted work that
+        # produced no passing outcome.  Reading only the pytest counts below
+        # drops it from the denominator entirely: the gate records the
+        # timeout with zero counts, so the arm would report one fewer required
+        # row and could even read as complete and clean while the gate failed.
+        totals["failed"] += 1
+        return
+    if status not in ("PASS", "FAIL"):
+        # Any status this reader does not model is unclassified work, not a
+        # passing row.
+        totals["incomplete"] += 1
+        return
     counts = case.get("counts")
     if not isinstance(counts, dict):
         totals["incomplete"] += 1
@@ -509,6 +522,29 @@ def effective_workers(report: dict[str, Any], requested: int, tiers: Iterable[st
             return None
         ceiling = min(ceiling, rows)
     return max(1, ceiling)
+
+
+def declared_tier_rows(project_root: Path, tiers: Iterable[str]) -> dict[str, int]:
+    """Return the declared row count of each tier in ``project_root``.
+
+    Read from the same manifest the gate selects its rows from, so a run that
+    died before writing a report is still charged the matrix it was asked to
+    run.  A tier that is not declared yields no entry rather than a guess.
+    """
+
+    wanted = tuple(tiers)
+    tier_config = _load_module_from_root(project_root, Path("tests") / "_tier_config.py")
+    if tier_config is None:
+        return {}
+    manifest = getattr(tier_config, "TIER_REQUIRED_NODEIDS", None)
+    if not isinstance(manifest, dict):
+        return {}
+    rows: dict[str, int] = {}
+    for tier in wanted:
+        nodeids = manifest.get(tier)
+        if isinstance(nodeids, (set, frozenset, list, tuple)) and nodeids:
+            rows[tier] = len(nodeids)
+    return rows
 
 
 def tier_row_identity(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, frozenset[str]]:
@@ -748,6 +784,13 @@ def run_arm(
     except subprocess.TimeoutExpired:
         result.wall_seconds = time.monotonic() - started
         result.cpu_seconds = max(0.0, _process_cpu_seconds() - before)
+        # The child was killed before it wrote a report, so no row produced a
+        # terminal outcome.  Charging one interrupted row would report a 62-row
+        # arm as having required one row and would let its denominator shrink
+        # to nothing.  The whole declared matrix is charged instead.
+        declared = declared_tier_rows(project_root, plan.tiers)
+        result.tier_row_totals = declared
+        result.not_started = max(0, sum(declared.values()) - 1)
         result.interrupted = 1
         result.error = f"arm exceeded its {timeout_seconds}s bound"
         result.report_path = str(stdout_path)
@@ -936,6 +979,21 @@ def select_policy(
             reasons.append(f"{result.plan.key()} failed {result.failed} required row(s)")
         if result.completed_passing <= 0:
             reasons.append(f"{result.plan.key()} produced no passing row")
+        # The declared totals and the recorded ids must describe the same rows.
+        # Checking only the sum against the outcomes lets an arm claim 43+19
+        # rows while supplying a single id per tier; the identity check in
+        # ``comparable`` cannot see it because every arm would be equally wrong.
+        inconsistent_tiers = [
+            tier
+            for tier, total in result.tier_row_totals.items()
+            if total and len(result.tier_rows.get(tier, ())) != total
+        ]
+        if inconsistent_tiers:
+            recorded = {tier: len(result.tier_rows.get(tier, ())) for tier in inconsistent_tiers}
+            reasons.append(
+                f"{result.plan.key()} declares {result.tier_row_totals} but recorded "
+                f"{recorded} row ids; inconsistent tiers: {inconsistent_tiers}"
+            )
         declared_rows = sum(result.tier_row_totals.values())
         if declared_rows and result.required_rows < declared_rows:
             # Every declared row must have produced a terminal outcome.  Without
@@ -970,6 +1028,22 @@ def select_policy(
                 f"{result.plan.key()} ran at effective workers="
                 f"{result.effective_workers} after the capacity policy clamped the "
                 f"requested {result.plan.requested_workers}"
+            )
+        clamped_tiers = {
+            tier: workers
+            for tier, workers in result.tier_effective_workers.items()
+            if workers != result.plan.requested_workers
+        }
+        if clamped_tiers and result.effective_workers == result.plan.requested_workers:
+            # The arm-level count can agree with the request while a tier's own
+            # recorded concurrency does not.  Trusting only the arm-level value
+            # would accept an arm whose own per-tier evidence says it ran below
+            # the count it is being compared on.
+            reasons.append(
+                f"{result.plan.key()} reports effective workers="
+                f"{result.effective_workers} but its own per-tier evidence "
+                f"recorded {clamped_tiers} for the requested "
+                f"{result.plan.requested_workers}"
             )
         if result.effective_workers is None:
             # Without an admitted ceiling there is no capacity evidence, so a

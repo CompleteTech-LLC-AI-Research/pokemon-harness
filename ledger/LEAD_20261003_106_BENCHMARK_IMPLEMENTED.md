@@ -308,6 +308,39 @@ test that asserted the sentinel was rewritten to assert the contract it stood
 in for: a non-PASS verdict blocks selection, and the required-row total equals
 what the gate actually reported.
 
+## Ninth review round: four findings on `0079f172`
+
+An eighth independent review raised four findings, one of them P1. All four
+were confirmed and fixed.
+
+| # | finding | disposition |
+|---|---|---|
+| P1 | a `TIMEOUT` row disappeared from the denominator | fixed — `production_gate_matrix` records a row killed at its per-row deadline as `TIMEOUT` with zero pytest counts. `_accumulate_case` counted it only through those counts, so a two-row tier with one pass and one timeout reported a single required row and could read as `complete=True` and `clean_pass=True` while the gate failed. A timeout is now counted as attempted work that failed, and any status the reader does not model is unclassified rather than credited as a pass |
+| P2 | a harness timeout charged one row instead of the declared matrix | fixed — an arm killed before writing its report set `interrupted = 1`, so a 62-row arm reported `required_total: 1` and 61 declared rows vanished. The whole declared matrix is now charged, read from the same manifest the gate selects its rows from |
+| P2 | `select_policy` accepted contradictory worker evidence | fixed — the clamp check read only `effective_workers`, so an arm reporting `effective_workers=2` alongside its own `tier_effective_workers={"trade": 2, "battle": 1}` could be selected. The per-tier record is now checked against the request |
+| P2 | row totals were not reconciled with row ids | fixed — an arm could claim 43 trade and 19 battle rows while supplying one id per tier, and cross-arm identity comparison could not see it because every arm was equally wrong. Declared totals are now reconciled against the recorded ids per tier |
+
+Each was re-checked by re-running the reviewer's own reproduction:
+
+```
+finding1 -> counts {'completed_passing': 1, 'failed': 1, ...} clean_pass False
+finding3 -> unselected
+finding4 -> unselected
+```
+
+### A test fixture that never matched the gate
+
+Fixing the P1 exposed that four row-accounting fixtures used `"PASSED"` and
+`"FAILED"`, but `production_gate_matrix` only ever emits `"PASS"`, `"FAIL"`,
+`"TIMEOUT"`, `"NOT_STARTED"`, and `"INTERRUPTED"`. Those fixtures passed
+because the reader credited any status it did not recognise, which is exactly
+the behaviour the new status check removes. They now use the gate's real
+statuses, so they describe the reports they claim to.
+
+Six regression tests were added covering the timed-out row, the unmodelled
+status, the whole-matrix charge on a harness timeout, the per-tier worker
+contradiction, matching per-tier evidence, and the totals-versus-ids mismatch.
+
 ## Policy selection is deliberately withheld
 
 No worker policy is recommended and the `workers=1` default is unchanged.

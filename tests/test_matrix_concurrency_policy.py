@@ -652,12 +652,12 @@ class TestMatrixRowAccounting:
         }
 
     def test_not_started_rows_stay_in_the_denominator(self):
-        counts = bench.tier_counts(self._report(["PASSED", "NOT_STARTED", "PASSED"]), ("trade",))
+        counts = bench.tier_counts(self._report(["PASS", "NOT_STARTED", "PASS"]), ("trade",))
         assert counts["completed_passing"] == 2
         assert counts["not_started"] == 1
 
     def test_interrupted_rows_are_counted_as_interrupted(self):
-        counts = bench.tier_counts(self._report(["PASSED", "INTERRUPTED"]), ("trade",))
+        counts = bench.tier_counts(self._report(["PASS", "INTERRUPTED"]), ("trade",))
         assert counts["completed_passing"] == 1
         assert counts["interrupted"] == 1
         assert counts["not_started"] == 0
@@ -670,7 +670,7 @@ class TestMatrixRowAccounting:
     def test_case_durations_come_from_rows_not_tier_totals(self):
         # A tier's duration_seconds is the sum of its rows and is not a
         # per-case latency, so it must not populate the percentile sample.
-        report = self._report(["PASSED", "PASSED"])
+        report = self._report(["PASS", "PASS"])
         report["tiers"][0]["duration_seconds"] = 999.0
         durations, deadline = bench.case_durations(report, ("trade",))
         assert durations == [1.0, 1.0]
@@ -720,7 +720,7 @@ class TestGateVerdictIsRecordedOnBothPaths:
                     ],
                     "case_results": [
                         {
-                            "status": "PASSED",
+                            "status": "PASS",
                             "duration_seconds": 2.0,
                             "deadline_seconds": 900.0 if tier == "trade" else 1200.0,
                             "counts": {"passed": 1, "failed": 0, "errors": 0},
@@ -833,7 +833,7 @@ class TestDeadlineHeadroomIsPerRow:
                     "counts": {"passed": 1, "failed": 0, "errors": 0},
                     "case_results": [
                         {
-                            "status": "PASSED",
+                            "status": "PASS",
                             "duration_seconds": 1000.0,
                             "deadline_seconds": 1200.0,
                             "counts": {"passed": 1},
@@ -846,7 +846,7 @@ class TestDeadlineHeadroomIsPerRow:
                     "counts": {"passed": 1, "failed": 0, "errors": 0},
                     "case_results": [
                         {
-                            "status": "PASSED",
+                            "status": "PASS",
                             "duration_seconds": 100.0,
                             "deadline_seconds": 900.0,
                             "counts": {"passed": 1},
@@ -868,7 +868,7 @@ class TestDeadlineHeadroomIsPerRow:
                     "counts": {"passed": 0, "failed": 1},
                     "case_results": [
                         {
-                            "status": "FAILED",
+                            "status": "FAIL",
                             "duration_seconds": 950.0,
                             "deadline_seconds": 900.0,
                             "counts": {"failed": 1},
@@ -1385,3 +1385,140 @@ class TestThroughputIsLabelledForWhatItDivides:
         assert "best_required_rows_per_hour" in per_runtime["source"]
         assert "reference_required_rows_per_hour" in per_runtime["source"]
         assert "best_passing_per_hour" not in per_runtime["source"]
+
+
+class TestGateRowStatusesAreAllAccountedFor:
+    """Every status the gate emits must land in a denominator."""
+
+    def test_a_timed_out_row_is_attempted_work_not_a_missing_one(self):
+        # production_gate_matrix records a row killed at its per-row deadline as
+        # TIMEOUT with zero pytest counts.  Counting it only through those counts
+        # dropped it from the denominator entirely, so an arm with one pass and
+        # one timeout reported a single required row and could even read as
+        # complete and clean while the gate failed.
+        report = {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "FAIL",
+                    "counts": {"passed": 1, "failed": 0},
+                    "case_results": [
+                        {"nodeid": "a", "status": "PASS", "counts": {"passed": 1}},
+                        {
+                            "nodeid": "b",
+                            "status": "TIMEOUT",
+                            "counts": {"passed": 0, "failed": 0, "errors": 0},
+                        },
+                    ],
+                }
+            ]
+        }
+        counts = bench.tier_counts(report, ("trade",))
+        assert counts["completed_passing"] == 1
+        assert counts["failed"] == 1
+        assert counts["incomplete"] == 0
+        arm = bench.ArmResult(
+            plan=_plan(tiers=("trade",)), **counts, wall_seconds=10.0, gate_passed=False
+        )
+        assert arm.required_rows == 2
+        assert arm.clean_pass is False
+
+    def test_an_unmodelled_status_is_unclassified_not_passing(self):
+        report = {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "FAIL",
+                    "counts": {"passed": 1, "failed": 0},
+                    "case_results": [
+                        {"nodeid": "a", "status": "PASS", "counts": {"passed": 1}},
+                        {
+                            "nodeid": "b",
+                            "status": "SOMETHING_NEW",
+                            "counts": {"passed": 1, "failed": 0},
+                        },
+                    ],
+                }
+            ]
+        }
+        counts = bench.tier_counts(report, ("trade",))
+        # The unknown status must not be credited as a pass.
+        assert counts["completed_passing"] == 1
+        assert counts["incomplete"] == 1
+
+
+class TestArmTimeoutChargesTheWholeMatrix:
+    """An arm killed before its report must not shrink its own denominator."""
+
+    def test_a_timed_out_arm_is_charged_every_declared_row(self, tmp_path, monkeypatch):
+        class _Timeout:
+            def __init__(self, *a, **k):
+                raise bench.subprocess.TimeoutExpired(cmd="gate", timeout=5.0)
+
+        monkeypatch.setattr(bench.subprocess, "run", _Timeout)
+        result = bench.run_arm(
+            _plan(tiers=("trade", "battle")),
+            project_root=PROJECT_ROOT,
+            evidence_root=tmp_path / "evidence",
+            timeout_seconds=5.0,
+            capacity_policy=Path("/policy.json"),
+        )
+        assert result.interrupted == 1
+        # The declared matrix is charged, not one synthetic row: a 62-row arm
+        # must not report that it required a single row.
+        assert result.tier_row_totals == {"trade": 43, "battle": 19}
+        assert result.required_rows == 62
+        assert result.complete is False
+        assert bench.select_policy([result], worker_counts=(1,))["outcome"] == "unselected"
+
+
+class TestPerTierWorkerEvidenceMustAgreeWithTheArm:
+    """The arm's own per-tier record must not contradict its effective count."""
+
+    def test_per_tier_clamp_is_refused_even_when_the_arm_count_agrees(self):
+        # The arm-level effective_workers equals the request while the arm's own
+        # per-tier evidence says battle ran at one worker.  Trusting only the
+        # arm-level value would select a count the matrix never reached.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0))
+        ]
+        for arm in arms:
+            if arm.plan.requested_workers == 2:
+                arm.tier_effective_workers = {"trade": 2, "battle": 1}
+        selection = bench.select_policy(arms, worker_counts=(1, 2))
+        assert selection["outcome"] == "unselected"
+        assert any("per-tier evidence recorded" in r for r in selection["reasons"])
+
+    def test_matching_per_tier_worker_evidence_is_accepted(self):
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0))
+        ]
+        for arm in arms:
+            arm.tier_effective_workers = {
+                "trade": arm.plan.requested_workers,
+                "battle": arm.plan.requested_workers,
+            }
+        assert bench.select_policy(arms, worker_counts=(1, 2))["outcome"] == "selected"
+
+
+class TestDeclaredTotalsMustMatchRecordedRowIds:
+    """Totals and ids must describe the same rows."""
+
+    def test_claiming_rows_without_recording_their_ids_is_refused(self):
+        # Every arm claims 43+19 rows and 62 passes while supplying one id per
+        # tier.  Cross-arm identity comparison cannot see it because every arm
+        # is equally wrong.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0), (4, 80.0))
+        ]
+        for arm in arms:
+            arm.tier_rows = {"trade": frozenset({"only-one"}), "battle": frozenset({"only-one"})}
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("inconsistent tiers" in r for r in selection["reasons"])
