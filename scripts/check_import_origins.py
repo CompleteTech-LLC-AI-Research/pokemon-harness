@@ -254,31 +254,49 @@ def _finder_source(finder: object) -> Path | None:
     controlled: a hostile metaclass can raise from ``__module__`` or a module
     can raise from ``__file__``.  A finder that cannot be located is not
     trusted, so an exception here must resolve to ``None`` rather than escape.
+
+    Every clause below re-raises ``KeyboardInterrupt`` and ``SystemExit``
+    ahead of the broad handler, and that is not decoration.  ``_finder_module``
+    already re-raises them precisely so an operator interrupt reaches the
+    operator; catching its result here and returning ``None`` discarded that
+    decision, so a Ctrl-C arriving while the guard was identifying a finder was
+    recorded as an unreadable finder instead.  The rule is the same at each
+    site: hostile input is refused, an interrupt is not.
     """
 
     try:
         module = _finder_module(finder)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
         return None
     if module is not None:
         try:
             origin = getattr(module, "__file__", None)
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:  # noqa: BLE001 - hostile module; fall through to find_spec
             origin = None
         if isinstance(origin, str) and origin:
             return _safe_resolve(Path(origin))
     try:
         name = finder.__module__ if isinstance(finder, type) else type(finder).__module__
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - hostile metaclass; untrusted by default
         return None
     if not isinstance(name, str) or not name:
         return None
     try:
         spec = importlib.util.find_spec(name)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - a hostile import hook must not abort the guard
         return None
     try:
         origin = getattr(spec, "origin", None) if spec is not None else None
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - hostile spec object
         return None
     if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):

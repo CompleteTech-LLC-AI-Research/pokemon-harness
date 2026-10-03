@@ -2609,6 +2609,33 @@ def test_an_interrupt_from_the_site_layout_still_propagates(monkeypatch):
             origins._site_packages_roots()
 
 
+def test_an_interrupt_while_identifying_a_finder_still_propagates(tmp_path, monkeypatch):
+    """``_finder_source`` must not launder an operator interrupt into a finding.
+
+    ``_finder_module`` re-raises ``KeyboardInterrupt`` and ``SystemExit`` on
+    purpose, so an operator interrupt reaches the operator.  The caller threw
+    that decision away: its broad ``except BaseException`` returned ``None``,
+    so a Ctrl-C arriving while the guard was identifying a finder was recorded
+    as an unreadable finder and the run continued.  Every clause in
+    ``_finder_source`` now re-raises first.
+
+    The interrupt is raised from a metaclass property, which is the same
+    attacker-controlled surface the surrounding guards exist for -- the
+    difference is only whether the value carried is an interrupt or ordinary
+    hostile data, and that distinction is exactly what these clauses preserve.
+    """
+
+    class InterruptMeta(type):
+        @property
+        def __module__(cls):
+            raise KeyboardInterrupt
+
+    hostile = InterruptMeta("InterruptFinder", (), {"find_spec": lambda self, *a: None})
+
+    with pytest.raises(KeyboardInterrupt):
+        origins._finder_source(hostile)
+
+
 def test_a_hostile_owner_iterable_cannot_abort_the_guard(tmp_path, monkeypatch):
     """The owner list must be materialised inside a fail-closed boundary.
 
