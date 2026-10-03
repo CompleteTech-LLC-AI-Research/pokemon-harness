@@ -184,22 +184,35 @@ every way the file could escape linting: an `--exclude` that drops it, a
 lane-level `--ignore=ALL`, a `per-file-ignores` entry of `["ALL"]`, and
 `--exit-zero` all answer "no violation", and all of them fail here.
 
-One probe rule is not enough, though, and that was found in review. A lane
-narrowed to `--select=F821` still fails an undefined name while an unused
+One probe rule is not enough, though, and that was found in review twice. A
+lane narrowed to `--select=F821` still fails an undefined name while an unused
 import goes unreported, and a `per-file-ignores = ["F821"]` entry does the
-same. So the check lane is probed with three independent violations — F821,
-F401 and F811 — and must reject at least two of them. That catches a narrowed
-or blanket-disabled rule set while leaving a *selective* ignore of one rule
-alone, which is a legitimate reviewable decision rather than an escape.
-Measured behaviour of that probe set:
+same. Three probes then looked sufficient — until `--select=F401,F811` kept
+two of the three firing while F821 was silently accepted. So the check lane is
+probed with **five** independent violations spanning five rule codes, every one
+of which must be reported, with a majority additionally required. Measured
+behaviour of that probe set:
 
-| lane configuration | F821 | F401 | F811 |
-|---|---|---|---|
-| unmodified | rejected | rejected | rejected |
-| `--select=F821` | rejected | **silent** | **silent** |
-| `per-file-ignores = ["F821"]` | silent | rejected | rejected |
-| `per-file-ignores = ["ALL"]` | silent | silent | silent |
-| `--ignore=ALL` | silent | silent | silent |
+| lane configuration | F821 | F401 | F811 | F632 | E711 |
+|---|---|---|---|---|---|
+| unmodified | rejected | rejected | rejected | rejected | rejected |
+| `--select=F821` | rejected | **silent** | **silent** | **silent** | rejected |
+| `--select=F401,F811` | **silent** | rejected | rejected | **silent** | **silent** |
+| `per-file-ignores = ["F821"]` | silent | rejected | rejected | rejected | rejected |
+| `per-file-ignores = ["ALL"]` | silent | silent | silent | silent | silent |
+| `--ignore=ALL` | silent | silent | silent | silent | silent |
+
+Two further signals keep that honest, because the majority rule alone cannot
+separate a blanket disable from a selective one:
+
+* A **syntax error** is reported before any rule selection applies, so probing
+  an unparseable snippet proves Ruff is reading the file at all. It fails when
+  the file is excluded and passes when it is merely unlinted.
+* A **control filename** that no `per-file-ignores` entry names is probed with
+  the same snippets. If a rule still fires there, the rule is active and only
+  this file's copy of it is silenced — which is selective, and legitimate. A
+  blanket entry leaves every rule firing for the control file and failing for
+  the benchmark, so the width of the probe set is what tells the two apart.
 
 F841 was the third probe at first and was dropped: Ruff lists it as enabled in
 `--show-settings` but does not report it for that input, so a probe whose rule
@@ -249,7 +262,7 @@ step-level condition.
 
 ### What is deliberately *not* rejected
 
-Two mutations leave the test green, and that is correct rather than a gap.
+Five mutations leave the test green, and that is correct rather than a gap.
 Verified directly against Ruff 0.16.5 by making the benchmark itself
 contain a real `F821`:
 
@@ -264,14 +277,25 @@ contain a real `F821`:
 | `--exclude <benchmark> --force-exclude` | **no** | no |
 
 Ruff's `--exclude` does not drop an explicitly-passed file unless
-`--force-exclude` is also present, so the first three rows are true passes: the
-real lane still lints the benchmark. Only the fourth row is an escape, and it
-fails the probe.
+`--force-exclude` is also present, so the first five rows are true passes: the
+real lane still lints the benchmark. Only the last two rows escape, and both
+fail the probe. A `per-file-ignores = ["F821"]` entry is also a true pass,
+since the other four probed rules still fire — but that one is selective rather
+than blanket, and it is handled by the probe set described above rather than by
+this table.
 
 ### Mutation matrix
 
-Each mutation below was applied to the runner and workflow and the policy
-suite re-run; every row was observed to fail.
+Each mutation below was applied to the runner and workflow, one at a time, and
+the policy suite re-run; every row marked `yes` was observed to fail. The rows
+marked `n/a` were observed to pass, and are not escapes for the reasons given
+above — listing them separately is the point: a green test is only meaningful
+once you have checked it is green for the right reason.
+
+An earlier revision of this table recorded a two-of-three quorum as sufficient.
+It was not: `--select=F401,F811` satisfied it while F821 stopped being
+enforced. The quorum is now a five-rule set in which every probed rule must be
+reported.
 
 | mutation | caught |
 |---|---|
@@ -283,6 +307,7 @@ suite re-run; every row was observed to fail.
 | `--ignore=ALL` in a check lane | yes |
 | `--select=E501` narrowing a check lane past every diagnostic rule | yes |
 | `--select=F821` narrowing a check lane past the other rules | yes |
+| `--select=F401,F811`, keeping a two-of-three quorum while dropping F821 | yes |
 | `--exit-zero` in both check lanes | yes |
 | `--fix` in both check lanes | yes |
 | `--range=1-1` in both format lanes | yes |
@@ -290,16 +315,20 @@ suite re-run; every row was observed to fail.
 | `set +e` around both main lanes | yes |
 | `if: ${{ false }}` on the workflow's lint/format step | yes |
 | `if: always()` on the workflow's unit job | yes |
+| `if false; then ... fi` inside the workflow's run block | yes |
+| `continue-on-error: true` on the lint step or its job | yes |
+| `set +e` followed by `exit 0` around the main check lane | yes |
 | `--force-exclude` alone in the lanes | n/a — not an escape (see above) |
 | `--exclude=scripts` alone in the lanes | n/a — not an escape (see above) |
 | `--exclude <benchmark>` in the space-separated operand form | n/a — not an escape (see above) |
 | `per-file-ignores = ["F821"]` only, for the benchmark | n/a — selective, not a blanket disable |
+| `--force-exclude` with `--exclude=<benchmark>`, both spellings | yes |
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 120 passed
+-> 122 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
