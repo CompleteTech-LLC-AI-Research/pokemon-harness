@@ -355,6 +355,15 @@ The benchmark causes **no** local-CI regression. Every failure this candidate
 shows is also a failure on unmodified `master` on this host, so the failures
 belong to the already-open #253 condition rather than to this change.
 
+This candidate is **not merged yet**. Seven adversarial review rounds each
+found real defects in the lint-coverage test, and the seventh did too; every
+one is fixed and verified here, but the branch is held to an independent
+review before merging and the reviewer credentials have since expired.
+A self-review pass in the meantime found two more probe defects of its own
+(the F841 and E711 rows above). Merging on self-verification alone is not the
+standard this branch has been held to, so the merge is deferred rather than
+claimed.
+
 Local CI remains **FAIL**. Release remains **PARTIAL**. #253 stays open and
 #106 stays open: the harness ships, but the qualifying measurement still cannot
 be run without real ROM and symbol assets and a capacity policy (#85). This
