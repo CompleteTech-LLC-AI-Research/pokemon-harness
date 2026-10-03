@@ -1,15 +1,20 @@
 """Static policy checks for the reproducible local CI runner.
 
-These tests intentionally inspect the runner and workflow text only.  Running
-the runner itself would install dependencies, build a wheel, and execute the
-bounded production gate, which is outside the unit-test tier.
+Most rows inspect the runner and workflow text.  Two of them instead *execute*
+the runner against a stub ``python`` that records argument vectors, so that
+exit-status propagation is measured rather than inferred; the stub keeps that
+run inside the unit tier instead of installing dependencies, building a wheel,
+or running the bounded production gate.
 """
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -709,6 +714,46 @@ def _diagnostics(completed: subprocess.CompletedProcess[str]) -> str:
     return f"{completed.stdout.strip()} {completed.stderr.strip()}".strip()
 
 
+def _reports_code(completed: subprocess.CompletedProcess[str], code: str) -> bool:
+    """Say whether a JSON-format Ruff run reported `code` as a diagnostic.
+
+    Ruff's human output repeats the offending source line, so a directive that
+    merely *mentions* a code ("`# ruff: noqa: F821, F401`") puts that code in
+    the text even when nothing was reported. The JSON array carries each
+    diagnostic's code separately, which is the only reliable way to ask.
+    """
+
+    try:
+        diagnostics = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(diagnostics, list) and any(
+        isinstance(item, dict) and item.get("code") == code for item in diagnostics
+    )
+
+
+def _comment_tokens(source: str) -> list[tokenize.TokenInfo]:
+    """Return only the real comments in `source`, as Python tokenizes them.
+
+    A suppression directive is only honoured by Ruff when it is an actual
+    comment. The same text inside a docstring or a string literal is inert, so
+    matching it with `line.strip().startswith("#")` would refuse a file whose
+    documentation merely quotes a directive. Tokenizing asks the same question
+    Ruff does, and also keeps this row working on an unparseable file.
+    """
+
+    try:
+        return [
+            token
+            for token in tokenize.generate_tokens(io.StringIO(source).readline)
+            if token.type == tokenize.COMMENT
+        ]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # An unparseable file is rejected by Ruff before any directive is read,
+        # so it cannot be escaping anything this row measures.
+        return []
+
+
 def _main_lane_sources() -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Return `(source, lane)` for both subcommands of both CI files."""
 
@@ -910,6 +955,167 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
             f"most rules are silenced for this file is a blanket disable, not a "
             f"selective ignore (options={options})"
         )
+
+
+def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
+    """A file-level `noqa`/`fmt` directive must not silence the whole file.
+
+    Every probe above feeds its snippet on *stdin*, which is what makes the
+    probes immune to `exclude`, `per-file-ignores` and a narrowed rule set --
+    Ruff resolves those from the filename, not the bytes. The cost of that
+    design is that a suppression living in the file's own content is invisible
+    to all of them.
+
+    That is not hypothetical. Planting `# ruff: noqa` on the benchmark's first
+    line, next to a real undefined name, leaves both lanes reporting
+    `All checks passed!` and every other row in this file green -- the whole
+    file becomes unlintable. An in-file directive is the one escape that no
+    option-level probe can catch, because the snippet the probe lints has no
+    directive to find.
+
+    Matching those directives textually is what this row deliberately avoids.
+    A bare `# ruff: noqa` is not the only form that silences a whole file:
+    measured against Ruff, `# ruff: noqa: F821`, `#ruff:noqa` and a
+    trailing-space variant each suppress F821 file-wide, while a bare
+    `# noqa: E501` is not honoured at all. A string-literal or docstring line
+    that merely *reads* like a directive is honoured by neither. So rather than
+    enumerate spellings, ask Ruff directly: for each candidate directive, does
+    appending it to the real benchmark actually change whether Ruff reports a
+    violation? A directive that silences the file is refused; one that does not
+    is left alone.
+    """
+
+    source = (ROOT / _BENCHMARK).read_text(encoding="utf-8")
+    lines = source.splitlines()
+
+    # A violation Ruff certainly reports in a clean file, used as the probe:
+    # if a directive silences the file, this stops being reported.
+    violation = "\n\ndef _suppression_probe():\n    return _undefined_name_probe\n"
+    check_options = _lane_options(
+        _main_lane(_ruff_invocations(RUNNER.read_text(encoding="utf-8")), "check")
+    )
+    format_options = _lane_options(
+        _main_lane(_ruff_invocations(RUNNER.read_text(encoding="utf-8")), "format")
+    )
+    reported = _probe_check(check_options, violation)
+    assert reported.returncode != 0 and "F821" in _diagnostics(reported), (
+        "the suppression probe no longer reports F821 on the real lane options, "
+        f"so this row cannot measure anything: {_diagnostics(reported)[:400]!r}"
+    )
+
+    # Lint directives: each of these really does suppress F821 file-wide,
+    # including the Flake8-compatible alias and the comma-separated code list.
+    # Uppercase spellings are NOT honoured and are deliberately absent, which
+    # is why the row measures each candidate instead of trusting this tuple to
+    # stay exhaustive.
+    lint_directives = (
+        "# ruff: noqa",
+        "# ruff:noqa",
+        "#ruff:noqa",
+        "# ruff: noqa   ",
+        "# ruff: noqa: F821",
+        "# ruff: noqa: F821, F401",
+        "# flake8: noqa",
+        "#flake8: noqa",
+    )
+    # Format directives: `# fmt: off` and `# yapf: disable` disable the
+    # formatter for the rest of the file. They are invisible to `ruff check`,
+    # so this half is measured through the format lane instead.
+    format_directives = (
+        "# fmt: off",
+        "# fmt:off",
+        "# yapf: disable",
+        "# yapf:disable",
+    )
+    silencing: list[str] = []
+    for directive in lint_directives:
+        # Ask for F821 by *code*, not by matching text: `# ruff: noqa: F821,
+        # F401` really does silence the whole file, but its unused `F401` also
+        # trips RUF100, so the process still exits nonzero and the echoed
+        # source line contains the string "F821" even when nothing is
+        # reported. Either signal would call that a live escape.
+        probe = _probe_check(check_options + ["--output-format=json"], f"{directive}\n" + violation)
+        if not _reports_code(probe, "F821"):
+            silencing.append(directive)
+
+    # Every one of those spellings really does suppress the file, so the row is
+    # measuring Ruff and not a guess about it. If a future Ruff drops one, the
+    # list shrinks and the row reports the drift instead of silently narrowing.
+    assert silencing == list(lint_directives), (
+        "these in-file lint directives no longer silence the benchmark, so "
+        f"the escape they represent is gone and this row must be revisited "
+        f"(silenced={silencing}, expected={list(lint_directives)})"
+    )
+
+    for directive in format_directives:
+        probe = _probe_format(format_options, f"{directive}\n" + _FORMAT_PROBES[0][1])
+        assert probe.returncode == 0, (
+            f"{directive!r} no longer disables the formatter for the rest of "
+            f"the file, so the format-lane escape it represents is gone and "
+            f"this row must be revisited"
+        )
+
+    def is_file_level(comment: str) -> bool:
+        """Say whether Ruff reads `comment` as one of the silencing directives.
+
+        The comparison is exact and case-sensitive because Ruff's own parser is:
+        an uppercase `# RUFF: NOQA` is inert prose, and so is a comment that
+        merely starts with a directive and then continues in English. A
+        trailing `: CODE` is the one suffix Ruff accepts, so that is allowed.
+        """
+
+        text = comment.strip()
+        for directive in (*lint_directives, *format_directives):
+            candidate = directive.strip()
+            if text == candidate or (
+                text.startswith(candidate) and text[len(candidate) :].startswith(":")
+            ):
+                return True
+        return False
+
+    file_level = [
+        (token.start[0], token.string)
+        for token in _comment_tokens(source)
+        if is_file_level(token.string)
+    ]
+    assert not file_level, (
+        f"{_BENCHMARK} carries a file-level suppression at "
+        f"{[f'{n}: {t}' for n, t in file_level]}; every probe in this file "
+        f"lints stdin, so an in-file opt-out makes the whole file unlintable "
+        f"while the suite stays green. Scope the directive to a line "
+        f"(`# noqa: CODE`) or remove it."
+    )
+
+    # The benchmark is allowed -- and required -- to carry selective,
+    # line-scoped ignores; assert one is still honoured, so a future edit
+    # cannot satisfy this row by deleting all of them.
+    selective = [line for line in lines if "# noqa:" in line]
+    assert selective, (
+        f"{_BENCHMARK} no longer carries any selective `# noqa: CODE`; this "
+        f"row requires the file to stay genuinely lint-clean, not merely free "
+        f"of file-level directives"
+    )
+    honoured = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--select=BLE001",
+            f"--stdin-filename={_BENCHMARK}",
+            "-",
+        ],
+        cwd=ROOT,
+        input="try:\n    pass\nexcept Exception:  # noqa: BLE001\n    pass\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert honoured.returncode == 0, (
+        "a selective `# noqa: BLE001` no longer suppresses BLE001, so the "
+        f"benchmark's own documented ignore is stale: "
+        f"{_diagnostics(honoured)[:400]!r}"
+    )
 
 
 # The stub records one JSON argument vector per line. It is assembled from

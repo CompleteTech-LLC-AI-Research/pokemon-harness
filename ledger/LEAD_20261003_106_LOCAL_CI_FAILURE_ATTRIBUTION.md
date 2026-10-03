@@ -338,16 +338,85 @@ reported.
 | `per-file-ignores = ["F821"]` only, for the benchmark | n/a for the coverage row — selective, not a blanket disable |
 | `--extend-ignore=E711`, a rule no probe covers | n/a — drops no rule CI depends on |
 | `--force-exclude` with `--exclude=<benchmark>`, both spellings | yes |
+| bare `# ruff: noqa` on the benchmark's first line | yes |
+| `# ruff:noqa`, `#ruff:noqa`, trailing-space variant | yes |
+| `# ruff: noqa: F821` and a comma-separated code list — *code-bearing* whole-file opt-outs | yes |
+| `# flake8: noqa`, `#flake8: noqa`, `# flake8: noqa: F821` — the Flake8-compatible aliases | yes |
+| `# fmt: off` on the benchmark's first line | yes |
+| `# fmt:off`, `# yapf: disable`, `# yapf:disable` | yes |
+| standalone `# ruff: noqa: BLE001` (a *selective* file-scoped ignore) | n/a — not an escape (see above) |
+| directive quoted inside a docstring or string literal | n/a — inert in Ruff |
+| `# RUFF: NOQA`, a bare `# noqa: E501`, directive text continuing in English | n/a — Ruff is case-sensitive and whole-token |
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 123 passed
+-> 124 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
 ```
+
+## Round 8 — the in-file opt-out that no option-level probe can see
+
+Every probe in `tests/test_local_ci_policy.py` answers its question by piping
+a snippet on **stdin** with `--stdin-filename <benchmark>`. That is exactly
+what makes them immune to `exclude`, `per-file-ignores` and a narrowed rule
+set: Ruff resolves all three from the filename, never from the bytes. The cost
+is the mirror image — a suppression that lives in the file's own *content* is
+invisible to every one of them, because the snippet being linted has no
+directive to find.
+
+Measured on this candidate, with `scripts/benchmark_matrix_concurrency.py`
+byte-identical to `b3484c68` apart from the planted directive:
+
+| planted | result on the real file | policy suite |
+|---|---|---|
+| bare `# ruff: noqa` + a real F821 | `All checks passed!` (exit 0) | **123 passed** |
+| `# fmt: off` + unformatted lines | `1 file already formatted` (exit 0) | **123 passed** |
+| `# yapf: disable` + unformatted lines | exit 0 | **123 passed** |
+| `# ruff: noqa: F821` + a real F821 | `All checks passed!` (exit 0) | **123 passed** |
+| `# flake8: noqa` + a real F821 | `All checks passed!` (exit 0) | **123 passed** |
+
+So the file could be listed in both lanes, carry a genuine violation, and
+report clean — with the whole suite green. That is the one escape class the
+option-level probes structurally cannot reach, and it is closed by a direct
+assertion on the real file rather than by another probe:
+
+`test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression` does not
+match directives as text. For each candidate spelling it asks Ruff whether
+appending it actually stops F821 being reported, and fails if any of them
+does. That matters because the obvious textual version of this row was wrong
+three times, each found by a later round: it first refused only the bare
+code-less form; then `# ruff: noqa: F821` — which also silences the rule for
+the whole file — walked straight through it; then the Flake8-compatible alias
+did the same. Measured spellings that each suppress file-wide: `# ruff: noqa`,
+`# ruff:noqa`, `#ruff:noqa`, a trailing-space variant, `# ruff: noqa: F821`, a
+comma-separated code list, and `# flake8: noqa` in three spellings; plus
+`# fmt: off`, `# fmt:off`, `# yapf: disable` and `# yapf:disable` for the
+format lane.
+
+Two details were needed to measure this rather than approximate it. The
+comma-separated form silences F821 *and* trips RUF100 for its unused codes, so
+the process still exits nonzero — keying on the exit code would have scored
+that as caught. Ruff's human output also echoes the offending source line, so
+a directive that merely names F821 puts that string in the text; the check
+asks Ruff for JSON and matches the diagnostic `code` instead.
+
+The scan reads the file through `tokenize`, so only real comments count: a
+docstring or string literal quoting a directive is inert in Ruff and must not
+refuse the file. The comparison is exact and case-sensitive for the same
+reason Ruff's parser is — `# RUFF: NOQA`, a bare `# noqa: E501`, and a comment
+that starts with a directive then continues in English are all inert, and all
+four are measured to pass.
+
+The row also stays honest in the other direction: it asserts every listed
+spelling still suppresses the file (so it cannot pass vacuously if Ruff
+changes), that a selective per-line ignore is still honoured, and that the
+benchmark still carries one. Refusing a *selective* file-scoped ignore such as
+the `# ruff: noqa: F401` in `src/pokered_harness/mcp_server.py` would be the
+over-rejection this table exists to prevent.
 
 ## Disposition
 
@@ -357,12 +426,16 @@ belong to the already-open #253 condition rather than to this change.
 
 This candidate is **not merged yet**. Seven adversarial review rounds each
 found real defects in the lint-coverage test, and the seventh did too; every
-one is fixed and verified here, but the branch is held to an independent
-review before merging and the reviewer credentials have since expired.
-A self-review pass in the meantime found two more probe defects of its own
-(the F841 and E711 rows above). Merging on self-verification alone is not the
-standard this branch has been held to, so the merge is deferred rather than
-claimed.
+one is fixed and verified here. The in-file opt-out above was found by an
+eighth round, run against an external model with no access to this
+conversation, after the four reviewer credentials had expired
+(`refresh_token_expired` for `codex1`/`codex2`, `refresh_token_revoked` for
+`codex3`/`codex4`) and the in-session sub-agent channel stopped delivering
+tasks at all — the condition tracked by #489. A self-review pass in the
+meantime found two more probe defects of its own (the F841 and E711 rows
+above). All of it is fixed and verified here, and the merge stays deferred
+until that independent round-8 review is re-run against the exact head
+carrying these fixes.
 
 Local CI remains **FAIL**. Release remains **PARTIAL**. #253 stays open and
 #106 stays open: the harness ships, but the qualifying measurement still cannot
