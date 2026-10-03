@@ -1,4 +1,8 @@
-# Independent review of PR #564 (matrix-concurrency benchmark)
+# Author verification of PR #564 (matrix-concurrency benchmark)
+
+**Not an independent review.** Sub-agent task delivery failed in this
+environment (see #489), so this record is the author's own verification. The
+independent-review bar for this PR is **not** met by this document.
 
 Date: 2026-10-03
 Base: `e2b5b79` (master) Head: `2ffe5b0` (`fix/106-matrix-concurrency-benchmark`)
@@ -7,7 +11,8 @@ Reviewer checkout: `/home/agent/rev564`, detached at `2ffe5b0`, own fresh venv
 
 ## Verdict
 
-**Mergeable.** No defect found. #106 stays **open** — this PR delivers the
+**Mergeable on author verification; independent review outstanding.** No
+defect found in the work below. #106 stays **open** — this PR delivers the
 measurement harness only, and the measurement cannot be run on this host
 (no ROMs, no symbol files, no capacity policy). That matches the PR's own
 stated scope.
