@@ -22,6 +22,16 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts" / "run_local_ci.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-hygiene.yml"
 
+# The one script deliberately held outside the `scripts/` lint+format boundary.
+# `release-evidence/fixture-manifest.json` records this tool's SHA-1 by value in
+# each boundary row's `runtime_identity`, and
+# `scripts/merge_fixture_manifest_rows._verify_producer_revision` recomputes that
+# hash from the committed bytes and refuses any row that no longer matches.
+# Reformatting it would invalidate the only record of which tool captured the
+# boundary fixtures, and repairing that requires re-capturing them from a real
+# ROM, so it is pinned here until that re-capture is possible.
+_PRODUCER_PINNED_BY_MANIFEST = "scripts/produce_battle_state_fixtures.py"
+
 
 def _ruff_invocations(text: str) -> list[tuple[str, ...]]:
     """Return the full argument vector of each `python -m ruff` call, in order.
@@ -228,6 +238,112 @@ def test_main_ruff_lane_tests_directory_covers_every_test_file_on_disk() -> None
         )
 
 
+def test_main_ruff_lanes_cover_every_script_file() -> None:
+    """Both main lanes must take the whole `scripts/` directory, not a subset.
+
+    Issue #567 was filed because the lanes enumerated `scripts/` file by file:
+    on master 51 of 114 scripts were listed and 63 were not, so a new script
+    shipped outside the lint boundary until someone added it by hand. PR #564
+    landed `scripts/benchmark_matrix_concurrency.py` -- 1409 lines -- that way.
+
+    Assert the directory token is present, and that no enumerated
+    `scripts/...` entry survives alongside it. A leftover entry would let a
+    later edit shrink the effective set back toward the partial list without
+    any other row noticing, which is the same failure mode
+    `test_main_ruff_lanes_cover_every_test_file` pins for `tests/`.
+    """
+
+    invocations = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
+    workflow_invocations = _ruff_invocations(WORKFLOW.read_text(encoding="utf-8"))
+
+    for subcommand in ("check", "format"):
+        for source, lanes in (("runner", invocations), ("workflow", workflow_invocations)):
+            lane = _main_lane(lanes, subcommand)
+            assert "scripts" in lane, (
+                f"{source} `ruff {subcommand}` lane must pass the `scripts` "
+                f"directory so a new script cannot escape the gate; got: {lane}"
+            )
+            assert not [token for token in lane if token.startswith("scripts/")], (
+                f"{source} `ruff {subcommand}` lane still enumerates individual "
+                f"scripts; the directory token must be the only `scripts` reference"
+            )
+            assert lane.count("scripts") == 1, (
+                f"{source} `ruff {subcommand}` lane must name the scripts "
+                f"directory exactly once, got {lane.count('scripts')}"
+            )
+
+
+def test_main_ruff_lane_scripts_directory_covers_every_script_file_on_disk() -> None:
+    """The `scripts` directory token must reach every script except the pinned one.
+
+    Asserting the token is present is necessary but not sufficient, exactly as
+    for `tests/`: a future `extend-exclude` entry could silently drop scripts
+    from the glob while the token stayed present. Resolve it the way Ruff does
+    and require the covered set to be the whole tree minus exactly the one file
+    the fixture-provenance guard pins, so a second silent exclusion fails here.
+    """
+
+    scripts_root = ROOT / "scripts"
+    on_disk = {
+        path.relative_to(ROOT).as_posix() for path in scripts_root.rglob("*.py") if path.is_file()
+    }
+    assert on_disk, "no script files found on disk"
+    assert scripts_root.is_dir(), "the `scripts` directory the lanes pass must exist"
+
+    covered = _ruff_lint_resolved_files("scripts")
+    uncovered = on_disk - covered
+    assert uncovered == {_PRODUCER_PINNED_BY_MANIFEST}, (
+        "scripts/ files are excluded from the Ruff lanes beyond the one pinned "
+        f"by the fixture manifest: {sorted(uncovered)} "
+        f"(extend-exclude={_ruff_excluded_patterns()!r})"
+    )
+    unexpected = covered - on_disk
+    assert not unexpected, f"Ruff resolved unexpected scripts/ files: {sorted(unexpected)[:5]}"
+
+
+def test_excluded_fixture_producer_still_matches_the_manifest_sha1() -> None:
+    """The one script held outside the lint boundary must not drift.
+
+    `scripts/produce_battle_state_fixtures.py` is excluded from the `scripts/`
+    lanes because reformatting it changes the SHA-1 that
+    `release-evidence/fixture-manifest.json` records as the capture tool's
+    identity. Excluding it also removes the ordinary signal that it was
+    modified, so this row re-establishes that signal independently: it reads
+    the recorded hashes straight out of the manifest and compares them with the
+    committed bytes.
+
+    If this ever fails, the correct repair is to re-capture the boundary
+    fixtures from a real ROM with the current producer and update the manifest
+    -- not to relax the check or hand-edit the recorded hash.
+    """
+
+    import hashlib
+    import re
+
+    manifest = (ROOT / "release-evidence" / "fixture-manifest.json").read_text(encoding="utf-8")
+    recorded = {
+        match.group("path"): match.group("sha1")
+        for match in re.finditer(
+            r"producer (?P<path>[\w./-]+\.py) SHA-1 (?P<sha1>[0-9a-f]{40})", manifest
+        )
+    }
+    assert recorded, "no producer SHA-1 recorded in the fixture manifest"
+    unpinned = set(recorded) - {_PRODUCER_PINNED_BY_MANIFEST}
+    assert set(recorded) == {_PRODUCER_PINNED_BY_MANIFEST}, (
+        f"the fixture manifest names a producer this row does not pin: {sorted(unpinned)}"
+    )
+
+    producer = ROOT / _PRODUCER_PINNED_BY_MANIFEST
+    assert producer.is_file(), f"pinned producer is missing: {_PRODUCER_PINNED_BY_MANIFEST}"
+    actual = hashlib.sha1(producer.read_bytes()).hexdigest()
+    assert actual == recorded[_PRODUCER_PINNED_BY_MANIFEST], (
+        f"{_PRODUCER_PINNED_BY_MANIFEST} no longer matches the SHA-1 the fixture "
+        f"manifest records ({recorded[_PRODUCER_PINNED_BY_MANIFEST]} -> {actual}); "
+        "re-capture the boundary fixtures with the committed producer rather "
+        "than editing the recorded hash"
+    )
+
+
 def test_runner_ruff_file_lists_match_the_workflow_exactly() -> None:
     """Both lanes must run the same Ruff commands, file lists and flags alike.
 
@@ -327,12 +443,17 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # Spot-check a declared core of the Ruff file boundaries, not only the
     # command prefixes, so a local run cannot silently lint a smaller set.
     #
-    # Since #259 the two main lanes take the `tests` directory itself, so this
-    # floor names that token plus the narrower runtime/link lane's explicit
-    # `tests/` entries, which stay enumerated. Individual main-lane test files
-    # are intentionally absent: their coverage is now enforced by
-    # `test_main_ruff_lanes_cover_every_test_file` above, which fails if the
-    # directory token is dropped or reintroduced as a partial list.
+    # Since #259 the two main lanes take the `tests` directory itself, and
+    # since #567 they take the `scripts` directory itself too. So this floor
+    # names those two directory tokens plus the narrower runtime/link lane's
+    # explicit `tests/` entries, which stay enumerated. Individual main-lane
+    # `scripts/` files are intentionally absent, exactly as individual
+    # main-lane test files are: their coverage is enforced by measurement in
+    # `test_main_ruff_lanes_cover_every_test_file` and
+    # `test_main_ruff_lanes_cover_every_script_file` above, which fail if a
+    # directory token is dropped or reintroduced as a partial list. Keeping the
+    # literal per-file `scripts/` entries here would have re-pinned the
+    # enumerated boundary that #567 exists to remove.
     #
     # This is a *subset floor*, not the full contract: every path it names is
     # in a lane, but the lanes carry more entries than it lists, and they did
@@ -349,34 +470,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # it enumerates the boundary; a path missing here is not by itself evidence
     # that the boundary lost it.
     workflow_paths = (
-        "scripts/benchmark_matrix_concurrency.py",
-        "scripts/bootstrap_pyboy.py",
-        "scripts/coverage_report.py",
-        "scripts/gate_capacity.py",
-        "scripts/gate_capacity_admission.py",
-        "scripts/gate_capacity_policy.py",
-        "scripts/gate_capacity_report.py",
-        "scripts/network_concurrency_probe.py",
-        "scripts/produce_battle_scenario.py",
-        "scripts/production_gate.py",
-        "scripts/production_gate_capacity.py",
-        "scripts/production_gate_matrix_audit.py",
-        "scripts/production_gate_runtime_gates.py",
-        "scripts/qualification_runner.py",
-        "scripts/qualification_runner_allocation.py",
-        "scripts/qualification_runner_assets.py",
-        "scripts/qualification_runner_cgroup.py",
-        "scripts/qualification_runner_cli.py",
-        "scripts/qualification_runner_command.py",
-        "scripts/qualification_runner_declaration.py",
-        "scripts/qualification_runner_facts.py",
-        "scripts/qualification_runner_host.py",
-        "scripts/qualification_runner_model.py",
-        "scripts/qualification_runner_report.py",
-        "scripts/qualification_runner_reservation.py",
-        "scripts/tcp_link_matrix.py",
-        "scripts/validate_battle_scenarios.py",
-        "scripts/validate_fixture_manifest.py",
+        "scripts",
         "tests",
         "tests/test_fixture_provenance.py",
         "src/pokered_harness/_mcp_facade_entry.py",
