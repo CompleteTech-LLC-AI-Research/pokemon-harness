@@ -1027,6 +1027,12 @@ the best worker count. Any of the following yields `unselected`, which is a
 valid result and never a defect:
 
 - a declared arm is missing, incomplete, or failed a required row;
+- the gate's own verdict for that arm was not `PASS`. `production_gate.py`
+  exits 0 if and only if its overall verdict is `PASS`, so a runtime,
+  collection, evidence, or capacity rejection blocks selection even when
+  individual rows passed;
+- the arm has no admitted capacity ceiling. Selection measures a worker count
+  against a CPU budget, so `--capacity-policy` is required to select;
 - an arm produced no passing row;
 - an arm ran at an effective worker count different from the one it requested,
   which means the capacity policy clamped it;

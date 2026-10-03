@@ -54,6 +54,7 @@ def _arm(
     interrupted: int = 0,
     wall: float = 100.0,
     effective: int | None = None,
+    gate_passed: bool = True,
 ):
     return bench.ArmResult(
         plan=_plan(runtime, workers),
@@ -64,6 +65,7 @@ def _arm(
         not_started=not_started,
         effective_workers=workers if effective is None else effective,
         wall_seconds=wall,
+        gate_passed=gate_passed,
     )
 
 
@@ -485,3 +487,100 @@ class TestPlanValidation:
 
     def test_worker_count_parsing_deduplicates_and_preserves_order(self):
         assert bench._parse_counts("4,1,4,2") == [4, 1, 2]
+
+
+class TestGateVerdictGatesSelection:
+    """A passing row count is not a passing gate verdict."""
+
+    def test_a_non_zero_gate_returncode_blocks_selection(self):
+        # production_gate.py exits 0 if and only if its overall verdict is PASS.
+        # An arm whose rows happened to pass while the gate rejected its
+        # runtime, collection, evidence, or capacity prerequisite must not select.
+        arms = _full_set(source_walls=(120.0, 90.0, 80.0), native_walls=(120.0, 90.0, 80.0))
+        arms[2] = _arm(runtime="source", workers=4, wall=80.0, gate_passed=False)
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("gate verdict is not PASS" in r for r in selection["reasons"])
+
+    def test_a_missing_capacity_ceiling_blocks_selection(self):
+        # Without --capacity-policy the gate reports admission as unenforced, so
+        # no worker count can be justified against a CPU budget.
+        arms = _full_set(source_walls=(120.0, 90.0, 80.0), native_walls=(120.0, 90.0, 80.0))
+        arms[0] = _arm(runtime="source", workers=1, wall=120.0, effective=0)
+        arms[0].effective_workers = None
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("no admitted capacity ceiling" in r for r in selection["reasons"])
+
+
+class TestMatrixRowAccounting:
+    """Rows that contribute no aggregate counts must still be counted."""
+
+    def _report(self, statuses):
+        return {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "INTERRUPTED",
+                    "counts": {"passed": 2, "failed": 0, "errors": 0},
+                    "case_results": [
+                        {
+                            "status": status,
+                            "duration_seconds": 1.0,
+                            "deadline_seconds": 600.0,
+                            "counts": {"passed": 1, "failed": 0, "errors": 0},
+                        }
+                        for status in statuses
+                    ],
+                }
+            ]
+        }
+
+    def test_not_started_rows_stay_in_the_denominator(self):
+        counts = bench.tier_counts(self._report(["PASSED", "NOT_STARTED", "PASSED"]), ("trade",))
+        assert counts["completed_passing"] == 2
+        assert counts["not_started"] == 1
+
+    def test_interrupted_rows_are_counted_as_interrupted(self):
+        counts = bench.tier_counts(self._report(["PASSED", "INTERRUPTED"]), ("trade",))
+        assert counts["completed_passing"] == 1
+        assert counts["interrupted"] == 1
+        assert counts["not_started"] == 0
+
+    def test_an_absent_declared_tier_is_incomplete(self):
+        counts = bench.tier_counts({"tiers": []}, ("trade", "battle"))
+        assert counts["incomplete"] == 2
+        assert counts["completed_passing"] == 0
+
+    def test_case_durations_come_from_rows_not_tier_totals(self):
+        # A tier's duration_seconds is the sum of its rows and is not a
+        # per-case latency, so it must not populate the percentile sample.
+        report = self._report(["PASSED", "PASSED"])
+        report["tiers"][0]["duration_seconds"] = 999.0
+        durations, deadline = bench.case_durations(report, ("trade",))
+        assert durations == [1.0, 1.0]
+        assert deadline == 600.0
+
+
+class TestInputRootsAreForwarded:
+    """Declared input roots must reach the gate, not just the report."""
+
+    def test_rom_and_fixture_roots_reach_the_gate(self, tmp_path):
+        plan = _plan()
+        command = bench.build_arm_command(
+            plan,
+            project_root=PROJECT_ROOT,
+            evidence_dir=tmp_path / "arm",
+            rom_root=Path("/assets/rom"),
+            fixture_root=Path("/assets/fixtures"),
+        )
+        assert command[command.index("--rom-root") + 1] == "/assets/rom"
+        assert command[command.index("--fixture-root") + 1] == "/assets/fixtures"
+
+    def test_absent_roots_are_omitted(self, tmp_path):
+        plan = _plan()
+        command = bench.build_arm_command(
+            plan, project_root=PROJECT_ROOT, evidence_dir=tmp_path / "arm"
+        )
+        assert "--rom-root" not in command
+        assert "--fixture-root" not in command

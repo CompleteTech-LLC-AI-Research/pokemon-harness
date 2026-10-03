@@ -119,9 +119,11 @@ class ArmResult:
     wall_seconds: float = 0.0
     cpu_seconds: float = 0.0
     per_case_seconds: list[float] = field(default_factory=list)
+    deadline_seconds: float | None = None
     deadline_headroom_seconds: float | None = None
     pressure_avg300: float | None = None
     returncode: int | None = None
+    gate_passed: bool = False
     report_path: str | None = None
     error: str = ""
 
@@ -205,6 +207,11 @@ def tier_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, int]:
     Anything the gate could not classify counts as incomplete rather than being
     dropped, so an unparseable report degrades to "not comparable" instead of
     "fast".
+
+    Matrix tiers carry their rows in ``case_results``.  Those rows are read
+    directly because a ``NOT_STARTED`` or ``INTERRUPTED`` row contributes
+    nothing to the aggregate ``counts``; reading only the aggregates would let
+    an unrun row disappear from the denominator entirely.
     """
 
     wanted = set(tiers)
@@ -219,22 +226,55 @@ def tier_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, int]:
     if not isinstance(payload, list):
         totals["incomplete"] += 1
         return totals
+    seen: set[str] = set()
     for tier in payload:
         if not isinstance(tier, dict):
             totals["incomplete"] += 1
             continue
-        if tier.get("name") not in wanted:
+        name = tier.get("name")
+        if name not in wanted:
             continue
+        seen.add(name)
         counts = tier.get("counts")
         if not isinstance(counts, dict):
             totals["incomplete"] += 1
             continue
-        totals["completed_passing"] += _as_int(counts.get("passed"))
-        totals["failed"] += _as_int(counts.get("failed")) + _as_int(counts.get("errors"))
-        totals["not_started"] += _as_int(counts.get("skipped")) + _as_int(counts.get("xfailed"))
+        case_results = tier.get("case_results")
+        if isinstance(case_results, list) and case_results:
+            for case in case_results:
+                _accumulate_case(totals, case)
+        else:
+            totals["completed_passing"] += _as_int(counts.get("passed"))
+            totals["failed"] += _as_int(counts.get("failed")) + _as_int(counts.get("errors"))
+            totals["not_started"] += _as_int(counts.get("skipped")) + _as_int(counts.get("xfailed"))
         if tier.get("status") not in ("PASS", "FAIL", "BLOCKED"):
             totals["incomplete"] += 1
+    for missing in sorted(wanted - seen):
+        # A declared tier the report never mentions is not a pass.
+        totals["incomplete"] += 1
     return totals
+
+
+def _accumulate_case(totals: dict[str, int], case: Any) -> None:
+    """Fold one matrix row into the arm totals without dropping it."""
+
+    if not isinstance(case, dict):
+        totals["incomplete"] += 1
+        return
+    status = case.get("status")
+    if status == "NOT_STARTED":
+        totals["not_started"] += 1
+        return
+    if status == "INTERRUPTED":
+        totals["interrupted"] += 1
+        return
+    counts = case.get("counts")
+    if not isinstance(counts, dict):
+        totals["incomplete"] += 1
+        return
+    totals["completed_passing"] += _as_int(counts.get("passed"))
+    totals["failed"] += _as_int(counts.get("failed")) + _as_int(counts.get("errors"))
+    totals["not_started"] += _as_int(counts.get("skipped")) + _as_int(counts.get("xfailed"))
 
 
 def effective_workers(report: dict[str, Any], requested: int) -> int | None:
@@ -250,21 +290,41 @@ def effective_workers(report: dict[str, Any], requested: int) -> int | None:
     return None
 
 
-def tier_durations(report: dict[str, Any], tiers: Iterable[str]) -> list[float]:
-    """Collect observed per-tier wall times as the per-case latency sample."""
+def case_durations(
+    report: dict[str, Any], tiers: Iterable[str]
+) -> tuple[list[float], float | None]:
+    """Return observed per-row durations and the declared per-row deadline.
+
+    Only matrix ``case_results`` rows are per-case samples.  A tier's aggregate
+    ``duration_seconds`` is the sum of a whole tier's rows and is never a
+    per-case latency, so it is not used here.  The deadline is taken from the
+    rows themselves rather than a top-level field the gate does not emit.
+    """
 
     wanted = set(tiers)
     durations: list[float] = []
+    deadlines: list[float] = []
     payload = report.get("tiers")
     if not isinstance(payload, list):
-        return durations
+        return durations, None
     for tier in payload:
         if not isinstance(tier, dict) or tier.get("name") not in wanted:
             continue
-        value = tier.get("duration_seconds")
-        if isinstance(value, (int, float)) and value > 0:
-            durations.append(float(value))
-    return durations
+        case_results = tier.get("case_results")
+        if not isinstance(case_results, list):
+            continue
+        for case in case_results:
+            if not isinstance(case, dict):
+                continue
+            value = case.get("duration_seconds")
+            if isinstance(value, (int, float)) and value > 0:
+                durations.append(float(value))
+            deadline = case.get("deadline_seconds")
+            if isinstance(deadline, (int, float)) and deadline > 0:
+                deadlines.append(float(deadline))
+    # The strictest declared deadline is the one every row had to meet.
+    observed_deadline = min(deadlines) if deadlines else None
+    return durations, observed_deadline
 
 
 def report_pressure(report: dict[str, Any]) -> float | None:
@@ -290,6 +350,8 @@ def build_arm_command(
     project_root: Path,
     evidence_dir: Path,
     capacity_policy: Path | None = None,
+    rom_root: Path | None = None,
+    fixture_root: Path | None = None,
 ) -> list[str]:
     """Return the exact ``production_gate.py`` argv for one arm.
 
@@ -322,6 +384,10 @@ def build_arm_command(
     ]
     for tier in plan.tiers:
         command.extend(("--tier", tier))
+    if rom_root is not None:
+        command.extend(("--rom-root", str(rom_root)))
+    if fixture_root is not None:
+        command.extend(("--fixture-root", str(fixture_root)))
     # The gate only accepts --cython-python together with --runtime-mode both,
     # so a single compiled arm is selected with --runtime-mode cython and its
     # interpreter is supplied through --python, which the gate applies to the
@@ -352,6 +418,8 @@ def run_arm(
     evidence_root: Path,
     timeout_seconds: float,
     capacity_policy: Path | None = None,
+    rom_root: Path | None = None,
+    fixture_root: Path | None = None,
     environment: dict[str, str] | None = None,
 ) -> ArmResult:
     """Run one arm and return its terminal, non-dropping result.
@@ -379,6 +447,8 @@ def run_arm(
         project_root=project_root,
         evidence_dir=arm_dir,
         capacity_policy=capacity_policy,
+        rom_root=rom_root,
+        fixture_root=fixture_root,
     )
     env = dict(os.environ if environment is None else environment)
     env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
@@ -431,12 +501,21 @@ def run_arm(
     result.failed = counts["failed"]
     result.incomplete = counts["incomplete"]
     result.not_started = counts["not_started"]
+    result.interrupted = counts["interrupted"]
     result.effective_workers = effective_workers(report, plan.requested_workers)
-    result.per_case_seconds = tier_durations(report, plan.tiers)
-    budget = report.get("timeout_seconds")
-    if result.per_case_seconds and isinstance(budget, (int, float)):
-        result.deadline_headroom_seconds = float(budget) - max(result.per_case_seconds)
+    result.per_case_seconds, result.deadline_seconds = case_durations(report, plan.tiers)
+    if result.per_case_seconds and result.deadline_seconds:
+        result.deadline_headroom_seconds = result.deadline_seconds - max(result.per_case_seconds)
     result.pressure_avg300 = report_pressure(report)
+    # The gate's exit status is authoritative: production_gate.py returns 0 if
+    # and only if its overall verdict is PASS.  Counting rows alone would accept
+    # an arm whose runtime, collection, evidence, or capacity prerequisite was
+    # rejected while some rows still happened to pass.
+    if result.returncode != 0:
+        result.gate_passed = False
+        if not result.failed and not result.incomplete:
+            # Preserve the row counts, but the arm is not a clean pass.
+            result.incomplete = max(result.incomplete, 1)
     return result
 
 
@@ -503,6 +582,17 @@ def select_policy(
                 f"{result.plan.key()} ran at effective workers="
                 f"{result.effective_workers} after the capacity policy clamped the "
                 f"requested {result.plan.requested_workers}"
+            )
+        if result.effective_workers is None:
+            # Without an admitted ceiling there is no capacity evidence, so a
+            # worker count cannot be justified against a CPU budget.
+            reasons.append(
+                f"{result.plan.key()} has no admitted capacity ceiling; supply "
+                "--capacity-policy so the worker count is measured against a budget"
+            )
+        if not result.gate_passed:
+            reasons.append(
+                f"{result.plan.key()} gate verdict is not PASS (returncode={result.returncode})"
             )
 
     by_runtime: dict[str, list[ArmResult]] = {}
@@ -762,6 +852,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     capacity_policy = (
         Path(args.capacity_policy).expanduser().resolve() if args.capacity_policy else None
     )
+    rom_root = Path(args.rom_root).expanduser().resolve() if args.rom_root else None
+    fixture_root = Path(args.fixture_root).expanduser().resolve() if args.fixture_root else None
     environment = dict(os.environ)
 
     results: list[ArmResult] = []
@@ -772,6 +864,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             evidence_root=evidence_root,
             timeout_seconds=args.arm_timeout_seconds,
             capacity_policy=capacity_policy,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
             environment=environment,
         )
         results.append(result)
