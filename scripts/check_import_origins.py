@@ -64,12 +64,12 @@ from urllib.parse import unquote, urlparse
 # length it would then have to catch an exception to undo.
 _VARIABLE_LENGTH_ALGORITHMS = frozenset({"shake_128", "shake_256"})
 
-# The largest digest any of those algorithms produces is SHAKE-256 at an
-# unbounded size, so a size cap cannot come from the algorithm set.  It comes
-# from the other direction instead: nothing a real installer writes is longer
-# than the widest fixed digest's encoding, so this bound only refuses claims no
-# genuine ``RECORD`` could have made -- and it stops a planted record from
-# choosing the size of an allocation the guard performs on its behalf.
+# SHAKE output is unbounded by definition, so no cap derived from the algorithm
+# set would bound it; this one is a deliberate refusal to size an allocation off
+# untrusted text.  1024 characters is 768 decoded bytes, far above any fixed
+# digest pip writes -- its ``RECORD`` writer emits ``sha256`` only -- so the
+# bound costs no realistic install anything while capping what a planted record
+# can ask the guard to allocate.
 _MAX_RECORDED_DIGEST_LENGTH = 1024
 
 # ``_file_digest`` encodes URL-safe base64, so the alphabet here is the URL-safe
