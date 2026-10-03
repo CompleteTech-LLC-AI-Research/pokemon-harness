@@ -182,6 +182,7 @@ UNIT_MODULES = frozenset(
         "test_probe_timed_trade_pair_evidence.py",
         "test_probe_timed_trade_pair_proof.py",
         "test_production_gate_diagnostics.py",
+        "test_matrix_concurrency_policy.py",
         "test_production_gate_matrix_manifest.py",
         "test_production_gate_report_loader.py",
         "test_production_gate_run_tier_failures.py",
