@@ -608,6 +608,42 @@ def test_operator_interrupt_is_not_swallowed_as_a_finding(tmp_path, monkeypatch,
         check_origins(tmp_path, ("interrupting_ns",))
 
 
+def test_a_finder_that_raises_on_hash_becomes_a_finding_not_a_traceback(
+    tmp_path, monkeypatch
+):
+    """A membership test against a finder set calls the finder's ``__hash__``.
+
+    ``_is_trusted_stdlib_finder`` decides trust with ``finder in <set>``, and
+    a set lookup invokes ``__hash__`` on the object being tested.  A hostile
+    finder controls that method, so the lookup is attacker-controlled data
+    reached before any of the surrounding guards apply.
+
+    A custom ``BaseException`` here is a finding, not an operator interrupt:
+    only ``KeyboardInterrupt`` and ``SystemExit`` are re-raised, everywhere
+    else in this module.  So the guard must report the finder as untrusted
+    rather than letting the exception escape ``check_origins``.
+    """
+
+    class ExplodingHash(BaseException):
+        """A direct ``BaseException`` subclass, i.e. not an operator interrupt."""
+
+    class HashBomb:
+        def __hash__(self):
+            raise ExplodingHash("hash escape")
+
+        def find_spec(self, *args):
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [HashBomb(), *sys.meta_path])
+
+    report = check_origins(tmp_path, ("interrupting_ns",))
+
+    assert report["status"] == "FAIL"
+    assert any(
+        package["package"] == "<interpreter>" for package in report["packages"]
+    ), f"the hostile finder must be refused as an interpreter finding: {report}"
+
+
 @pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
 def test_resolve_path_does_not_swallow_an_interrupt(raised):
     """``_resolve_path`` itself must re-raise, not just callers that reach it.

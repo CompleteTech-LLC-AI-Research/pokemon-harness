@@ -82,9 +82,24 @@ def _trusted_stdlib_finders() -> set[object]:
 
 
 def _is_trusted_stdlib_finder(finder: object) -> bool:
-    """Return whether ``finder`` is one of the interpreter's own finders."""
+    """Return whether ``finder`` is one of the interpreter's own finders.
 
-    return finder in _trusted_stdlib_finders()
+    A set membership test calls ``__hash__`` and ``__eq__`` on the object
+    being looked up, and both are supplied by the finder itself.  The lookup
+    is therefore attacker-controlled data reached before any of the guards
+    around the caller's own attribute reads, so it has to be guarded here.
+
+    An exception that is not an operator interrupt means this finder is not
+    one of the interpreter's own, which is the same answer an identity
+    mismatch gives: untrusted by default.
+    """
+
+    try:
+        return finder in _trusted_stdlib_finders()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return False
 
 
 def _site_packages_roots() -> list[Path]:
