@@ -2621,7 +2621,13 @@ class _Interrupting:
 
 
 def _interrupting_finder(raised):
-    """A finder whose ``__module__`` raises, built without inheriting the metaclass."""
+    """A finder whose ``__module__`` raises, built without inheriting the metaclass.
+
+    Only usable for the clauses at or before the ``__module__`` lookup.  The
+    later clauses need a finder whose ``__module__`` resolves normally, so the
+    hostile read has to be moved to the clause under test -- see
+    ``_plain_finder`` for those.
+    """
 
     class Meta(type):
         def __getattribute__(cls, name):
@@ -2633,6 +2639,24 @@ def _interrupting_finder(raised):
         pass
 
     return Finder()
+
+
+def _plain_finder(raised):
+    """A finder whose ``__module__`` is an ordinary name, so later clauses run.
+
+    A finder that interrupts on ``__module__`` would abort at the ``__module__``
+    clause before ``find_spec`` or ``spec.origin`` is ever consulted, so the
+    later rows would pass without ever reaching the clause they name.
+    """
+
+    class Finder:
+        pass
+
+    instance = Finder()
+    # Set on the class, not the instance: ``_finder_source`` reads
+    # ``type(finder).__module__`` for a non-class finder.
+    type(instance).__module__ = "plain_finder_module"
+    return instance
 
 
 @pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
@@ -2685,14 +2709,16 @@ def test_an_interrupt_while_identifying_a_finder_still_propagates(
         monkeypatch.setattr(origins, "_finder_module", lambda f: None)
 
     elif clause == "find_spec":
-        finder = _interrupting_finder(raised)
+        finder = _plain_finder(raised)
         monkeypatch.setattr(origins, "_finder_module", lambda f: None)
         monkeypatch.setattr(importlib.util, "find_spec", interrupt)
 
     else:
-        finder = _interrupting_finder(raised)
+        finder = _plain_finder(raised)
         monkeypatch.setattr(origins, "_finder_module", lambda f: None)
-        monkeypatch.setattr(importlib.util, "find_spec", lambda *a, **k: _Interrupting(raised))
+        monkeypatch.setattr(
+            importlib.util, "find_spec", lambda *a, **k: _Interrupting(raised)
+        )
 
     with pytest.raises((KeyboardInterrupt, SystemExit)):
         origins._finder_source(finder)
