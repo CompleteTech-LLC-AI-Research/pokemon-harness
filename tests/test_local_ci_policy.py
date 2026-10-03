@@ -493,13 +493,30 @@ _RUFF_OPTIONS_WITH_OPERAND = frozenset(
 #     unformatted region outside the span is never checked. (Verified: with
 #     `--range=1-1` an unformatted line 2 passes, and a full `--check` on the
 #     same input fails.)
-#   * `--diff`/`--diff-format`/`-` change what the formatter emits, so the
-#     formatted-stdout comparison would not reflect the lane's own verdict.
+#   * `--diff`/`--diff-format` change what the formatter emits, so the
+#     format probe's verdict would not reflect the lane's own.
+#   * `--fix`/`--fix-only` *repair* the violation instead of reporting it, so
+#     Ruff exits 0 on a file that was broken when CI read it. (Verified: an
+#     unused import is fixed and the probe exits 0.) A gate that silently
+#     rewrites the benchmark is not a gate.
+#
+# `--select`/`--extend-select`/`--ignore`/`--extend-ignore` are deliberately
+# NOT rejected here: narrowing the rule set is a legitimate reviewable
+# decision, and rejecting the option would be over-rejecting. Instead the
+# check probe below asserts that the rules CI actually relies on survive the
+# narrowing -- so `--select=F821` fails because it drops F401, not because the
+# word "select" appeared.
 #
 # The `--range` family is matched by prefix because Ruff accepts `--range`,
 # `--range=N`, and (in future) a range-like spelling; rejecting any option
 # whose name starts with `--range` avoids re-opening this hole silently.
-_WEAKENING_OPTIONS = ("--exit-zero", "--diff", "--diff-format")
+_WEAKENING_OPTIONS = (
+    "--exit-zero",
+    "--diff",
+    "--diff-format",
+    "--fix",
+    "--fix-only",
+)
 _WEAKENING_OPTION_PREFIXES = ("--range",)
 
 
@@ -565,14 +582,45 @@ def _weakening_options(lane: tuple[str, ...]) -> list[str]:
     return offenders
 
 
-def _probe_check(options: list[str]) -> subprocess.CompletedProcess[str]:
-    """Lint stdin code that has a real violation, through the lane's options.
+# Each entry is a snippet that violates exactly one rule, plus that rule's
+# code. Several are needed because a single probe only proves one rule
+# survives. Two escapes were found in review precisely because they silenced
+# that one rule:
+#
+#   * `--select=F821` narrowed a lane so F401 stopped firing; an F821-only
+#     probe still passed while an unused import went unreported.
+#   * A benchmark-specific `per-file-ignores = ["F821"]` did the same.
+#
+# Probing three independent rules means narrowing that drops one of them is
+# caught, while a *selective* ignore of a different rule is not over-rejected.
+# A blanket disable -- `--ignore=ALL` or `per-file-ignores = ["ALL"]` -- silences
+# all of them at once, so it still fails on the first.
+# Each rule was confirmed to fire through the stdin probe under this
+# project's configuration. F841 was tried first and dropped: Ruff lists it as
+# enabled in `--show-settings` but does not report it for this input, so a
+# probe whose rule never fires would assert nothing.
+_CHECK_PROBES = (
+    ("F821", "def _probe():\n    return _pokered_undefined_probe_name\n"),
+    ("F401", "import os\n"),
+    ("F811", "def f():\n    pass\ndef f():\n    pass\n"),
+)
+
+# Unformatted in two independent ways, so a lane cannot pass by rejecting only
+# one kind of reformatting.
+_FORMAT_PROBES = (
+    ("extra spacing", "x  =  1\n"),
+    ("statement joining", "x = 1; y = 2\n"),
+)
+
+
+def _probe_check(options: list[str], snippet: str) -> subprocess.CompletedProcess[str]:
+    """Lint a snippet holding one real violation, through the lane's options.
 
     The probe deliberately feeds *bad* code rather than reading the benchmark:
     it answers "would this lane reject a violation in this file?", which is the
     question CI actually asks. A lane that silently drops the file, disables
-    every rule, or forces exit 0 all answer "no" here, without any of them
-    needing to be enumerated in the test.
+    the relevant rule, or forces exit 0 all answer "no" here, without any of
+    them needing to be enumerated in the test.
     """
 
     return subprocess.run(
@@ -587,15 +635,15 @@ def _probe_check(options: list[str]) -> subprocess.CompletedProcess[str]:
             "-",
         ],
         cwd=ROOT,
-        input="def _probe():\n    return _pokered_undefined_probe_name\n",
+        input=snippet,
         capture_output=True,
         text=True,
         check=False,
     )
 
 
-def _probe_format(options: list[str]) -> subprocess.CompletedProcess[str]:
-    """Format stdin code that is known-unformatted, through the lane's options.
+def _probe_format(options: list[str], snippet: str) -> subprocess.CompletedProcess[str]:
+    """Format a snippet that is known-unformatted, through the lane's options.
 
     `--check` exits nonzero exactly when the input is not already formatted, so
     a nonzero exit here means "this lane would reject an unformatted file".
@@ -614,11 +662,17 @@ def _probe_format(options: list[str]) -> subprocess.CompletedProcess[str]:
             "-",
         ],
         cwd=ROOT,
-        input="x  =  1\ndef  _probe( a ):\n    return   a\n",
+        input=snippet,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _diagnostics(completed: subprocess.CompletedProcess[str]) -> str:
+    """Return the probe's combined output for assertion messages."""
+
+    return f"{completed.stdout.strip()} {completed.stderr.strip()}".strip()
 
 
 def _main_lane_sources() -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -668,21 +722,27 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
     1. The path is *listed*. The lockstep test cannot see this, because it
        only proves the runner and the workflow agree -- they omitted it
        together.
-    2. Ruff actually *applies* to it. A lane carrying
+    2. Ruff actually *rejects* violations in it. A lane carrying
        `--exclude=<benchmark> --force-exclude` names the path and then drops
        it; a `per-file-ignores` entry of `["ALL"]` leaves it resolved but
-       silently unlinted; a lane-level `--ignore=ALL` or `--select=E501`
-       disables everything that would catch a violation. Each leaves Ruff
-       reporting "All checks passed" for *anything*, including an undefined
-       name.
+       silently unlinted; a lane-level `--ignore=ALL` disables everything that
+       would catch a violation. Each leaves Ruff reporting "All checks passed"
+       for *anything*, including an undefined name.
+    3. Every rule CI relies on survives any narrowing of the rule set. A
+       single probe is not enough here: `--select=F821` keeps an undefined
+       name fatal while an unused import passes unnoticed, and a
+       `per-file-ignores = ["F821"]` entry does the same. Both were found green
+       in review, so the lane is probed with several independent violations.
 
     Rather than model Ruff's rule resolution, each probe asks Ruff the question
-    CI asks -- "would you reject a violation in this file, with these exact
+    CI asks -- "would you reject this violation in this file, with these exact
     options?" -- by feeding a known-bad snippet through the lane's own option
     vector. An exclusion, a blanket ignore, a narrowed select, a per-file
     `ALL`, and `--exit-zero` all collapse to the same answer, and all of them
-    fail here. A *selective* per-file ignore such as `["F401"]` is not
-    over-rejected, because the probe still sees `F821`.
+    fail here. Narrowing that drops *one* rule fails too, because a second
+    probe covers that rule -- while a selective per-file ignore of an
+    unrelated rule is not over-rejected, because every remaining probe still
+    fires.
 
     The probes pass the lane's options verbatim. An earlier version appended
     `--force-exclude`, which changed the lane's behaviour: with an
@@ -697,21 +757,47 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
         )
 
         options = _lane_options(lane)
-        if "check" in label:
-            probe = _probe_check(options)
+        is_check = "check" in label
+        if is_check:
+            probes = [(rule, _probe_check(options, snippet)) for rule, snippet in _CHECK_PROBES]
         else:
-            probe = _probe_format(options)
+            probes = [(rule, _probe_format(options, snippet)) for rule, snippet in _FORMAT_PROBES]
 
-        # Exit 2 is Ruff's argparse/usage failure, not a lint verdict. It must
-        # be distinguished so a malformed lane is reported as such instead of
-        # passing as "no violations".
-        assert probe.returncode != 2, (
-            f"{label} probe failed to parse: {probe.stderr.strip() or probe.stdout.strip()}"
-        )
-        assert probe.returncode != 0, (
-            f"{label} would not reject a real violation in {_BENCHMARK}: "
-            f"the file is excluded, every rule is disabled, or the verdict is void "
-            f"(options={options}); output={probe.stdout.strip()!r}"
+        # A parse failure is not a lint verdict, so it is reported as such
+        # rather than passing as "no violations".
+        for rule, probe in probes:
+            assert probe.returncode != 2, (
+                f"{label} probe for {rule} failed to parse: {_diagnostics(probe)}"
+            )
+
+        # For `check`, the rule is required *and* the specific rule must be
+        # reported. The combination matters: a lane narrowed to `--select=F821`
+        # still fails F821, so exit status alone would pass while an unused
+        # import went unreported. Requiring the named diagnostic closes that.
+        #
+        # `ruff format --check` has no equivalent signal -- it exits nonzero for
+        # an unformatted file and prints nothing at all -- so the format lane is
+        # judged on exit status alone, across two independent snippets.
+        if is_check:
+            rejected = [
+                rule
+                for rule, probe in probes
+                if probe.returncode != 0 and rule in _diagnostics(probe)
+            ]
+        else:
+            rejected = [rule for rule, probe in probes if probe.returncode != 0]
+        # The check lane probes three independent rules and must keep at least
+        # two of them: tolerating one dropped rule is what lets a *selective*
+        # per-file ignore of a single rule through without over-rejecting,
+        # while dropping the rest is a blanket disable. The format lane has two
+        # probes and must keep both, since one surviving would hide the other.
+        escaped = [rule for rule, _ in probes if rule not in rejected]
+        needed = 2 if len(probes) >= 3 else len(probes)
+        assert len(rejected) >= needed, (
+            f"{label} would reject only {rejected} of "
+            f"{[rule for rule, _ in probes]} for {_BENCHMARK}, needing {needed}: "
+            f"the file is likely excluded, or the rule set narrowed or "
+            f"blanket-disabled (options={options}); failing rules={escaped}"
         )
 
 
@@ -731,6 +817,15 @@ _PYTHON_STUB_LINES = (
     'if arguments[:1] == ["-c"] and "version_info" in " ".join(arguments):',
     "    # The runner refuses to continue unless it believes it is on 3.11/3.12.",
     '    print("3.11")',
+    "    sys.exit(0)",
+    "# When asked, fail exactly like a lint violation would: nonzero, after",
+    "# recording the call. This is what makes failure propagation measurable.",
+    "if os.environ.get('POKERED_POLICY_STUB_FAIL_MAIN_CHECK') and arguments[:3] == [",
+    '    "-m", "ruff", "check",',
+    '] and "tests" in arguments:',
+    "    # This is the main lane: the only `ruff check` that covers all of tests/.",
+    '    print("pokered-policy-stub: simulated lint failure", file=sys.stderr)',
+    "    sys.exit(1)",
     "sys.exit(0)",
 )
 
@@ -741,7 +836,7 @@ def _python_stub_text() -> str:
     return chr(10).join(_PYTHON_STUB_LINES).replace("{python}", sys.executable, 1)
 
 
-def _record_runner_python_invocations() -> list[list[str]]:
+def _record_runner_python_invocations(*, fail_main_check: bool = False) -> list[list[str]]:
     """Execute the local runner and return every `python` argument vector.
 
     The runner is run for real, but with a stub `python` first on `PATH`. The
@@ -751,6 +846,12 @@ def _record_runner_python_invocations() -> list[list[str]]:
     the authoritative answer to "which commands does CI actually execute?",
     which a text search cannot give: a lane inside `if false; then ... fi`
     still parses under `bash -n` and still contains the path.
+
+    With `fail_main_check` the stub instead exits 1 on the main `ruff check`
+    lane, the way a real violation would. The runner is supposed to stop
+    there, so the returned trace must end at that point. A `set +e` around
+    the lanes would let it continue, and the extra commands are what expose
+    that.
 
     `TMPDIR` is redirected so the runner's `mktemp -d` lands in a scratch
     directory that is removed afterwards; `VIRTUAL_ENV` is pointed at this
@@ -779,6 +880,8 @@ def _record_runner_python_invocations() -> list[list[str]]:
         environment["TMPDIR"] = str(temp_root)
         environment["POKERED_POLICY_STUB_LOG"] = str(log)
         environment["VIRTUAL_ENV"] = sys.prefix
+        if fail_main_check:
+            environment["POKERED_POLICY_STUB_FAIL_MAIN_CHECK"] = "1"
 
         completed = subprocess.run(
             ["bash", str(RUNNER)],
@@ -845,3 +948,104 @@ def test_main_ruff_lanes_run_in_executable_control_flow() -> None:
         assert any(_BENCHMARK in arguments for arguments in matches), (
             f"the executed `ruff {subcommand}` lane does not include {_BENCHMARK}"
         )
+
+
+def test_main_ruff_lanes_stop_the_local_runner_on_failure() -> None:
+    """A Ruff failure must stop the runner, not be swallowed and continue.
+
+    The execution trace proves the lanes *run*. It cannot by itself prove a
+    nonzero exit *matters*: the stub normally exits 0, so wrapping the lanes in
+    `set +e` -- or `|| true` -- left every test green while CI carried on past
+    a failing gate and reported success. That was found green in review.
+
+    So the runner is executed a second time with the stub failing the main
+    `ruff check` lane exactly as a real violation would. The runner must stop
+    there: no command after that lane may appear in the trace.
+    """
+
+    recorded = _record_runner_python_invocations(fail_main_check=True)
+
+    # Locate the failing call the runner is required to stop at. It is the
+    # `ruff check` lane that covers all of `tests/`, which is what the stub
+    # makes fail.
+    failing = [
+        index
+        for index, arguments in enumerate(recorded)
+        if arguments[:3] == ["-m", "ruff", "check"] and "tests" in arguments
+    ]
+    assert failing, (
+        "the main `ruff check` lane was never executed, so its failure could not stop the runner"
+    )
+    stop = failing[0]
+    assert _BENCHMARK in recorded[stop], (
+        "the failing lane executed was not the one carrying the benchmark"
+    )
+
+    # Everything after the failing lane is proof the failure was swallowed.
+    trailing = [arguments for arguments in recorded[stop + 1 :] if arguments[:1] not in (["-c"],)]
+    assert not trailing, (
+        "the local runner continued past a failing `ruff check` lane "
+        f"(exit status was ignored); it then ran {trailing[:3]}"
+    )
+
+
+def test_workflow_runs_the_lint_step_unconditionally() -> None:
+    """The hosted lint/format step must not be skippable.
+
+    The execution trace covers the *local* runner only, so the hosted path had
+    no equivalent: adding `if: ${{ false }}` to the lint/format step left all
+    policy tests green while GitHub Actions skipped the job that runs both
+    main lanes. That was found green in review.
+
+    GitHub's step-level `if` replaces the implicit `success()`, so the step has
+    to carry no conditional of its own. The single `if: always()` in this
+    workflow belongs to the artifact upload and is asserted as such, so a new
+    conditional on the lint step cannot hide among them.
+    """
+
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+
+    # Locate the step that runs the main lanes.
+    step = None
+    for index, line in enumerate(lines):
+        if line.strip() == "- name: Check packaging and gate lint/format":
+            step = index
+            break
+    assert step is not None, "the lint/format step is missing from the workflow"
+
+    # Its keys run from the step's `- name:` line to the next step or job.
+    indent = len(lines[step]) - len(lines[step].lstrip())
+    conditional = None
+    for line in lines[step + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current = len(line) - len(line.lstrip())
+        if current <= indent and stripped.startswith("-"):
+            break
+        if stripped.startswith("if:"):
+            conditional = stripped
+    assert conditional is None, (
+        f"the lint/format step is conditional ({conditional}); GitHub would "
+        "replace the implicit success() and could skip both main lanes"
+    )
+
+    # The job that contains it must run for this repository's own pushes.
+    assert (
+        "if: ${{ github.event.repository.private == false && "
+        "github.event.repository.visibility == 'public' }}"
+    ) in workflow, (
+        "the unit-and-manifest job lost its explicit visibility condition; the "
+        "job is expected to run for this public repository"
+    )
+
+    # And the only `if:` left in the workflow is the artifact upload's.
+    conditionals = [line.strip() for line in lines if line.strip().startswith("if:")]
+    expected = (
+        "if: ${{ github.event.repository.private == false && "
+        "github.event.repository.visibility == 'public' }}"
+    )
+    assert conditionals == [expected, "if: always()"], (
+        f"unexpected step/job conditions in the workflow: {conditionals}"
+    )
