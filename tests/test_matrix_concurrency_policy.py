@@ -57,14 +57,20 @@ def _arm(
     gate_passed: bool = True,
     tiers=("trade", "battle"),
 ):
+    plan = _plan(runtime, workers, tiers)
+    # A real arm records what each tier ran, because that is what makes two
+    # arms comparable.  Model that here so fixtures are not incomparable by
+    # omission; tests that care about the row identity override it.
+    tier_rows = {"trade": 43, "battle": 19}
     return bench.ArmResult(
-        plan=_plan(runtime, workers, tiers),
+        plan=plan,
         completed_passing=passing,
         failed=failed,
         incomplete=incomplete,
         interrupted=interrupted,
         not_started=not_started,
         effective_workers=workers if effective is None else effective,
+        tier_row_totals={tier: tier_rows[tier] for tier in plan.tiers if tier in tier_rows},
         wall_seconds=wall,
         gate_passed=gate_passed,
     )
@@ -984,3 +990,126 @@ class TestArmTimeoutBound:
             ).arm_timeout_seconds
             == 5.0
         )
+
+
+class TestUndeclaredWorkerCountsCannotBeSelected:
+    """Only the declared experiment may be ranked or selected."""
+
+    def test_an_undeclared_worker_arm_cannot_win(self):
+        # The selector must not pick a worker count the run never set out to
+        # measure, even when that arm looks like the fastest.  An API caller can
+        # supply any arm it likes; the selector has to refuse the extras itself.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0), (4, 80.0), (8, 10.0))
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any(
+            "workers=8, which is not a declared worker count" in reason
+            for reason in selection["reasons"]
+        )
+
+
+class TestPerTierRowIdentityIsComparableWork:
+    """A manifest change between sequential arms must be visible."""
+
+    def test_a_per_tier_row_shift_is_not_comparable(self):
+        # Arms run sequentially.  If the manifest changes between them, 43 trade
+        # + 19 battle rows can become 42 + 20 with the same total of 62, and the
+        # timing difference would be attributed to concurrency instead.
+        arms = [
+            _arm(runtime="source", workers=1, wall=100.0),
+            _arm(runtime="source", workers=2, wall=90.0),
+            _arm(runtime="source", workers=4, wall=80.0),
+        ]
+        for arm in arms:
+            arm.tier_row_totals = {"trade": 43, "battle": 19}
+        arms[2].tier_row_totals = {"trade": 42, "battle": 20}
+        assert bench.comparable(arms) is False
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("not comparable" in reason for reason in selection["reasons"])
+
+    def test_matching_per_tier_rows_are_comparable(self):
+        arms = [
+            _arm(runtime="source", workers=1, wall=100.0),
+            _arm(runtime="source", workers=2, wall=90.0),
+            _arm(runtime="source", workers=4, wall=80.0),
+        ]
+        for arm in arms:
+            arm.tier_row_totals = {"trade": 43, "battle": 19}
+        assert bench.comparable(arms) is True
+
+    def test_an_arm_without_recorded_rows_is_not_comparable(self):
+        # An arm that never recorded its per-tier rows cannot be shown to have
+        # run the same work as its peers, so it is not comparable by assumption.
+        arms = [
+            _arm(runtime="source", workers=1, wall=100.0),
+            _arm(runtime="source", workers=2, wall=90.0),
+            _arm(runtime="source", workers=4, wall=80.0),
+        ]
+        for arm in arms:
+            arm.tier_row_totals = {"trade": 43, "battle": 19}
+        arms[1].tier_row_totals = {}
+        assert bench.comparable(arms) is False
+
+
+class TestPerTierConcurrencyIsReportedHonestly:
+    """effective_workers is the governing count, not a uniform description."""
+
+    def test_per_tier_concurrency_reflects_each_tier_s_row_count(self):
+        report = {
+            "capacity": {"admission": {"max_concurrent_pairs": 64}},
+            "tiers": [_tier("trade", rows=43), _tier("battle", rows=19)],
+        }
+        # Trade ran 30-wide and battle 19-wide; the governing value for the arm
+        # is the smallest, 19, but the report records both honestly.
+        assert bench.tier_effective_workers(report, 30, ("trade", "battle")) == {
+            "trade": 30,
+            "battle": 19,
+        }
+        assert bench.effective_workers(report, 30, ("trade", "battle")) == 19
+
+    def test_per_tier_concurrency_is_unknown_without_a_readable_row_count(self):
+        report = {
+            "capacity": {"admission": {"max_concurrent_pairs": 64}},
+            "tiers": [_tier("battle", rows=19)],
+        }
+        assert bench.tier_effective_workers(report, 4, ("trade", "battle")) is None
+
+
+class TestArmBoundIsScopedToTheRequestedRoot:
+    """The derived bound must describe the tree it will actually run."""
+
+    def test_an_unreadable_root_does_not_borrow_another_checkout_manifest(self):
+        # Loading the manifest by module name would return whichever copy was
+        # already imported, so a nonexistent root would silently report this
+        # checkout's 61,500 s matrix.  The bound must instead be unknown and
+        # fall back to the conservative floor.
+        assert bench._declared_matrix_worst_case_seconds(Path("/nonexistent-matrix-root")) == 0.0
+
+    def test_the_bound_reads_the_matrix_from_the_given_root(self, tmp_path):
+        # A synthetic root with a larger matrix must raise the derived bound,
+        # proving the value tracks the requested tree rather than the process's
+        # own checkout.
+        tests_dir = tmp_path / "tests"
+        scripts_dir = tmp_path / "scripts"
+        tests_dir.mkdir()
+        scripts_dir.mkdir()
+        (tests_dir / "_tier_config.py").write_text(
+            "TIER_REQUIRED_NODEIDS = {\n"
+            "    'trade': frozenset(f'ter-{i}' for i in range(600)),\n"
+            "    'battle': frozenset(f'battle-{i}' for i in range(300)),\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (scripts_dir / "production_gate_model.py").write_text(
+            "MATRIX_CASE_TIMEOUT_SECONDS = {'trade': 900.0, 'battle': 1200.0}\n",
+            encoding="utf-8",
+        )
+        worst = bench._declared_matrix_worst_case_seconds(tmp_path)
+        assert worst == 600 * 900.0 + 300 * 1200.0
+        # The floor is a floor, not a cap: a larger matrix must raise the bound.
+        assert bench.default_arm_timeout_seconds(tmp_path) > worst > 108000.0

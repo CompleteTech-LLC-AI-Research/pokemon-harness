@@ -1048,6 +1048,10 @@ valid result and never a defect:
   measured only `trade` while `workers=2` and `workers=4` measured only `battle`
   never measured any worker count on both tiers;
 - an arm produced no passing row;
+- an arm ran at a worker count that was never declared. The selector ranks and
+  selects only the declared experiment, so an API caller that supplies an
+  undeclared arm gets a refusal naming it rather than a policy chosen from a
+  concurrency the run never set out to measure;
 - an arm ran at an effective worker count different from the one it requested,
   which means something below the request clamped it. Three ceilings apply and
   the smallest one is the arm's real concurrency: the requested count, the
@@ -1057,7 +1061,17 @@ valid result and never a defect:
   runs the 19-row battle tier at 19 in practice. Row counts are read from the
   report itself rather than hardcoded, and an unreadable tier row count yields
   no effective count at all, so an unmeasurable arm is never reported as
-  running at exactly the requested count;
+  running at exactly the requested count. Each tier really does use its own
+  concurrency, so the per-tier values are recorded as `tier_effective_workers`
+  and the arm-level `effective_workers` is the smallest of them — the count
+  that governs the matrix as a whole, which is the only value a single worker
+  policy could honestly be applied to;
+- two arms of one runtime ran a different number of rows in any given tier.
+  Arms run sequentially, so the manifest can change between them; a shift from
+  43 trade and 19 battle rows to 42 and 20 keeps the combined total at 62 while
+  trading a cheap row for an expensive one, and that timing difference would be
+  attributed to concurrency. Comparability is decided per tier, and an arm that
+  never recorded its per-tier rows is not comparable by assumption;
 - the runtimes disagree on the best worker count;
 - nothing beat the `workers=1` reference.
 
@@ -1080,6 +1094,13 @@ conservative if either source cannot be read. A hardcoded bound is wrong: a
 bound below the serial worst case interrupts a legitimate slow `workers=1`
 baseline and reports an unsupported `unselected` result that looks like a
 measurement rather than a harness artifact.
+
+Both sources are read by file path under `--project-root`, not by module name.
+An ordinary `import` returns whichever copy is already loaded — this checkout,
+or anything imported earlier — so a benchmark pointed at a different tree would
+otherwise budget against another tree's matrix and could return a bound below
+the real one. When the tree cannot be read, the bound is unknown and the floor
+applies; no other checkout's numbers are ever substituted.
 
 ### Status
 

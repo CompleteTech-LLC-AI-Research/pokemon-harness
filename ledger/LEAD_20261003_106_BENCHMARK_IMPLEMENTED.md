@@ -166,6 +166,66 @@ clean. End-to-end on this head, both runtimes at `workers=1` over
 `trade,battle` with an explicit 240 s arm bound, returned `unselected` with the
 expected per-arm reasons and no policy change.
 
+## Sixth review round: four findings on `c26c8148`
+
+A fifth independent review of `c26c8148` raised four findings. All four were
+confirmed and fixed; the reviewer reproduced the first two directly.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | `select_policy` never rejected arms at undeclared worker counts, so a clean `workers=8` arm could be ranked and selected while the experiment only declared 1, 2 and 4 | fixed — an arm whose `requested_workers` is not in the declared set is refused by name. The CLI only builds declared arms, so this was an API-correctness gap in the selector's own stated contract |
+| 2 | `comparable()` compared a combined row total, so a manifest change between sequential arms could hide behind an unchanged total | fixed — comparability is now decided per tier from the arm's recorded `tier_row_totals`, with the combined required-row count still part of the identity. Arms run sequentially, so 43 trade + 19 battle becoming 42 + 20 keeps the total at 62 while trading a cheap row for an expensive one |
+| 3 | `_declared_matrix_worst_case_seconds` imported by module name, so it returned whichever copy was already imported rather than reading `project_root` | fixed — this was a genuine bug in the code added minutes earlier. Reproduced: a nonexistent root returned this checkout's 61,500 s. Both sources are now loaded by file path under the requested root, with no `sys.path` mutation and no `sys.modules` leakage. The reviewer was right that the previous floor test passed only because the floor masked the import error |
+| 4 | `effective_workers` reported one number for an arm whose tiers genuinely ran at different concurrency | accepted as a reporting defect, fixed as reporting — the smallest per-tier value remains the correct value to govern a matrix-wide policy, and rejecting that arm is correct. But the arm report now also carries `tier_effective_workers`, so a request of 30 records `{"trade": 30, "battle": 19}` instead of presenting 19 as if it described both tiers |
+
+Finding 3 also required a real fix to the load itself: `production_gate_model.py`
+executes `@dataclass` at import time, and dataclasses resolve string
+annotations through `sys.modules[cls.__module__]`, so a module executed outside
+`sys.modules` raises `AttributeError`. The loader registers the module under a
+private name for the duration of execution and restores the previous state
+afterwards, so nothing shadows the real `tests` or `scripts` packages.
+
+Eight regression tests were added: undeclared worker counts cannot win, a
+per-tier row shift is incomparable, matching per-tier rows are comparable, an
+arm without recorded rows is incomparable, per-tier concurrency is reported
+per tier, per-tier concurrency is unknown without a readable row count, an
+unreadable root does not borrow another checkout's manifest, and a synthetic
+larger matrix raises the derived bound above the floor.
+
+Verification on this head:
+
+```
+.venv-wt106/bin/python -m pytest -o addopts="" -p no:cacheprovider \
+  tests/test_matrix_concurrency_policy.py \
+  tests/test_production_gate_strict_matrix.py \
+  tests/test_production_gate_matrix_manifest.py \
+  tests/test_production_gate_report_loader.py \
+  tests/test_production_gate_run_tier_failures.py \
+  tests/test_gate_capacity_policy.py \
+  tests/test_gate_capacity_boundaries.py \
+  tests/test_gate_capacity_interrupts.py \
+  tests/test_gate_capacity_main.py
+313 passed, 1 warning in 14.11s
+```
+
+Each of the four findings was re-checked by re-running the reviewer's own
+reproduction against the fixed code:
+
+```
+finding1 -> unselected ['source/workers-8 ran at workers=8, which is not a declared worker count [1, 2, 4]', ...]
+finding2 -> False unselected
+finding3 -> 0.0 108000.0
+finding4 -> {'trade': 30, 'battle': 19} 19
+```
+
+The reviewer confirmed the two findings from the previous round are closed: the
+per-arm tier coverage check does close the union-of-partial-arms case, and the
+skipped-arm test now asserts a reason tied to that arm. It found no relaxed
+deadline, threshold, skip, xfail, or gate in the diff. Its test suite could not
+run in its read-only sandbox because pytest could not create a temporary file,
+so its counterexamples were reproduced by importing the module directly rather
+than by running the suite.
+
 ## Policy selection is deliberately withheld
 
 No worker policy is recommended and the `workers=1` default is unchanged.

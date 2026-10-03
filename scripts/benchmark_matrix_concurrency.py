@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -92,14 +93,20 @@ def _declared_matrix_worst_case_seconds(project_root: Path) -> float:
     per-row budget because the gate may spend that much on one row before it
     finally reports the failure, making this a true upper bound rather than an
     estimate.
+
+    Both sources are loaded by file path under ``project_root`` rather than by
+    module name.  An ``import_module("tests._tier_config")`` would return
+    whichever copy was already imported -- the benchmark's own checkout, or a
+    previously imported one -- regardless of the root it was asked about, so a
+    benchmark pointed at a different tree would silently budget against another
+    tree's matrix.  Reading the exact files keeps the bound tied to the tree
+    whose rows the child gate will actually run.
     """
 
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    try:
-        tier_config = importlib.import_module("tests._tier_config")
-        gate_model = importlib.import_module("scripts.production_gate_model")
-    except Exception:  # noqa: BLE001 - an unreadable manifest is not evidence
+    root = Path(project_root)
+    tier_config = _load_module_from_root(root, Path("tests") / "_tier_config.py")
+    gate_model = _load_module_from_root(root, Path("scripts") / "production_gate_model.py")
+    if tier_config is None or gate_model is None:
         return 0.0
     manifest = getattr(tier_config, "TIER_REQUIRED_NODEIDS", None)
     timeouts = getattr(gate_model, "MATRIX_CASE_TIMEOUT_SECONDS", None)
@@ -115,6 +122,46 @@ def _declared_matrix_worst_case_seconds(project_root: Path) -> float:
             return 0.0
         worst += len(nodeids) * float(per_row)
     return worst
+
+
+def _load_module_from_root(project_root: Path, relative_path: Path):
+    """Load one source file from ``project_root`` without touching ``sys.path``.
+
+    Returns ``None`` for any file that is absent, unreadable, or fails to
+    execute.  A caller must treat that as "unknown" and fall back to its
+    conservative default; it must never substitute a module imported from
+    somewhere else.
+    """
+
+    path = project_root / relative_path
+    name = f"_benchmark_matrix_{relative_path.stem}"
+    previous = sys.modules.get(name)
+    try:
+        if not path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        # ``dataclass`` resolves string annotations through
+        # ``sys.modules[cls.__module__]``, so the module must be registered
+        # while it executes.  The name is private and removed again below, so
+        # this never shadows the real ``tests`` or ``scripts`` packages.
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+    except Exception:  # noqa: BLE001 - an unreadable source is not evidence
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+        return None
+    return module
 
 
 # ``production_gate.py`` spells the compiled runtime ``cython`` (see
@@ -190,6 +237,12 @@ class ArmResult:
     interrupted: int = 0
     not_started: int = 0
     effective_workers: int | None = None
+    # Per-tier counts of the rows the arm actually reported, captured from the
+    # gate's own report.  Arms run sequentially, so the manifest can change
+    # between two of them; these are what make that difference visible instead
+    # of letting a combined total hide a trade/battle shift.
+    tier_row_totals: dict[str, int] = field(default_factory=dict)
+    tier_effective_workers: dict[str, int] = field(default_factory=dict)
     wall_seconds: float = 0.0
     cpu_seconds: float = 0.0
     per_case_seconds: list[float] = field(default_factory=list)
@@ -262,6 +315,8 @@ class ArmResult:
             "requested_workers": self.plan.requested_workers,
             "effective_workers": self.effective_workers,
             "tiers": list(self.plan.tiers),
+            "tier_rows": dict(sorted(self.tier_row_totals.items())),
+            "tier_effective_workers": dict(sorted(self.tier_effective_workers.items())),
             "rows": {
                 "completed_passing": self.completed_passing,
                 "failed": self.failed,
@@ -398,13 +453,21 @@ def tier_row_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, i
 
 
 def effective_workers(report: dict[str, Any], requested: int, tiers: Iterable[str]) -> int | None:
-    """Return the concurrency every declared tier in this arm actually ran.
+    """Return the concurrency that governs this arm's whole matrix.
 
-    Three ceilings apply, and the smallest one is the arm's real concurrency:
-    the requested worker count, the capacity policy's admitted pair ceiling,
-    and the smallest declared tier row count.  The last of those is why a
-    request of 44 workers does not read as an arm at 44 when the battle tier
-    only declares 19 rows -- the gate can never run 44 battle rows at once.
+    The gate caps each tier independently at ``min(matrix_workers, rows,
+    capacity ceiling)``, so a single arm genuinely uses different concurrency
+    per tier when its tiers declare different row counts.  This returns the
+    smallest of those per-tier values: the concurrency that governs the arm as
+    a whole.
+
+    That is deliberately the *smallest*.  A worker policy governs the matrix as
+    one unit, so a count is only selectable when it is honoured everywhere.  A
+    request of 44 against a 43-row trade tier and a 19-row battle tier is not a
+    44-worker arm -- the gate cannot run 44 battle rows at once -- and reporting
+    44 would claim a concurrency the matrix never reached.  The per-tier values
+    are recorded separately in ``tier_effective_workers`` so the report does
+    not present this governing value as if it were uniform.
 
     ``None`` returns when the capacity policy admitted no ceiling or when a
     tier's row count is unreadable.  An unknown effective count is never
@@ -427,6 +490,34 @@ def effective_workers(report: dict[str, Any], requested: int, tiers: Iterable[st
             return None
         ceiling = min(ceiling, rows)
     return max(1, ceiling)
+
+
+def tier_effective_workers(
+    report: dict[str, Any], requested: int, tiers: Iterable[str]
+) -> dict[str, int] | None:
+    """Return the per-tier concurrency the gate actually used for this arm.
+
+    Mirrors ``production_gate_matrix._run_matrix_tier``, which caps each tier
+    at ``min(matrix_workers, len(nodeids))`` and then at the admitted pair
+    ceiling.  Returning ``None`` means at least one declared tier's row count
+    could not be read, so no per-tier value is asserted.
+    """
+
+    capacity = report.get("capacity")
+    admission = capacity.get("admission") if isinstance(capacity, dict) else None
+    if not isinstance(admission, dict):
+        return None
+    admitted = admission.get("max_concurrent_pairs")
+    if type(admitted) is not int or admitted <= 0:
+        return None
+    row_counts = tier_row_counts(report, tiers)
+    result: dict[str, int] = {}
+    for tier in tiers:
+        rows = row_counts.get(tier)
+        if not isinstance(rows, int) or rows <= 0:
+            return None
+        result[tier] = max(1, min(requested, admitted, rows))
+    return result
 
 
 def case_durations(
@@ -647,6 +738,16 @@ def run_arm(
     result.not_started = counts["not_started"]
     result.interrupted = counts["interrupted"]
     result.effective_workers = effective_workers(report, plan.requested_workers, plan.tiers)
+    # Record what each tier actually ran so a manifest change between sequential
+    # arms cannot hide behind an unchanged combined total.
+    result.tier_row_totals = {
+        tier: rows
+        for tier, rows in tier_row_counts(report, plan.tiers).items()
+        if isinstance(rows, int) and rows > 0
+    }
+    per_tier_workers = tier_effective_workers(report, plan.requested_workers, plan.tiers)
+    if per_tier_workers is not None:
+        result.tier_effective_workers = per_tier_workers
     result.per_case_seconds, result.deadline_headroom_seconds = case_durations(report, plan.tiers)
     result.pressure_avg300 = report_pressure(report)
     # The gate's exit status is authoritative: production_gate.py returns 0 if
@@ -663,15 +764,17 @@ def run_arm(
 def comparable(results: Sequence[ArmResult]) -> bool:
     """Return whether these arms may be compared against each other.
 
-    Two arms are comparable only when they ran the same declared work, i.e.
-    they share a runtime, a required-row count, and the same set of declared
-    tiers.
+    Two arms are comparable only when they ran the same declared work: a shared
+    runtime, the same set of declared tiers, and the same number of rows in
+    *each* tier.
 
     The effective worker count deliberately varies across the arms being
     compared -- that difference is the experiment.  What must not vary is the
-    *amount and shape of declared work*: comparing arms that ran different
-    numbers of required rows, or different tiers, would attribute the
-    difference in work to concurrency.
+    *amount and shape of declared work*.  Comparing per tier rather than on a
+    combined total matters because arms run sequentially: if the manifest
+    changes between them, a shift from 43 trade and 19 battle rows to 42 and 20
+    keeps the total at 62 while trading a cheap row for an expensive one.  The
+    timing difference would then be attributed to concurrency.
 
     A capacity-policy clamp is detected separately, by comparing each arm's
     effective worker count against the worker count it requested.  An arm that
@@ -681,7 +784,20 @@ def comparable(results: Sequence[ArmResult]) -> bool:
 
     if len(results) < 2:
         return True
-    return len({(r.plan.runtime, r.required_rows, frozenset(r.plan.tiers)) for r in results}) == 1
+    identity = {
+        (
+            r.plan.runtime,
+            frozenset(r.plan.tiers),
+            r.required_rows,
+            tuple(sorted(r.tier_row_totals.items())),
+        )
+        for r in results
+    }
+    if len(identity) != 1:
+        return False
+    # An arm that never recorded per-tier rows cannot be shown to have run the
+    # same work as its peers, so it is not comparable by assumption.
+    return all(r.tier_row_totals for r in results)
 
 
 def select_policy(
@@ -727,6 +843,16 @@ def select_policy(
                 r.plan.runtime == runtime and r.plan.requested_workers == workers for r in results
             ):
                 reasons.append(f"no result for {runtime} workers={workers}")
+    # An arm at a worker count that was never declared is not part of this
+    # experiment.  Leaving such arms eligible would let the ranking below pick
+    # a count the run never set out to measure, and would compare it against
+    # declared counts that were never measured at that concurrency.
+    for result in results:
+        if result.plan.requested_workers not in declared:
+            reasons.append(
+                f"{result.plan.key()} ran at workers={result.plan.requested_workers}, "
+                f"which is not a declared worker count {declared}"
+            )
 
     for result in results:
         if not result.complete:
@@ -767,8 +893,9 @@ def select_policy(
     for runtime, arms in by_runtime.items():
         if not comparable(arms):
             reasons.append(
-                f"{runtime} arms are not comparable; effective worker counts or "
-                "required row counts differ"
+                f"{runtime} arms are not comparable; their declared tiers or "
+                f"per-tier row counts differ: "
+                f"{ {a.plan.key(): a.tier_row_totals for a in arms} }"
             )
 
     if reasons:
