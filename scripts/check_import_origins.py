@@ -1217,7 +1217,53 @@ def _foreign_path_locations(
 
 
 def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKAGES) -> dict:
-    """Return a JSON-serializable report of every package's resolved origin."""
+    """Return a JSON-serializable report of every package's resolved origin.
+
+    Every value inspected below comes from outside this process: ``sys``,
+    ``site``, ``sys.modules``, the meta-path, and the on-disk layout an install
+    produced.  Thirteen review rounds across #558 and #559 each found one more
+    such read that a hostile object could raise a direct ``BaseException``
+    subclass from, so the reads are individually guarded.
+
+    That is not sufficient on its own and this boundary is the backstop for
+    the same reason: a guard whose only answer to a hostile input is a
+    traceback is fail-open, because it emits no machine-readable finding for a
+    caller to gate on.  A read nobody has thought of yet must still produce a
+    refusal.  So any ``BaseException`` that escapes the analysis below is
+    converted here into the same FAIL document every other refusal produces.
+    ``KeyboardInterrupt`` and ``SystemExit`` deliberately pass through: an
+    operator interrupt must still stop the process.
+    """
+
+    try:
+        return _check_origins(project_root, packages)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - the guard must never traceback
+        return {
+            "project_root": _describe(project_root),
+            "packages": [
+                {
+                    "package": "<guard>",
+                    "origin": None,
+                    "status": "FAIL",
+                    "detail": (
+                        "the import-origin guard could not complete: "
+                        f"{_type_name(exc)}: {_describe(exc)}"
+                    ),
+                }
+            ],
+            "status": "FAIL",
+        }
+
+
+def _check_origins(project_root: Path, packages: tuple[str, ...]) -> dict:
+    """Return the report, or raise whatever a hostile input raises.
+
+    The analysis proper.  ``check_origins`` wraps this so that a hostile input
+    escaping any read becomes a refusal rather than a traceback; nothing here
+    catches on its behalf.
+    """
 
     # Start from a clean slate.  An entry left over from an earlier call would
     # pair this call's origin -- which the release lane may have resolved from

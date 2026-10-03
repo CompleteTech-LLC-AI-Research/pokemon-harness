@@ -2311,12 +2311,23 @@ def test_a_hostile_project_root_resolve_cannot_abort_the_guard(tmp_path, monkeyp
     caller-supplied path-like that raised a direct ``BaseException`` subclass
     escaped as a traceback.  A root that cannot be resolved cannot be shown to
     be the checkout under test, so the guard refuses it.
+
+    The hostile root is an ``os.PathLike`` rather than a ``Path`` subclass:
+    ``pathlib.Path`` cannot be subclassed this way on Python 3.11 (the
+    subclass has no ``_flavour``), so the ``Path`` form of this row could
+    never be constructed and therefore never exercised the guard at all.
     """
 
     class ExplodingResolve(BaseException):
         pass
 
-    class HostileRoot(Path):
+    class HostileRoot(os.PathLike):
+        def __init__(self, path):
+            self._path = path
+
+        def __fspath__(self):
+            return str(self._path)
+
         def resolve(self, *args, **kwargs):
             raise ExplodingResolve("root refuses to resolve")
 
@@ -2456,9 +2467,16 @@ def test_an_interrupt_from_the_project_root_still_propagates(tmp_path):
     Same contract as the meta-path row above, at the other new guard: a
     ``KeyboardInterrupt`` raised while the root is being resolved belongs to
     the operator, not to the tree under test.
+
     """
 
-    class HostileRoot(Path):
+    class HostileRoot(os.PathLike):
+        def __init__(self, path):
+            self._path = path
+
+        def __fspath__(self):
+            return str(self._path)
+
         def resolve(self, *args, **kwargs):
             raise KeyboardInterrupt
 
@@ -3833,3 +3851,45 @@ def test_a_recorded_path_that_another_record_contradicts_is_not_attested():
         for disposable in (planted, dist_info / "RECORD"):
             disposable.unlink(missing_ok=True)
         dist_info.rmdir()
+
+
+def test_the_guard_refuses_rather_than_traceback_on_any_escape(tmp_path, monkeypatch):
+    """``check_origins`` must always answer, even for a read nobody guarded.
+
+    Thirteen review rounds across #558 and #559 each widened one more
+    hostile read, and several of them repaired an *adjacent* read rather
+    than the reported one.  Widening read N therefore never proved read N+1
+    was safe, and this module cannot enumerate every value an attacker
+    controls: ``sys``, ``site``, ``sys.modules``, the meta-path and the
+    on-disk install layout all sit outside the process's own control.
+
+    So the entry point carries the guarantee instead: anything escaping the
+    analysis becomes the same machine-readable FAIL every other refusal
+    produces.  A guard that answers with a traceback is fail-open, because a
+    caller gating on ``status`` sees nothing at all.
+
+    ``KeyboardInterrupt`` and ``SystemExit`` must still escape, so an
+    operator can always stop the run.
+    """
+
+    class Exploding(BaseException):
+        pass
+
+    def explode(*_args, **_kwargs):
+        raise Exploding("novel read boom")
+
+    monkeypatch.setattr(origins, "_allowed_roots", explode)
+
+    report = check_origins(tmp_path, ("anything",))
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"][0]["package"] == "<guard>"
+    assert "could not complete" in report["packages"][0]["detail"]
+
+    def raise_interrupt(*_args, **_kwargs):
+        raise interrupt
+
+    for interrupt in (KeyboardInterrupt(), SystemExit()):
+        monkeypatch.setattr(origins, "_allowed_roots", raise_interrupt)
+        with pytest.raises(type(interrupt)):
+            check_origins(tmp_path, ("anything",))
