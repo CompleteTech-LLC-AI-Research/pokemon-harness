@@ -721,12 +721,16 @@ def _reports_code(completed: subprocess.CompletedProcess[str], code: str) -> boo
     merely *mentions* a code ("`# ruff: noqa: F821, F401`") puts that code in
     the text even when nothing was reported. The JSON array carries each
     diagnostic's code separately, which is the only reliable way to ask.
+
+    Unparseable output counts as *reporting*, not as silence: a probe that did
+    not return Ruff's JSON has measured nothing, and treating that as "no
+    diagnostic" would let a broken probe mark a real directive as harmless.
     """
 
     try:
         diagnostics = json.loads(completed.stdout or "[]")
     except json.JSONDecodeError:
-        return False
+        return True
     return isinstance(diagnostics, list) and any(
         isinstance(item, dict) and item.get("code") == code for item in diagnostics
     )
@@ -979,10 +983,17 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
     trailing-space variant each suppress F821 file-wide, while a bare
     `# noqa: E501` is not honoured at all. A string-literal or docstring line
     that merely *reads* like a directive is honoured by neither. So rather than
-    enumerate spellings, ask Ruff directly: for each candidate directive, does
-    appending it to the real benchmark actually change whether Ruff reports a
-    violation? A directive that silences the file is refused; one that does not
-    is left alone.
+    enumerate spellings, ask Ruff directly. Two lists are involved and both are
+    measured rather than assumed: a set of candidate spellings, each of which
+    must still silence the file (so the row cannot go vacuous if Ruff changes),
+    and the comments the benchmark actually carries, each of which is refused
+    only if it really does silence the file.
+
+    That second pass is behavioural on purpose. Text matching cannot tell
+    `# ruff: noqa: F821` (an escape) from `# ruff: noqa: F401`, which was
+    written to mean something narrower but -- measured -- silences the whole
+    file just the same, and it would wrongly refuse a balanced `# fmt: off` /
+    `# fmt: on` region that only skips one span.
     """
 
     source = (ROOT / _BENCHMARK).read_text(encoding="utf-8")
@@ -1012,20 +1023,28 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
         "# ruff: noqa",
         "# ruff:noqa",
         "#ruff:noqa",
+        "#ruff: noqa",
         "# ruff: noqa   ",
         "# ruff: noqa: F821",
         "# ruff: noqa: F821, F401",
         "# flake8: noqa",
         "#flake8: noqa",
+        "#flake8: noqa: F821",
     )
-    # Format directives: `# fmt: off` and `# yapf: disable` disable the
-    # formatter for the rest of the file. They are invisible to `ruff check`,
-    # so this half is measured through the format lane instead.
+    # Format directives: `# fmt: off` disables the formatter for the rest of
+    # the file *unless* a later `# fmt: on` balances it, so the escape needs
+    # the unbalanced form below. They are invisible to `ruff check`, so this
+    # half is measured through the format lane instead.
     format_directives = (
         "# fmt: off",
         "# fmt:off",
         "# yapf: disable",
         "# yapf:disable",
+    )
+    baseline = _probe_format(format_options, _FORMAT_PROBES[0][1])
+    assert baseline.returncode != 0, (
+        "the format probe no longer reports an unformatted file, so this row "
+        f"cannot measure anything: {_diagnostics(baseline)[:400]!r}"
     )
     silencing: list[str] = []
     for directive in lint_directives:
@@ -1055,28 +1074,37 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
             f"this row must be revisited"
         )
 
-    def is_file_level(comment: str) -> bool:
-        """Say whether Ruff reads `comment` as one of the silencing directives.
-
-        The comparison is exact and case-sensitive because Ruff's own parser is:
-        an uppercase `# RUFF: NOQA` is inert prose, and so is a comment that
-        merely starts with a directive and then continues in English. A
-        trailing `: CODE` is the one suffix Ruff accepts, so that is allowed.
-        """
-
-        text = comment.strip()
-        for directive in (*lint_directives, *format_directives):
-            candidate = directive.strip()
-            if text == candidate or (
-                text.startswith(candidate) and text[len(candidate) :].startswith(":")
-            ):
-                return True
-        return False
+    # Test each real comment the benchmark actually carries by asking Ruff
+    # whether *that* comment silences the file. Matching text instead cannot
+    # separate a code-bearing opt-out for one rule from one written for another
+    # -- both silence the file -- and it would wrongly refuse a balanced
+    # format-off/format-on region that only skips one span.
+    #
+    # Each comment is probed through the lane it could affect: a formatter
+    # directive is invisible to `ruff check`, so asking the check lane would
+    # wave every one of them through.
+    #
+    # A directive is refused when it silences *any* probe, which is the
+    # honest reading of "the file opted out of the gate". Two measured cases
+    # that look narrower than they are: a code-bearing directive silences its
+    # own code file-wide but still reports every other rule, and a
+    # format-off/format-on region leaves later code checked -- yet both stop
+    # the specific probe this row runs, so both are worth surfacing.
+    def silences(comment: str) -> bool:
+        if not _reports_code(
+            _probe_check(
+                check_options + ["--output-format=json"],
+                f"{comment}\n{violation}",
+            ),
+            "F821",
+        ):
+            return True
+        return _probe_format(format_options, f"{comment}\n" + _FORMAT_PROBES[0][1]).returncode == 0
 
     file_level = [
         (token.start[0], token.string)
         for token in _comment_tokens(source)
-        if is_file_level(token.string)
+        if token.string.strip().startswith("#") and silences(token.string)
     ]
     assert not file_level, (
         f"{_BENCHMARK} carries a file-level suppression at "
