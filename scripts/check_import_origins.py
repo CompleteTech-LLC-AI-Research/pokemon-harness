@@ -138,17 +138,43 @@ def _site_packages_roots() -> list[Path]:
         except BaseException:  # noqa: BLE001 - no user site on this layout
             return
 
+    # The attribute reads are guarded for the same reason the calls are: an
+    # interpreter that replaced the ``site`` module with a hostile
+    # ``ModuleType`` subclass controls what ``getattr`` returns, and reading
+    # the attribute is a call into that code.  Without this a direct
+    # ``BaseException`` raised here escaped before either helper was reached.
     candidates: list[str] = []
-    _extend(getattr(site, "getsitepackages", None), candidates)
-    _append_one(getattr(site, "getusersitepackages", None), candidates)
+    for attribute, adder in (
+        ("getsitepackages", _extend),
+        ("getusersitepackages", _append_one),
+    ):
+        try:
+            getter = getattr(site, attribute, None)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - the site module is untrusted
+            continue
+        adder(getter, candidates)
 
     roots: list[Path] = []
     for candidate in candidates:
-        if not candidate:
-            continue
+        # The truth test sits inside the boundary for the same reason the
+        # conversion does: it interrogates the very object the getter returned,
+        # so a path-like whose ``__bool__`` raises must be skipped like any
+        # other unusable entry rather than escaping the guard.
         try:
+            if not candidate:
+                continue
             roots.append(Path(candidate).resolve())
-        except (OSError, ValueError, RuntimeError):
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - entry is untrusted
+            # The previous handler named only ``(OSError, ValueError,
+            # RuntimeError)``, which left a path-like raising a direct
+            # ``BaseException`` subclass from ``__fspath__`` escaping.  A
+            # site directory that cannot be converted or resolved simply is
+            # not usable, and an unusable one contributes no root -- the same
+            # fail-closed direction the site getters themselves take.
             continue
     return roots
 
@@ -292,6 +318,19 @@ def _code_signature(code: object) -> tuple:
                     )
                 )
             else:
+                # This site reads ``type(constant).__name__`` directly rather
+                # than through ``_type_name``, unlike the finding-rendering
+                # paths.  It is safe anyway, and deliberately left alone:
+                # the whole loop sits inside this function's ``except
+                # BaseException`` boundary, so a hostile metaclass here
+                # refuses the *signature* -- it returns a fresh object that
+                # compares equal only to itself, so the code cannot match.
+                # Swapping in ``_describe`` would look tidier and would be a
+                # real behaviour change: ``repr`` and ``str`` differ for
+                # strings, and these tuples are compared for equality
+                # against a recompiled copy of the same function.  Making the
+                # rendering "safer" without need would risk refusing genuine
+                # finders, which is the worse failure here.
                 items.append((type(constant).__name__, repr(constant)))
         return (
             tuple(items),
