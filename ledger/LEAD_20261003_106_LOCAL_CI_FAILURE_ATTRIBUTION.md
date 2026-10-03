@@ -59,9 +59,16 @@ aggregate totals.
 ## Full comparison: all thirteen failing modules, master vs this change
 
 Two checkouts were used, each with its own virtualenv built by
-`pip install -e ".[dev]"`: a **master baseline** detached at the merged
-`1325f139` tree, and this **candidate** tree. Identical invocation on both,
-no selection, no skips, no xfail, no synthetic gameplay:
+`pip install -e ".[dev]"`: a **master baseline** at the merged `1325f139` tree,
+and this **candidate** tree. Identical invocation on both, no selection, no
+skips, no xfail, no synthetic gameplay:
+
+Provenance limit, stated rather than glossed: the retained comparison logs
+(`/tmp/base13*.txt`, `/tmp/head13*.txt`) record the pytest output but **not**
+the baseline checkout's SHA. So what the logs substantiate is the *failure
+set* — 19 versus 22, the 19 identical, and the three named extras — and the
+claim that the baseline was the merged master tree rests on the recorded
+checkout rather than on anything inside those files.
 
 ```bash
 python -m pytest -p no:randomly -q \
@@ -95,7 +102,7 @@ unmodified `master`, and each fails there too:
 
 | test | isolated runs on unmodified master |
 |---|---|
-| `test_real_partial_progress_active_interrupt_is_terminal` | fails (run 1), and its sibling also fails |
+| `test_real_partial_progress_active_interrupt_is_terminal` | fails (run 1) |
 | `test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events` | fails (run 1) |
 | `test_real_partial_public_tick_failure_counts_only_completed_frames` | fails (run 3), passes (runs 4, 5) |
 
@@ -120,12 +127,16 @@ Two host-imposed causes, both tracked by **#253**:
 
 1. `OSError: [Errno 30] Read-only file system` — the probe process family
    needs a POSIX shared-memory segment under `/dev/shm`. This host mounts
-   `/dev/shm` read-only at 63 MB, so the segment cannot be created.
+   `/dev/shm` read-only at 63 MB, so the segment cannot be created. The
+   `Errno 30` appears 163 times in the retained gate log; the mount mode and
+   size are a direct `df -h /dev/shm` observation on this host, not something
+   the log itself records.
 2. `TimedOwnerError: request deadline expired` and
    `AssertionError: paired owners did not complete semantic work within 48s
    capacity` — the measured single-frame cost on this 4-CPU host is ~11.48 s
-   against a 5 s deadline. #253's correction at `96c4c1ea` classifies the
-   split as 2 deterministic and 7 load-dependent, not 3 and 6.
+   against a 5 s deadline. The CPU count is a direct `nproc` observation;
+   the timings are the gate's own. #253's correction at `96c4c1ea`
+   classifies the split as 2 deterministic and 7 load-dependent, not 3 and 6.
 
 ## The change touches none of it
 
@@ -155,18 +166,69 @@ new code — was added to neither the check lane nor the format lane in either
 
 The existing lockstep test could not catch it: it only proves the runner and
 the workflow list the *same* files, and both omitted the path together. This
-candidate fixes the omission and adds one test that checks all three things
-that have to hold, for both subcommands and **both** files:
+candidate fixes the omission and adds tests that hold for both subcommands and
+**both** files:
 
 1. the path is **listed** in the lane;
-2. Ruff actually **resolves** it — a lane can list a path and still drop it by
-   carrying `--force-exclude --exclude=<benchmark>`;
-3. Ruff actually applies its **rules** to it — a `per-file-ignores` entry of
-   `["ALL"]` leaves the file resolved but silently unlinted, and Ruff then
-   reports "All checks passed" for anything, including an undefined name.
+2. Ruff actually **rejects a violation** in it, probed through the lane's own
+   option vector;
+3. the runner actually **executes** those lanes.
 
-Each of those was refuted in review before being fixed, and each is verified
-non-vacuous by mutation:
+Point 2 is deliberately behavioural rather than a model of Ruff's rule
+resolution. The probe feeds a known-bad snippet to `ruff` on stdin under
+`--stdin-filename <benchmark>` carrying the lane's real options, and asserts
+the verdict is nonzero and not an argparse failure. That single question
+absorbs every way the file could escape linting: an `--exclude` that drops it,
+a lane-level `--ignore=ALL` or a narrowed `--select`, a `per-file-ignores`
+entry of `["ALL"]`, and `--exit-zero` all answer "no violation", and all of
+them fail here. It also stops short of over-rejecting: a *selective* per-file
+ignore such as `["F401"]` still reports `F821`, so the probe passes.
+
+Two lanes of escape cannot be detected by probing and are rejected by name
+instead. `--exit-zero` keeps printing diagnostics while forcing exit 0, so a
+real violation no longer fails CI; `--range` format-checks only a line span, so
+an unformatted region outside the span is never checked — measured directly:
+with `--range=1-1` an unformatted line 2 passes while a full `--check` on the
+same input fails.
+
+An earlier revision of this probe injected `--force-exclude`, which changed the
+lane's own behaviour rather than measuring it: with an `extend-exclude` naming
+the benchmark, the real command still resolved the file while the probe
+reported it as excluded. That produced a false failure, so the probe now
+passes the lane's options verbatim and adds nothing.
+
+Point 3 exists because every other check in this file reads the runner as
+*text*, so a lane wrapped in `if false; then ... fi` still parses under
+`bash -n`, still contains the path, and still leaves all tests green while CI
+executes neither command. The runner is now executed for real against a stub
+`python` that records its argument vectors and does nothing else; the recorded
+trace, not the text, decides whether a lane runs. The execution is hermetic —
+no dependency install, no gate, no wheel build, no network — and redirects
+`TMPDIR` into a scratch directory that is removed afterwards. It costs about
+4 seconds.
+
+### What is deliberately *not* rejected
+
+Two mutations leave the test green, and that is correct rather than a gap.
+Verified directly against Ruff 0.16.5 by making the benchmark itself
+contain a real `F821`:
+
+| lane option | file resolved by Ruff? | F821 reported? |
+|---|---|---|
+| (none) | yes | yes |
+| `--force-exclude` alone | yes | yes |
+| `--exclude=scripts` alone | yes | yes |
+| `--exclude=scripts --force-exclude` | **no** | no |
+
+Ruff's `--exclude` does not drop an explicitly-passed file unless
+`--force-exclude` is also present, so the first three rows are true passes: the
+real lane still lints the benchmark. Only the fourth row is an escape, and it
+fails the probe.
+
+### Mutation matrix
+
+Each mutation below was applied to the runner and workflow and the policy
+suite re-run; every row was observed to fail.
 
 | mutation | caught |
 |---|---|
@@ -177,24 +239,18 @@ non-vacuous by mutation:
 | `--exclude <benchmark>` in the space-separated operand form | yes |
 | `per-file-ignores = ["ALL"]` for the benchmark in `pyproject.toml` | yes |
 | `--ignore=ALL` in a check lane | yes |
-| `--force-exclude` present in the lane, so the probe must not repeat it | yes |
-| `--exclude=scripts`, excluding the parent directory | yes |
-
-Point 3 needed two corrections found while verifying it. A per-file ignore does
-not show up in `ruff check --show-settings` unless the table is nested under
-`[tool.ruff.lint]`, and with the table misplaced Ruff reported "All checks
-passed" for a file containing an undefined name while `per_file_ignores` still
-read `{}`. And the settings probe originally read Ruff's bare config, so a
-lane-level `--ignore=ALL` — which leaves the file resolved, disables every
-rule, and still reports success — went unnoticed. The test now applies each
-check lane's own options to the settings probe and asserts that rules remain
-enabled.
+| `--select=E501` narrowing a check lane past every diagnostic rule | yes |
+| `--exit-zero` in both check lanes | yes |
+| `--range=1-1` in both format lanes | yes |
+| both main lanes wrapped in `if false; then ... fi` | yes |
+| `--force-exclude` alone in the lanes | n/a — not an escape (see above) |
+| `--exclude=scripts` alone in the lanes | n/a — not an escape (see above) |
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 116 passed
+-> 118 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
