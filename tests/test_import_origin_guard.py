@@ -11,6 +11,7 @@ import contextlib
 import csv
 import hashlib
 import importlib
+import importlib.util
 import io
 import json
 import os
@@ -2609,31 +2610,92 @@ def test_an_interrupt_from_the_site_layout_still_propagates(monkeypatch):
             origins._site_packages_roots()
 
 
-def test_an_interrupt_while_identifying_a_finder_still_propagates(tmp_path, monkeypatch):
+class _Interrupting:
+    """Attribute access that raises the interrupt the test is parameterised on."""
+
+    def __init__(self, raised):
+        self._raised = raised
+
+    def __getattr__(self, name):
+        raise self._raised
+
+
+def _interrupting_finder(raised):
+    """A finder whose ``__module__`` raises, built without inheriting the metaclass."""
+
+    class Meta(type):
+        def __getattribute__(cls, name):
+            if name == "__module__":
+                raise raised
+            return type.__getattribute__(cls, name)
+
+    class Finder(metaclass=Meta):
+        pass
+
+    return Finder()
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "_finder_module",
+        "module __file__",
+        "finder __module__",
+        "find_spec",
+        "spec origin",
+    ],
+)
+def test_an_interrupt_while_identifying_a_finder_still_propagates(
+    monkeypatch, raised, clause
+):
     """``_finder_source`` must not launder an operator interrupt into a finding.
 
     ``_finder_module`` re-raises ``KeyboardInterrupt`` and ``SystemExit`` on
     purpose, so an operator interrupt reaches the operator.  The caller threw
-    that decision away: its broad ``except BaseException`` returned ``None``,
-    so a Ctrl-C arriving while the guard was identifying a finder was recorded
-    as an unreadable finder and the run continued.  Every clause in
-    ``_finder_source`` now re-raises first.
+    that decision away: every one of its five broad ``except BaseException``
+    clauses returned ``None`` instead, so a Ctrl-C arriving while the guard was
+    identifying a finder was recorded as an unreadable finder and the run
+    continued.  Each clause now re-raises first.
 
-    The interrupt is raised from a metaclass property, which is the same
+    All five are parameterised because they are five separate ``try`` blocks
+    with five separate handlers.  A re-raise added to one of them proves
+    nothing about the other four, which is how the defect survived a row that
+    exercised only the first.
+
+    The interrupt is raised from a hostile attribute, which is the same
     attacker-controlled surface the surrounding guards exist for -- the
     difference is only whether the value carried is an interrupt or ordinary
     hostile data, and that distinction is exactly what these clauses preserve.
     """
 
-    class InterruptMeta(type):
-        @property
-        def __module__(cls):
-            raise KeyboardInterrupt
+    def interrupt(*args, **kwargs):
+        raise raised
 
-    hostile = InterruptMeta("InterruptFinder", (), {"find_spec": lambda self, *a: None})
+    if clause == "_finder_module":
+        finder = _interrupting_finder(raised)
+        monkeypatch.setattr(origins, "_finder_module", interrupt)
 
-    with pytest.raises(KeyboardInterrupt):
-        origins._finder_source(hostile)
+    elif clause == "module __file__":
+        finder = _interrupting_finder(raised)
+        monkeypatch.setattr(origins, "_finder_module", lambda f: _Interrupting(raised))
+
+    elif clause == "finder __module__":
+        finder = _interrupting_finder(raised)
+        monkeypatch.setattr(origins, "_finder_module", lambda f: None)
+
+    elif clause == "find_spec":
+        finder = _interrupting_finder(raised)
+        monkeypatch.setattr(origins, "_finder_module", lambda f: None)
+        monkeypatch.setattr(importlib.util, "find_spec", interrupt)
+
+    else:
+        finder = _interrupting_finder(raised)
+        monkeypatch.setattr(origins, "_finder_module", lambda f: None)
+        monkeypatch.setattr(importlib.util, "find_spec", lambda *a, **k: _Interrupting(raised))
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._finder_source(finder)
 
 
 def test_a_hostile_owner_iterable_cannot_abort_the_guard(tmp_path, monkeypatch):
