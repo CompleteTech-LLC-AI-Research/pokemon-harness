@@ -125,11 +125,13 @@ def _site_packages_roots() -> list[Path]:
 
     roots: list[Path] = []
     for candidate in candidates:
-        if not candidate:
-            continue
         try:
+            if not candidate:
+                continue
             roots.append(Path(candidate).resolve())
-        except (OSError, ValueError, RuntimeError):
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - hostile candidate; no usable root
             continue
     return roots
 

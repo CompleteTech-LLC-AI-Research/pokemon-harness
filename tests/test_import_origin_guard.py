@@ -905,6 +905,42 @@ def test_an_unreadable_code_object_cannot_abort_the_guard():
     assert len(walked) == 1
 
 
+def test_a_hostile_site_candidate_cannot_abort_the_guard(monkeypatch):
+    """A site candidate that is hostile on its own terms must be skipped.
+
+    Repairing the ``site`` getter calls was not sufficient.  Each candidate
+    they returned was then tested for truthiness and converted with
+    ``Path(...).resolve()`` outside any ``BaseException`` guard, and a
+    candidate is a value the environment -- not the interpreter -- supplied.
+    A path-like raising a direct ``BaseException`` subclass from
+    ``__bool__``, ``__fspath__`` or ``__str__`` escaped ``check_origins``
+    with a traceback instead of a finding.
+
+    The repair skips an unusable candidate and fails closed: no roots means
+    the finder cannot be certified and the guard refuses.
+    """
+
+    class ExplodingCandidate(BaseException):
+        pass
+
+    class HostileCandidate:
+        def __bool__(self):
+            raise ExplodingCandidate("site candidate bool boom")
+
+        def __fspath__(self):
+            raise ExplodingCandidate("site candidate fspath boom")
+
+        def __str__(self):
+            raise ExplodingCandidate("site candidate str boom")
+
+    hostile_site = types.ModuleType("site")
+    hostile_site.getsitepackages = lambda: [HostileCandidate()]
+    hostile_site.getusersitepackages = lambda: None
+    monkeypatch.setitem(sys.modules, "site", hostile_site)
+
+    assert origins._site_packages_roots() == []
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
