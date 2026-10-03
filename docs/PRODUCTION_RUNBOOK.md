@@ -968,6 +968,84 @@ operator provisions the allocation declared in §3c, which is an action outside
 this job's authority. Nothing here may be used to promote a shared-host result
 to capacity qualification.
 
+## 3b. Benchmark matrix-worker concurrency
+
+Issue #106. `scripts/benchmark_matrix_concurrency.py` measures whether running
+the declared trade/battle matrices at more than one worker actually increases
+qualified throughput, and it refuses to recommend a worker count that the
+measurement does not support.
+
+The gate's default stays `--matrix-workers 1`, because each matrix row runs an
+emulator pair and the historical four-worker trade matrix failed `18/19`. This
+benchmark exists to replace that assumption with a measurement, not to raise
+the default.
+
+### Command
+
+```bash
+python scripts/benchmark_matrix_concurrency.py \
+  --project-root . \
+  --capacity-policy path/to/capacity-policy.json \
+  --source-python .venv/bin/python \
+  --native-python .venv-cython/bin/python \
+  --worker-counts 1,2,4 \
+  --tiers trade,battle \
+  --evidence-dir target/matrix-concurrency/<run-id>
+```
+
+`--evidence-dir` must be new; the script refuses to overwrite an existing one.
+Each arm gets its own evidence directory and its own raw-output directory, and
+those raw directories are siblings rather than children because
+`production_gate.py` rejects a `--raw-output-dir` nested inside an
+`--evidence-dir`.
+
+The report-facing runtime names are `source` and `native`. The benchmark
+translates `native` to the gate's `cython` spelling when it builds the child
+command, because `production_gate.py` accepts only `source`, `cython`, or
+`both`. A single-runtime arm is given its interpreter through `--python`,
+which the gate applies to whichever runtime it was asked to execute.
+
+Pass `--capacity-policy` on the command line. Setting `POKERED_CAPACITY_POLICY`
+in the environment does not reach the gate, which reports
+`capacity admission is not enforced` unless it receives the flag.
+
+### What is recorded
+
+Every arm records the tested commit, the interpreter for its runtime, the
+input roots, the declared tiers, wall time, reaped child CPU seconds, per-case
+durations with nearest-rank percentiles, deadline headroom, resource pressure,
+and the counts of passing, failed, incomplete, interrupted, and unstarted rows.
+
+Failed, incomplete, interrupted, and unstarted rows stay in the denominator.
+A configuration that skips work to finish sooner scores lower, not higher.
+
+### When a policy is selected
+
+`selection: selected` appears only when every declared worker count has a
+complete, passing, comparable arm in every runtime, and all runtimes agree on
+the best worker count. Any of the following yields `unselected`, which is a
+valid result and never a defect:
+
+- a declared arm is missing, incomplete, or failed a required row;
+- an arm produced no passing row;
+- an arm ran at an effective worker count different from the one it requested,
+  which means the capacity policy clamped it;
+- the runtimes disagree on the best worker count;
+- nothing beat the `workers=1` reference.
+
+`unselected` is reported, not repaired. The `workers=1` default is unchanged
+until a complete measurement selects otherwise, and selection is a report only:
+this script never edits a default, a policy, or a gate.
+
+### Status
+
+No qualifying measurement is recorded. The benchmark is implemented and its
+accounting and selection logic are tested, but every real-ROM arm requires the
+five ROMs, three symbol files, and external fixture bytes, and the CPU
+admission it is meant to be measured against requires the runner described in
+§3c. Until both exist, #106 remains open and this section documents a command
+rather than a result.
+
 ## 4. Run the evidence tiers
 
 Run the tiers in order and save the complete output with the commit and
