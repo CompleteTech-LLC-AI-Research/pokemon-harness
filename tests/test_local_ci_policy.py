@@ -734,9 +734,12 @@ def _reports_code(completed: subprocess.CompletedProcess[str], code: str) -> boo
         diagnostics = json.loads(completed.stdout)
     except json.JSONDecodeError:
         return True
-    return isinstance(diagnostics, list) and any(
-        isinstance(item, dict) and item.get("code") == code for item in diagnostics
-    )
+    if not isinstance(diagnostics, list):
+        # Parseable but not Ruff's documented array shape, so this run measured
+        # nothing. Reporting is the safe answer; silence would let a broken
+        # probe excuse a real directive.
+        return True
+    return any(isinstance(item, dict) and item.get("code") == code for item in diagnostics)
 
 
 def _comment_tokens(source: str) -> list[tokenize.TokenInfo]:
@@ -1012,13 +1015,13 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
     # would make the scan below pass vacuously. Require that the benchmark is
     # actually lintable, so that path stays unreachable while the file is fine.
     lintable = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", _BENCHMARK],
+        [sys.executable, "-m", "ruff", "check", "--output-format=json", _BENCHMARK],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert "invalid-syntax" not in _diagnostics(lintable), (
+    assert not _reports_code(lintable, "invalid-syntax"), (
         f"{_BENCHMARK} no longer parses, so its comments cannot be inspected "
         f"and this row would pass for the wrong reason: "
         f"{_diagnostics(lintable)[:400]!r}"
@@ -1073,11 +1076,15 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
     )
     silencing: list[str] = []
     for directive in lint_directives:
-        # Ask for F821 by *code*, not by matching text: `# ruff: noqa: F821,
-        # F401` really does silence the whole file, but its unused `F401` also
-        # trips RUF100, so the process still exits nonzero and the echoed
-        # source line contains the string "F821" even when nothing is
-        # reported. Either signal would call that a live escape.
+        # Ask for F821 by *code*, not by matching text: the code-bearing
+        # "F821, F401" spelling really does silence the whole file, but its
+        # unused `F401` also trips RUF100, so the process still exits nonzero
+        # and the echoed source line contains the string "F821" even when
+        # nothing is reported. Either signal would call that a live escape.
+        #
+        # The directive is named only by its code list, never quoted verbatim.
+        # Writing one of these opt-out lines into *this* file would silence
+        # F821 here as well, which is the same escape this row exists to catch.
         probe = _probe_check(check_options + ["--output-format=json"], f"{directive}\n" + violation)
         if not _reports_code(probe, "F821"):
             silencing.append(directive)
@@ -1126,10 +1133,32 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
             return True
         return _probe_format(format_options, f"{comment}\n" + _FORMAT_PROBES[0][1]).returncode == 0
 
+    # Probing all 131 comments through two lanes costs ~130 subprocesses, so
+    # skip the ones Ruff's directive grammar cannot possibly match. Every
+    # spelling measured above starts with one of these tokens; a comment that
+    # does not is ordinary prose and cannot be a directive. This is a
+    # short-circuit on a necessary condition, not a reimplementation of the
+    # rule -- `silences` still decides anything that gets this far.
+    directive_prefixes = (
+        "# ruff",
+        "#ruff",
+        "# flake8",
+        "#flake8",
+        "# fmt",
+        "#fmt",
+        "# yapf",
+        "#yapf",
+        "# noqa",
+        "#noqa",
+    )
+
+    def maybe_directive(comment: str) -> bool:
+        return comment.strip().lower().startswith(directive_prefixes)
+
     file_level = [
         (token.start[0], token.string)
         for token in _comment_tokens(source)
-        if token.string.strip().startswith("#") and silences(token.string)
+        if maybe_directive(token.string) and silences(token.string)
     ]
     assert not file_level, (
         f"{_BENCHMARK} carries a file-level suppression at "

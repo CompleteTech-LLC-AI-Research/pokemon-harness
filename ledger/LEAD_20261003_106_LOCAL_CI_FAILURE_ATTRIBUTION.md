@@ -470,3 +470,81 @@ Local CI remains **FAIL**. Release remains **PARTIAL**. #253 stays open and
 #106 stays open: the harness ships, but the qualifying measurement still cannot
 be run without real ROM and symbol assets and a capacity policy (#85). This
 document is an attribution record, not a waiver.
+
+## Round-9 corrections (measured on this head)
+
+Three defects were found after the round-8 review returned MERGEABLE. All three
+are fixed here, and each claim below was measured rather than assumed.
+
+**The `noqa` scan's prefilter is a necessary condition, not a second rule.**
+Probing all 131 comments through two lanes costs ~130 subprocesses. The scan
+now short-circuits on a comment that cannot possibly match Ruff's directive
+grammar — one that does not begin `# ruff`, `#flake8`, `# fmt`, `# yapf` or
+`# noqa` (space-insensitive, case-insensitive) is prose. `silences()` still
+decides anything that reaches it, so the prefilter can only skip comments Ruff
+would not have honoured anyway. Measured effect: the row drops from ~24s to
+~3.5s with no change in verdict.
+
+**`_reports_code` counts a parseable non-array as *reporting*, not silence.**
+It previously returned `False` for any JSON that was not a list, contradicting
+its own fail-closed docstring: a probe that did not return Ruff's documented
+array shape had measured nothing, and calling that "no diagnostic" would let a
+broken probe excuse a real directive. Verified across nine inputs — empty
+output, non-JSON text, and valid JSON object/string/number/null all now read as
+"reporting"; only a well-formed array lacking the code reads as silence.
+
+**The `invalid-syntax` guard uses Ruff's JSON, not human text.** It matched the
+string `"invalid-syntax"` against Ruff's default output, which a future format
+change or a localized message could silently stop producing. It now runs
+`--output-format=json` and asks `_reports_code`, the same structured path every
+other row uses.
+
+### A live CI failure the earlier gates had missed
+
+The RUF100 in `tests/test_local_ci_policy.py` is **pre-existing on the pushed
+head `fceb11c3`**, not introduced by this round's edits. It matters more than a
+style nit: the explanatory comment at line 1079 quoted a code-bearing
+`ruff: noqa` directive verbatim, so Ruff honoured it *in the test file itself*
+and suppressed F821 there — the exact file-wide opt-out this row exists to
+catch, living in the row's own source.
+
+Earlier verification reported "Ruff check clean" because it named two files
+(`tests/test_local_ci_policy.py` and the benchmark) rather than running the
+lane. The real `ruff check` lane in `scripts/run_local_ci.sh` enumerates 52
+paths ending in `tests`, and it fails on this head:
+
+    RUF100 [*] Unused `noqa` directive (unused: `F821`)
+        --> tests/test_local_ci_policy.py:1079:58
+    Found 1 error.
+
+Merging `fceb11c3` as it stood would have turned the CI lane red. The comment
+now names the directive by its code list and never quotes it, and the lane is
+re-run in full — all three `run_local_ci.sh` lanes and all three
+`release-hygiene.yml` lanes pass, with **zero** Ruff warnings. An earlier
+reword of that comment reintroduced the same problem as a parse warning
+(`Invalid '# ruff: noqa' directive`); the wording was tightened a second time
+to emit nothing at all, matching the zero-warning baseline on `master`.
+
+### The three "allowed" cases were a harness bug, not a test defect
+
+An earlier matrix reported `# flake8: noqa: F821`, `# fmt: off` and `# fmt:off`
+as slipping through. Re-run one at a time against the real row, all three fail
+correctly and name line 1. The matrix itself was at fault twice over: it
+matched drift markers against pytest's *echoed source* of the test function —
+which necessarily contains those strings — and its verdict came from a
+pipeline whose exit status it had lost. Re-run with the verdict read from the
+process exit code and drift matched only on `^E ` error lines, all fourteen
+asserted opt-out spellings fail the row and all six inert comments pass.
+
+One of those inert comments was chosen wrong. `# ruff: noqa is in CONTRIBUTING`
+is **not** inert: Ruff parses the directive prefix and ignores trailing prose,
+so it silences the file just as a bare directive does. Measured directly —
+F821 reported without it, absent with it. It is a true positive, and the row
+catching it is correct behaviour.
+
+Full matrix on this head: 14/14 real opt-out spellings caught (bare, no-space,
+space-before-colon, trailing-space, code-bearing, comma-separated code list,
+Flake8 alias, spaced and unspaced alias, spaced and unspaced `# fmt: off`,
+spaced and unspaced `# yapf: disable`), 6/6 inert comments allowed. Bare
+`# noqa` and `# noqa: F821` were measured and found **not** to silence the
+file, so they are correctly allowed and are absent from the row's asserted list.
