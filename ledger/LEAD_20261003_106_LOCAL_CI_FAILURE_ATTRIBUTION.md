@@ -176,13 +176,19 @@ non-vacuous by mutation:
 | `--force-exclude --exclude=<benchmark>` in the workflow's lanes only | yes |
 | `--exclude <benchmark>` in the space-separated operand form | yes |
 | `per-file-ignores = ["ALL"]` for the benchmark in `pyproject.toml` | yes |
+| `--ignore=ALL` in a check lane | yes |
+| `--force-exclude` present in the lane, so the probe must not repeat it | yes |
+| `--exclude=scripts`, excluding the parent directory | yes |
 
-Point 3 needed a correction found while verifying it: a per-file ignore does
+Point 3 needed two corrections found while verifying it. A per-file ignore does
 not show up in `ruff check --show-settings` unless the table is nested under
 `[tool.ruff.lint]`, and with the table misplaced Ruff reported "All checks
-passed" for a file containing an undefined name while
-`per_file_ignores` still read `{}`. The test asserts against Ruff's resolved
-settings, so it now fails on the ignore that actually applies.
+passed" for a file containing an undefined name while `per_file_ignores` still
+read `{}`. And the settings probe originally read Ruff's bare config, so a
+lane-level `--ignore=ALL` — which leaves the file resolved, disables every
+rule, and still reports success — went unnoticed. The test now applies each
+check lane's own options to the settings probe and asserts that rules remain
+enabled.
 
 ## Focused suites on this candidate
 
