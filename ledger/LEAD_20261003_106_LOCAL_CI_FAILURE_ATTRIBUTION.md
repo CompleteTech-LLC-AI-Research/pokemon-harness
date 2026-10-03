@@ -49,8 +49,12 @@ capacity-policy: unavailable
 overall: FAIL
 ```
 
-These counts are the gate's own. They are reproduced on unmodified `master`;
-they are not introduced by this work.
+These counts are the gate's own, taken from the full local-CI run recorded
+above. They have **not** been re-measured as whole-tier totals on unmodified
+master — the master comparison below covers the failing modules directly rather
+than re-running the entire ~30 minute gate on a second tree. What is
+demonstrated on unmodified master is the per-test failure set, not these
+aggregate totals.
 
 ## Full comparison: all thirteen failing modules, master vs this change
 
@@ -128,8 +132,7 @@ Two host-imposed causes, both tracked by **#253**:
 `tests/test_mcp_timed_stdio.py` is **empty**. The timed-owner implementation,
 the shared-memory probe and the gate logic are untouched.
 
-The complete candidate diff is three code files plus this ledger and the
-release note for the work:
+The complete candidate diff is three code files plus this ledger:
 
 ```
 .github/workflows/release-hygiene.yml  |  2 +
@@ -150,16 +153,28 @@ new code — was added to neither the check lane nor the format lane in either
 
 The existing lockstep test could not catch it: it only proves the runner and
 the workflow list the *same* files, and both omitted the path together. This
-candidate fixes the omission and adds a test that pins the benchmark to each
-of the four lane/file combinations. The test was verified to fail when the
-entry is removed from the check lane, and again when it is removed from the
-format lane.
+candidate fixes the omission and adds two tests.
+
+The first pins the benchmark to each of the four lane/file combinations by
+membership. That test alone was not enough: a lane can list a path and still
+drop it, by carrying `--force-exclude --exclude=<benchmark>`, and a membership
+assertion cannot see that. The second test therefore asks Ruff itself whether
+it resolves the file under the lane's own options, which is the same technique
+`_ruff_lint_resolved_files` already uses for `tests/`.
+
+Both were verified non-vacuous by mutation:
+
+| mutation | caught by |
+|---|---|
+| entry removed from the check lane | membership test |
+| entry removed from the format lane | membership test |
+| `--force-exclude --exclude=<benchmark>` added to both lanes | resolution test |
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 116 passed
+-> 117 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
@@ -167,9 +182,9 @@ bash -n scripts/run_local_ci.sh                  -> clean
 
 ## Disposition
 
-The benchmark causes **no** local-CI regression. The failures are the
-already-open #253 condition, reproduced identically on unmodified master on
-this host.
+The benchmark causes **no** local-CI regression. Every failure this candidate
+shows is also a failure on unmodified `master` on this host, so the failures
+belong to the already-open #253 condition rather than to this change.
 
 Local CI remains **FAIL**. Release remains **PARTIAL**. #253 stays open and
 #106 stays open: the harness ships, but the qualifying measurement still cannot

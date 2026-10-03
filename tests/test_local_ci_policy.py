@@ -492,3 +492,66 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
                 f"{source} `ruff {subcommand}` lane lost {benchmark}; "
                 f"the benchmark would ship unlinted"
             )
+
+
+def test_matrix_benchmark_is_actually_resolved_by_ruff() -> None:
+    """Listing the benchmark is not enough; Ruff must really lint it.
+
+    Membership in the lane's argument vector can be satisfied while the file is
+    still excluded. A lane carrying `--force-exclude
+    --exclude=scripts/benchmark_matrix_concurrency.py` lists the path and then
+    silently drops it, and the membership test above passes regardless, because
+    it only ever inspects the declared text.
+
+    So this asks Ruff, which is the only component that knows how it resolves
+    excludes, exactly as `_ruff_lint_resolved_files` already does for `tests/`.
+    `ruff check` has `--show-files`; `ruff format` has no equivalent, so the
+    format lane is probed for its warning instead. Both subcommands accept
+    `--force-exclude`, and `--force-exclude` is what makes an explicitly listed
+    path droppable at all: without it a bare file argument is linted even if
+    `extend-exclude` matches it. So the probe runs the lane with
+    `--force-exclude` and asks Ruff to resolve the benchmark on its own. A
+    genuinely excluded path yields "No Python files found under the given
+    path(s)" and no output, which is what this rejects.
+    """
+
+    benchmark = "scripts/benchmark_matrix_concurrency.py"
+    runner_lanes = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
+
+    for subcommand in ("check", "format"):
+        lane = _main_lane(runner_lanes, subcommand)
+        # Keep the lane's Ruff options -- that is where an `--exclude` hiding
+        # the benchmark would live -- but replace the path list with the
+        # benchmark alone, so the probe reports on that one file.
+        # `--check` and `--show-files` are re-added below, so drop the lane's
+        # own copies to avoid the repeated-flag error Ruff rejects.
+        probes = {"--check", "--show-files", "--diff"}
+        options = [
+            argument
+            for argument in lane[3:]
+            if not (argument.endswith(".py") and "=" not in argument)
+            and argument != "tests"
+            and argument not in probes
+        ]
+        # The lane may already carry some of these; Ruff rejects a repeated
+        # flag, and that argparse error would mask the resolution check.
+        for flag in ("--force-exclude", "--no-cache"):
+            if flag not in options:
+                options.append(flag)
+        arguments = [*options]
+        arguments.append("--show-files" if subcommand == "check" else "--check")
+        arguments.append(benchmark)
+        completed = subprocess.run(
+            [sys.executable, "-m", "ruff", *arguments],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, (
+            f"`ruff {subcommand}` probe failed to run: {completed.stderr.strip()}"
+        )
+        assert "No Python files found" not in completed.stderr, (
+            f"`ruff {subcommand}` declares {benchmark} but Ruff excludes it, so "
+            f"the benchmark would ship unlinted: {completed.stderr.strip()}"
+        )
