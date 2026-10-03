@@ -722,13 +722,16 @@ def _reports_code(completed: subprocess.CompletedProcess[str], code: str) -> boo
     the text even when nothing was reported. The JSON array carries each
     diagnostic's code separately, which is the only reliable way to ask.
 
-    Unparseable output counts as *reporting*, not as silence: a probe that did
-    not return Ruff's JSON has measured nothing, and treating that as "no
-    diagnostic" would let a broken probe mark a real directive as harmless.
+    Anything that is not a parseable JSON array counts as *reporting*, not as
+    silence: a probe that did not return Ruff's JSON has measured nothing, and
+    treating that as "no diagnostic" would let a broken probe mark a real
+    directive as harmless. Empty output counts as unmeasured too.
     """
 
+    if not completed.stdout.strip():
+        return True
     try:
-        diagnostics = json.loads(completed.stdout or "[]")
+        diagnostics = json.loads(completed.stdout)
     except json.JSONDecodeError:
         return True
     return isinstance(diagnostics, list) and any(
@@ -743,7 +746,13 @@ def _comment_tokens(source: str) -> list[tokenize.TokenInfo]:
     comment. The same text inside a docstring or a string literal is inert, so
     matching it with `line.strip().startswith("#")` would refuse a file whose
     documentation merely quotes a directive. Tokenizing asks the same question
-    Ruff does, and also keeps this row working on an unparseable file.
+    Ruff does.
+
+    A file this cannot tokenize yields no comments, which would make the
+    caller pass vacuously -- so the caller pairs this with a real lint of the
+    file, which rejects an unparseable module outright. `tokenize` reports that
+    as `TokenError` or `IndentationError` depending on where it gives up; the
+    broader `SyntaxError` is not caught here on purpose.
     """
 
     try:
@@ -752,9 +761,7 @@ def _comment_tokens(source: str) -> list[tokenize.TokenInfo]:
             for token in tokenize.generate_tokens(io.StringIO(source).readline)
             if token.type == tokenize.COMMENT
         ]
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        # An unparseable file is rejected by Ruff before any directive is read,
-        # so it cannot be escaping anything this row measures.
+    except (tokenize.TokenError, IndentationError):
         return []
 
 
@@ -989,15 +996,33 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
     and the comments the benchmark actually carries, each of which is refused
     only if it really does silence the file.
 
-    That second pass is behavioural on purpose. Text matching cannot tell
-    `# ruff: noqa: F821` (an escape) from `# ruff: noqa: F401`, which was
-    written to mean something narrower but -- measured -- silences the whole
-    file just the same, and it would wrongly refuse a balanced `# fmt: off` /
-    `# fmt: on` region that only skips one span.
+    That second pass is behavioural on purpose, and it is deliberately
+    asymmetric with the list above. The list holds whole-file opt-outs; the
+    scan asks whether each comment stops *this* lane from catching *this*
+    probe, which is stricter. A code-bearing directive scoped to some other
+    code is left alone, and a `# fmt: off` region is surfaced even when a
+    later `# fmt: on` balances it -- Ruff does not re-check the span between
+    them, so an unformatted region there would still ship unchecked.
     """
 
     source = (ROOT / _BENCHMARK).read_text(encoding="utf-8")
     lines = source.splitlines()
+
+    # `_comment_tokens` yields nothing for a file it cannot tokenize, which
+    # would make the scan below pass vacuously. Require that the benchmark is
+    # actually lintable, so that path stays unreachable while the file is fine.
+    lintable = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", _BENCHMARK],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "invalid-syntax" not in _diagnostics(lintable), (
+        f"{_BENCHMARK} no longer parses, so its comments cannot be inspected "
+        f"and this row would pass for the wrong reason: "
+        f"{_diagnostics(lintable)[:400]!r}"
+    )
 
     # A violation Ruff certainly reports in a clean file, used as the probe:
     # if a directive silences the file, this stops being reported.
