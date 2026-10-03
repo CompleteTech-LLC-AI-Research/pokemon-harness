@@ -121,6 +121,8 @@ def _site_packages_roots() -> list[Path]:
             return
         try:
             sink.extend(getter())
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:  # noqa: BLE001 - layout is advisory here
             return
 
@@ -131,6 +133,8 @@ def _site_packages_roots() -> list[Path]:
             return
         try:
             sink.append(getter())
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:  # noqa: BLE001 - no user site on this layout
             return
 
@@ -682,8 +686,22 @@ def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
     meta-path contains a finder this checkout did not install.
     """
 
+    # ``sys.meta_path`` is itself untrusted: an attacker who installs a finder
+    # controls the list it lives in, and materialising it calls that
+    # container's ``__iter__``.  Reading it therefore fails the same way a
+    # hostile ``__path__`` does -- with a traceback instead of a verdict --
+    # unless it is guarded here.  An unreadable meta-path means the guard
+    # cannot establish that this checkout installed every finder, which is
+    # exactly the claim it refuses to make without evidence.
+    try:
+        finders = list(sys.meta_path)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return [(sys.meta_path, None)]
+
     offenders: list[tuple[object, Path | None]] = []
-    for finder in list(sys.meta_path):
+    for finder in finders:
         if _is_trusted_stdlib_finder(finder) or _is_installation_finder(finder):
             continue
         # Report the code location: it is the only part of a refused finder's
@@ -773,7 +791,15 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     try:
         distribution = _distribution(distribution_name)
         text = distribution.read_text("direct_url.json")
-    except (OSError, importlib.metadata.PackageNotFoundError):
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted metadata reader
+        # A distribution object is third-party code and ``read_text`` is just a
+        # method on it, so it can raise anything -- including a direct
+        # ``BaseException`` subclass that bypassed ``except (OSError, ...)``
+        # and escaped the guard.  An install whose own record cannot be read
+        # cannot be attributed to this checkout, so it contributes no allowed
+        # root: fail closed.
         return None
     if not text:
         return None
@@ -906,7 +932,19 @@ def _allowed_roots(
         # being silently admitted.
         return roots
     for package in packages:
-        for owner in distributions.get(package, ()) or ():
+        try:
+            owners = distributions.get(package, ()) or ()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - metadata mapping is untrusted
+            # ``packages_distributions`` returns an attacker-reachable
+            # mapping, so the ``.get`` that reads it is a call into arbitrary
+            # code and can raise a direct ``BaseException`` subclass.  Without
+            # this the exception escaped ``check_origins`` with a traceback.
+            # An owner list that cannot be read attributes no install to this
+            # checkout, so no root is admitted -- fail closed.
+            continue
+        for owner in owners:
             if not _is_this_checkout(project_root, _installed_from(owner, project_root)):
                 continue
             try:
@@ -1035,6 +1073,30 @@ def _resolve_path(candidate: object, package: str) -> tuple[Path | None, str]:
         return None, f"origin is not a usable path: {_describe(exc)}"
 
 
+def _type_name(value: object) -> str:
+    """Return ``type(value).__name__`` without trusting the metaclass.
+
+    A hostile object controls its own metaclass, so ``type(value)`` is an
+    object whose ``__name__`` lookup can run attacker code or raise.  This is
+    the same exposure ``_describe`` closes for ``str``, applied to the type of
+    the value rather than the value, so a finding can still be rendered when
+    the thing being reported about is itself a trap.
+    """
+
+    try:
+        name = type(value).__name__
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return "<unknown type>"
+    try:
+        return str(name)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return "<unknown type name>"
+
+
 def _describe(value: object) -> str:
     """Return a printable rendering of ``value`` that cannot itself raise.
 
@@ -1049,7 +1111,7 @@ def _describe(value: object) -> str:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException:  # noqa: BLE001 - untrusted data, see docstring
-        return f"<unprintable {type(value).__name__}>"
+        return f"<unprintable {_type_name(value)}>"
 
 
 def _foreign_path_locations(
@@ -1150,7 +1212,35 @@ def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKA
     # install metadata rather than from a live import -- with that earlier
     # tree's module, and report a foreign portion for an honest install.
     _RESOLVED_MODULES.clear()
-    root = project_root.resolve()
+    # ``project_root`` is supplied by the caller, and a path-like whose
+    # ``resolve`` raises would otherwise abort the guard before any report
+    # exists -- the same traceback-instead-of-a-verdict failure the rest of
+    # this module is written to prevent.  A root that cannot be resolved
+    # cannot be shown to be the checkout under test, so it is refused.
+    try:
+        root = project_root.resolve()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - untrusted data, see docstring
+        return {
+            # ``_describe`` rather than a bare ``str``: the root that failed to
+            # resolve is itself the hostile path-like, so rendering it here
+            # would raise out of the very handler meant to report the escape.
+            "project_root": _describe(project_root),
+            "packages": [
+                {
+                    "package": "<project-root>",
+                    "origin": None,
+                    "status": "FAIL",
+                    "detail": (
+                        "project root could not be resolved: "
+                        f"{_type_name(exc)}: {_describe(exc)}"
+                    ),
+                }
+            ],
+            "status": "FAIL",
+            "detail": "project root could not be resolved",
+        }
     allowed_roots = _allowed_roots(root, packages)
     findings: list[dict] = []
     # A meta-path finder this checkout did not install can place a submodule

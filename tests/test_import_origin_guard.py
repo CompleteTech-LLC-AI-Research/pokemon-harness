@@ -25,6 +25,7 @@ import pytest
 import scripts.check_import_origins as origins
 import scripts.production_gate as gate
 from scripts.check_import_origins import (
+    _describe,
     _file_digest,
     _finder_code_file,
     _finder_source,
@@ -2263,6 +2264,313 @@ def test_a_hostile_finder_descriptor_cannot_abort_the_guard(tmp_path, monkeypatc
     report = check_origins(root, ("descriptor_pkg",))
 
     assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_meta_path_container_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """An unreadable ``sys.meta_path`` must be a finding, not a traceback.
+
+    ``sys.meta_path`` was read with a bare ``for finder in list(sys.meta_path)``.
+    The container is attacker-controlled in the same way a hostile
+    ``__path__`` is: whoever installs a finder chooses what list it lands in,
+    and materialising it calls that container's ``__iter__``.  A direct
+    ``BaseException`` subclass raised there bypassed every clause in the loop
+    body -- there was none -- and escaped ``check_origins`` before a report
+    existed.  Materialisation is now guarded, and an unreadable meta-path is
+    reported as the untrusted container it is, which fails closed.
+    """
+
+    class ExplodingIter(BaseException):
+        """Not an ``Exception``; that distinction is the whole point of the row."""
+
+    class HostileMetaPath:
+        def __iter__(self):
+            raise ExplodingIter("meta_path refuses to be iterated")
+
+    root = tmp_path / "root"
+    package_dir = root / "meta_path_container_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "meta_path_container_pkg" or name.startswith("meta_path_container_pkg."):
+            del sys.modules[name]
+
+    hostile = HostileMetaPath()
+    monkeypatch.setattr(sys, "meta_path", hostile)
+
+    report = check_origins(root, ("meta_path_container_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "meta_path" in report["packages"][0]["detail"], report
+
+
+def test_a_hostile_project_root_resolve_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A ``resolve()`` that raises must produce a structured ``FAIL``.
+
+    ``project_root.resolve()`` ran unguarded, before any report existed, so a
+    caller-supplied path-like that raised a direct ``BaseException`` subclass
+    escaped as a traceback.  A root that cannot be resolved cannot be shown to
+    be the checkout under test, so the guard refuses it.
+    """
+
+    class ExplodingResolve(BaseException):
+        pass
+
+    class HostileRoot(Path):
+        def resolve(self, *args, **kwargs):
+            raise ExplodingResolve("root refuses to resolve")
+
+    package_dir = tmp_path / "hostile_root_pkg"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in list(sys.modules):
+        if name == "hostile_root_pkg" or name.startswith("hostile_root_pkg."):
+            del sys.modules[name]
+
+    report = check_origins(HostileRoot(tmp_path), ("hostile_root_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "could not be resolved" in report["detail"], report
+
+
+def test_a_hostile_project_root_cannot_escape_while_being_reported(tmp_path):
+    """Reporting an unresolvable root must not re-raise on ``str(root)``.
+
+    The first fix rendered the failed root with a bare ``str(project_root)`` --
+    the same hostile object whose ``resolve`` had just raised.  A root that
+    also traps ``__str__`` therefore escaped out of the handler meant to
+    report the escape, reproducing the very defect the row above closes.  The
+    report renders it through ``_describe``.
+    """
+
+    class ExplodingStr(BaseException):
+        pass
+
+    class ExplodingResolve(BaseException):
+        pass
+
+    class HostileRoot:
+        def resolve(self, *args, **kwargs):
+            raise ExplodingResolve("root refuses to resolve")
+
+        def __str__(self):
+            raise ExplodingStr("root refuses to be printed")
+
+    report = check_origins(HostileRoot(), ("whatever_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "could not be resolved" in report["detail"], report
+    assert report["project_root"].startswith("<unprintable"), report
+
+
+def test_a_hostile_metaclass_cannot_break_finding_rendering():
+    """``_describe`` and ``_type_name`` must render a hostile metaclass.
+
+    Both helpers close the same class of hole in different places: everything
+    this module reports came from the interpreter, so a value can carry a
+    metaclass that explodes on ``__name__``.  ``str(value)`` is guarded by
+    ``_describe``, but the type name is read off ``type(value)`` and is itself
+    a lookup on an object the attacker controls -- so it needs its own guard.
+
+    This is asserted against the helpers directly on purpose.  Driving the
+    metaclass through ``check_origins`` instead would make pytest itself
+    crash while formatting the failure (``object.__repr__`` reads
+    ``type(self).__name__``), so a regression here would abort the whole
+    session rather than report one failing row.
+    """
+
+    class ExplodingName(BaseException):
+        pass
+
+    class ExplodingMeta(type):
+        @property
+        def __name__(cls):
+            raise ExplodingName("metaclass refuses to name itself")
+
+    class Hostile(metaclass=ExplodingMeta):
+        def __str__(self):
+            raise ExplodingName("hostile refuses to be printed")
+
+    hostile = Hostile()
+
+    def render(call):
+        """Run ``call``, reporting an escape as a printable string.
+
+        Both helpers are called through this so that a regression can be
+        *reported*.  An escaping exception would otherwise be handed to
+        pytest, whose repr of it reads the hostile metaclass and aborts the
+        entire session -- turning one broken row into an unreadable run.  The
+        class name used here comes from a real exception class, so it is safe
+        to render.
+        """
+
+        try:
+            return str(call())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - see docstring
+            return f"<escaped {type(exc).__name__}>"
+
+    rendered = render(lambda: _describe(hostile))
+    type_name = render(lambda: origins._type_name(hostile))
+
+    assert rendered.startswith("<unprintable"), rendered
+    # Referenced off the module, not imported at the top of the suite: a top
+    # level ``from ... import _type_name`` would abort collection outright
+    # against a tree that does not define it, which would mask the very
+    # regression this row exists to catch.
+    assert type_name == "<unknown type>", type_name
+    assert _describe(1) == "1", _describe(1)
+    assert origins._type_name(1) == "int", origins._type_name(1)
+
+
+def test_an_interrupt_from_the_meta_path_container_still_propagates(tmp_path, monkeypatch):
+    """An operator interrupt must not be laundered into a finding.
+
+    This module catches ``BaseException`` broadly so that hostile input cannot
+    crash the guard, and re-raises ``KeyboardInterrupt`` and ``SystemExit`` so a
+    real interrupt still stops the run.  The new meta-path guard must not
+    swallow one: a Ctrl-C arriving while the guard is reading ``sys.meta_path``
+    has to reach the operator, not be recorded as a finding about the tree.
+    """
+
+    class HostileMetaPath:
+        def __iter__(self):
+            raise KeyboardInterrupt
+
+    root = tmp_path / "root"
+    package_dir = root / "interrupt_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setattr(sys, "meta_path", HostileMetaPath())
+
+    with pytest.raises(KeyboardInterrupt):
+        check_origins(root, ("interrupt_pkg",))
+
+
+def test_an_interrupt_from_the_project_root_still_propagates(tmp_path):
+    """The root guard must also leave an operator interrupt alone.
+
+    Same contract as the meta-path row above, at the other new guard: a
+    ``KeyboardInterrupt`` raised while the root is being resolved belongs to
+    the operator, not to the tree under test.
+    """
+
+    class HostileRoot(Path):
+        def resolve(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        check_origins(HostileRoot(tmp_path), ("whatever_pkg",))
+
+
+def test_a_hostile_distribution_object_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A distribution whose ``read_text`` raises must not escape.
+
+    ``_installed_from`` caught only ``(OSError, PackageNotFoundError)`` around
+    ``distribution.read_text``.  A distribution is third-party code and that
+    call is just a method on it, so a direct ``BaseException`` subclass
+    bypassed the enumeration and escaped ``check_origins`` as a traceback.
+
+    The row also pins the *direction* of the repair.  Returning ``None`` is
+    only safe because ``None`` means "this install cannot be attributed to
+    this checkout", which withholds an allowed root rather than granting one.
+    A generic handler that instead admitted the install would turn a hostile
+    metadata object into a way to widen the trusted tree, and would still
+    produce no traceback -- so the absence of an escape proves nothing on its
+    own.  The package here is planted outside the root and genuinely absent
+    from the checkout, so a correct refusal is ``FAIL`` and only a widened
+    allowed-root set could report ``PASS``.
+    """
+
+    class ExplodingReadText(BaseException):
+        pass
+
+    class EvilDistribution:
+        def read_text(self, name):
+            raise ExplodingReadText("metadata read escape")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "unattributable_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "unattributable_pkg" or name.startswith("unattributable_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"unattributable_pkg": ["evil"]},
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata, "distribution", lambda name: EvilDistribution()
+    )
+
+    report = check_origins(tmp_path / "checkout", ("unattributable_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_owners_mapping_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """An owner mapping that raises on ``.get`` must not escape.
+
+    ``_allowed_roots`` called ``distributions.get(package, ())`` on whatever
+    ``packages_distributions()`` returned.  That mapping is attacker-reachable,
+    so the lookup is a call into arbitrary code; a direct ``BaseException``
+    subclass raised there escaped both ``_allowed_roots`` and
+    ``check_origins``.  As above, the package is planted outside the root so
+    that only a withheld allowed root can produce the expected ``FAIL``.
+    """
+
+    class ExplodingMapping(BaseException):
+        pass
+
+    class HostileOwners(dict):
+        def get(self, *args, **kwargs):
+            raise ExplodingMapping("hostile owners mapping")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "unmappable_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "unmappable_pkg" or name.startswith("unmappable_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(
+        origins.importlib.metadata, "packages_distributions", HostileOwners
+    )
+
+    report = check_origins(tmp_path / "checkout", ("unmappable_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_an_interrupt_from_the_site_layout_still_propagates(monkeypatch):
+    """``_site_packages_roots`` must not swallow an operator interrupt.
+
+    The two site-layout helpers catch ``BaseException`` so an unreadable
+    layout cannot crash the guard, but they previously swallowed
+    ``KeyboardInterrupt`` and ``SystemExit`` too -- which contradicts the
+    contract the rest of this module keeps and that the hash and root rows
+    above pin.  A layout error is advisory and may be ignored; a Ctrl-C
+    belongs to the operator.
+    """
+
+    import site
+
+    for attribute in ("getsitepackages", "getusersitepackages"):
+
+        def interrupt(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(site, attribute, interrupt, raising=False)
+
+        with pytest.raises(KeyboardInterrupt):
+            origins._site_packages_roots()
 
 
 def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
