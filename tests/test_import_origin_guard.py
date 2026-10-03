@@ -2037,6 +2037,52 @@ def test_meta_path_finder_cannot_smuggle_a_foreign_submodule(tmp_path, monkeypat
     assert str(foreign.resolve()) in leaked.__file__
 
 
+@pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
+def test_an_interrupt_while_naming_a_refused_finder_still_propagates(
+    tmp_path, monkeypatch, raised
+):
+    """``_describe_finder`` builds a FAIL detail, and must not eat an interrupt.
+
+    This is the one site in the class that is reachable from the public entry
+    point: ``check_origins`` joins ``_describe_finder`` over untrusted
+    intruders to render the ``<interpreter>`` FAIL detail.  A finder that is
+    both an untrusted intruder and unable to report its identity therefore
+    swallowed a Ctrl-C while the guard was writing the very message the
+    operator needed to read.
+
+    The other sites in this class are currently masked by an earlier guard that
+    propagates first, which is why they are pinned structurally by the
+    ``ast`` sweep rather than by a row each: a row can only prove a site if it
+    can reach it.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "interrupt_named_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    class HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name in ("__module__", "__qualname__", "__name__"):
+                raise raised
+            return type.__getattribute__(cls, name)
+
+    intruder = HostileMeta(
+        "InterruptNamedFinder",
+        (),
+        {"find_spec": classmethod(lambda cls, name, path=None, target=None: None)},
+    )
+
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setattr(sys, "meta_path", [intruder, *sys.meta_path])
+    for name in list(sys.modules):
+        if name == "interrupt_named_pkg" or name.startswith("interrupt_named_pkg."):
+            del sys.modules[name]
+
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        check_origins(root, ("interrupt_named_pkg",))
+
+
 def test_meta_path_finder_outside_site_packages_is_refused(tmp_path, monkeypatch):
     """The refusal is about *where* the finder lives, not its name.
 

@@ -476,6 +476,8 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
         return False
     try:
         target_signature = _code_signature(target)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - hostile code object; untrusted by default
         return False
     for candidate in _code_objects(tree):
@@ -488,6 +490,8 @@ def _code_matches_source(function: object, source_file: Path) -> bool:
                 and _code_signature(candidate) == target_signature
             ):
                 return True
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:  # noqa: BLE001, S112 - hostile code object; untrusted
             continue
     return False
@@ -837,12 +841,16 @@ def _is_installation_finder(finder: object) -> bool:
         return False
     try:
         function = getattr(finder, "find_spec", None)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - hostile descriptor; untrusted by default
         return False
     if function is None:
         return False
     try:
         function = getattr(function, "__func__", function)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - hostile descriptor; untrusted by default
         return False
     return _code_matches_source(function, code_file)
@@ -897,6 +905,8 @@ def _describe_finder(entry: tuple[object, Path | None]) -> str:
             name = f"{finder.__module__}.{getattr(finder, '__qualname__', None) or finder.__name__}"
         else:
             name = f"{type(finder).__module__}.{type(finder).__qualname__}"
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:  # noqa: BLE001 - a hostile metaclass must not abort the report
         name = "<finder with an unreadable identity>"
     if source is not None:
