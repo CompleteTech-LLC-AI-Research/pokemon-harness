@@ -88,11 +88,14 @@ class Driver:
         self.press_count += 1
         if self.press_count % 50 == 0:
             gs = self.s.read_game_state()
-            print(f"  #{self.press_count} map=0x{gs.overworld.map_id:02x} "
-                  f"xy=({gs.overworld.x},{gs.overworld.y}) "
-                  f"party_lvl={gs.party.mons[0].level if gs.party.mons else '-'} "
-                  f"hp={gs.party.mons[0].hp if gs.party.mons else '-'}",
-                  file=sys.stderr, flush=True)
+            print(
+                f"  #{self.press_count} map=0x{gs.overworld.map_id:02x} "
+                f"xy=({gs.overworld.x},{gs.overworld.y}) "
+                f"party_lvl={gs.party.mons[0].level if gs.party.mons else '-'} "
+                f"hp={gs.party.mons[0].hp if gs.party.mons else '-'}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def idle(self, ticks: int) -> None:
         self.s.step(ticks)
@@ -132,6 +135,7 @@ class Driver:
         # circular dependency at module load (grind imports rtb).
         try:
             from grind import _battle_turn as _grind_battle_turn
+
             _grind_battle_turn(self, force_fight=True)
             return
         except ImportError:
@@ -225,7 +229,7 @@ class Driver:
 
     def run_bedroom_to_pallet(self) -> None:
         # 2F stairs
-        for d in ["down", "left"] + ["up"]*5 + ["right"]*5 + ["up"]:
+        for d in ["down", "left"] + ["up"] * 5 + ["right"] * 5 + ["up"]:
             self.press(d)
         for _ in range(20):
             if self.gs().overworld.map_id == M_REDS_1F:
@@ -234,26 +238,34 @@ class Driver:
         # 1F out front door
         for _ in range(15):
             gs = self.gs()
-            if gs.overworld.map_id == M_PALLET: break
-            if gs.overworld.y >= 7: break
+            if gs.overworld.map_id == M_PALLET:
+                break
+            if gs.overworld.y >= 7:
+                break
             self.press("down")
         for _ in range(8):
             gs = self.gs()
-            if gs.overworld.map_id == M_PALLET: break
-            if gs.overworld.x <= 3: break
+            if gs.overworld.map_id == M_PALLET:
+                break
+            if gs.overworld.x <= 3:
+                break
             self.press("left")
         for _ in range(4):
-            if self.gs().overworld.map_id == M_PALLET: break
+            if self.gs().overworld.map_id == M_PALLET:
+                break
             self.press("down")
         for _ in range(10):
-            if self.gs().overworld.map_id == M_PALLET: break
+            if self.gs().overworld.map_id == M_PALLET:
+                break
             self.idle(30)
 
     def run_pallet_to_lab(self) -> None:
         """Walk to (10, 1), Oak intercepts."""
         self.idle(60)
-        for _ in range(5): self.press("right")
-        for _ in range(5): self.press("up")
+        for _ in range(5):
+            self.press("right")
+        for _ in range(5):
+            self.press("up")
         # Wait for Oak script, mash A
         for _ in range(120):
             gs = self.gs()
@@ -273,16 +285,21 @@ class Driver:
                 gs_before = self.gs()
                 self.press("down", step=30)
                 gs_after = self.gs()
-                if (gs_after.overworld.x, gs_after.overworld.y) != (gs_before.overworld.x, gs_before.overworld.y):
+                if (gs_after.overworld.x, gs_after.overworld.y) != (
+                    gs_before.overworld.x,
+                    gs_before.overworld.y,
+                ):
                     break  # we moved, control is ours
             self.press("a", step=30)
         # Walk to (8, 4)
         for _ in range(8):
-            if self.gs().overworld.x >= 8: break
+            if self.gs().overworld.x >= 8:
+                break
             self.press("right")
         for _ in range(4):
             gs = self.gs()
-            if gs.overworld.y == 4: break
+            if gs.overworld.y == 4:
+                break
             self.press("up" if gs.overworld.y > 4 else "down")
         # Face UP, A
         self.press("up")
@@ -290,7 +307,8 @@ class Driver:
         # Starter dialog
         for _ in range(30):
             self.press("a", step=30)
-            if self.gs().party.count > 0: break
+            if self.gs().party.count > 0:
+                break
         if self.gs().party.count == 0:
             print("WARN: no starter", file=sys.stderr)
             return
@@ -311,22 +329,26 @@ class Driver:
         # Wait for script >= 10
         for _ in range(100):
             sc = self.sym.read_u8(self.mem, "wOaksLabCurScript")
-            if sc >= 10: break
+            if sc >= 10:
+                break
             self.press("a", step=30)
         # Walk to (5, 6)
         for d in ["down", "left", "left", "left", "down"]:
-            if self.gs().battle.active: break
+            if self.gs().battle.active:
+                break
             self.press(d)
         # Clear pre-battle dialog
         for _ in range(50):
-            if self.gs().battle.active: break
+            if self.gs().battle.active:
+                break
             self.press("a", step=30)
         # Battle
         self.resolve_battle()
         # Exit lab
         for _ in range(80):
             gs = self.gs()
-            if gs.overworld.map_id == M_PALLET: break
+            if gs.overworld.map_id == M_PALLET:
+                break
             if self.joy_locked():
                 self.press("a", step=30)
             else:
@@ -337,34 +359,60 @@ class Driver:
         # After lab exit at (12, 11), step down
         self.press("down")
         # Path LEFT×4 UP×11 RIGHT UP×3
-        for d in (["left"]*4 + ["up"]*11 + ["right"] + ["up"]*3):
+        for d in ["left"] * 4 + ["up"] * 11 + ["right"] + ["up"] * 3:
             gs = self.gs()
-            if gs.overworld.map_id == M_ROUTE_1: break
-            if gs.battle.active: self.resolve_battle()
+            if gs.overworld.map_id == M_ROUTE_1:
+                break
+            if gs.battle.active:
+                self.resolve_battle()
             self.press(d)
         # Route 1 → Viridian via BFS-like zigzag
-        path = (["up"]*7 + ["left"]*3 + ["up"]*4 + ["right"]*5 + ["up"]*4 +
-                ["left"]*3 + ["up"]*6 + ["right"]*5 + ["up"]*11 + ["left"]*3 + ["up"]*3)
+        path = (
+            ["up"] * 7
+            + ["left"] * 3
+            + ["up"] * 4
+            + ["right"] * 5
+            + ["up"] * 4
+            + ["left"] * 3
+            + ["up"] * 6
+            + ["right"] * 5
+            + ["up"] * 11
+            + ["left"] * 3
+            + ["up"] * 3
+        )
         for d in path:
             gs = self.gs()
-            if gs.overworld.map_id == M_VIRIDIAN: return
-            if gs.battle.active: self.resolve_battle(); continue
-            if self.joy_locked(): self.press("a", step=30); continue
+            if gs.overworld.map_id == M_VIRIDIAN:
+                return
+            if gs.battle.active:
+                self.resolve_battle()
+                continue
+            if self.joy_locked():
+                self.press("a", step=30)
+                continue
             self.press(d)
         # Finisher: bump-walk up with L/R detours around ledges.
         # Route 1 is tall (~35 tiles) and has multiple ledges requiring
         # zig-zag detours, so give plenty of iterations.
         for _ in range(200):
             gs = self.gs()
-            if gs.overworld.map_id == M_VIRIDIAN: return
-            if gs.battle.active: self.resolve_battle(); continue
-            if self.joy_locked(): self.press("a"); continue
+            if gs.overworld.map_id == M_VIRIDIAN:
+                return
+            if gs.battle.active:
+                self.resolve_battle()
+                continue
+            if self.joy_locked():
+                self.press("a")
+                continue
             before = (gs.overworld.x, gs.overworld.y)
             self.press("up")
             if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                self.press("left"); self.press("up")
+                self.press("left")
+                self.press("up")
                 if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                    self.press("right"); self.press("right"); self.press("up")
+                    self.press("right")
+                    self.press("right")
+                    self.press("up")
 
     # ---- Healing detour -----------------------------------------------
 
@@ -372,10 +420,7 @@ class Driver:
     # Viridian Pokemon Center door at (23, 25). 16 steps. Discovered via
     # ``scripts/bfs_route.py --goal-map 0x29``.
     VIRIDIAN_TO_PC_PATH = (
-        ["up"] * 5 + ["left"] +
-        ["up"] * 2 + ["left"] +
-        ["up"] * 2 + ["right"] * 4 +
-        ["up"]
+        ["up"] * 5 + ["left"] + ["up"] * 2 + ["left"] + ["up"] * 2 + ["right"] * 4 + ["up"]
     )
 
     def _hp_full(self) -> bool:
@@ -398,9 +443,12 @@ class Driver:
         """
         gs = self.gs()
         if gs.overworld.map_id != M_VIRIDIAN:
-            print(f"  WARN: heal_at_viridian_pokecenter called on map="
-                  f"0x{gs.overworld.map_id:02x}, skipping",
-                  file=sys.stderr, flush=True)
+            print(
+                f"  WARN: heal_at_viridian_pokecenter called on map="
+                f"0x{gs.overworld.map_id:02x}, skipping",
+                file=sys.stderr,
+                flush=True,
+            )
             return
 
         # 1) Walk to the PC door (warp into map 0x29).
@@ -411,9 +459,11 @@ class Driver:
         # Settle after the map transition so we have fresh RAM to read.
         self.idle(60)
         if self.gs().overworld.map_id != M_VIRIDIAN_POKECENTER:
-            print(f"  WARN: failed to enter PC, map="
-                  f"0x{self.gs().overworld.map_id:02x}",
-                  file=sys.stderr, flush=True)
+            print(
+                f"  WARN: failed to enter PC, map=0x{self.gs().overworld.map_id:02x}",
+                file=sys.stderr,
+                flush=True,
+            )
             return
 
         # 2) Walk up to the nurse counter. The counter blocks at y=3 so
@@ -460,10 +510,15 @@ class Driver:
         self.idle(30)
         gs = self.gs()
         m = gs.party.mons[0] if gs.party.mons else None
-        print(f"  heal done: map=0x{gs.overworld.map_id:02x} "
-              f"xy=({gs.overworld.x},{gs.overworld.y}) "
-              f"HP={m.hp}/{m.max_hp}" if m else "no party",
-              file=sys.stderr, flush=True)
+        print(
+            f"  heal done: map=0x{gs.overworld.map_id:02x} "
+            f"xy=({gs.overworld.x},{gs.overworld.y}) "
+            f"HP={m.hp}/{m.max_hp}"
+            if m
+            else "no party",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def set_pokedex_flag(self) -> None:
         """RAM-write EVENT_GOT_POKEDEX to unblock Viridian Old Man."""
@@ -472,22 +527,31 @@ class Driver:
         bit = 37 % 8  # 5
         current = self.mem[base + byte_off]
         self.mem[base + byte_off] = current | (1 << bit)
-        print(f"  set EVENT_GOT_POKEDEX: flags[{byte_off}] 0x{current:02x} -> 0x{self.mem[base+byte_off]:02x}",
-              file=sys.stderr, flush=True)
+        print(
+            f"  set EVENT_GOT_POKEDEX: flags[{byte_off}] 0x{current:02x} -> 0x{self.mem[base + byte_off]:02x}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def run_viridian_to_route2(self) -> None:
         """Walk straight north, bumping around obstacles, into Route 2."""
         self.set_pokedex_flag()
         for _ in range(100):
             gs = self.gs()
-            if gs.overworld.map_id == M_ROUTE_2: return
-            if gs.battle.active: self.resolve_battle(); continue
+            if gs.overworld.map_id == M_ROUTE_2:
+                return
+            if gs.battle.active:
+                self.resolve_battle()
+                continue
             before = (gs.overworld.x, gs.overworld.y)
             self.press("up")
             if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                self.press("left"); self.press("up")
+                self.press("left")
+                self.press("up")
                 if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                    self.press("right"); self.press("right"); self.press("up")
+                    self.press("right")
+                    self.press("right")
+                    self.press("up")
 
     def _step_up_with_left_detour(self, max_left: int = 6) -> bool:
         """Try to move UP one tile, detouring LEFT as needed.
@@ -520,12 +584,17 @@ class Driver:
     # BFS-verified path from Route 2 south entry (8, 71) to Forest South
     # Gate door at (3, 43). Discovered via scripts/bfs_route.py. 41 steps.
     ROUTE2_TO_FOREST_GATE_PATH = (
-        ["up"] * 9 + ["left"] +           # (8,71) → (8,62) → (7,62)
-        ["up"] * 5 + ["left"] * 2 +       # (7,62) → (7,57) → (5,57)
-        ["up"] + ["left"] +               # (5,57) → (5,56) → (4,56)
-        ["up"] * 7 + ["right"] * 4 +      # (4,56) → (4,49) → (8,49)
-        ["up"] * 4 + ["left"] * 5 +       # (8,49) → (8,45) → (3,45)
-        ["up"]                             # (3,45) → (3,44) warp to 0x32
+        ["up"] * 9
+        + ["left"]  # (8,71) → (8,62) → (7,62)
+        + ["up"] * 5
+        + ["left"] * 2  # (7,62) → (7,57) → (5,57)
+        + ["up"]
+        + ["left"]  # (5,57) → (5,56) → (4,56)
+        + ["up"] * 7
+        + ["right"] * 4  # (4,56) → (4,49) → (8,49)
+        + ["up"] * 4
+        + ["left"] * 5  # (8,49) → (8,45) → (3,45)
+        + ["up"]  # (3,45) → (3,44) warp to 0x32
     )
 
     def run_route2_to_forest(self) -> None:
@@ -538,8 +607,7 @@ class Driver:
         for d in self.ROUTE2_TO_FOREST_GATE_PATH:
             # check for map transition — we're done
             gs = self.gs()
-            if gs.overworld.map_id in (M_VIRIDIAN_FOREST_SOUTH_GATE,
-                                       M_VIRIDIAN_FOREST):
+            if gs.overworld.map_id in (M_VIRIDIAN_FOREST_SOUTH_GATE, M_VIRIDIAN_FOREST):
                 break
             if gs.battle.active:
                 self.resolve_battle()
@@ -547,26 +615,35 @@ class Driver:
                 # advance any dialog (shouldn't happen on Route 2, but safe)
                 for _ in range(5):
                     self.press("a")
-                    if not self.joy_locked(): break
+                    if not self.joy_locked():
+                        break
             assert d in DIR_NAMES
             self.press(d)
         # Push through the gate interior (map 0x32) into forest (0x33).
         # BFS-verified: gate entry (4,1) → RIGHT then UP → forest.
         for d in ["right", "up"] + ["up"] * 3:
-            if self.gs().overworld.map_id == M_VIRIDIAN_FOREST: break
-            if self.gs().battle.active: self.resolve_battle(); continue
+            if self.gs().overworld.map_id == M_VIRIDIAN_FOREST:
+                break
+            if self.gs().battle.active:
+                self.resolve_battle()
+                continue
             self.press(d)
 
     def run_forest_traversal(self) -> None:
         """Forest is 17x24 blocks = 34x48 tiles. Enter at bottom, exit at top via north gate."""
         for _ in range(700):
             gs = self.gs()
-            if gs.overworld.map_id == M_VIRIDIAN_FOREST_NORTH_GATE: break
+            if gs.overworld.map_id == M_VIRIDIAN_FOREST_NORTH_GATE:
+                break
             if gs.overworld.map_id not in (M_VIRIDIAN_FOREST, M_VIRIDIAN_FOREST_NORTH_GATE):
                 print(f"  forest exited to map=0x{gs.overworld.map_id:02x}", file=sys.stderr)
                 break
-            if gs.battle.active: self.resolve_battle(); continue
-            if self.joy_locked(): self.press("a"); continue
+            if gs.battle.active:
+                self.resolve_battle()
+                continue
+            if self.joy_locked():
+                self.press("a")
+                continue
             before = (gs.overworld.x, gs.overworld.y)
             # Prefer UP, then LEFT if blocked
             if gs.overworld.x > 4:
@@ -575,28 +652,36 @@ class Driver:
                 self.press("up")
             if (self.gs().overworld.x, self.gs().overworld.y) == before:
                 # Bump around
-                for d in ["up","left","up","right","up"]:
+                for d in ["up", "left", "up", "right", "up"]:
                     self.press(d)
-                    if (self.gs().overworld.x, self.gs().overworld.y) != before: break
+                    if (self.gs().overworld.x, self.gs().overworld.y) != before:
+                        break
 
     def run_forest_gate_to_pewter(self) -> None:
         """Exit north gate of forest into Route 2 (northern section), then north to Pewter."""
         # In the gate, walk UP through
         for _ in range(15):
             gs = self.gs()
-            if gs.overworld.map_id == M_ROUTE_2: break
+            if gs.overworld.map_id == M_ROUTE_2:
+                break
             self.press("up")
         # Route 2 north to Pewter
         for _ in range(100):
             gs = self.gs()
-            if gs.overworld.map_id == M_PEWTER: return
-            if gs.battle.active: self.resolve_battle(); continue
+            if gs.overworld.map_id == M_PEWTER:
+                return
+            if gs.battle.active:
+                self.resolve_battle()
+                continue
             before = (gs.overworld.x, gs.overworld.y)
             self.press("up")
             if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                self.press("left"); self.press("up")
+                self.press("left")
+                self.press("up")
                 if (self.gs().overworld.x, self.gs().overworld.y) == before:
-                    self.press("right"); self.press("right"); self.press("up")
+                    self.press("right")
+                    self.press("right")
+                    self.press("up")
 
     def run_pewter_to_gym(self) -> None:
         """Pewter Gym is on the west side. Enter from south."""
@@ -604,8 +689,11 @@ class Driver:
         # Navigate to it
         for _ in range(200):
             gs = self.gs()
-            if gs.overworld.map_id == M_PEWTER_GYM: return
-            if gs.battle.active: self.resolve_battle(); continue
+            if gs.overworld.map_id == M_PEWTER_GYM:
+                return
+            if gs.battle.active:
+                self.resolve_battle()
+                continue
             before = (gs.overworld.x, gs.overworld.y)
             # Target (16, 18) — navigate there
             target_x, target_y = 16, 18
@@ -621,7 +709,8 @@ class Driver:
                 self.press("up")  # enter
             if (self.gs().overworld.x, self.gs().overworld.y) == before:
                 # bump
-                self.press("down"); self.press("right")
+                self.press("down")
+                self.press("right")
 
     def run_brock_battle(self) -> None:
         """In gym: walk up to Brock, fight."""
@@ -642,7 +731,8 @@ class Driver:
         # Post-battle dialog
         for _ in range(60):
             gs = self.gs()
-            if gs.progress.badges_raw & 0x01: return
+            if gs.progress.badges_raw & 0x01:
+                return
             self.press("a", step=30)
 
 
@@ -656,10 +746,13 @@ def main():
     if not (rom and sym):
         raise SystemExit("need POKERED_ROM_PATH, POKERED_SYM_PATH")
 
-    session = Session.from_files(rom, sym,
+    session = Session.from_files(
+        rom,
+        sym,
         expected_rom_sha1=os.environ.get(
             "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
-        ))
+        ),
+    )
     register_default_hooks(session)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -701,10 +794,13 @@ def main():
             save(name)
             gs = session.read_game_state()
             total_presses = drv.press_count + wt_drv.press_index
-            print(f"  → map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-                  f"presses={total_presses} party={gs.party.count} "
-                  f"badges=0x{gs.progress.badges_raw:02x}",
-                  file=sys.stderr, flush=True)
+            print(
+                f"  → map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+                f"presses={total_presses} party={gs.party.count} "
+                f"badges=0x{gs.progress.badges_raw:02x}",
+                file=sys.stderr,
+                flush=True,
+            )
             if gs.progress.badges_raw & 0x01:
                 print(f"\nBOULDER BADGE at {total_presses} presses!", file=sys.stderr)
                 break
@@ -712,13 +808,16 @@ def main():
         gs = session.read_game_state()
         total_presses = drv.press_count + wt_drv.press_index
         print("\n=== FINAL ===", file=sys.stderr)
-        print(f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-              f"presses={total_presses} badges=0x{gs.progress.badges_raw:02x}",
-              file=sys.stderr)
+        print(
+            f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+            f"presses={total_presses} badges=0x{gs.progress.badges_raw:02x}",
+            file=sys.stderr,
+        )
         if gs.party.mons:
             m = gs.party.mons[0]
-            print(f"Bulba: L{m.level} HP{m.hp}/{m.max_hp} moves={m.moves} pp={m.pp}",
-                  file=sys.stderr)
+            print(
+                f"Bulba: L{m.level} HP{m.hp}/{m.max_hp} moves={m.moves} pp={m.pp}", file=sys.stderr
+            )
         session.close()
 
 

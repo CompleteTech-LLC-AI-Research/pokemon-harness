@@ -22,6 +22,7 @@ Usage::
         --start walkthrough_yellow_honest15/milestones/brock_badge.state \\
         --outdir walkthrough_yellow_to_cerulean
 """
+
 from __future__ import annotations
 
 import argparse
@@ -67,6 +68,7 @@ from pokered_harness.session import Session
 
 # --- Phase 5: cross Route 4 east -> Cerulean City ------------------------
 
+
 def _perturb_rng(session: Session, seed_hash: int) -> None:
     """Poke hRandomAdd (0xFFD3) / hRandomSub (0xFFD4) to break
     deterministic NPC-walk cycles across blackout recoveries. Without
@@ -80,15 +82,22 @@ def _perturb_rng(session: Session, seed_hash: int) -> None:
         return
 
 
-def _recover_to_route4_west(drv: rtb.Driver, session: Session,
-                             outdir: Path, rom: str, sym: str, sha1: str,
-                             max_cycles: int = 4) -> bool:
+def _recover_to_route4_west(
+    drv: rtb.Driver,
+    session: Session,
+    outdir: Path,
+    rom: str,
+    sym: str,
+    sha1: str,
+    max_cycles: int = 4,
+) -> bool:
     """After a Mt. Moon blackout lands us at Pewter PC (0x3a or 0x02),
     walk back through Pewter -> Route 3 -> Route 4 west to resume Mt.
     Moon traversal. Perturbs the game's RNG (hRandomAdd/Sub) before
     re-entering so NPC walk patterns differ per cycle, avoiding the
     sprite-attractor cycles that trap identical replays."""
     import time as _time
+
     _perturb_rng(session, int(_time.time()))
     # Exit Pewter PC if inside
     for _ in range(8):
@@ -106,22 +115,19 @@ def _recover_to_route4_west(drv: rtb.Driver, session: Session,
             break
     # East to Route 3
     ftb._activate_repel(drv)
-    _pathfind_walk(drv, session, outdir, "35,19",
-                   "rec_pewter_east",
-                   rom, sym, sha1, stop_map_ids=(M_ROUTE_3,))
+    _pathfind_walk(
+        drv, session, outdir, "35,19", "rec_pewter_east", rom, sym, sha1, stop_map_ids=(M_ROUTE_3,)
+    )
     for _ in range(8):
         if drv.gs().overworld.map_id == M_ROUTE_3:
             break
         drv.press("right")
     session.step(120, render=True)
     # Cross Route 3 via the known waypoints
-    for goal, label in [("30,11", "rec_r3_1"), ("45,11", "rec_r3_2"),
-                         ("60,0", "rec_r3_n")]:
+    for goal, label in [("30,11", "rec_r3_1"), ("45,11", "rec_r3_2"), ("60,0", "rec_r3_n")]:
         if drv.gs().overworld.map_id != M_ROUTE_3:
             break
-        _pathfind_walk(drv, session, outdir, goal, label,
-                        rom, sym, sha1,
-                        stop_map_ids=(M_ROUTE_4,))
+        _pathfind_walk(drv, session, outdir, goal, label, rom, sym, sha1, stop_map_ids=(M_ROUTE_4,))
         ftb._activate_repel(drv)
     for _ in range(8):
         if drv.gs().overworld.map_id == M_ROUTE_4:
@@ -131,8 +137,9 @@ def _recover_to_route4_west(drv: rtb.Driver, session: Session,
     return drv.gs().overworld.map_id == M_ROUTE_4
 
 
-def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
-                 rom: str, sym: str, sha1: str) -> bool:
+def cross_route4(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """Walk east across Route 4 to the Cerulean City connection.
 
     Route 4 is split in two halves by the Mt. Moon mountain range:
@@ -156,15 +163,12 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         cur_map = drv.gs().overworld.map_id
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             if blackout_cycles >= 15:
-                print("  mt_moon: too many blackouts; bailing",
-                      flush=True)
+                print("  mt_moon: too many blackouts; bailing", flush=True)
                 return False
             blackout_cycles += 1
             stuck_in_mm_count = 0
-            print(f"  mt_moon blackout #{blackout_cycles} -> recovering",
-                  flush=True)
-            if not _recover_to_route4_west(drv, session, outdir,
-                                            rom, sym, sha1):
+            print(f"  mt_moon blackout #{blackout_cycles} -> recovering", flush=True)
+            if not _recover_to_route4_west(drv, session, outdir, rom, sym, sha1):
                 return False
             continue
         # If stuck in Mt. Moon same xy across multiple phases, force
@@ -174,8 +178,10 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
             if cur_xy == last_mm_xy:
                 stuck_in_mm_count += 1
                 if stuck_in_mm_count >= 2:
-                    print(f"  mt_moon stuck at {cur_xy}; poison-blackout "
-                          "to reset NPC state", flush=True)
+                    print(
+                        f"  mt_moon stuck at {cur_xy}; poison-blackout to reset NPC state",
+                        flush=True,
+                    )
                     try:
                         mem = session._pyboy.memory  # type: ignore
                         drv.mem[drv.sym.addr_of("wLastBlackoutMap")] = M_PEWTER_CITY
@@ -183,6 +189,7 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                             _OFFSET_HP,
                             _OFFSET_STATUS,
                         )
+
                         base = drv.sym.addr_of("wPartyMons")
                         mem[base + _OFFSET_HP + 0] = 0
                         mem[base + _OFFSET_HP + 1] = 1
@@ -224,9 +231,17 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
             ftb._activate_repel(drv)
             # If on west half (x<=20), warp into Mt. Moon 1F.
             if drv.gs().overworld.x <= 20:
-                _pathfind_walk(drv, session, outdir, "18,5", "r4w_to_mm",
-                                rom, sym, sha1,
-                                stop_map_ids=(M_MT_MOON_1F,))
+                _pathfind_walk(
+                    drv,
+                    session,
+                    outdir,
+                    "18,5",
+                    "r4w_to_mm",
+                    rom,
+                    sym,
+                    sha1,
+                    stop_map_ids=(M_MT_MOON_1F,),
+                )
                 for _ in range(6):
                     if drv.gs().overworld.map_id == M_MT_MOON_1F:
                         break
@@ -243,15 +258,21 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                 # plateau, tile 0x39). Target (89, 10) and let the
                 # final RIGHT-mash step off the edge into Cerulean.
                 if drv.gs().overworld.x < 89:
-                    res = _step_by_step_walk(drv, session, outdir,
-                                              "89,10", "r4e_to_cerulean",
-                                              rom, sym, sha1,
-                                              target_map_id=M_CERULEAN_CITY,
-                                              max_presses=300,
-                                              extra_blockers=None,
-                                              stop_map_ids=(M_CERULEAN_CITY,))
-                    print(f"  r4e_to_cerulean: {res} -> "
-                          f"{_gs_summary(session)}", flush=True)
+                    res = _step_by_step_walk(
+                        drv,
+                        session,
+                        outdir,
+                        "89,10",
+                        "r4e_to_cerulean",
+                        rom,
+                        sym,
+                        sha1,
+                        target_map_id=M_CERULEAN_CITY,
+                        max_presses=300,
+                        extra_blockers=None,
+                        stop_map_ids=(M_CERULEAN_CITY,),
+                    )
+                    print(f"  r4e_to_cerulean: {res} -> {_gs_summary(session)}", flush=True)
                 # Final RIGHT-mash to cross the map-connection boundary.
                 for _ in range(16):
                     before = (drv.gs().overworld.x, drv.gs().overworld.y)
@@ -277,18 +298,15 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
         # priority order), walk it, let the game warp, and repeat
         # until we land on Route 4. A visited-warp set breaks
         # A <-> B ping-pong.
-        if drv.gs().overworld.map_id in (M_MT_MOON_1F, M_MT_MOON_B1F,
-                                          M_MT_MOON_B2F):
+        if drv.gs().overworld.map_id in (M_MT_MOON_1F, M_MT_MOON_B1F, M_MT_MOON_B2F):
             ftb._activate_repel(drv)
             cur_map = drv.gs().overworld.map_id
             if cur_map == M_MT_MOON_1F:
-                _mark_trainers_defeated(session,
-                                         _MT_MOON_1F_TRAINER_EVENTS,
-                                         label="mm1f_pre_solve")
+                _mark_trainers_defeated(session, _MT_MOON_1F_TRAINER_EVENTS, label="mm1f_pre_solve")
             elif cur_map == M_MT_MOON_B2F:
-                _mark_trainers_defeated(session,
-                                         _MT_MOON_B2F_TRAINER_EVENTS,
-                                         label="mmb2f_pre_solve")
+                _mark_trainers_defeated(
+                    session, _MT_MOON_B2F_TRAINER_EVENTS, label="mmb2f_pre_solve"
+                )
                 # Let sprite state settle after warp — fresh-map
                 # entry can have sprite slots mid-initialization.
                 session.step(60, render=True)
@@ -296,36 +314,46 @@ def cross_route4(drv: rtb.Driver, session: Session, outdir: Path,
                 # No-op if sprites already gone (post-pickup). Must run
                 # after pre-solve so Super Nerd skips the forced battle.
                 present = _b2f_fossil_sprites_present(session)
-                print(f"  mmb2f: fossil sprites present={present}",
-                      flush=True)
+                print(f"  mmb2f: fossil sprites present={present}", flush=True)
                 if present:
-                    ok = _clear_b2f_fossils(drv, session, outdir,
-                                             rom, sym, sha1)
+                    ok = _clear_b2f_fossils(drv, session, outdir, rom, sym, sha1)
                     if not ok:
-                        print("  mmb2f: fossil clear failed, warp-hop "
-                              "will likely fail too", flush=True)
+                        print(
+                            "  mmb2f: fossil clear failed, warp-hop will likely fail too",
+                            flush=True,
+                        )
             warps = _MT_MOON_WARPS_BY_FLOOR[cur_map]
-            label = {M_MT_MOON_1F: "mm1f_warp",
-                     M_MT_MOON_B1F: "mmb1f_warp",
-                     M_MT_MOON_B2F: "mmb2f_warp"}[cur_map]
-            res = _try_warp_hop(drv, session, outdir, rom, sym, sha1,
-                                warps, label,
-                                stop_map_ids=(M_ROUTE_4,),
-                                tried_edges=tried_edges)
-            print(f"  {label}: {res} -> {_gs_summary(session)}",
-                  flush=True)
+            label = {
+                M_MT_MOON_1F: "mm1f_warp",
+                M_MT_MOON_B1F: "mmb1f_warp",
+                M_MT_MOON_B2F: "mmb2f_warp",
+            }[cur_map]
+            res = _try_warp_hop(
+                drv,
+                session,
+                outdir,
+                rom,
+                sym,
+                sha1,
+                warps,
+                label,
+                stop_map_ids=(M_ROUTE_4,),
+                tried_edges=tried_edges,
+            )
+            print(f"  {label}: {res} -> {_gs_summary(session)}", flush=True)
             session.step(120, render=True)
             if res == "no_warp":
-                print(f"  no reachable warps on map 0x{cur_map:02x}; "
-                      f"bailing", flush=True)
+                print(f"  no reachable warps on map 0x{cur_map:02x}; bailing", flush=True)
                 return False
     return drv.gs().overworld.map_id == M_CERULEAN_CITY
 
 
 # --- Phase 6: walk Cerulean -> Cerulean PC -------------------------------
 
-def walk_to_cerulean_pc(drv: rtb.Driver, session: Session, outdir: Path,
-                        rom: str, sym: str, sha1: str) -> bool:
+
+def walk_to_cerulean_pc(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """Walk from the Cerulean City entry tile to the Cerulean PC door
     approach cell (19, 18), then step UP onto the warp at (19, 17)
     which triggers the Pokémon Center transition.
@@ -335,12 +363,20 @@ def walk_to_cerulean_pc(drv: rtb.Driver, session: Session, outdir: Path,
     he's on the east-bound path."""
     ftb._activate_repel(drv)
     session.step(60, render=True)
-    res = _step_by_step_walk(drv, session, outdir, "19,18", "to_cpc",
-                              rom, sym, sha1,
-                              target_map_id=M_CERULEAN_POKECENTER,
-                              max_presses=120,
-                              extra_blockers=None,
-                              stop_map_ids=(M_CERULEAN_POKECENTER,))
+    res = _step_by_step_walk(
+        drv,
+        session,
+        outdir,
+        "19,18",
+        "to_cpc",
+        rom,
+        sym,
+        sha1,
+        target_map_id=M_CERULEAN_POKECENTER,
+        max_presses=120,
+        extra_blockers=None,
+        stop_map_ids=(M_CERULEAN_POKECENTER,),
+    )
     print(f"  to_cpc: {res} -> {_gs_summary(session)}", flush=True)
     for _ in range(6):
         if drv.gs().overworld.map_id == M_CERULEAN_POKECENTER:
@@ -364,12 +400,17 @@ PHASES = [
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--start", required=True,
-                   help="Path to a .state to resume from (e.g. brock_badge.state)")
+    p.add_argument(
+        "--start", required=True, help="Path to a .state to resume from (e.g. brock_badge.state)"
+    )
     p.add_argument("--outdir", default="walkthrough_yellow_to_cerulean")
     p.add_argument("--stop-after", default=PHASES[-1], choices=PHASES)
-    p.add_argument("--skip-to", default=None, choices=PHASES,
-                   help="Skip phases up to (but not including) this one.")
+    p.add_argument(
+        "--skip-to",
+        default=None,
+        choices=PHASES,
+        help="Skip phases up to (but not including) this one.",
+    )
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]

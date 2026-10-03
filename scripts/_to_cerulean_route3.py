@@ -3,6 +3,7 @@
 Extracted from ``scripts/to_cerulean.py`` (see issue #145).  State and
 shared helpers come from ``_to_cerulean_support``.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,13 +29,16 @@ from pokered_harness.session import Session
 
 # --- Phase 1: exit gym + heal at Pewter PC --------------------------------
 
-def exit_gym(drv: rtb.Driver, session: Session, outdir: Path,
-             rom: str, sym: str, sha1: str) -> bool:
+
+def exit_gym(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """A* from current gym xy down to the south warp tile, then step
     onto it to trigger the warp out. Pewter Gym south warp is at
     (4, 13)/(5, 13); A* picks whichever is reachable."""
-    res = _pathfind_walk(drv, session, outdir, "4,13", "exit_gym",
-                         rom, sym, sha1, stop_map_ids=(M_PEWTER_CITY,))
+    res = _pathfind_walk(
+        drv, session, outdir, "4,13", "exit_gym", rom, sym, sha1, stop_map_ids=(M_PEWTER_CITY,)
+    )
     print(f"  exit_gym walk: {res}", flush=True)
     # Step DOWN through the warp if not already out
     for _ in range(6):
@@ -45,14 +49,14 @@ def exit_gym(drv: rtb.Driver, session: Session, outdir: Path,
     return drv.gs().overworld.map_id == M_PEWTER_CITY
 
 
-def heal_at_pewter_pc(drv: rtb.Driver, session: Session, outdir: Path,
-                      rom: str, sym: str, sha1: str) -> bool:
+def heal_at_pewter_pc(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """A* to Pewter PC entrance, talk to nurse, exit south."""
     # Pewter PC entry warp is around (13, 26) — door tile that warps to
     # PEWTER_POKECENTER. We path to the tile DIRECTLY in front of it
     # (13, 27) then step UP onto the warp.
-    res = _pathfind_walk(drv, session, outdir, "13,27", "to_pewter_pc",
-                         rom, sym, sha1)
+    res = _pathfind_walk(drv, session, outdir, "13,27", "to_pewter_pc", rom, sym, sha1)
     print(f"  to_pewter_pc result: {res}", flush=True)
     # Cross into PC
     for _ in range(6):
@@ -61,8 +65,9 @@ def heal_at_pewter_pc(drv: rtb.Driver, session: Session, outdir: Path,
         drv.press("up")
     session.step(60, render=True)
     if drv.gs().overworld.map_id != M_PEWTER_POKECENTER:
-        print(f"  WARN failed entry to Pewter PC "
-              f"(map=0x{drv.gs().overworld.map_id:02x})", flush=True)
+        print(
+            f"  WARN failed entry to Pewter PC (map=0x{drv.gs().overworld.map_id:02x})", flush=True
+        )
         return False
     # Walk up to nurse and talk
     for _ in range(6):
@@ -95,8 +100,10 @@ def heal_at_pewter_pc(drv: rtb.Driver, session: Session, outdir: Path,
 
 # --- Phase 2: cross Pewter east -> Route 3 --------------------------------
 
-def walk_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
-                   rom: str, sym: str, sha1: str) -> bool:
+
+def walk_to_route3(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """A* east across Pewter to the Route 3 entry tile.
 
     Route 3 entry from Pewter is the east warp around (33, 19) -
@@ -105,8 +112,9 @@ def walk_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
     ftb._activate_repel(drv)
     # Pewter east-to-Route-3 warp is around (35, 19) — pathfind to the
     # tile JUST west of the warp then step RIGHT through.
-    res = _pathfind_walk(drv, session, outdir, "35,19", "pewter_east",
-                         rom, sym, sha1, stop_map_ids=(M_ROUTE_3,))
+    res = _pathfind_walk(
+        drv, session, outdir, "35,19", "pewter_east", rom, sym, sha1, stop_map_ids=(M_ROUTE_3,)
+    )
     print(f"  pewter_east result: {res}", flush=True)
     # Cross the east warp
     for _ in range(8):
@@ -119,8 +127,10 @@ def walk_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
 
 # --- Phase 3: cross Route 3 east -> Mt. Moon entry -----------------------
 
-def _recover_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
-                       rom: str, sym: str, sha1: str) -> bool:
+
+def _recover_to_route3(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """After a blackout that dumped us into Pewter (or its PC), walk
     south out of the PC if needed, settle the engine, then A* east
     back into Route 3."""
@@ -159,8 +169,10 @@ def _recover_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
             drv.press("down")
         session.step(60, render=True)
     if drv.gs().overworld.map_id != M_PEWTER_CITY:
-        print(f"  recover: not on Pewter (map=0x"
-              f"{drv.gs().overworld.map_id:02x}); giving up", flush=True)
+        print(
+            f"  recover: not on Pewter (map=0x{drv.gs().overworld.map_id:02x}); giving up",
+            flush=True,
+        )
         return False
     # If blackout left us in front of a building entrance, take a
     # cardinal step (south usually opens up the city) to clear any
@@ -175,9 +187,17 @@ def _recover_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
     session.step(60, render=True)
     ftb._activate_repel(drv)
     for retry in range(3):
-        res = _pathfind_walk(drv, session, outdir, "35,19",
-                             f"recover_east_r{retry}",
-                             rom, sym, sha1, stop_map_ids=(M_ROUTE_3,))
+        res = _pathfind_walk(
+            drv,
+            session,
+            outdir,
+            "35,19",
+            f"recover_east_r{retry}",
+            rom,
+            sym,
+            sha1,
+            stop_map_ids=(M_ROUTE_3,),
+        )
         print(f"  recover_east_r{retry}: {res}", flush=True)
         if res in ("done", "stop"):
             break
@@ -190,9 +210,13 @@ def _recover_to_route3(drv: rtb.Driver, session: Session, outdir: Path,
     return drv.gs().overworld.map_id == M_ROUTE_3
 
 
-def _greedy_east(drv: rtb.Driver, session: Session,
-                 target_x: int, target_map_id: int | None = None,
-                 max_steps: int = 400) -> str:
+def _greedy_east(
+    drv: rtb.Driver,
+    session: Session,
+    target_x: int,
+    target_map_id: int | None = None,
+    max_steps: int = 400,
+) -> str:
     """Walk east greedily, handling obstacles by trying alternate
     directions. Returns ``"reached"`` if x>=target_x, ``"map"`` if
     target_map_id matched, ``"blackout"`` if we landed on Pewter,
@@ -213,8 +237,7 @@ def _greedy_east(drv: rtb.Driver, session: Session,
         if gs.battle.active:
             drv.resolve_battle()
             continue
-        if (gs.party.mons and gs.party.mons[0].hp == 0
-                and gs.overworld.map_id != M_ROUTE_3):
+        if gs.party.mons and gs.party.mons[0].hp == 0 and gs.overworld.map_id != M_ROUTE_3:
             return "blackout"
         if gs.overworld.map_id in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             return "blackout"
@@ -231,8 +254,7 @@ def _greedy_east(drv: rtb.Driver, session: Session,
         # Try directions in priority: east, then alternate UD to dodge
         # sprite blockers, then push through dialog with A.
         before = (gs.overworld.x, gs.overworld.y)
-        for d in ("right", "up", "right", "down", "right",
-                  "down", "right", "up"):
+        for d in ("right", "up", "right", "down", "right", "down", "right", "up"):
             drv.press(d)
             if drv.gs().battle.active:
                 drv.resolve_battle()
@@ -265,9 +287,15 @@ def _greedy_east(drv: rtb.Driver, session: Session,
     return "stuck"
 
 
-def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
-                 rom: str, sym: str, sha1: str,
-                 max_blackout_recoveries: int = 20) -> bool:
+def cross_route3(
+    drv: rtb.Driver,
+    session: Session,
+    outdir: Path,
+    rom: str,
+    sym: str,
+    sha1: str,
+    max_blackout_recoveries: int = 20,
+) -> bool:
     """A* east across Route 3 to the Mt. Moon 1F entrance.
 
     Route 3 east edge warps to MT_MOON_1F (0x3B). Trainer sight-lines
@@ -327,17 +355,14 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             session.step(60, render=True)
             cur_map = drv.gs().overworld.map_id
             if cur_map == 0x00:
-                print("  map still 0x00 after settle; bailing",
-                      flush=True)
+                print("  map still 0x00 after settle; bailing", flush=True)
                 return False
         if cur_map in (M_PEWTER_CITY, M_PEWTER_POKECENTER):
             if blackouts >= max_blackout_recoveries:
-                print(f"  too many blackouts ({blackouts}); bailing",
-                      flush=True)
+                print(f"  too many blackouts ({blackouts}); bailing", flush=True)
                 return False
             blackouts += 1
-            print(f"  blackout #{blackouts} -> recovering to Route 3",
-                  flush=True)
+            print(f"  blackout #{blackouts} -> recovering to Route 3", flush=True)
             if not _recover_to_route3(drv, session, outdir, rom, sym, sha1):
                 return False
             ftb._activate_repel(drv)
@@ -362,21 +387,34 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             if use_sbs:
                 # Step-by-step re-A*: robust to trainer post-battle
                 # sprite shifts but 10-50x slower than linear walk.
-                res = _step_by_step_walk(drv, session, outdir, goal,
-                                          f"{label}_b{blackouts}",
-                                          rom, sym, sha1,
-                                          target_map_id=None,
-                                          max_presses=300,
-                                          extra_blockers=route3_pens,
-                                          stop_map_ids=_ROUTE3_EXIT_MAPS)
+                res = _step_by_step_walk(
+                    drv,
+                    session,
+                    outdir,
+                    goal,
+                    f"{label}_b{blackouts}",
+                    rom,
+                    sym,
+                    sha1,
+                    target_map_id=None,
+                    max_presses=300,
+                    extra_blockers=route3_pens,
+                    stop_map_ids=_ROUTE3_EXIT_MAPS,
+                )
             else:
-                res = _pathfind_walk(drv, session, outdir, goal,
-                                     f"{label}_b{blackouts}",
-                                     rom, sym, sha1,
-                                     stop_map_ids=_ROUTE3_EXIT_MAPS,
-                                     extra_blockers=route3_pens)
-            print(f"  {label}_b{blackouts}: {res} -> "
-                  f"{_gs_summary(session)}", flush=True)
+                res = _pathfind_walk(
+                    drv,
+                    session,
+                    outdir,
+                    goal,
+                    f"{label}_b{blackouts}",
+                    rom,
+                    sym,
+                    sha1,
+                    stop_map_ids=_ROUTE3_EXIT_MAPS,
+                    extra_blockers=route3_pens,
+                )
+            print(f"  {label}_b{blackouts}: {res} -> {_gs_summary(session)}", flush=True)
             if res in ("done", "stop", "map", "reached"):
                 # If we reached the final north-edge waypoint (60, 0),
                 # try the UP press now to trigger the Route 4 map
@@ -400,10 +438,8 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
         # connection to Route 4. Set target_x very high and rely on
         # target_map_id to detect the transition once A* drops us
         # onto sy=0 and the next UP press wraps to Route 4.
-        res = _greedy_east(drv, session, target_x=139,
-                           target_map_id=M_ROUTE_4, max_steps=400)
-        print(f"  greedy east: {res} -> {_gs_summary(session)}",
-              flush=True)
+        res = _greedy_east(drv, session, target_x=139, target_map_id=M_ROUTE_4, max_steps=400)
+        print(f"  greedy east: {res} -> {_gs_summary(session)}", flush=True)
         if res == "blackout":
             continue  # outer loop handles recovery
         if res == "stuck":
@@ -414,8 +450,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             # it. Manually step west 2-3 tiles to escape the pen,
             # then re-A* from the new position.
             stuck_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
-            print(f"  greedy stuck at {stuck_xy}; stepping WEST to "
-                  f"escape trainer pin", flush=True)
+            print(f"  greedy stuck at {stuck_xy}; stepping WEST to escape trainer pin", flush=True)
             escape_moved = False
             for _ in range(4):
                 before = (drv.gs().overworld.x, drv.gs().overworld.y)
@@ -435,13 +470,19 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             print(f"  after west-escape: {_gs_summary(session)}", flush=True)
             if escape_moved:
                 # Re-try A* to the goal from new position.
-                esc = _pathfind_walk(drv, session, outdir,
-                                      "60,0", f"r3_escape_b{blackouts}",
-                                      rom, sym, sha1,
-                                      stop_map_ids=_ROUTE3_EXIT_MAPS,
-                                      extra_blockers=None)
-                print(f"  r3_escape: {esc} -> {_gs_summary(session)}",
-                      flush=True)
+                esc = _pathfind_walk(
+                    drv,
+                    session,
+                    outdir,
+                    "60,0",
+                    f"r3_escape_b{blackouts}",
+                    rom,
+                    sym,
+                    sha1,
+                    stop_map_ids=_ROUTE3_EXIT_MAPS,
+                    extra_blockers=None,
+                )
+                print(f"  r3_escape: {esc} -> {_gs_summary(session)}", flush=True)
                 if esc in ("done", "stop", "map"):
                     continue
                 if drv.gs().overworld.map_id in _ROUTE3_EXIT_MAPS:
@@ -449,8 +490,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
             # Escape failed too. Force-blackout fallback (existing
             # poison-tick cheat). This is a harness-level escape
             # hatch when A* AND greedy both can't make progress.
-            print(f"  stuck at {_gs_summary(session)}; forcing blackout",
-                  flush=True)
+            print(f"  stuck at {_gs_summary(session)}; forcing blackout", flush=True)
             try:
                 mem = session._pyboy.memory  # type: ignore[attr-defined]
                 drv.mem[drv.sym.addr_of("wRepelRemainingSteps")] = 0
@@ -459,6 +499,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
                     _OFFSET_HP,
                     _OFFSET_STATUS,
                 )
+
                 base = drv.sym.addr_of("wPartyMons")
                 mem[base + _OFFSET_HP + 0] = 0
                 mem[base + _OFFSET_HP + 1] = 1
@@ -491,8 +532,7 @@ def cross_route3(drv: rtb.Driver, session: Session, outdir: Path,
                 return False
             # Settle on new map
             session.step(300, render=True)
-            print(f"  blackout landed at {_gs_summary(session)}",
-                  flush=True)
+            print(f"  blackout landed at {_gs_summary(session)}", flush=True)
             continue
         # Greedy east-walker returned "reached" or "map" — fall through
         # to the warp-cross step below.

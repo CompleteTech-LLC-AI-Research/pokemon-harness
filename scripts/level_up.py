@@ -83,11 +83,7 @@ class Grinder:
         return self.s.read_game_state()
 
     def joy_locked(self) -> bool:
-        return (
-            self.sym.read_u8(self.mem, "wJoyIgnore") != 0
-            if "wJoyIgnore" in self.sym
-            else False
-        )
+        return self.sym.read_u8(self.mem, "wJoyIgnore") != 0 if "wJoyIgnore" in self.sym else False
 
     def read_battle_pp(self) -> list[int]:
         base = self.sym.addr_of("wBattleMonPP")
@@ -104,8 +100,9 @@ class Grinder:
             if gs.party.mons and gs.party.mons[0].hp == 0:
                 # Fainted — blackout teleports to Viridian PC. Mash A to
                 # clear whiteout text.
-                print("  Bulbasaur fainted! Mashing through blackout...",
-                      file=sys.stderr, flush=True)
+                print(
+                    "  Bulbasaur fainted! Mashing through blackout...", file=sys.stderr, flush=True
+                )
                 self.blackout_count += 1
                 for _ in range(80):
                     self.press("a")
@@ -200,14 +197,14 @@ class Grinder:
         wall and steps into grass.
         """
         path = (
-            ["up"] * 9        # (8, 71) -> (8, 62)
-            + ["left"]        # (8, 62) -> (7, 62)
-            + ["up"] * 5      # (7, 62) -> (7, 57)
-            + ["left"] * 2    # (7, 57) -> (5, 57)
-            + ["up"]          # (5, 57) -> (5, 56)
-            + ["left"]        # (5, 56) -> (4, 56)
-            + ["up"] * 5      # (4, 56) -> (4, 51)  -- into grass (y<=52)
-            + ["right"] * 2   # (4, 51) -> (6, 51)  -- center of grass patch
+            ["up"] * 9  # (8, 71) -> (8, 62)
+            + ["left"]  # (8, 62) -> (7, 62)
+            + ["up"] * 5  # (7, 62) -> (7, 57)
+            + ["left"] * 2  # (7, 57) -> (5, 57)
+            + ["up"]  # (5, 57) -> (5, 56)
+            + ["left"]  # (5, 56) -> (4, 56)
+            + ["up"] * 5  # (4, 56) -> (4, 51)  -- into grass (y<=52)
+            + ["right"] * 2  # (4, 51) -> (6, 51)  -- center of grass patch
         )
         for d in path:
             gs = self.gs()
@@ -224,7 +221,6 @@ class Grinder:
     # grass tiles (0x52) occupy approximately y=45..52 around x=4..15.
     GRASS_Y_MIN = 46
     GRASS_Y_MAX = 52
-
 
     def walk_in_grass(self, max_steps: int = 40) -> bool:
         """Alternate UP/DOWN within the Route 2 grass patch.
@@ -261,7 +257,7 @@ class Grinder:
             if (i + 1) % 10 == 0:
                 mon = self.gs().party.mons[0] if self.gs().party.mons else None
                 print(
-                    f"  walk step {i+1}: xy={new_pos} "
+                    f"  walk step {i + 1}: xy={new_pos} "
                     f"L{mon.level if mon else '?'} "
                     f"HP{mon.hp if mon else '?'}/{mon.max_hp if mon else '?'} "
                     f"presses={self.press_count}",
@@ -318,8 +314,7 @@ class Grinder:
             # the simplest recovery strategy.
             if gs.overworld.map_id not in (M_ROUTE_2, M_VIRIDIAN):
                 print(
-                    f"  Post-blackout on map 0x{gs.overworld.map_id:02x}. "
-                    f"Stopping grind.",
+                    f"  Post-blackout on map 0x{gs.overworld.map_id:02x}. Stopping grind.",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -369,9 +364,7 @@ class Grinder:
         return final_level
 
 
-def grind_to_level(
-    session: Session, target_level: int = 13, max_battles: int = 40
-) -> int:
+def grind_to_level(session: Session, target_level: int = 13, max_battles: int = 40) -> int:
     """Grind wild encounters on Route 2 until Bulbasaur hits target_level.
 
     Returns the final level reached. Does NOT reset state — caller is

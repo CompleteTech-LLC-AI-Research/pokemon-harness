@@ -164,9 +164,7 @@ def _cleanup_pair(
     if active_error is not None:
         active_error.add_note("pair cleanup failures:")
         for operation, error in failures:
-            active_error.add_note(
-                f"  {operation}: {type(error).__name__}: {error}"
-            )
+            active_error.add_note(f"  {operation}: {type(error).__name__}: {error}")
         return
 
     for operation, error in failures:
@@ -196,8 +194,7 @@ def _open_pair_sessions(
             # coords leave the windows comfortably centered and visible.
             if _force_move_pyboy_windows([(200, 300), (1200, 300)]):
                 print(
-                    "[info] moved PyBoy windows to (200,300) and (1200,300) "
-                    "on primary monitor",
+                    "[info] moved PyBoy windows to (200,300) and (1200,300) on primary monitor",
                     flush=True,
                 )
             else:
@@ -227,15 +224,21 @@ def _open_pair_sessions(
         raise
 
 
-
 # ---------------------------------------------------------------------------
 # Copied trade helpers (from tests/test_pyboy_link_session_roms.py)
 # ---------------------------------------------------------------------------
 
 
 def _drive_two_sessions_to_link_menu(
-    a, b, link, *, total_frames: int = 2400, frames_per_attempt: int = 20,
-    sampler=None, dwell_s: float = 0.0, natural: bool = False,
+    a,
+    b,
+    link,
+    *,
+    total_frames: int = 2400,
+    frames_per_attempt: int = 20,
+    sampler=None,
+    dwell_s: float = 0.0,
+    natural: bool = False,
     natural_shot=None,
 ) -> dict:
     counters = {
@@ -290,9 +293,13 @@ def _drive_two_sessions_to_link_menu(
             break
         # Natural: when the "Would you like to save?" prompt just
         # appeared, hold briefly so the YES/NO menu is readable.
-        if natural and not save_dwelt and (
-            counters["SaveGameData"][0] > prev_save[0]
-            or counters["SaveGameData"][1] > prev_save[1]
+        if (
+            natural
+            and not save_dwelt
+            and (
+                counters["SaveGameData"][0] > prev_save[0]
+                or counters["SaveGameData"][1] > prev_save[1]
+            )
         ):
             save_dwelt = True
             tick_both_coarse(15)  # tick a bit so the prompt has rendered
@@ -301,9 +308,7 @@ def _drive_two_sessions_to_link_menu(
             tick_both_coarse(30)  # remainder of the dwell
         a.press("a", duration=4)
         b.press("a", duration=4)
-        in_serial_phase = (
-            counters["SaveGameData"][0] > 0 or counters["SaveGameData"][1] > 0
-        )
+        in_serial_phase = counters["SaveGameData"][0] > 0 or counters["SaveGameData"][1] > 0
         if in_serial_phase:
             tick_both_fine(frames_per_attempt)
         else:
@@ -316,18 +321,30 @@ def _drive_two_sessions_to_link_menu(
 
 
 def _drive_past_link_menu_to_trade_center(
-    a, b, link, *, post_link_menu_frames: int = 1200, frames_per_attempt: int = 20,
-    mid_callback=None, sampler=None, dwell_s: float = 0.0,
-    natural: bool = False, natural_shot=None,
+    a,
+    b,
+    link,
+    *,
+    post_link_menu_frames: int = 1200,
+    frames_per_attempt: int = 20,
+    mid_callback=None,
+    sampler=None,
+    dwell_s: float = 0.0,
+    natural: bool = False,
+    natural_shot=None,
 ) -> dict:
     diag = _drive_two_sessions_to_link_menu(
-        a, b, link, sampler=sampler, dwell_s=dwell_s, natural=natural,
+        a,
+        b,
+        link,
+        sampler=sampler,
+        dwell_s=dwell_s,
+        natural=natural,
         natural_shot=natural_shot,
     )
     counters = diag["counters"]
     assert counters["LinkMenu"][0] > 0 and counters["LinkMenu"][1] > 0, (
-        "precondition: both sides must have reached LinkMenu before "
-        "attempting TRADE_CENTER warp"
+        "precondition: both sides must have reached LinkMenu before attempting TRADE_CENTER warp"
     )
 
     extra_frames = 0
@@ -362,10 +379,18 @@ def _drive_past_link_menu_to_trade_center(
 
 
 def _drive_complete_trade(
-    a, b, link, *, counters: dict,
-    trade_budget_frames: int = 4000, step_frames: int = 20,
-    mid_callback=None, sampler=None, dwell_s: float = 0.0,
-    natural: bool = False, natural_shot=None,
+    a,
+    b,
+    link,
+    *,
+    counters: dict,
+    trade_budget_frames: int = 4000,
+    step_frames: int = 20,
+    mid_callback=None,
+    sampler=None,
+    dwell_s: float = 0.0,
+    natural: bool = False,
+    natural_shot=None,
 ) -> dict:
     add_mon = counters["_AddEnemyMonToPlayerParty"]
     trade_center_trade = counters["TradeCenter_Trade"]
@@ -387,8 +412,10 @@ def _drive_complete_trade(
     dir_b = "right" if conn_b_now == INTERNAL else "left"
 
     for _ in range(4):
-        if (counters["CableClub_DoBattleOrTrade"][0] > 0
-                and counters["CableClub_DoBattleOrTrade"][1] > 0):
+        if (
+            counters["CableClub_DoBattleOrTrade"][0] > 0
+            and counters["CableClub_DoBattleOrTrade"][1] > 0
+        ):
             break
         a.press(dir_a, duration=8)
         b.press(dir_b, duration=8)
@@ -398,13 +425,17 @@ def _drive_complete_trade(
 
     settle_frames = 0
     while settle_frames < 1800:
-        if (counters["CableClub_DoBattleOrTrade"][0] > 0
-                and counters["CableClub_DoBattleOrTrade"][1] > 0):
+        if (
+            counters["CableClub_DoBattleOrTrade"][0] > 0
+            and counters["CableClub_DoBattleOrTrade"][1] > 0
+        ):
             break
         a.press("a", duration=4)
         b.press("a", duration=4)
-        if (counters["CableClub_DoBattleOrTrade"][0] > 0
-                or counters["CableClub_DoBattleOrTrade"][1] > 0):
+        if (
+            counters["CableClub_DoBattleOrTrade"][0] > 0
+            or counters["CableClub_DoBattleOrTrade"][1] > 0
+        ):
             tick_interleaved(step_frames)
         else:
             tick_per_frame(step_frames)
@@ -417,10 +448,7 @@ def _drive_complete_trade(
     menu_key = "TradeCenter_SelectMon.playerMonMenu_HandleInput"
     tct_key = "TradeCenter_Trade"
 
-    prev = {
-        k: list(counters[k])
-        for k in (stats_key, trade_key, menu_key, tct_key)
-    }
+    prev = {k: list(counters[k]) for k in (stats_key, trade_key, menu_key, tct_key)}
     right_pending = [0, 0]
     RIGHT_PRESS_ITERATIONS = 5
 
@@ -455,13 +483,18 @@ def _drive_complete_trade(
 
         # Capture a mid-trade-animation frame once TradeCenter_Trade has
         # actually been entered.
-        if (mid_callback is not None and not called_anim_shot
-                and trade_center_trade[0] > 0 and trade_center_trade[1] > 0):
+        if (
+            mid_callback is not None
+            and not called_anim_shot
+            and trade_center_trade[0] > 0
+            and trade_center_trade[1] > 0
+        ):
             mid_callback()
             called_anim_shot = True
 
         now = {k: list(counters[k]) for k in (stats_key, trade_key, menu_key, tct_key)}
         for idx, sess in enumerate((a, b)):
+
             def ticked(key, _idx=idx, _now=now, _prev=prev):
                 return _now[key][_idx] > _prev[key][_idx]
 
@@ -526,21 +559,18 @@ def main() -> int:
 
     versions = [v.strip() for v in args.versions.split(",") if v.strip()]
     if len(versions) != 2:
-        print(f"[error] --versions must be 'a,b'; got {args.versions!r}",
-              flush=True)
+        print(f"[error] --versions must be 'a,b'; got {args.versions!r}", flush=True)
         return 2
     version_a, version_b = versions
     for v in (version_a, version_b):
         if v not in _ROM_PATHS:
-            print(f"[error] unknown version {v!r}; choose from "
-                  f"{sorted(_ROM_PATHS)}", flush=True)
+            print(f"[error] unknown version {v!r}; choose from {sorted(_ROM_PATHS)}", flush=True)
             return 2
 
     _assert_fixtures_available(version_a)
     _assert_fixtures_available(version_b)
 
-    outdir = (_REPO / args.outdir) if not Path(args.outdir).is_absolute() \
-        else Path(args.outdir)
+    outdir = (_REPO / args.outdir) if not Path(args.outdir).is_absolute() else Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     shoot = Shooter(outdir)
 
@@ -561,9 +591,7 @@ def main() -> int:
         # Side-by-side on the primary monitor: Red on the left, Blue on the right.
         # Opening and window setup are transactional so a failed second session
         # cannot strand the first emulator.
-        a, b, _pyboy_hwnds = _open_pair_sessions(
-            version_a, version_b, view=args.view
-        )
+        a, b, _pyboy_hwnds = _open_pair_sessions(version_a, version_b, view=args.view)
 
         # PyBoy's Cython ``set_emulation_speed`` is declared ``int`` in the
         # .pxd, so fractional values silently truncate to 0 (unlimited —
@@ -573,11 +601,13 @@ def main() -> int:
         # 20 frames/iter @ 60fps = 0.333s emulated. At speed=0.5 we want
         # each iter to take ~0.666s wall — so dwell ~= 0.333s.
         _iter_s = 20.0 / 60.0
-        _dwell_s = max(0.0, (_iter_s / max(args.speed, 1e-3)) - _iter_s) \
-            if args.view else 0.0
+        _dwell_s = max(0.0, (_iter_s / max(args.speed, 1e-3)) - _iter_s) if args.view else 0.0
         if args.view and _dwell_s > 0:
-            print(f"[info] dwell per driver iteration: {_dwell_s*1000:.0f}ms "
-                  f"(target speed {args.speed}x)", flush=True)
+            print(
+                f"[info] dwell per driver iteration: {_dwell_s * 1000:.0f}ms "
+                f"(target speed {args.speed}x)",
+                flush=True,
+            )
         # Phase A: pair + start.
         t0 = time.perf_counter()
         link = PyBoyLinkSession.local(view=args.view)
@@ -617,6 +647,7 @@ def main() -> int:
             timeline_dir.mkdir(parents=True, exist_ok=True)
             state = {"counter": 0, "shots": 0}
             every = args.sample_every
+
             def sampler(phase_tag: str):
                 state["counter"] += 1
                 if state["counter"] % every != 0:
@@ -626,8 +657,8 @@ def main() -> int:
                 stem = f"{idx:04d}__{phase_tag}"
                 a._pyboy.screen.image.save(timeline_dir / f"{stem}__red.png")
                 b._pyboy.screen.image.save(timeline_dir / f"{stem}__blue.png")
-            print(f"[info] timeline sampler: every {every} iters -> "
-                  f"{timeline_dir}", flush=True)
+
+            print(f"[info] timeline sampler: every {every} iters -> {timeline_dir}", flush=True)
 
         # Phase B: drive past LinkMenu to TRADE_CENTER warp.
         t0 = time.perf_counter()
@@ -678,13 +709,17 @@ def main() -> int:
                     print(f"  wrote {combined} (color+dialog)", flush=True)
 
         warp = _drive_past_link_menu_to_trade_center(
-            a, b, link, mid_callback=_mid_linkmenu_shot, sampler=sampler,
-            dwell_s=_dwell_s, natural=args.natural,
+            a,
+            b,
+            link,
+            mid_callback=_mid_linkmenu_shot,
+            sampler=sampler,
+            dwell_s=_dwell_s,
+            natural=args.natural,
             natural_shot=_nat_shot if args.natural else None,
         )
         t_phase_b = time.perf_counter() - t0
-        print(f"[phase B: link menu -> trade center] {t_phase_b:.2f}s",
-              flush=True)
+        print(f"[phase B: link menu -> trade center] {t_phase_b:.2f}s", flush=True)
 
         if warp.get("extra_frames", 0) < 120:
             # Warp happened too quickly for the mid-callback to trigger;
@@ -719,9 +754,14 @@ def main() -> int:
                 print(f"  wrote {p}", flush=True)
 
         trade_diag = _drive_complete_trade(
-            a, b, link, counters=diag_counters,
-            mid_callback=_mid_trade_anim_shot, sampler=sampler,
-            dwell_s=_dwell_s, natural=args.natural,
+            a,
+            b,
+            link,
+            counters=diag_counters,
+            mid_callback=_mid_trade_anim_shot,
+            sampler=sampler,
+            dwell_s=_dwell_s,
+            natural=args.natural,
             natural_shot=_nat_shot if args.natural else None,
         )
         t_phase_c = time.perf_counter() - t0
@@ -779,19 +819,24 @@ def main() -> int:
         # (dex card → party-add → save → return to TC → idle) has room
         # to play out without being cut off at the window close.
         if args.view:
-            print("[info] holding post-trade state for 21s so you can see "
-                  "the received Pokémon's Pokédex card, the party-add, "
-                  "the post-trade auto-save, and the return to the Trade "
-                  "Center…", flush=True)
-            for chunk_idx, tag in enumerate([
-                "phase_07_party_add",
-                "phase_08_pokedex_card",
-                "phase_09_post_save_a",
-                "phase_10_post_save_b",
-                "phase_11_back_in_tc",
-                "phase_12_tc_idle_a",
-                "phase_13_tc_idle_b",
-            ]):
+            print(
+                "[info] holding post-trade state for 21s so you can see "
+                "the received Pokémon's Pokédex card, the party-add, "
+                "the post-trade auto-save, and the return to the Trade "
+                "Center…",
+                flush=True,
+            )
+            for chunk_idx, tag in enumerate(
+                [
+                    "phase_07_party_add",
+                    "phase_08_pokedex_card",
+                    "phase_09_post_save_a",
+                    "phase_10_post_save_b",
+                    "phase_11_back_in_tc",
+                    "phase_12_tc_idle_a",
+                    "phase_13_tc_idle_b",
+                ]
+            ):
                 link.step_interleaved(180)  # 3 seconds
                 try:
                     paths = shoot.shoot_pair(a, b, tag)
@@ -807,8 +852,11 @@ def main() -> int:
             # the "press Enter" branch and close the windows
             # instantly. Fixed hold is robust in every environment.
             hold_s = args.hold_after_s
-            print(f"[info] post-trade idle hold for {hold_s}s — watch the "
-                  f"windows, they'll close on their own.", flush=True)
+            print(
+                f"[info] post-trade idle hold for {hold_s}s — watch the "
+                f"windows, they'll close on their own.",
+                flush=True,
+            )
             if hold_s > 0:
                 link.step_interleaved(hold_s * 60)
 
@@ -821,8 +869,7 @@ def main() -> int:
         post_b_str = _species_name(post_b_species) if post_b_species is not None else "<none>"
 
         print(
-            f"pre:  {version_a} lead = {pre_a_str}, "
-            f"{version_b} lead = {pre_b_str}",
+            f"pre:  {version_a} lead = {pre_a_str}, {version_b} lead = {pre_b_str}",
             flush=True,
         )
         # Primary check: _AddEnemyMonToPlayerParty fires on both sides
@@ -831,16 +878,13 @@ def main() -> int:
         # if both sides start with the same species the lead species
         # stays the same after a straight swap. OT-name fingerprint
         # flips in that case, so we use it as an extra signal.
-        species_changed = (
-            pre_a_species != post_a_species and pre_b_species != post_b_species
-        )
+        species_changed = pre_a_species != post_a_species and pre_b_species != post_b_species
         ot_changed = pre_a_ot != post_a_ot and pre_b_ot != post_b_ot
         engine_trade = add_mon[0] > 0 and add_mon[1] > 0
         trade_happened = engine_trade and (species_changed or ot_changed)
         tag = "  <- TRADE SUCCEEDED" if trade_happened else "  <- TRADE DID NOT COMPLETE"
         print(
-            f"post: {version_a} lead = {post_a_str}, "
-            f"{version_b} lead = {post_b_str}{tag}",
+            f"post: {version_a} lead = {post_a_str}, {version_b} lead = {post_b_str}{tag}",
             flush=True,
         )
         print(

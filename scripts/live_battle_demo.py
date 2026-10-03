@@ -233,21 +233,30 @@ def main() -> int:
     )
     parser.add_argument("--versions", default="red,blue")
     parser.add_argument("--outdir", default="walkthrough_link_battle")
-    parser.add_argument("--view", action="store_true",
-                        help="Open SDL2 windows for both peers.")
-    parser.add_argument("--hold-after-s", type=int, default=60,
-                        help="Seconds to idle both emulators after the "
-                             "battle phase so you can watch the windows.")
-    parser.add_argument("--battle-turns", type=int, default=1,
-                        help="How many move-damage resolutions to "
-                             "require on both peers before declaring "
-                             "the demo successful. Default 1 — the "
-                             "existing test suite also caps at 1 turn "
-                             "because multi-turn link battles desync "
-                             "in this emulator setup.")
-    parser.add_argument("--battle-budget-frames", type=int, default=3600,
-                        help="Safety cap on emulated frames per turn. "
-                             "Default 3600 (~60s).")
+    parser.add_argument("--view", action="store_true", help="Open SDL2 windows for both peers.")
+    parser.add_argument(
+        "--hold-after-s",
+        type=int,
+        default=60,
+        help="Seconds to idle both emulators after the battle phase so you can watch the windows.",
+    )
+    parser.add_argument(
+        "--battle-turns",
+        type=int,
+        default=1,
+        help="How many move-damage resolutions to "
+        "require on both peers before declaring "
+        "the demo successful. Default 1 — the "
+        "existing test suite also caps at 1 turn "
+        "because multi-turn link battles desync "
+        "in this emulator setup.",
+    )
+    parser.add_argument(
+        "--battle-budget-frames",
+        type=int,
+        default=3600,
+        help="Safety cap on emulated frames per turn. Default 3600 (~60s).",
+    )
     args = parser.parse_args()
 
     versions = [v.strip() for v in args.versions.split(",") if v.strip()]
@@ -270,13 +279,11 @@ def main() -> int:
 
     for v in (version_a, version_b):
         if v not in _ROM_PATHS:
-            print(f"[error] unknown version {v!r}; choose from "
-                  f"{sorted(_ROM_PATHS)}")
+            print(f"[error] unknown version {v!r}; choose from {sorted(_ROM_PATHS)}")
             return 2
         _assert_fixtures_available(v)
 
-    outdir = (_REPO / args.outdir) if not Path(args.outdir).is_absolute() \
-        else Path(args.outdir)
+    outdir = (_REPO / args.outdir) if not Path(args.outdir).is_absolute() else Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     shoot = Shooter(outdir)
 
@@ -296,8 +303,10 @@ def main() -> int:
 
         ow_a = a.read_game_state().overworld
         ow_b = b.read_game_state().overworld
-        print(f"[diagnostic-only start] A coord=({ow_a.x},{ow_a.y}) map=0x{ow_a.map_id:02x} | "
-              f"B coord=({ow_b.x},{ow_b.y}) map=0x{ow_b.map_id:02x}")
+        print(
+            f"[diagnostic-only start] A coord=({ow_a.x},{ow_a.y}) map=0x{ow_a.map_id:02x} | "
+            f"B coord=({ow_b.x},{ow_b.y}) map=0x{ow_b.map_id:02x}"
+        )
         shoot.shoot_pair(a, b, "bphase_00_start")
 
         # --- Phase A: receptionist → save → LinkMenu ---
@@ -336,8 +345,7 @@ def main() -> int:
                 break
             a.press("a", duration=4)
             b.press("a", duration=4)
-            in_serial = (counters["SaveGameData"][0] > 0
-                         or counters["SaveGameData"][1] > 0)
+            in_serial = counters["SaveGameData"][0] > 0 or counters["SaveGameData"][1] > 0
             if in_serial:
                 tick_both_fine(20)
             else:
@@ -371,8 +379,7 @@ def main() -> int:
         map_b = b.read_game_state().overworld.map_id
         print(f"[diagnostic-only warp] A map=0x{map_a:02x}, B map=0x{map_b:02x}")
         assert map_a == COLOSSEUM_MAP_ID and map_b == COLOSSEUM_MAP_ID, (
-            f"expected COLOSSEUM 0x{COLOSSEUM_MAP_ID:02x}, "
-            f"got A=0x{map_a:02x} B=0x{map_b:02x}"
+            f"expected COLOSSEUM 0x{COLOSSEUM_MAP_ID:02x}, got A=0x{map_a:02x} B=0x{map_b:02x}"
         )
         shoot.shoot_pair(a, b, "bphase_03_colosseum_entry")
 
@@ -412,13 +419,9 @@ def main() -> int:
         shoot.shoot_pair(a, b, "bphase_04_approach_partner")
 
         assert cct[0] > 0 and cct[1] > 0, (
-            "CableClub_DoBattleOrTrade never fired on both sides; "
-            "battle didn't launch"
+            "CableClub_DoBattleOrTrade never fired on both sides; battle didn't launch"
         )
-        print(
-            f"[diagnostic-only battle launched] CableClub_DoBattleOrTrade: "
-            f"A={cct[0]} B={cct[1]}"
-        )
+        print(f"[diagnostic-only battle launched] CableClub_DoBattleOrTrade: A={cct[0]} B={cct[1]}")
 
         # --- Phase D: drive turns until EndOfBattle fires on both sides ---
         #
@@ -473,10 +476,12 @@ def main() -> int:
                 shoot.shoot_pair(a, b, f"bphase_07_turn_{cur_dmg:02d}_resolved")
                 last_dmg_captured = cur_dmg
                 try:
-                    hp_a = (a._pyboy.memory[a.symbols.addr_of("wPartyMon1HP")] << 8) \
-                        | a._pyboy.memory[a.symbols.addr_of("wPartyMon1HP") + 1]
-                    hp_b = (b._pyboy.memory[b.symbols.addr_of("wPartyMon1HP")] << 8) \
-                        | b._pyboy.memory[b.symbols.addr_of("wPartyMon1HP") + 1]
+                    hp_a = (
+                        a._pyboy.memory[a.symbols.addr_of("wPartyMon1HP")] << 8
+                    ) | a._pyboy.memory[a.symbols.addr_of("wPartyMon1HP") + 1]
+                    hp_b = (
+                        b._pyboy.memory[b.symbols.addr_of("wPartyMon1HP")] << 8
+                    ) | b._pyboy.memory[b.symbols.addr_of("wPartyMon1HP") + 1]
                 except Exception:  # noqa: BLE001 - snapshotting is best effort
                     hp_a = hp_b = -1
                 print(

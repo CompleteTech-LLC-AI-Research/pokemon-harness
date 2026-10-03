@@ -48,9 +48,7 @@ def _validated_pins(
     if expected_symbol_sha1 is None:
         raise ValueError(f"symbol file is not pinned in VERSIONS.md: {sym}")
     if supplied_sha1 is not None and supplied_sha1.lower() != expected_rom_sha1:
-        raise ValueError(
-            f"provided ROM SHA-1 does not match the VERSIONS.md pin for {rom}"
-        )
+        raise ValueError(f"provided ROM SHA-1 does not match the VERSIONS.md pin for {rom}")
     return pins, expected_rom_sha1, expected_symbol_sha1
 
 
@@ -162,8 +160,7 @@ def _poison_blackout_to_cerulean(session: Session, drv: rtb.Driver) -> bool:
     mem[mons_base + _OFFSET_STATUS] = 1 << 3  # PSN
 
     print(
-        "[diagnostic-only] poison blackout: destination=Cerulean, "
-        "lead HP=1 status=PSN",
+        "[diagnostic-only] poison blackout: destination=Cerulean, lead HP=1 status=PSN",
         flush=True,
     )
     directions = ("left", "right", "up", "down", "right", "left", "down", "up")
@@ -171,8 +168,7 @@ def _poison_blackout_to_cerulean(session: Session, drv: rtb.Driver) -> bool:
         gs = drv.gs()
         if gs.overworld.map_id == CERULEAN_CITY:
             print(
-                f"[diagnostic-only] arrived Cerulean City by poison blackout "
-                f"after {i} steps",
+                f"[diagnostic-only] arrived Cerulean City by poison blackout after {i} steps",
                 flush=True,
             )
             return True
@@ -252,11 +248,8 @@ def _special_warp_to_cerulean(session: Session, drv: rtb.Driver) -> bool:
     return drv.gs().overworld.map_id == CERULEAN_CITY
 
 
-def produce(source: Path, rom: Path, sym: Path, out: Path,
-            sha1: str | None = None) -> None:
-    pins, expected_rom_sha1, expected_symbol_sha1 = _validated_pins(
-        rom, sym, sha1
-    )
+def produce(source: Path, rom: Path, sym: Path, out: Path, sha1: str | None = None) -> None:
+    pins, expected_rom_sha1, expected_symbol_sha1 = _validated_pins(rom, sym, sha1)
     session: Session | None = None
     active_error: BaseException | None = None
     try:
@@ -280,7 +273,9 @@ def produce(source: Path, rom: Path, sym: Path, out: Path,
             drv.press("a")
         session.step(30, render=False)
 
-        if not _special_warp_to_cerulean(session, drv) and not _poison_blackout_to_cerulean(session, drv):
+        if not _special_warp_to_cerulean(session, drv) and not _poison_blackout_to_cerulean(
+            session, drv
+        ):
             _clear_audio_fade_state(session)
             mem[symbols.addr_of("wLastBlackoutMap")] = CERULEAN_CITY
             mem[symbols.addr_of("wDestinationMap")] = CERULEAN_CITY
@@ -299,7 +294,10 @@ def produce(source: Path, rom: Path, sym: Path, out: Path,
                 _clear_audio_fade_state(session)
                 gs = drv.gs()
                 if gs.overworld.map_id == CERULEAN_CITY and not drv.joy_locked():
-                    print(f"[diagnostic-only] arrived Cerulean City after {(phase + 1) * 60} frames", flush=True)
+                    print(
+                        f"[diagnostic-only] arrived Cerulean City after {(phase + 1) * 60} frames",
+                        flush=True,
+                    )
                     break
                 if phase % 4 == 3:
                     print(
@@ -365,7 +363,10 @@ def produce(source: Path, rom: Path, sym: Path, out: Path,
         drv.press("up")
         session.step(30, render=False)
         gs = drv.gs()
-        if gs.overworld.map_id != CERULEAN_POKECENTER or (gs.overworld.x, gs.overworld.y) != (11, 3):
+        if gs.overworld.map_id != CERULEAN_POKECENTER or (gs.overworld.x, gs.overworld.y) != (
+            11,
+            3,
+        ):
             print(
                 f"[diagnostic-only] walk to Cable Club tile did not move; setting stock PC coords "
                 f"directly from map=0x{gs.overworld.map_id:02x} "
