@@ -1043,16 +1043,43 @@ valid result and never a defect:
   is only evidence if it is measured against that default;
 - the run did not measure both `trade` and `battle`. A worker policy governs
   the declared matrix as a whole, so a single-tier run reports measurements but
-  cannot select a policy;
+  cannot select a policy. Every arm must cover the whole matrix on its own: a
+  union across arms is not evidence, because a benchmark in which `workers=1`
+  measured only `trade` while `workers=2` and `workers=4` measured only `battle`
+  never measured any worker count on both tiers;
 - an arm produced no passing row;
 - an arm ran at an effective worker count different from the one it requested,
-  which means the capacity policy clamped it;
+  which means something below the request clamped it. Three ceilings apply and
+  the smallest one is the arm's real concurrency: the requested count, the
+  capacity policy's admitted pair ceiling, and the smallest declared tier row
+  count. The gate schedules at most one worker per row of a tier
+  (`max_workers = min(matrix_workers, len(nodeids))`), so a 44-worker request
+  runs the 19-row battle tier at 19 in practice. Row counts are read from the
+  report itself rather than hardcoded, and an unreadable tier row count yields
+  no effective count at all, so an unmeasurable arm is never reported as
+  running at exactly the requested count;
 - the runtimes disagree on the best worker count;
 - nothing beat the `workers=1` reference.
 
 `unselected` is reported, not repaired. The `workers=1` default is unchanged
 until a complete measurement selects otherwise, and selection is a report only:
 this script never edits a default, a policy, or a gate.
+
+### The per-arm wall-clock ceiling
+
+`--arm-timeout-seconds` bounds this harness's own child process; it relaxes no
+per-row deadline the gate enforces. When it is not supplied, the bound is
+derived from the same two sources the gate reads: the declared matrix rows in
+`tests/_tier_config.py` and `MATRIX_CASE_TIMEOUT_SECONDS` in
+`scripts/production_gate_model.py`. Each row is charged its full per-row
+budget because the gate may spend that much on one row before it finally
+reports the failure, making the sum a true upper bound rather than an
+estimate. A margin and a floor are applied so the bound still covers process
+start-up, report writing, and the final aggregate flush, and so it stays
+conservative if either source cannot be read. A hardcoded bound is wrong: a
+bound below the serial worst case interrupts a legitimate slow `workers=1`
+baseline and reports an unsupported `unselected` result that looks like a
+measurement rather than a harness artifact.
 
 ### Status
 

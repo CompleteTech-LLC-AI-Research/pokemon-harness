@@ -96,6 +96,76 @@ Both arms executed, both produced a terminal non-passing result, and selection
 was correctly withheld. The sibling `-raw` directories were confirmed on disk.
 The report recorded the tested commit under `identity.head`.
 
+## Fifth review round: three accounting defects and one test gap
+
+A fourth independent review of `0c3a8498` raised three significant findings
+and one test gap. All four are fixed here.
+
+| # | finding | defect | consequence if shipped |
+|---|---|---|---|
+| 1 | arm timeout arithmetic | the default `--arm-timeout-seconds 43200` was below the serial worst case | the live manifest declares 43 trade rows at 900 s and 19 battle rows at 1200 s, so a legitimate `workers=1` arm may legitimately spend 61,500 s. A 43,200 s ceiling interrupts a valid slow baseline and reports an unsupported `unselected` that is indistinguishable from a measured result |
+| 2 | worker count could exceed a tier's rows | `effective_workers()` considered only the request and the capacity ceiling | the gate caps `max_workers = min(matrix_workers, len(nodeids))` per tier, so a 44-worker request runs the 19-row battle tier at 19. Reporting 44 claims a concurrency the matrix cannot reach, and the existing clamp check would approve it as a supported count |
+| 3 | a union of tier sets could select a full-matrix policy | the full-tier check used the union of tiers across all arms | selection succeeded with `workers=1` measuring only `trade` and `workers=2`/`4` measuring only `battle`. No worker count was ever measured on both tiers, yet a matrix-wide policy was selected |
+| 4 | test gap | `test_unstarted_work_is_not_rewarded_as_speed` built a skipped arm but never passed it to `select_policy` | its `unselected` result came from the absent `workers=2`/`4` arms, so it would still have passed if unstarted rows stopped blocking selection |
+
+### Disposition
+
+1. The bound is derived, not hardcoded. `default_arm_timeout_seconds()` sums
+   every declared selection-tier row charged at its full per-row budget, reading
+   the row manifest from `tests._tier_config` and the timeouts from
+   `scripts.production_gate_model` — the two sources the gate itself reads, so
+   the bound tracks the live matrix instead of duplicating it. A 1.25 margin
+   covers start-up and report writing; a 108,000 s floor applies when either
+   source is unreadable, and the derived value is raised above the floor when
+   the matrix grows. The CLI default is now `None`, meaning "derive", and
+   `--arm-timeout-seconds` remains an explicit override. No per-row deadline is
+   relaxed: this bounds only the harness's own child process.
+2. `effective_workers()` now takes the declared tiers and returns the smallest
+   of the requested count, the admitted pair ceiling, and the smallest tier row
+   count. Row counts come from the report — `case_results` for a tier that ran,
+   otherwise the declared `selected_nodeids` — so no row total is hardcoded. An
+   unreadable row count yields `None`, which is already a selection blocker, so
+   an unmeasurable arm can never be read as running at exactly the request.
+3. Every arm must now individually contain the full required tier set. The
+   per-arm reason names the arm and the missing tiers. `comparable()` also
+   carries the tier set in its identity, so arms that measured different tiers
+   are not comparable even when they somehow pass the per-arm check. The CLI
+   builds one common tier list for every arm, so this is an API-correctness
+   repair; the union form was reachable only by calling `select_policy` directly.
+4. The test now passes the skipped arm in and asserts the explicit
+   `not_started=1` reason, so it fails if unstarted rows stop blocking
+   selection.
+
+Seven regression tests were added: tier-clamped effective workers (44 -> 19),
+the declared-selection fallback when no case rows exist, unknown row counts,
+the union-of-partial-arms reproduction, a single-tier run, differing tier sets
+breaking comparability, and the timeout derivation covering the live matrix,
+the unreadable-manifest floor, and the CLI override.
+
+Verification on this head:
+
+```
+.venv-wt106/bin/python -m pytest -o addopts="" -p no:cacheprovider \
+  tests/test_matrix_concurrency_policy.py
+73 passed, 1 warning in 1.39s
+
+.venv-wt106/bin/python -m pytest -o addopts="" -p no:cacheprovider \
+  tests/test_production_gate_strict_matrix.py \
+  tests/test_production_gate_matrix_manifest.py \
+  tests/test_production_gate_report_loader.py \
+  tests/test_production_gate_run_tier_failures.py \
+  tests/test_gate_capacity_policy.py \
+  tests/test_gate_capacity_boundaries.py \
+  tests/test_gate_capacity_interrupts.py \
+  tests/test_gate_capacity_main.py
+232 passed
+```
+
+`ruff check`, `ruff format --check`, `py_compile`, and `git diff --check` are
+clean. End-to-end on this head, both runtimes at `workers=1` over
+`trade,battle` with an explicit 240 s arm bound, returned `unselected` with the
+expected per-arm reasons and no policy change.
+
 ## Policy selection is deliberately withheld
 
 No worker policy is recommended and the `workers=1` default is unchanged.

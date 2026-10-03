@@ -70,6 +70,23 @@ def _arm(
     )
 
 
+def _tier(name: str, *, rows: int, with_cases: bool = True):
+    """Build one gate tier payload with a known declared row count."""
+
+    tier = {
+        "name": name,
+        "status": "PASS",
+        "counts": {"passed": rows, "failed": 0},
+        "selected_nodeids": [f"tests/t.py::test[{name}-{index}]" for index in range(rows)],
+    }
+    if with_cases:
+        tier["case_results"] = [
+            {"nodeid": nodeid, "status": "PASS", "counts": {"passed": 1, "failed": 0}}
+            for nodeid in tier["selected_nodeids"]
+        ]
+    return tier
+
+
 def _full_set(*, source_walls, native_walls, passing: int = 18):
     """Return complete arms for both runtimes at workers 1/2/4."""
 
@@ -226,6 +243,48 @@ class TestSelectionOutcomes:
         assert selection["outcome"] == "selected"
         assert selection["policy"]["matrix_workers"] == 4
 
+    def test_a_union_of_partial_arms_cannot_satisfy_full_matrix_selection(self):
+        # Every arm must cover the whole matrix on its own.  A union across arms
+        # would let workers=1 measure trade only while workers=2/4 measure
+        # battle only, and the union would look like a full-matrix benchmark
+        # even though no worker count was ever measured on both tiers.
+        arms = [
+            _arm(runtime="source", workers=1, tiers=("trade",), wall=120.0),
+            _arm(runtime="source", workers=2, tiers=("battle",), wall=90.0),
+            _arm(runtime="source", workers=4, tiers=("battle",), wall=80.0),
+            _arm(runtime="native", workers=1, tiers=("trade",), wall=120.0),
+            _arm(runtime="native", workers=2, tiers=("battle",), wall=90.0),
+            _arm(runtime="native", workers=4, tiers=("battle",), wall=80.0),
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any(
+            "did not measure the full" in reason and "not measured: ['battle']" in reason
+            for reason in selection["reasons"]
+        )
+
+    def test_an_unrequested_tier_does_not_license_partial_arms(self):
+        # Passing --tiers trade only cannot select a policy that governs the
+        # battle tier too, however many workers the trade arms cover.
+        arms = [
+            _arm(runtime="source", workers=1, tiers=("trade",), wall=120.0),
+            _arm(runtime="source", workers=2, tiers=("trade",), wall=90.0),
+            _arm(runtime="source", workers=4, tiers=("trade",), wall=80.0),
+            _arm(runtime="native", workers=1, tiers=("trade",), wall=120.0),
+            _arm(runtime="native", workers=2, tiers=("trade",), wall=90.0),
+            _arm(runtime="native", workers=4, tiers=("trade",), wall=80.0),
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("not measured: ['battle']" in reason for reason in selection["reasons"])
+
+    def test_differing_tier_sets_make_arms_incomparable(self):
+        arms = [
+            _arm(runtime="source", workers=1, tiers=("trade", "battle"), wall=100.0),
+            _arm(runtime="source", workers=2, tiers=("trade",), wall=90.0),
+        ]
+        assert bench.comparable(arms) is False
+
 
 class TestReportParsing:
     """An unparseable or unexpected report degrades to incomplete, not fast."""
@@ -285,12 +344,51 @@ class TestReportParsing:
         assert counts["completed_passing"] == 4
 
     def test_effective_workers_clamps_to_the_admitted_ceiling(self):
-        report = {"capacity": {"admission": {"max_concurrent_pairs": 2}}}
-        assert bench.effective_workers(report, 4) == 2
-        assert bench.effective_workers(report, 1) == 1
+        report = {
+            "capacity": {"admission": {"max_concurrent_pairs": 2}},
+            "tiers": [_tier("trade", rows=43), _tier("battle", rows=19)],
+        }
+        assert bench.effective_workers(report, 4, ("trade", "battle")) == 2
+        assert bench.effective_workers(report, 1, ("trade", "battle")) == 1
 
     def test_missing_capacity_leaves_effective_workers_unknown(self):
-        assert bench.effective_workers({}, 4) is None
+        assert bench.effective_workers({}, 4, ("trade", "battle")) is None
+
+    def test_effective_workers_never_exceeds_the_smallest_declared_tier(self):
+        # The gate caps concurrency at min(matrix_workers, len(nodeids)) per
+        # tier, so a 44-worker request runs battle at 19 in practice.  Reading
+        # that as an arm at 44 workers would claim a concurrency the matrix
+        # cannot reach, and the selection clamp would silently approve it.
+        report = {
+            "capacity": {"admission": {"max_concurrent_pairs": 64}},
+            "tiers": [_tier("trade", rows=43), _tier("battle", rows=19)],
+        }
+        assert bench.effective_workers(report, 44, ("trade", "battle")) == 19
+        assert bench.tier_row_counts(report, ("trade", "battle")) == {
+            "trade": 43,
+            "battle": 19,
+        }
+
+    def test_effective_workers_falls_back_to_declared_selection_when_no_cases_ran(self):
+        # A tier that produced no case_results still declares its rows, so the
+        # row ceiling must not become "unknown" and hide the clamp.
+        report = {
+            "capacity": {"admission": {"max_concurrent_pairs": 64}},
+            "tiers": [
+                _tier("trade", rows=43, with_cases=False),
+                _tier("battle", rows=19),
+            ],
+        }
+        assert bench.effective_workers(report, 8, ("trade", "battle")) == 8
+
+    def test_effective_workers_is_unknown_when_a_tier_row_count_is_unreadable(self):
+        # An arm whose row count cannot be read has no capacity evidence, so it
+        # must not be reported as running at exactly the requested count.
+        report = {
+            "capacity": {"admission": {"max_concurrent_pairs": 64}},
+            "tiers": [_tier("battle", rows=19)],
+        }
+        assert bench.effective_workers(report, 4, ("trade", "battle")) is None
 
 
 class TestPercentiles:
@@ -807,10 +905,21 @@ class TestThroughputCountsAllRequiredWork:
         assert complete.clean_pass is True
         assert skipped.complete is False
         selection = bench.select_policy(
-            [complete, _arm(runtime="native", workers=1, wall=100.0)],
+            # The skipped arm is passed in on purpose: otherwise the refusal
+            # would come from the absent workers=2/4 arms and would pass even
+            # if unstarted rows stopped blocking selection.
+            [
+                complete,
+                skipped,
+                _arm(runtime="native", workers=1, wall=100.0),
+            ],
             worker_counts=(1, 2, 4),
         )
         assert selection["outcome"] == "unselected"
+        assert any(
+            "source/workers-1 is incomplete" in reason and "not_started=1" in reason
+            for reason in selection["reasons"]
+        )
 
     def test_a_failed_row_is_counted_in_required_work(self):
         complete = _arm(passing=19, failed=0, wall=100.0)
@@ -830,3 +939,48 @@ class TestThroughputCountsAllRequiredWork:
         # so a reader can see that a row was skipped.
         assert partial.clean_passing_per_hour < partial.passing_per_hour
         assert partial.required_rows == 19
+
+
+class TestArmTimeoutBound:
+    """The harness ceiling must outlast a legitimate workers=1 baseline."""
+
+    def test_the_bound_covers_a_serial_run_of_the_declared_matrix(self):
+        # At one worker the gate may spend every declared row's full per-row
+        # budget before it reports any failure.  A bound below that interrupts a
+        # valid slow baseline and reports an unsupported "unselected" result.
+        worst = bench._declared_matrix_worst_case_seconds(PROJECT_ROOT)
+        assert worst > 0
+        assert bench.default_arm_timeout_seconds(PROJECT_ROOT) > worst
+
+    def test_the_bound_is_derived_from_the_live_matrix(self):
+        # The bound must track the declared rows and the gate's own per-tier
+        # timeouts rather than a hardcoded total, so growing the matrix raises
+        # it automatically.
+        import importlib
+
+        tier_config = importlib.import_module("tests._tier_config")
+        gate_model = importlib.import_module("scripts.production_gate_model")
+        expected = sum(
+            len(tier_config.TIER_REQUIRED_NODEIDS[tier])
+            * gate_model.MATRIX_CASE_TIMEOUT_SECONDS[tier]
+            for tier in bench.REQUIRED_SELECTION_TIERS
+        )
+        assert bench._declared_matrix_worst_case_seconds(PROJECT_ROOT) == expected
+
+    def test_an_unreadable_matrix_keeps_the_conservative_floor(self):
+        # A manifest that cannot be read is not evidence of a small matrix, so
+        # the floor applies instead of a value derived from nothing.
+        assert (
+            bench.default_arm_timeout_seconds(Path("/nonexistent-matrix-root"))
+            == bench.DEFAULT_ARM_TIMEOUT_SECONDS_FLOOR
+        )
+
+    def test_the_cli_default_is_derived_and_still_overridable(self):
+        parser = bench.build_parser()
+        assert parser.parse_args(["--evidence-dir", "e"]).arm_timeout_seconds is None
+        assert (
+            parser.parse_args(
+                ["--evidence-dir", "e", "--arm-timeout-seconds", "5"]
+            ).arm_timeout_seconds
+            == 5.0
+        )

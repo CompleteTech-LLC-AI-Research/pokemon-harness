@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -48,11 +49,74 @@ RUNTIMES = ("source", "native")
 # report measurements but must not select a policy.
 REQUIRED_SELECTION_TIERS = ("battle", "trade")
 # The slowest legitimate arm must not be killed by this harness.  At workers=1
-# the gate may spend 19 x 900 s on trade plus 19 x 1200 s on battle before any
+# the gate may spend every declared row's full per-row budget before any
 # failure, so an arm bound below that would interrupt a valid slow baseline and
-# report an unsupported "unselected".  This is a harness ceiling on our own
-# child process, not a relaxation of any per-row deadline the gate enforces.
-DEFAULT_ARM_TIMEOUT_SECONDS = 43200.0
+# report an unsupported "unselected".  The bound is derived from the two
+# sources the gate itself uses -- the declared matrix rows and the per-tier row
+# timeouts -- rather than hardcoded, so it tracks the live matrix.
+#
+# This is a ceiling on our own child process.  It relaxes no per-row deadline
+# the gate enforces.
+DEFAULT_ARM_TIMEOUT_SECONDS_FLOOR = 108000.0
+# Headroom above the derived worst case so process start-up, report writing and
+# the final aggregate flush cannot consume the margin and report a legitimate
+# arm as interrupted.
+ARM_TIMEOUT_MARGIN = 1.25
+
+
+def default_arm_timeout_seconds(project_root: Path) -> float:
+    """Return an arm bound that cannot kill a legitimate workers=1 baseline.
+
+    The gate may spend each declared row's full per-row budget before any
+    failure, so the bound is derived from the same two authoritative sources
+    the gate itself reads: the declared matrix rows in ``tests/_tier_config``
+    and the per-tier row timeouts in ``scripts.production_gate_model``.  A
+    floor is applied so the bound stays conservative if either source cannot
+    be read.
+    """
+
+    total = DEFAULT_ARM_TIMEOUT_SECONDS_FLOOR
+    worst = _declared_matrix_worst_case_seconds(project_root)
+    if worst > 0:
+        # The floor is a floor, not a cap: a grown matrix must raise the bound
+        # rather than quietly fall back to a value too small for it.
+        total = max(total, worst * ARM_TIMEOUT_MARGIN)
+    return total
+
+
+def _declared_matrix_worst_case_seconds(project_root: Path) -> float:
+    """Return the seconds a serial (workers=1) arm could legitimately spend.
+
+    ``0.0`` means "the declared matrix could not be read", which leaves the
+    caller's conservative floor in place.  Each row is charged its full
+    per-row budget because the gate may spend that much on one row before it
+    finally reports the failure, making this a true upper bound rather than an
+    estimate.
+    """
+
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    try:
+        tier_config = importlib.import_module("tests._tier_config")
+        gate_model = importlib.import_module("scripts.production_gate_model")
+    except Exception:  # noqa: BLE001 - an unreadable manifest is not evidence
+        return 0.0
+    manifest = getattr(tier_config, "TIER_REQUIRED_NODEIDS", None)
+    timeouts = getattr(gate_model, "MATRIX_CASE_TIMEOUT_SECONDS", None)
+    if not isinstance(manifest, dict) or not isinstance(timeouts, dict):
+        return 0.0
+    worst = 0.0
+    for tier in REQUIRED_SELECTION_TIERS:
+        nodeids = manifest.get(tier)
+        per_row = timeouts.get(tier)
+        if not isinstance(nodeids, (set, frozenset, list, tuple)):
+            return 0.0
+        if isinstance(per_row, bool) or not isinstance(per_row, (int, float)):
+            return 0.0
+        worst += len(nodeids) * float(per_row)
+    return worst
+
+
 # ``production_gate.py`` spells the compiled runtime ``cython`` (see
 # ``production_gate_model.RUNTIME_MODES``).  This benchmark reports it as
 # ``native`` because that is the name used throughout the issue and the
@@ -302,17 +366,67 @@ def _accumulate_case(totals: dict[str, int], case: Any) -> None:
     totals["not_started"] += _as_int(counts.get("skipped")) + _as_int(counts.get("xfailed"))
 
 
-def effective_workers(report: dict[str, Any], requested: int) -> int | None:
-    """Return the worker count the capacity policy actually admitted."""
+def tier_row_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, int | None]:
+    """Return how many declared rows each requested tier actually ran.
+
+    The gate schedules at most one worker per row of a tier
+    (``max_workers = min(matrix_workers, len(nodeids))``), so a tier's row
+    count is the ceiling on that tier's concurrency.  The count comes from the
+    report itself -- ``case_results`` for a tier that ran, otherwise the
+    declared ``selected_nodeids`` -- so it tracks the real matrix instead of a
+    hardcoded row total.  ``None`` means the tier's row count could not be
+    determined, which is not evidence of any worker count.
+    """
+
+    wanted = set(tiers)
+    counts: dict[str, int | None] = {tier: None for tier in wanted}
+    payload = report.get("tiers")
+    if not isinstance(payload, list):
+        return counts
+    for tier in payload:
+        if not isinstance(tier, dict) or tier.get("name") not in wanted:
+            continue
+        name = tier["name"]
+        case_results = tier.get("case_results")
+        if isinstance(case_results, list) and case_results:
+            counts[name] = len(case_results)
+            continue
+        selected = tier.get("selected_nodeids")
+        if isinstance(selected, list) and selected:
+            counts[name] = len(selected)
+    return counts
+
+
+def effective_workers(report: dict[str, Any], requested: int, tiers: Iterable[str]) -> int | None:
+    """Return the concurrency every declared tier in this arm actually ran.
+
+    Three ceilings apply, and the smallest one is the arm's real concurrency:
+    the requested worker count, the capacity policy's admitted pair ceiling,
+    and the smallest declared tier row count.  The last of those is why a
+    request of 44 workers does not read as an arm at 44 when the battle tier
+    only declares 19 rows -- the gate can never run 44 battle rows at once.
+
+    ``None`` returns when the capacity policy admitted no ceiling or when a
+    tier's row count is unreadable.  An unknown effective count is never
+    reported as a match for the requested count, because that would let an
+    unsupported worker count look measured.
+    """
 
     capacity = report.get("capacity")
     admission = capacity.get("admission") if isinstance(capacity, dict) else None
     if not isinstance(admission, dict):
         return None
     admitted = admission.get("max_concurrent_pairs")
-    if type(admitted) is int and admitted > 0:
-        return min(requested, admitted)
-    return None
+    if type(admitted) is not int or admitted <= 0:
+        return None
+    ceiling = min(requested, admitted)
+    row_counts = tier_row_counts(report, tiers)
+    for tier in tiers:
+        rows = row_counts.get(tier)
+        if not isinstance(rows, int) or rows <= 0:
+            return None
+        ceiling = min(ceiling, rows)
+    return max(1, ceiling)
 
 
 def case_durations(
@@ -532,7 +646,7 @@ def run_arm(
     result.incomplete = counts["incomplete"]
     result.not_started = counts["not_started"]
     result.interrupted = counts["interrupted"]
-    result.effective_workers = effective_workers(report, plan.requested_workers)
+    result.effective_workers = effective_workers(report, plan.requested_workers, plan.tiers)
     result.per_case_seconds, result.deadline_headroom_seconds = case_durations(report, plan.tiers)
     result.pressure_avg300 = report_pressure(report)
     # The gate's exit status is authoritative: production_gate.py returns 0 if
@@ -549,13 +663,15 @@ def run_arm(
 def comparable(results: Sequence[ArmResult]) -> bool:
     """Return whether these arms may be compared against each other.
 
-    Two arms are comparable only when they ran the same declared rows, i.e.
-    they share a runtime and a required-row count.
+    Two arms are comparable only when they ran the same declared work, i.e.
+    they share a runtime, a required-row count, and the same set of declared
+    tiers.
 
     The effective worker count deliberately varies across the arms being
     compared -- that difference is the experiment.  What must not vary is the
-    *amount of declared work*: comparing arms that ran different numbers of
-    required rows would attribute the difference in work to concurrency.
+    *amount and shape of declared work*: comparing arms that ran different
+    numbers of required rows, or different tiers, would attribute the
+    difference in work to concurrency.
 
     A capacity-policy clamp is detected separately, by comparing each arm's
     effective worker count against the worker count it requested.  An arm that
@@ -565,7 +681,7 @@ def comparable(results: Sequence[ArmResult]) -> bool:
 
     if len(results) < 2:
         return True
-    return len({(r.plan.runtime, r.required_rows) for r in results}) == 1
+    return len({(r.plan.runtime, r.required_rows, frozenset(r.plan.tiers)) for r in results}) == 1
 
 
 def select_policy(
@@ -593,13 +709,18 @@ def select_policy(
             f"the workers=1 reference is required to select a policy; declared "
             f"worker counts start at {reference_workers}"
         )
-    measured_tiers = {tier for result in results for tier in result.plan.tiers}
-    missing_tiers = sorted(set(REQUIRED_SELECTION_TIERS) - measured_tiers)
-    if missing_tiers:
-        reasons.append(
-            f"selection requires the full {list(REQUIRED_SELECTION_TIERS)} matrix; "
-            f"not measured: {missing_tiers}"
-        )
+    # Every arm must cover the whole matrix on its own.  A union across arms is
+    # not evidence: an arm that measured only trade has no battle throughput to
+    # compare, and a worker policy that governs both tiers cannot be justified
+    # by a benchmark in which different worker counts measured different tiers.
+    required_tiers = set(REQUIRED_SELECTION_TIERS)
+    for result in results:
+        missing_tiers = sorted(required_tiers - set(result.plan.tiers))
+        if missing_tiers:
+            reasons.append(
+                f"{result.plan.key()} did not measure the full "
+                f"{list(REQUIRED_SELECTION_TIERS)} matrix; not measured: {missing_tiers}"
+            )
     for runtime in RUNTIMES:
         for workers in declared:
             if not any(
@@ -842,7 +963,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--worker-counts", default=",".join(str(w) for w in DEFAULT_WORKER_COUNTS))
     parser.add_argument("--tiers", default="trade,battle")
-    parser.add_argument("--arm-timeout-seconds", type=float, default=DEFAULT_ARM_TIMEOUT_SECONDS)
+    parser.add_argument(
+        "--arm-timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "wall-clock ceiling for one arm; defaults to a bound derived from the "
+            "declared matrix so a legitimate workers=1 baseline is not interrupted"
+        ),
+    )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     return parser
 
@@ -856,10 +985,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         worker_counts = _parse_counts(args.worker_counts)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.arm_timeout_seconds <= 0:
+    if args.arm_timeout_seconds is not None and args.arm_timeout_seconds <= 0:
         parser.error("--arm-timeout-seconds must be positive")
 
     project_root = Path(args.project_root).expanduser().resolve()
+    arm_timeout_seconds = (
+        args.arm_timeout_seconds
+        if args.arm_timeout_seconds is not None
+        else default_arm_timeout_seconds(project_root)
+    )
     evidence_root = Path(args.evidence_dir).expanduser().resolve()
     tiers = tuple(t.strip() for t in args.tiers.split(",") if t.strip())
     if not tiers:
@@ -907,7 +1041,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan,
             project_root=project_root,
             evidence_root=evidence_root,
-            timeout_seconds=args.arm_timeout_seconds,
+            timeout_seconds=arm_timeout_seconds,
             capacity_policy=capacity_policy,
             rom_root=rom_root,
             fixture_root=fixture_root,
@@ -932,7 +1066,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         selection=selection,
         rom_root=args.rom_root or "unavailable",
         fixture_root=args.fixture_root or "unavailable",
-        timeout_seconds=args.arm_timeout_seconds,
+        timeout_seconds=arm_timeout_seconds,
     )
     report_path = evidence_root / "benchmark-report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
