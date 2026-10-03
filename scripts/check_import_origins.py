@@ -84,7 +84,12 @@ def _trusted_stdlib_finders() -> set[object]:
 def _is_trusted_stdlib_finder(finder: object) -> bool:
     """Return whether ``finder`` is one of the interpreter's own finders."""
 
-    return finder in _trusted_stdlib_finders()
+    # Membership in a set hashes and compares the candidate, so a hostile
+    # metaclass gets to run both ``__hash__`` and ``__eq__`` -- and may raise a
+    # direct ``BaseException`` subclass from either.  Identity against the
+    # three exact objects is the same decision without any attacker code
+    # running at all.
+    return any(finder is trusted for trusted in _trusted_stdlib_finders())
 
 
 def _site_packages_roots() -> list[Path]:
@@ -120,8 +125,19 @@ def _site_packages_roots() -> list[Path]:
             return
 
     candidates: list[str] = []
-    _extend(getattr(site, "getsitepackages", None), candidates)
-    _append_one(getattr(site, "getusersitepackages", None), candidates)
+    # The attribute lookup itself is untrusted: a replaced ``site`` module can
+    # raise from ``__getattr__``, not only from the getter it returns.
+    site_attributes: list[object] = []
+    for name in ("getsitepackages", "getusersitepackages"):
+        try:
+            site_attributes.append(getattr(site, name, None))
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001 - hostile site module; no such root
+            site_attributes.append(None)
+
+    for getter, append in zip(site_attributes, (_extend, _append_one), strict=True):
+        append(getter, candidates)
 
     roots: list[Path] = []
     for candidate in candidates:
@@ -489,7 +505,9 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
     for record in records:
         try:
             text = record.read_text(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - unreadable record; unattributable
             continue
         for line in text.splitlines():
             # ``RECORD`` is CSV with the shape ``path,sha256=<digest>,size``.
@@ -585,7 +603,9 @@ def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
     for entry in entries:
         try:
             text = entry.read_text(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - unreadable .pth; no attestation
             continue
         if needle in text:
             return True
@@ -669,8 +689,18 @@ def _untrusted_meta_path_finders() -> list[tuple[object, Path | None]]:
     meta-path contains a finder this checkout did not install.
     """
 
+    try:
+        finders = list(sys.meta_path)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - unreadable meta-path; refuse below
+        # An interpreter whose meta-path cannot be listed cannot be shown to
+        # be free of an injected finder, so report a sentinel that forces the
+        # caller's refusal rather than certifying an unchecked import path.
+        return [(sys, None)]
+
     offenders: list[tuple[object, Path | None]] = []
-    for finder in list(sys.meta_path):
+    for finder in finders:
         if _is_trusted_stdlib_finder(finder) or _is_installation_finder(finder):
             continue
         # Report the code location: it is the only part of a refused finder's
@@ -760,7 +790,11 @@ def _installed_from(distribution_name: str, project_root: Path) -> Path | None:
     try:
         distribution = _distribution(distribution_name)
         text = distribution.read_text("direct_url.json")
-    except (OSError, importlib.metadata.PackageNotFoundError):
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - unattributable, not a crash
         return None
     if not text:
         return None

@@ -941,6 +941,105 @@ def test_a_hostile_site_candidate_cannot_abort_the_guard(monkeypatch):
     assert origins._site_packages_roots() == []
 
 
+def test_a_hostile_finder_hash_cannot_abort_the_guard(tmp_path):
+    """Recognising the stdlib finders must not run attacker code.
+
+    ``_is_trusted_stdlib_finder`` decided by ``finder in <set>``, which hashes
+    and compares the candidate.  A finder whose metaclass raises a direct
+    ``BaseException`` subclass from ``__hash__`` therefore escaped
+    ``check_origins`` before any provenance question was even asked.  The
+    decision is now identity against the three exact interpreter objects,
+    which runs no attacker code at all.
+    """
+
+    class ExplodingHash(BaseException):
+        pass
+
+    class HostileMeta(type):
+        def __hash__(cls):
+            raise ExplodingHash("finder hash boom")
+
+    class HostileFinder(metaclass=HostileMeta):
+        def find_spec(self, *_args, **_kwargs):
+            return None
+
+    # The metaclass only runs when the finder is a CLASS.  An instance is
+    # hashed by its own type, so putting an instance on sys.meta_path never
+    # reaches the hostile __hash__ and the row would pass on unfixed source.
+    saved_meta_path = list(sys.meta_path)
+    sys.meta_path.insert(0, HostileFinder)
+    try:
+        assert origins._untrusted_meta_path_finders() != []
+        assert origins._is_trusted_stdlib_finder(HostileFinder) is False
+    finally:
+        sys.meta_path[:] = saved_meta_path
+
+
+def test_an_unreadable_meta_path_cannot_abort_the_guard(monkeypatch):
+    """A meta-path that cannot be listed must refuse, not certify.
+
+    ``list(sys.meta_path)`` ran unguarded, so a ``sys.meta_path`` whose
+    iteration raises a direct ``BaseException`` subclass escaped the guard.
+    An interpreter whose meta-path cannot be enumerated cannot be shown to be
+    free of an injected finder, so the repair reports a sentinel offender and
+    the caller's refusal fires.
+    """
+
+    class ExplodingIteration(BaseException):
+        pass
+
+    class HostileMetaPath(list):
+        def __iter__(self):
+            raise ExplodingIteration("meta_path iteration boom")
+
+    monkeypatch.setattr(sys, "meta_path", HostileMetaPath(sys.meta_path))
+
+    assert origins._untrusted_meta_path_finders() != []
+
+
+def test_a_hostile_site_attribute_lookup_cannot_abort_the_guard(monkeypatch):
+    """The ``site`` attribute lookup is untrusted too, not just the getter."""
+
+    class ExplodingLookup(BaseException):
+        pass
+
+    class HostileSite(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("get"):
+                raise ExplodingLookup("site getter lookup boom")
+            raise AttributeError(name)
+
+    monkeypatch.setitem(sys.modules, "site", HostileSite("site"))
+
+    assert origins._site_packages_roots() == []
+
+
+def test_an_unreadable_distribution_record_cannot_abort_the_guard(monkeypatch):
+    """A distribution whose record cannot be read is unattributable.
+
+    ``read_text`` on a distribution, a ``RECORD`` and a ``.pth`` was guarded
+    with ``(OSError, ValueError)``.  These are objects an install layout
+    supplies, so a direct ``BaseException`` subclass escaped the guard instead
+    of being reported as an unattributable install.
+    """
+
+    class ExplodingRecord(BaseException):
+        pass
+
+    class HostileDistribution:
+        def read_text(self, *_args, **_kwargs):
+            raise ExplodingRecord("distribution record boom")
+
+    monkeypatch.setattr(origins, "_distribution", lambda _name: HostileDistribution())
+
+    assert (
+        origins._installed_from(
+            "pokered-harness", REPO_ROOT
+        )
+        is None
+    )
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
