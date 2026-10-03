@@ -7,13 +7,16 @@ directions: the guard must accept the tree under test and reject any other.
 """
 
 import contextlib
+import csv
 import importlib
+import io
 import json
 import os
 import re
 import runpy
 import subprocess
 import sys
+import tokenize
 import types
 from pathlib import Path
 
@@ -21,7 +24,20 @@ import pytest
 
 import scripts.check_import_origins as origins
 import scripts.production_gate as gate
-from scripts.check_import_origins import check_origins, main
+from scripts.check_import_origins import (
+    _describe,
+    _file_digest,
+    _finder_code_file,
+    _finder_source,
+    _is_installation_finder,
+    _is_recorded_by_an_install,
+    _is_trusted_stdlib_finder,
+    _is_within,
+    _record_digests,
+    _site_packages_roots,
+    check_origins,
+    main,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -593,6 +609,42 @@ def test_operator_interrupt_is_not_swallowed_as_a_finding(tmp_path, monkeypatch,
         check_origins(tmp_path, ("interrupting_ns",))
 
 
+def test_a_finder_that_raises_on_hash_becomes_a_finding_not_a_traceback(
+    tmp_path, monkeypatch
+):
+    """A membership test against a finder set calls the finder's ``__hash__``.
+
+    ``_is_trusted_stdlib_finder`` decides trust with ``finder in <set>``, and
+    a set lookup invokes ``__hash__`` on the object being tested.  A hostile
+    finder controls that method, so the lookup is attacker-controlled data
+    reached before any of the surrounding guards apply.
+
+    A custom ``BaseException`` here is a finding, not an operator interrupt:
+    only ``KeyboardInterrupt`` and ``SystemExit`` are re-raised, everywhere
+    else in this module.  So the guard must report the finder as untrusted
+    rather than letting the exception escape ``check_origins``.
+    """
+
+    class ExplodingHash(BaseException):
+        """A direct ``BaseException`` subclass, i.e. not an operator interrupt."""
+
+    class HashBomb:
+        def __hash__(self):
+            raise ExplodingHash("hash escape")
+
+        def find_spec(self, *args):
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [HashBomb(), *sys.meta_path])
+
+    report = check_origins(tmp_path, ("interrupting_ns",))
+
+    assert report["status"] == "FAIL"
+    assert any(
+        package["package"] == "<interpreter>" for package in report["packages"]
+    ), f"the hostile finder must be refused as an interpreter finding: {report}"
+
+
 @pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
 def test_resolve_path_does_not_swallow_an_interrupt(raised):
     """``_resolve_path`` itself must re-raise, not just callers that reach it.
@@ -737,6 +789,159 @@ def test_cli_survives_an_exception_whose_str_raises(tmp_path, capsys):
     assert report["status"] == "FAIL"
 
 
+def test_a_hostile_path_getter_cannot_abort_the_guard(tmp_path):
+    """A namespace package whose ``__path__`` raises must be a finding.
+
+    ``_resolve_origin`` guards the ``__file__`` read, but the namespace
+    fallback read ``__path__`` two lines later sat outside any guard, so a
+    module whose ``__getattribute__`` raises a direct ``BaseException``
+    escaped ``check_origins`` entirely.  ``_foreign_path_locations`` had the
+    same unguarded read, and the ``__file__`` corroboration inside it a
+    third.  All three now convert the raise into a reported finding.
+    """
+
+    class ExplodingPath(BaseException):
+        pass
+
+    class BadModule(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "__path__":
+                raise ExplodingPath("path boom")
+            return super().__getattribute__(name)
+
+    package = tmp_path / "path_crash_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    module = BadModule("path_crash_pkg")
+    module.__file__ = str(package / "__init__.py")
+    with _module_installed("path_crash_pkg", module):
+        report = check_origins(tmp_path, ("path_crash_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "__path__ could not be read" in report["packages"][0]["detail"], report
+
+
+def test_a_hostile_site_module_cannot_abort_the_guard(tmp_path):
+    """``site`` getters are untrusted input too, and must fail closed.
+
+    ``_site_packages_roots`` reads ``site.getsitepackages()`` and
+    ``site.getusersitepackages()``.  Both calls were guarded with
+    ``except Exception``, but ``site`` is an ordinary module attribute and a
+    process that replaced it -- or a test that does -- can raise a direct
+    ``BaseException`` subclass.  That escaped ``check_origins`` as a
+    traceback, with no machine-readable finding at all.
+
+    The repaired guards return no install roots, which makes every consumer
+    treat the finder as untrusted: ``_finder_is_installed`` falls through to
+    ``False`` and ``_is_trusted_finder`` returns ``False``.  The guard
+    therefore refuses instead of crashing.
+    """
+
+    class ExplodingSite(BaseException):
+        pass
+
+    real_site = sys.modules.get("site")
+
+    def boom(*_args, **_kwargs):
+        raise ExplodingSite("site getter boom")
+
+    hostile_site = types.ModuleType("site")
+    hostile_site.getsitepackages = boom
+    hostile_site.getusersitepackages = boom
+
+    package = tmp_path / "site_boom_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    module = types.ModuleType("site_boom_pkg")
+    module.__file__ = str(package / "__init__.py")
+    sys.modules["site"] = hostile_site
+    try:
+        with _module_installed("site_boom_pkg", module):
+            report = check_origins(tmp_path, ("site_boom_pkg",))
+    finally:
+        if real_site is None:
+            del sys.modules["site"]
+        else:
+            sys.modules["site"] = real_site
+
+    assert report["status"] == "FAIL", report
+
+
+def test_an_unreadable_finder_descriptor_refuses_installation_trust(
+    tmp_path, monkeypatch
+):
+    """``_is_installation_finder``'s own descriptor reads must refuse, not escape.
+
+    Round 3 repaired the descriptor reads in ``_finder_code_file``, but the
+    same pair in ``_is_installation_finder`` (``find_spec``, then ``__func__``)
+    was still guarded with ``except Exception``.  Reaching them requires a
+    finder that already looks installed, which is why the round-3 meta-path
+    row passes on the unfixed source and cannot catch this.
+    """
+
+    class ExplodingDescriptor(BaseException):
+        pass
+
+    class HostileFinder:
+        @property
+        def find_spec(self):
+            raise ExplodingDescriptor("descriptor boom")
+
+        def __repr__(self):
+            return "<hostile finder>"
+
+    code_file = tmp_path / "installed.py"
+    code_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(origins, "_finder_code_file", lambda _finder: code_file)
+    monkeypatch.setattr(
+        origins, "_finder_was_imported_from", lambda _finder, _code_file: True
+    )
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [tmp_path])
+    monkeypatch.setattr(origins, "_is_within", lambda *_a, **_k: True)
+
+    assert origins._is_installation_finder(HostileFinder()) is False
+
+
+def test_an_unreadable_code_object_cannot_abort_the_guard():
+    """Code-object introspection must refuse an unreadable code object.
+
+    ``_code_matches_source`` reads ``function.__code__`` and compares code
+    signatures, and both walks -- ``_code_objects`` and ``_code_signature`` --
+    read ``co_consts`` and the per-field attributes unguarded, while
+    ``function`` is the very object a hostile ``find_spec`` descriptor
+    supplied.  A code-like object whose ``co_consts`` raises a direct
+    ``BaseException`` subclass therefore escaped ``check_origins``.
+
+    Two unreadable signatures must never compare equal to each other, or two
+    hostile objects would corroborate one another into a false match, so the
+    refusal value is built fresh on every call.
+    """
+
+    class ExplodingConsts(BaseException):
+        pass
+
+    class HostileCode:
+        co_name = "find_spec"
+
+        @property
+        def co_consts(self):
+            raise ExplodingConsts("co_consts boom")
+
+    def genuine() -> None:
+        return None
+
+    assert origins._code_signature(HostileCode()) != origins._code_signature(
+        HostileCode()
+    )
+    assert isinstance(origins._code_signature(genuine.__code__), tuple)
+    # The walk yields the object itself, then stops rather than raising.
+    walked = list(origins._code_objects(HostileCode()))
+    assert walked[0].co_name == "find_spec"
+    assert len(walked) == 1
+
+
 def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
     """A loader that fails with an unprintable exception is still a finding.
 
@@ -760,9 +965,11 @@ def test_cli_survives_an_import_error_whose_str_raises(tmp_path, capsys):
             raise ExplodingImportError("nope")
         return real_import(name, *args, **kwargs)
 
-    with _module_installed("unprintable_import", types.ModuleType("unprintable_import")):
-        with _import_replaced(_failing_import):
-            returncode = main(["--project-root", str(tmp_path), "--package", "unprintable_import"])
+    with (
+        _module_installed("unprintable_import", types.ModuleType("unprintable_import")),
+        _import_replaced(_failing_import),
+    ):
+        returncode = main(["--project-root", str(tmp_path), "--package", "unprintable_import"])
 
     assert returncode == 1
     report = json.loads(capsys.readouterr().out)
@@ -783,9 +990,8 @@ def test_resolve_origin_does_not_swallow_an_interrupt(raised):
     def _interrupting_import(name, *args, **kwargs):
         raise raised
 
-    with _import_replaced(_interrupting_import):
-        with pytest.raises((KeyboardInterrupt, SystemExit)):
-            origins._resolve_origin("interruptible_import")
+    with _import_replaced(_interrupting_import), pytest.raises((KeyboardInterrupt, SystemExit)):
+        origins._resolve_origin("interruptible_import")
 
 
 def test_installed_from_refuses_a_record_the_interpreter_will_not_parse():
@@ -862,9 +1068,11 @@ def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path,
     ValueError, RuntimeError)`` clause catches.  That escaped ``check_origins``
     as a traceback, the same INTERNALERROR the NUL rows were added to stop.
 
-    The portion belongs in the foreign list regardless: it cannot be shown to
-    be inside any allowed root, and "inside this checkout" is the claim being
-    disproved.
+    The portion cannot be shown to be inside any allowed root, and "inside this
+    checkout" is the claim being disproved.  It is reported on the *unusable*
+    channel rather than the foreign one because #551 split those apart: a
+    portion that exists and resolves elsewhere is a different finding from one
+    that never resolved at all.  Either way the caller fails closed.
     """
 
     module = types.ModuleType("junk_ns")
@@ -876,7 +1084,7 @@ def test_namespace_portion_that_is_not_a_path_is_a_finding_not_a_crash(tmp_path,
 
     assert report["status"] == "FAIL"
     assert report["packages"][0]["package"] == "junk_ns"
-    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+    assert "path portion is not usable" in report["packages"][0]["detail"]
 
 
 @pytest.mark.parametrize("junk", [7, 42, 3.5, object()])
@@ -1569,11 +1777,10 @@ def test_unusable_namespace_portion_is_a_finding_not_a_crash(tmp_path, monkeypat
     namespace rows then crashed with ``ValueError: embedded null character``
     out of ``check_origins`` instead of producing a finding.
 
-    The namespace finding names the offending portion rather than reusing the
-    ``not a usable path`` wording, because an unresolvable portion is still a
-    foreign portion and the caller reports it on that channel.  What matters
-    is that it is a finding naming the package, at the verdict level, with no
-    exception escaping.
+    The finding names the offending portion on the *unusable* channel, since
+    #551 reports a portion that never resolved separately from one that
+    resolved somewhere foreign.  What matters is that it is a finding naming
+    the package, at the verdict level, with no exception escaping.
     """
 
     module = types.ModuleType("bad_ns")
@@ -1585,7 +1792,7 @@ def test_unusable_namespace_portion_is_a_finding_not_a_crash(tmp_path, monkeypat
 
     assert report["status"] == "FAIL"
     assert report["packages"][0]["package"] == "bad_ns"
-    assert "resolves outside this checkout" in report["packages"][0]["detail"]
+    assert "path portion is not usable" in report["packages"][0]["detail"]
 
 
 def test_unusable_origin_is_a_finding_not_a_crash(monkeypatch):
@@ -1681,3 +1888,2008 @@ def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert returncode == 1
     assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
+
+
+def test_regular_package_refuses_a_foreign_path_portion(tmp_path, monkeypatch):
+    """A regular package with a foreign ``__path__`` entry must FAIL.
+
+    A checkout-local ``__init__.py`` does not make a package trusted.  Python
+    lets a regular package carry more than one ``__path__`` entry --
+    ``pkgutil.extend_path``, an explicit ``__path__`` extension, or a
+    ``.pth``-installed entry all do it -- and the interpreter imports
+    submodules from every one of them.  So a submodule missing locally still
+    imports from the foreign portion while the top-level origin looks correct.
+
+    That is the exact false PASS #534 exists to prevent, and the earlier guard
+    reported PASS here because it inspected ``__path__`` only for namespace
+    packages.
+    """
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    package_dir = root / "split_reg"
+    package_dir.mkdir(parents=True)
+    # A REGULAR package: it has __init__.py, so __file__ is not None.
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = outside / "split_reg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "split_reg" or name.startswith("split_reg."):
+            del sys.modules[name]
+
+    package = importlib.import_module("split_reg")
+    assert getattr(package, "__file__", None) is not None, "expected a regular package"
+    package.__path__.append(str(foreign))
+
+    report = check_origins(root, ("split_reg",))
+
+    assert report["status"] == "FAIL", report
+    assert "also resolves outside this checkout" in report["packages"][0]["detail"]
+    assert str(foreign.resolve()) in report["packages"][0]["detail"]
+
+    # The foreign portion really is importable, so this row is not vacuous.
+    leaked = importlib.import_module("split_reg.leaked")
+    assert leaked.ORIGIN == "foreign"
+
+
+def test_unusable_path_portion_is_a_finding_not_a_crash(tmp_path, monkeypatch):
+    """A malformed ``__path__`` entry must become a FAIL, not raise.
+
+    A package's own origin goes through ``_resolve_path``, which reports an
+    unusable path as a finding.  A malformed *portion* has to fail the same
+    way: a path an interpreter reports is data, and one that cannot be resolved
+    must not escape the guard as a traceback.
+    """
+
+    root = tmp_path / "root"
+    (root / "ok_ns").mkdir(parents=True)
+    good = root / "ok_ns" / "portion"
+    good.mkdir()
+    module = types.ModuleType("broken_ns")
+    module.__file__ = None
+    module.__path__ = [str(good), "/bad\x00origin"]
+    monkeypatch.setitem(sys.modules, "broken_ns", module)
+
+    report = check_origins(root, ("broken_ns",))
+
+    assert report["status"] == "FAIL", report
+    assert "not usable" in report["packages"][0]["detail"]
+
+
+def test_meta_path_finder_cannot_smuggle_a_foreign_submodule(tmp_path, monkeypatch):
+    """A ``sys.meta_path`` finder must not be able to defeat the guard.
+
+    Location checks cannot see a finder.  ``PathFinder`` only ever searches a
+    parent's ``__path__``, but a finder earlier on ``sys.meta_path`` may
+    return a spec for a submodule from any location at all, and
+    ``importlib._bootstrap`` consults those finders *before* ``PathFinder``
+    does.  So a package whose origin and every ``__path__`` portion are local
+    can still have its submodules imported from another tree.
+
+    This is the false PASS the guard exists to prevent, reached by a route the
+    ``__path__`` checks cannot observe.
+    """
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    package_dir = root / "smuggle_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = outside / "smuggle_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "smuggle_pkg" or name.startswith("smuggle_pkg."):
+            del sys.modules[name]
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+
+    class SmugglingFinder:
+        """Route one submodule to a foreign file, ignoring every other name."""
+
+        def find_spec(self, name, path=None, target=None):
+            # The ``target`` parameter is part of the finder protocol and must
+            # not be shadowed by a local variable: an earlier draft of this
+            # probe reused the name for the foreign path, which silently made
+            # the finder return None and the row pass vacuously.
+            if name == "smuggle_pkg.leaked":
+                return importlib.util.spec_from_file_location(name, foreign_file)
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [SmugglingFinder(), *sys.meta_path])
+
+    report = check_origins(root, ("smuggle_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert "meta_path" in detail, detail
+    assert "SmugglingFinder" in detail, detail
+
+    # The escape really works, so the row is not asserting a hypothetical.
+    leaked = importlib.import_module("smuggle_pkg.leaked")
+    assert leaked.ORIGIN == "foreign"
+    assert str(foreign.resolve()) in leaked.__file__
+
+
+def test_meta_path_finder_outside_site_packages_is_refused(tmp_path, monkeypatch):
+    """The refusal is about *where* the finder lives, not its name.
+
+    A finder defined outside the interpreter's own site-packages is an
+    environment-installed hook: an ad-hoc ``.pth`` file, a stale editable
+    install from another checkout, or a sitecustomize injected into the
+    environment.  None of those belong to the checkout under test, so none may
+    be trusted to place a checked package's submodules.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hooked_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    finder_file = outside / "custom_finder.py"
+    finder_file.write_text(
+        "class ForeignFinder:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setitem(sys.modules, "custom_finder", None)
+    for name in list(sys.modules):
+        if name == "hooked_pkg" or name.startswith("hooked_pkg."):
+            del sys.modules[name]
+
+    module = types.ModuleType("custom_finder")
+    module.__file__ = str(finder_file)
+    foreign_finder = type(
+        "ForeignFinder",
+        (),
+        {"find_spec": lambda self, name, path=None, target=None: None},
+    )
+    foreign_finder.__module__ = "custom_finder"
+    monkeypatch.setitem(sys.modules, "custom_finder", module)
+    monkeypatch.setattr(sys, "meta_path", [foreign_finder, *sys.meta_path])
+
+    report = check_origins(root, ("hooked_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert "meta_path" in detail, detail
+    # The detail reports where the finder's code really came from, which for a
+    # test-defined class is this test file -- not the ``__file__`` it claims.
+    assert "ForeignFinder" in detail, detail
+    assert str(finder_file.resolve()) not in detail, (
+        "the refusal must not repeat the finder's own unverified __file__ claim"
+    )
+
+
+def test_standard_and_installation_finders_are_still_trusted():
+    """The release lane depends on custom finders and must keep working.
+
+    ``pip install -e ".[dev]"`` installs an ``__editable__..._finder`` onto
+    ``sys.meta_path``, and a virtual environment installs ``_virtualenv._Finder``.
+    Refusing every non-stdlib finder would refuse the supported release lane,
+    so finders whose defining module lives in the interpreter's own
+    site-packages remain trusted.  This row is the control that keeps the
+    refusal from being simply "reject anything custom".
+    """
+
+    report = check_origins(REPO_ROOT)
+
+    assert report["status"] == "PASS", report
+    custom = [entry for entry in sys.meta_path if not _is_trusted_stdlib_finder(entry)]
+    assert custom, "expected the editable install to install a custom finder"
+    for entry in custom:
+        assert _is_installation_finder(entry), (
+            f"{entry!r} should be recognised as an installation finder, "
+            "otherwise the release lane is refused"
+        )
+
+
+def test_a_finder_cannot_trust_itself_by_claiming_a_site_packages_module(tmp_path, monkeypatch):
+    """``module.__file__`` is mutable, so it cannot be the trust evidence.
+
+    Trusting a finder because the module object it names carries a
+    site-packages ``__file__`` is trusting a claim the finder itself can make.
+    A module registered under a trusted-looking name, whose ``__file__`` points
+    at a site-packages path that was never written, would otherwise pass and
+    then serve a foreign submodule -- reintroducing exactly the blocker this
+    guard change exists to close.
+
+    Requiring the resolved file to actually exist keeps the decision on the
+    filesystem rather than on self-report, matching the "provenance is decided
+    by location only" rule the rest of the module already follows.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "spoof_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "spoof_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "spoof_pkg" or name.startswith("spoof_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir(), "the live interpreter must have a site-packages directory"
+    claimed = site_root / "spoofed_trusted_finder_module.py"
+    assert not claimed.exists(), "the spoofed path must not exist for this row to mean anything"
+
+    fake_module = types.ModuleType("spoofed_trusted_finder_module")
+    fake_module.__file__ = str(claimed)
+    monkeypatch.setitem(sys.modules, "spoofed_trusted_finder_module", fake_module)
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+
+    class SpoofingFinder:
+        # A *class* is what setuptools actually installs, and CPython calls
+        # its find_spec unbound, so it must be a classmethod.  An ordinary
+        # method here would receive the module name as ``self`` and never
+        # match, making the row pass for the wrong reason.
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            if name == "spoof_pkg.leaked":
+                return importlib.util.spec_from_file_location(name, foreign_file)
+            return None
+
+    SpoofingFinder.__module__ = "spoofed_trusted_finder_module"
+    # Inserted by hand rather than via monkeypatch.setattr so the teardown
+    # below can remove it while the path and sys.modules setup survive.
+    sys.meta_path.insert(0, SpoofingFinder)
+
+    try:
+        assert not _is_installation_finder(SpoofingFinder), (
+            "a finder whose claimed site-packages file does not exist must not be trusted"
+        )
+        report = check_origins(root, ("spoof_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"]
+
+        # The escape is real, so the row is not asserting a hypothetical.
+        leaked = importlib.import_module("spoof_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(SpoofingFinder)
+
+
+def test_a_hostile_finder_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """Inspecting a hostile finder must fail closed, not raise.
+
+    A metaclass may raise from ``__module__``, and a module object may raise
+    from ``__file__``.  The guard is a preflight: an exception escaping it
+    turns an explicit refusal into a traceback, which is the crash mode
+    ``_resolve_path`` already had to be hardened against for package origins.
+    A finder that cannot be inspected is simply not trusted.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hostile_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "hostile_pkg" or name.startswith("hostile_pkg."):
+            del sys.modules[name]
+
+    class HostileMeta(type):
+        @property
+        def __module__(cls):
+            raise RuntimeError("metaclass refuses to name itself")
+
+    hostile = HostileMeta("HostileFinder", (), {"find_spec": lambda self, *a: None})
+    monkeypatch.setattr(sys, "meta_path", [hostile, *sys.meta_path])
+
+    report = check_origins(root, ("hostile_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "meta_path" in report["packages"][0]["detail"], report
+
+
+def test_a_hostile_finder_raising_base_exception_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A ``BaseException`` from a hostile metaclass must not escape either.
+
+    The row above raises ``RuntimeError``, which ``except Exception`` already
+    caught.  A metaclass is arbitrary code and need not stay inside
+    ``Exception``: raising a direct ``BaseException`` subclass bypassed every
+    such clause in ``_finder_source`` and escaped ``check_origins`` with a
+    traceback, which is the exact crash mode the preflight exists to prevent.
+    """
+
+    class ExplodingBase(BaseException):
+        """Not an ``Exception``; that distinction is the whole point of the row."""
+
+    class ExplodingMeta(type):
+        @property
+        def __module__(cls):
+            raise ExplodingBase("metaclass refuses to name itself")
+
+    root = tmp_path / "root"
+    package_dir = root / "base_exception_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "base_exception_pkg" or name.startswith("base_exception_pkg."):
+            del sys.modules[name]
+
+    hostile = ExplodingMeta("HostileFinder", (), {"find_spec": lambda self, *a: None})
+    monkeypatch.setattr(sys, "meta_path", [hostile, *sys.meta_path])
+
+    report = check_origins(root, ("base_exception_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "meta_path" in report["packages"][0]["detail"], report
+
+
+def test_a_hostile_finder_descriptor_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A ``find_spec`` descriptor raising ``BaseException`` must be a finding.
+
+    Two sites leaked this.  ``_finder_code_file`` guarded its descriptor
+    lookups with ``except Exception``.  And ``_allowed_roots`` wrapped
+    ``importlib.metadata.packages_distributions()`` the same way -- but that
+    call imports helper modules, so a hostile finder raises straight out of
+    it before any distribution is even examined.  Both now catch
+    ``BaseException``; the metadata one returns no site-packages roots, which
+    fails closed.
+    """
+
+    class ExplodingDescriptor(BaseException):
+        pass
+
+    class HostileDescriptor:
+        @property
+        def find_spec(self):
+            raise ExplodingDescriptor("descriptor boom")
+
+    root = tmp_path / "root"
+    package_dir = root / "descriptor_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "descriptor_pkg" or name.startswith("descriptor_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(sys, "meta_path", [HostileDescriptor(), *sys.meta_path])
+
+    report = check_origins(root, ("descriptor_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_meta_path_container_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """An unreadable ``sys.meta_path`` must be a finding, not a traceback.
+
+    ``sys.meta_path`` was read with a bare ``for finder in list(sys.meta_path)``.
+    The container is attacker-controlled in the same way a hostile
+    ``__path__`` is: whoever installs a finder chooses what list it lands in,
+    and materialising it calls that container's ``__iter__``.  A direct
+    ``BaseException`` subclass raised there bypassed every clause in the loop
+    body -- there was none -- and escaped ``check_origins`` before a report
+    existed.  Materialisation is now guarded, and an unreadable meta-path is
+    reported as the untrusted container it is, which fails closed.
+    """
+
+    class ExplodingIter(BaseException):
+        """Not an ``Exception``; that distinction is the whole point of the row."""
+
+    class HostileMetaPath:
+        def __iter__(self):
+            raise ExplodingIter("meta_path refuses to be iterated")
+
+    root = tmp_path / "root"
+    package_dir = root / "meta_path_container_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "meta_path_container_pkg" or name.startswith("meta_path_container_pkg."):
+            del sys.modules[name]
+
+    hostile = HostileMetaPath()
+    monkeypatch.setattr(sys, "meta_path", hostile)
+
+    report = check_origins(root, ("meta_path_container_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "meta_path" in report["packages"][0]["detail"], report
+
+
+def test_a_hostile_project_root_resolve_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A ``resolve()`` that raises must produce a structured ``FAIL``.
+
+    ``project_root.resolve()`` ran unguarded, before any report existed, so a
+    caller-supplied path-like that raised a direct ``BaseException`` subclass
+    escaped as a traceback.  A root that cannot be resolved cannot be shown to
+    be the checkout under test, so the guard refuses it.
+
+    The hostile root is an ``os.PathLike`` rather than a ``Path`` subclass:
+    ``pathlib.Path`` cannot be subclassed this way on Python 3.11 (the
+    subclass has no ``_flavour``), so the ``Path`` form of this row could
+    never be constructed and therefore never exercised the guard at all.
+    """
+
+    class ExplodingResolve(BaseException):
+        pass
+
+    class HostileRoot(os.PathLike):
+        def __init__(self, path):
+            self._path = path
+
+        def __fspath__(self):
+            return str(self._path)
+
+        def resolve(self, *args, **kwargs):
+            raise ExplodingResolve("root refuses to resolve")
+
+    package_dir = tmp_path / "hostile_root_pkg"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in list(sys.modules):
+        if name == "hostile_root_pkg" or name.startswith("hostile_root_pkg."):
+            del sys.modules[name]
+
+    report = check_origins(HostileRoot(tmp_path), ("hostile_root_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "could not be resolved" in report["detail"], report
+
+
+def test_a_hostile_project_root_cannot_escape_while_being_reported(tmp_path):
+    """Reporting an unresolvable root must not re-raise on ``str(root)``.
+
+    The first fix rendered the failed root with a bare ``str(project_root)`` --
+    the same hostile object whose ``resolve`` had just raised.  A root that
+    also traps ``__str__`` therefore escaped out of the handler meant to
+    report the escape, reproducing the very defect the row above closes.  The
+    report renders it through ``_describe``.
+    """
+
+    class ExplodingStr(BaseException):
+        pass
+
+    class ExplodingResolve(BaseException):
+        pass
+
+    class HostileRoot:
+        def resolve(self, *args, **kwargs):
+            raise ExplodingResolve("root refuses to resolve")
+
+        def __str__(self):
+            raise ExplodingStr("root refuses to be printed")
+
+    report = check_origins(HostileRoot(), ("whatever_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "could not be resolved" in report["detail"], report
+    assert report["project_root"].startswith("<unprintable"), report
+
+
+def test_a_hostile_metaclass_cannot_break_finding_rendering():
+    """``_describe`` and ``_type_name`` must render a hostile metaclass.
+
+    Both helpers close the same class of hole in different places: everything
+    this module reports came from the interpreter, so a value can carry a
+    metaclass that explodes on ``__name__``.  ``str(value)`` is guarded by
+    ``_describe``, but the type name is read off ``type(value)`` and is itself
+    a lookup on an object the attacker controls -- so it needs its own guard.
+
+    This is asserted against the helpers directly on purpose.  Driving the
+    metaclass through ``check_origins`` instead would make pytest itself
+    crash while formatting the failure (``object.__repr__`` reads
+    ``type(self).__name__``), so a regression here would abort the whole
+    session rather than report one failing row.
+    """
+
+    class ExplodingName(BaseException):
+        pass
+
+    class ExplodingMeta(type):
+        @property
+        def __name__(cls):
+            raise ExplodingName("metaclass refuses to name itself")
+
+    class Hostile(metaclass=ExplodingMeta):
+        def __str__(self):
+            raise ExplodingName("hostile refuses to be printed")
+
+    hostile = Hostile()
+
+    def render(call):
+        """Run ``call``, reporting an escape as a printable string.
+
+        Both helpers are called through this so that a regression can be
+        *reported*.  An escaping exception would otherwise be handed to
+        pytest, whose repr of it reads the hostile metaclass and aborts the
+        entire session -- turning one broken row into an unreadable run.  The
+        class name used here comes from a real exception class, so it is safe
+        to render.
+        """
+
+        try:
+            return str(call())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - see docstring
+            return f"<escaped {type(exc).__name__}>"
+
+    rendered = render(lambda: _describe(hostile))
+    type_name = render(lambda: origins._type_name(hostile))
+
+    assert rendered.startswith("<unprintable"), rendered
+    # Referenced off the module, not imported at the top of the suite: a top
+    # level ``from ... import _type_name`` would abort collection outright
+    # against a tree that does not define it, which would mask the very
+    # regression this row exists to catch.
+    assert type_name == "<unknown type>", type_name
+    assert _describe(1) == "1", _describe(1)
+    assert origins._type_name(1) == "int", origins._type_name(1)
+
+
+def test_an_interrupt_from_the_meta_path_container_still_propagates(tmp_path, monkeypatch):
+    """An operator interrupt must not be laundered into a finding.
+
+    This module catches ``BaseException`` broadly so that hostile input cannot
+    crash the guard, and re-raises ``KeyboardInterrupt`` and ``SystemExit`` so a
+    real interrupt still stops the run.  The new meta-path guard must not
+    swallow one: a Ctrl-C arriving while the guard is reading ``sys.meta_path``
+    has to reach the operator, not be recorded as a finding about the tree.
+    """
+
+    class HostileMetaPath:
+        def __iter__(self):
+            raise KeyboardInterrupt
+
+    root = tmp_path / "root"
+    package_dir = root / "interrupt_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setattr(sys, "meta_path", HostileMetaPath())
+
+    with pytest.raises(KeyboardInterrupt):
+        check_origins(root, ("interrupt_pkg",))
+
+
+def test_an_interrupt_from_the_project_root_still_propagates(tmp_path):
+    """The root guard must also leave an operator interrupt alone.
+
+    Same contract as the meta-path row above, at the other new guard: a
+    ``KeyboardInterrupt`` raised while the root is being resolved belongs to
+    the operator, not to the tree under test.
+
+    """
+
+    class HostileRoot(os.PathLike):
+        def __init__(self, path):
+            self._path = path
+
+        def __fspath__(self):
+            return str(self._path)
+
+        def resolve(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        check_origins(HostileRoot(tmp_path), ("whatever_pkg",))
+
+
+def test_a_hostile_distribution_object_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A distribution whose ``read_text`` raises must not escape.
+
+    ``_installed_from`` caught only ``(OSError, PackageNotFoundError)`` around
+    ``distribution.read_text``.  A distribution is third-party code and that
+    call is just a method on it, so a direct ``BaseException`` subclass
+    bypassed the enumeration and escaped ``check_origins`` as a traceback.
+
+    The row also pins the *direction* of the repair.  Returning ``None`` is
+    only safe because ``None`` means "this install cannot be attributed to
+    this checkout", which withholds an allowed root rather than granting one.
+    A generic handler that instead admitted the install would turn a hostile
+    metadata object into a way to widen the trusted tree, and would still
+    produce no traceback -- so the absence of an escape proves nothing on its
+    own.  The package here is planted outside the root and genuinely absent
+    from the checkout, so a correct refusal is ``FAIL`` and only a widened
+    allowed-root set could report ``PASS``.
+    """
+
+    class ExplodingReadText(BaseException):
+        pass
+
+    class EvilDistribution:
+        def read_text(self, name):
+            raise ExplodingReadText("metadata read escape")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "unattributable_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "unattributable_pkg" or name.startswith("unattributable_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(
+        origins.importlib.metadata,
+        "packages_distributions",
+        lambda: {"unattributable_pkg": ["evil"]},
+    )
+    monkeypatch.setattr(
+        origins.importlib.metadata, "distribution", lambda name: EvilDistribution()
+    )
+
+    report = check_origins(tmp_path / "checkout", ("unattributable_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_owners_mapping_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """An owner mapping that raises on ``.get`` must not escape.
+
+    ``_allowed_roots`` called ``distributions.get(package, ())`` on whatever
+    ``packages_distributions()`` returned.  That mapping is attacker-reachable,
+    so the lookup is a call into arbitrary code; a direct ``BaseException``
+    subclass raised there escaped both ``_allowed_roots`` and
+    ``check_origins``.  As above, the package is planted outside the root so
+    that only a withheld allowed root can produce the expected ``FAIL``.
+    """
+
+    class ExplodingMapping(BaseException):
+        pass
+
+    class HostileOwners(dict):
+        def get(self, *args, **kwargs):
+            raise ExplodingMapping("hostile owners mapping")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "unmappable_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "unmappable_pkg" or name.startswith("unmappable_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(
+        origins.importlib.metadata, "packages_distributions", HostileOwners
+    )
+
+    report = check_origins(tmp_path / "checkout", ("unmappable_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_an_interrupt_from_the_site_layout_still_propagates(monkeypatch):
+    """``_site_packages_roots`` must not swallow an operator interrupt.
+
+    The two site-layout helpers catch ``BaseException`` so an unreadable
+    layout cannot crash the guard, but they previously swallowed
+    ``KeyboardInterrupt`` and ``SystemExit`` too -- which contradicts the
+    contract the rest of this module keeps and that the hash and root rows
+    above pin.  A layout error is advisory and may be ignored; a Ctrl-C
+    belongs to the operator.
+    """
+
+    import site
+
+    for attribute in ("getsitepackages", "getusersitepackages"):
+
+        def interrupt(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(site, attribute, interrupt, raising=False)
+
+        with pytest.raises(KeyboardInterrupt):
+            origins._site_packages_roots()
+
+
+def test_a_hostile_owner_iterable_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """The owner list must be materialised inside a fail-closed boundary.
+
+    The previous repair guarded ``distributions.get(...)``, which protected the
+    *lookup* but not the value it returns.  ``packages_distributions`` is
+    attacker-reachable, so the returned value need not be a list at all:
+    iterating it runs its ``__iter__``, and a direct ``BaseException`` subclass
+    raised there escaped ``check_origins``.  As in the two rows above, the
+    package is planted outside the root so only a withheld allowed root can
+    produce the expected ``FAIL``.
+    """
+
+    class ExplodingOwners(BaseException):
+        pass
+
+    class HostileOwners:
+        def __iter__(self):
+            raise ExplodingOwners("owners iteration")
+
+    class HostileMapping:
+        def get(self, key, default=()):
+            return HostileOwners()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "unenumerable_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "unenumerable_pkg" or name.startswith("unenumerable_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(origins.importlib.metadata, "packages_distributions", HostileMapping)
+
+    report = check_origins(tmp_path / "checkout", ("unenumerable_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_exception_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """No finding may read ``type(exc).__name__`` while formatting itself.
+
+    ``_type_name`` was added for exactly this, but the first round used it in
+    one place only.  Four other sites interpolated ``type(exc).__name__``
+    directly into their detail line -- so an exception class with a metaclass
+    that raises on ``__name__`` turned the act of *reporting* a failure into
+    the failure itself.  The row asserts the property rather than the sites:
+    every detail line the guard builds must survive an exception whose type
+    cannot be named.
+
+    ``_resolve_origin`` imports the package it is auditing, so the hostile
+    exception is raised by replacing the importer for the duration.
+    """
+
+    class HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise RuntimeError("hostile exception typename")
+            return super().__getattribute__(name)
+
+    class Hostile(BaseException, metaclass=HostileMeta):
+        pass
+
+    _make_package(tmp_path, "trap_pkg")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in list(sys.modules):
+        if name == "trap_pkg" or name.startswith("trap_pkg."):
+            del sys.modules[name]
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def hostile_import(name, *args, **kwargs):
+        if name == "trap_pkg":
+            raise Hostile()
+        return real_import(name, *args, **kwargs)
+
+    def run():
+        with _import_replaced(hostile_import):
+            return check_origins(tmp_path, ("trap_pkg",))
+
+    # Called through a reporting wrapper: when the guard regresses, the
+    # escaping ``RuntimeError`` names the hostile metaclass, and pytest's
+    # repr of that exception reads the metaclass too -- so a bare
+    # ``check_origins`` call here would abort the whole session instead of
+    # reporting this one row.
+    try:
+        report = run()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - see comment above
+        report = {"status": f"<escaped {type(exc).__name__}>"}
+
+    assert report["status"] == "FAIL", report
+
+
+def test_no_detail_line_names_an_exception_type_unsafely():
+    """Guard against re-introducing a bare ``type(exc).__name__``.
+
+    The round that added ``_type_name`` fixed one site out of five, which is
+    exactly the failure mode a reviewer has to catch by hand.  This row reads
+    the module's own source and fails if a ``type(exc).__name__`` reappears, so
+    the next person to add an error message gets told instead of shipping
+    another escape.  It reads the source rather than the behaviour because the
+    behaviour is already covered above; this is the cheap guard on the pattern.
+    """
+
+    source = Path(origins.__file__).read_text(encoding="utf-8")
+
+    assert "type(exc).__name__" not in source, (
+        "exception type names must go through _type_name(): a hostile exception "
+        "class controls its own metaclass"
+    )
+
+
+def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
+    """A genuine site-packages ``__file__`` must not authenticate a stranger.
+
+    Requiring the claimed file merely to *exist* was the second attempt at this
+    check, and review defeated it: a finder can claim the module name of a real
+    installed package, whose ``__file__`` genuinely is inside site-packages and
+    genuinely does exist.  Existence proves the borrowed file is real, not that
+    it defines this finder.
+
+    The only unforgeable statement is where the executing ``find_spec`` code was
+    compiled from, so that is what trust is decided on.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "borrow_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "borrow_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "borrow_pkg" or name.startswith("borrow_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    # A real, existing *file* inside site-packages -- exactly what the previous
+    # existence check was fooled by.
+    #
+    # The candidate must be a regular file, not merely a path that exists.
+    # Preferring `pyvenv.cfg` or a `*.dist-info` entry picks a *directory* in a
+    # typical venv, and a directory claim is rejected by the `is_file()` check
+    # for a reason unrelated to provenance.  The row would then pass no matter
+    # how trust was decided, so it would stop pinning the claim-vs-code
+    # distinction it exists to test.
+    genuine = sorted(path for path in site_root.glob("*.py") if path.is_file())
+    if not genuine:
+        genuine = sorted(
+            path for path in site_root.rglob("*.py") if path.is_file() and path.stat().st_size > 0
+        )
+    assert genuine, "this row needs a real existing .py file inside site-packages to borrow"
+    borrowed = genuine[0]
+    assert Path(borrowed).is_file(), "the borrowed path must be a regular file"
+
+    bystander = types.ModuleType("innocent_bystander_module")
+    bystander.__file__ = str(borrowed)
+    monkeypatch.setitem(sys.modules, "innocent_bystander_module", bystander)
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+
+    class BorrowingFinder:
+        @classmethod
+        def find_spec(cls, name, path=None, target=None):
+            if name == "borrow_pkg.leaked":
+                return importlib.util.spec_from_file_location(name, foreign_file)
+            return None
+
+    BorrowingFinder.__module__ = "innocent_bystander_module"
+    sys.meta_path.insert(0, BorrowingFinder)
+    try:
+        # The borrowed claim looks exactly like a real install: an existing
+        # file inside site-packages.  Assert that directly, so the row cannot
+        # pass merely because some *other* part of the check happened to
+        # reject this finder.
+        claimed = _finder_source(BorrowingFinder)
+        assert claimed is not None, "the borrowed claim must be discoverable"
+        assert Path(claimed).exists(), "the borrowed file must really exist"
+        assert any(
+            _is_within(Path(claimed), site_root, strict=False)
+            for site_root in _site_packages_roots()
+        ), "the borrowed file must really sit inside site-packages"
+        assert str(Path(claimed).resolve()) == str(Path(borrowed).resolve())
+
+        # What actually differs is where the finder's own code came from.
+        assert _finder_code_file(BorrowingFinder) != Path(claimed).resolve(), (
+            "the executing find_spec code must not appear to come from the borrowed file"
+        )
+
+        assert not _is_installation_finder(BorrowingFinder), (
+            "borrowing a real installed module's file must not confer trust"
+        )
+        report = check_origins(root, ("borrow_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("borrow_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(BorrowingFinder)
+
+
+def test_a_finder_compiled_without_a_source_file_cannot_borrow_a_claim(tmp_path, monkeypatch):
+    """No ``co_filename`` means no provenance, and a claim must not supply it.
+
+    Every earlier row defeats a finder that at least has a real code object, so
+    trust can be decided by comparing that object's file against site-packages.
+    A finder built by ``compile(src, "", "exec")`` or otherwise defined without
+    a source file has no such file to compare, and the honest answer is "not
+    trusted".
+
+    The tempting shortcut is to fall back to the finder's self-reported
+    ``__file__`` in exactly that case.  That reintroduces the whole bug this
+    guard was rewritten to remove: an attacker with no provenance at all simply
+    borrows a real installed module's name and inherits its trust.  This row is
+    the mutation guard for that fallback -- it fails if the no-provenance branch
+    ever starts consulting ``_finder_source``.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "noprovenance_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "noprovenance_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "noprovenance_pkg" or name.startswith("noprovenance_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = sorted(path for path in site_root.glob("*.py") if path.is_file())
+    if not genuine:
+        genuine = sorted(path for path in site_root.rglob("*.py") if path.is_file())
+    assert genuine, "this row needs a real installed module to borrow the name of"
+    borrowed = genuine[0]
+
+    bystander = types.ModuleType("innocent_noprovenance_module")
+    bystander.__file__ = str(borrowed)
+    monkeypatch.setitem(sys.modules, "innocent_noprovenance_module", bystander)
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class NoProvenanceFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'noprovenance_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    # An empty filename is what compile() records for code with no source file.
+    namespace = {"__name__": "innocent_noprovenance_module", "importlib": importlib}
+    exec(compile(source, "", "exec"), namespace)  # noqa: S102 - the attack itself
+    forged = namespace["NoProvenanceFinder"]
+    forged.__module__ = "innocent_noprovenance_module"
+
+    sys.meta_path.insert(0, forged)
+    try:
+        # The premise: there is genuinely no code file to judge, while the
+        # claim points at a real installed module inside site-packages.
+        assert _finder_code_file(forged) is None, (
+            "this row needs a finder whose find_spec has no source file"
+        )
+        claimed = _finder_source(forged)
+        assert claimed is not None, "the borrowed claim must be discoverable"
+        assert Path(claimed).is_file(), "the borrowed path must be a real file"
+        assert any(
+            _is_within(Path(claimed), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the borrowed file must really sit inside site-packages"
+
+        assert not _is_installation_finder(forged), (
+            "a finder with no code provenance must not be trusted on its claim"
+        )
+        report = check_origins(root, ("noprovenance_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("noprovenance_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+
+
+def test_a_finder_compiled_from_a_vanished_file_inside_site_packages_is_refused(
+    tmp_path, monkeypatch
+):
+    """Containment alone is not provenance; the file must still be there.
+
+    Trust is decided by resolving the finder's ``co_filename`` and asking
+    whether it lands inside site-packages.  Resolution of a missing path
+    succeeds, so containment alone would also accept a filename that merely
+    *reads* as though it were installed -- for example a file the interpreter
+    compiled from and has since deleted, or a name a site-packages writer
+    never actually produced.
+
+    This row is the mutation guard for the ``is_file()`` check.  It compiles a
+    finder from a path inside site-packages that does not exist, asserts the
+    path really is contained, and then requires the finder to be refused
+    anyway.  Removing the existence check leaves the containment assertion
+    satisfied and the trust decision wrong, so the row fails.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "vanished_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "vanished_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "vanished_pkg" or name.startswith("vanished_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    vanished = site_root / "vanished_installation_finder_module.py"
+    assert not vanished.exists(), "the compiled-from path must not exist"
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class VanishedFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'vanished_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    namespace = {
+        "__name__": "vanished_installation_finder_module",
+        "importlib": importlib,
+    }
+    # Compile *from* the non-existent site-packages path: this is the case a
+    # deleted-after-compile installation leaves behind.
+    exec(compile(source, str(vanished), "exec"), namespace)  # noqa: S102
+    forged = namespace["VanishedFinder"]
+    forged.__module__ = "vanished_installation_finder_module"
+
+    sys.meta_path.insert(0, forged)
+    try:
+        code_file = _finder_code_file(forged)
+        assert code_file is not None, "the compiled-from path must be reported"
+        assert not Path(code_file).exists(), "the premise is a path that is gone"
+        assert any(
+            _is_within(Path(code_file), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the vanished path must still be lexically inside site-packages"
+
+        assert not _is_installation_finder(forged), (
+            "a filename inside site-packages that does not exist proves nothing"
+        )
+        report = check_origins(root, ("vanished_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("vanished_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+
+
+def test_a_forged_co_filename_borrowing_an_existing_file_is_refused(tmp_path, monkeypatch):
+    """A name that exists is still only a claim; the bytecode must match it.
+
+    The rows above forge ``__file__``, or compile from a path that was never
+    created, so the ``is_file()`` existence check stops them.  ``compile``
+    also accepts the filename it records, which is the remaining hole: a
+    hostile finder compiled under the name of a real, already-present
+    site-packages file inherits that file's location, passes the existence
+    check, and would otherwise be trusted while serving modules from
+    anywhere on disk.
+
+    This is the mutation guard for ``_code_matches_source``.  The bytecode
+    the finder actually executes is recompiled from the borrowed file's real
+    source, so nothing matches and the finder is refused.  Deleting the
+    corroboration call restores the false green while every other row still
+    passes.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "borrowed_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "borrowed_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "borrowed_pkg" or name.startswith("borrowed_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    borrowed = site_root / "genuine_install_neighbour.py"
+    borrowed.write_text("# a real, already-present site-packages file\n", encoding="utf-8")
+    assert borrowed.is_file(), "the borrowed path must really exist"
+
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "class BorrowedNameFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'borrowed_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    namespace = {
+        "__name__": "genuine_install_neighbour",
+        "importlib": importlib,
+    }
+    # Compile *from* a path that really exists, carrying no hostile source.
+    exec(compile(source, str(borrowed), "exec"), namespace)  # noqa: S102
+    forged = namespace["BorrowedNameFinder"]
+    forged.__module__ = "genuine_install_neighbour"
+    forged.__file__ = str(borrowed)
+
+    sys.meta_path.insert(0, forged)
+    try:
+        code_file = _finder_code_file(forged)
+        assert code_file is not None, "the compiled-from path must be reported"
+        assert Path(code_file).is_file(), "the premise is a path that does exist"
+        assert any(
+            _is_within(Path(code_file), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the borrowed path must be inside site-packages"
+
+        assert not _is_installation_finder(forged), (
+            "existing at a trusted location is not provenance; the bytecode must "
+            "come from that file"
+        )
+        report = check_origins(root, ("borrowed_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("borrowed_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        sys.meta_path.remove(forged)
+
+
+def test_a_genuine_install_finder_is_not_refused_by_the_source_corroboration():
+    """The new channel must refuse forgeries only, not real install finders.
+
+    Corroboration is load-bearing for the refusal above, so it also needs a
+    row in the other direction: a finder whose bytecode genuinely comes from
+    the site-packages file it names has to stay trusted, or every editable
+    install would be reported as a hostile meta-path entry.
+
+    The trusted direction is demonstrated with the finders this interpreter
+    actually has installed, not with a file written into site-packages during
+    the test.  Provenance is decided from install records -- a distribution's
+    ``RECORD`` hash, or a ``.pth`` in the same directory that imports the
+    defining module -- so a source file the test just dropped there is, by
+    construction, not something any install vouched for.
+    """
+
+    custom = [entry for entry in sys.meta_path if not _is_trusted_stdlib_finder(entry)]
+    assert custom, "expected this interpreter to have an installation finder"
+    for finder in custom:
+        code_file = _finder_code_file(finder)
+        assert code_file is not None, (
+            f"{finder!r} is installed by this checkout but reports no code file"
+        )
+        assert code_file.is_file(), f"{code_file} must exist"
+        function = getattr(finder.find_spec, "__func__", finder.find_spec)
+        assert origins._code_matches_source(function, code_file), (
+            "bytecode compiled from this file must be recognised as coming from it"
+        )
+        assert _is_installation_finder(finder), (
+            f"{finder!r} must stay trusted; refusing it fails the release lane"
+        )
+
+
+def test_an_empty_package_request_fails_closed(tmp_path):
+    """Verifying zero packages must never be reported as a pass.
+
+    ``all()`` over an empty sequence is ``True``, so the verdict used to be
+    ``PASS`` for a request that checked nothing.  No live caller can reach
+    that today -- ``main()`` maps an empty list back to ``REQUIRED_PACKAGES``
+    and ``tests/conftest.py`` uses the default -- but the parameter is now
+    caller-controlled, so a future caller would silently get a gate that
+    exits 0 having verified nothing.
+
+    This is the mutation guard for the empty-request branch: dropping it
+    restores ``{"packages": [], "status": "PASS"}``.
+    """
+
+    report = check_origins(tmp_path, ())
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"] == [], report
+    assert report["detail"] == "no packages were selected to verify", report
+
+
+def test_a_same_shape_twin_in_site_packages_cannot_corroborate_a_forged_finder(
+    tmp_path, monkeypatch
+):
+    """Bytecode shape is not provenance when constants differ.
+
+    CPython addresses constants by *index*, so two functions that differ only
+    in what their constants are compile to byte-identical ``co_code``.
+    Comparing ``co_name``/``co_code``/``co_names``/``co_varnames`` therefore
+    lets any real site-packages file that happens to define a same-shape
+    ``find_spec`` vouch for a hostile one: the planted twin supplies the
+    shape, the constant supplies the foreign path.  Measured on #556, that
+    produced ``PASS`` with a foreign submodule loading.
+
+    This is the mutation guard for ``_code_signature``.  Without it the
+    hostile finder is corroborated; with it, nothing matches.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "twin_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "twin_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "twin_pkg" or name.startswith("twin_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    twin = site_root / "benign_shape_neighbour.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    benign_file = "/nonexistent/benign/target.py"
+    shape = (
+        "import importlib.util\n"
+        "def find_spec(self, fullname, path=None, target=None):\n"
+        "    if fullname == 'twin_pkg.leaked':\n"
+        "        return importlib.util.spec_from_file_location(fullname, %r)\n"
+        "    return None\n"
+    )
+    # A genuine-looking file whose find_spec has the *same shape* as the
+    # hostile one below, differing only in the path constant.
+    twin.write_text(shape % benign_file, encoding="utf-8")
+
+    namespace = {"importlib": importlib}
+    exec(compile(shape % foreign_file, str(twin), "exec"), namespace)  # noqa: S102
+    forged = namespace["find_spec"]
+    holder = type("TwinShapeFinder", (), {"find_spec": staticmethod(forged)})()
+    holder.__module__ = "benign_shape_neighbour"
+    holder.__file__ = str(twin)
+
+    sys.meta_path.insert(0, holder)
+    try:
+        benign_namespace: dict = {}
+        exec(compile(twin.read_text(encoding="utf-8"), str(twin), "exec"), benign_namespace)  # noqa: S102
+        benign = benign_namespace["find_spec"]
+        assert benign.__code__.co_code == forged.__code__.co_code, (
+            "the premise is that co_code is identical for both"
+        )
+        assert benign.__code__.co_consts != forged.__code__.co_consts, (
+            "the premise is that co_consts is what distinguishes them"
+        )
+
+        assert not _is_installation_finder(holder), (
+            "a same-shape twin must not corroborate a finder serving a different constant"
+        )
+        report = check_origins(root, ("twin_pkg",))
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+    finally:
+        sys.meta_path.remove(holder)
+
+
+def test_a_genuine_finder_with_nested_code_still_matches_its_source(tmp_path):
+    """Constant comparison recurses, and must not refuse a real installer.
+
+    ``_code_signature`` walks nested code objects so a closure or
+    comprehension inside ``find_spec`` is covered.  A real installer written
+    that way has to keep its trust, or the extra strictness becomes a false
+    red on ordinary editable installs.
+
+    The finder is built outside this checkout on purpose.  This row is about
+    the *content* channel -- that a source containing nested code compiles to a
+    signature the guard reproduces -- so it exercises
+    ``_code_matches_source`` directly.  Load provenance is a separate channel
+    with its own rows; testing it here with a file no install ever recorded
+    would only re-test the wrong thing.
+    """
+
+    genuine = tmp_path / "nested_finder_source.py"
+    genuine.write_text(
+        "class NestedFinder:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        names = [name for name in (fullname,) if name]\n"
+        "        if not names:\n"
+        "            return None\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    namespace: dict = {}
+    exec(compile(genuine.read_text(encoding="utf-8"), str(genuine), "exec"), namespace)  # noqa: S102
+    finder = namespace["NestedFinder"]()
+    function = getattr(finder.find_spec, "__func__", finder.find_spec)
+
+    assert origins._code_signature(function.__code__), "constants are captured"
+    assert origins._code_matches_source(function, genuine), (
+        "a source whose find_spec contains nested code must still match itself"
+    )
+
+
+def test_a_nested_code_twin_with_equal_constants_is_still_refused(tmp_path, monkeypatch):
+    """The constant signature must cover nested BYTECODE, not just constants.
+
+    A constant-only signature has a residual gap that this row pins shut.  A
+    nested body -- a lambda, comprehension or closure -- is itself a code
+    object sitting in the parent's ``co_consts`` at a fixed index, so the
+    parent's ``co_code`` cannot see what the nested body does.  If the attacker
+    writes the nested body so its *constants* stay identical while its
+    *bytecode* differs, a signature that recurses only into constants compares
+    equal and the hostile finder is corroborated.
+
+    Here the nested lambda is ``_n + ''`` in the planted file and ``'' + _n``
+    in the hostile one: same constant ``''``, same result, different nested
+    bytecode.  Every field compared at the top level is equal.
+
+    This is the mutation guard for the nested half of ``_code_signature``:
+    folding a nested code object's own ``co_code``/``co_names``/``co_varnames``
+    into its signature.  Removing that fold makes the signature constants-only
+    again, the twin is corroborated, and this row fails (verified: the mutant
+    is bypassable end to end, guard PASS with a foreign submodule loading).
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "nested_twin_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "nested_twin_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "nested_twin_pkg" or name.startswith("nested_twin_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    twin = site_root / "nested_twin_neighbour.py"
+    shape = (
+        "import importlib.util\n"
+        "def find_spec(self, fullname, path=None, target=None):\n"
+        "    inner = lambda _n: %s\n"
+        "    if fullname == 'nested_twin_pkg.leaked':\n"
+        "        return importlib.util.spec_from_file_location(\n"
+        "            fullname, inner(__import__('os').environ['LEAKED_PATH']))\n"
+        "    return None\n"
+    )
+    twin.write_text(shape % "_n + ''", encoding="utf-8")
+
+    namespace: dict = {}
+    # The hostile twin differs ONLY in the nested body; the served path comes
+    # from the environment, so it is never a constant in either function.
+    exec(compile(shape % "'' + _n", str(twin), "exec"), namespace)  # noqa: S102
+    forged = namespace["find_spec"]
+    holder = type("NestedTwinFinder", (), {"find_spec": staticmethod(forged)})()
+    holder.__module__ = "nested_twin_neighbour"
+    holder.__file__ = str(twin)
+
+    monkeypatch.setenv("LEAKED_PATH", str((foreign / "leaked.py").resolve()))
+    sys.meta_path.insert(0, holder)
+    try:
+        genuine_namespace: dict = {}
+        exec(compile(twin.read_text(encoding="utf-8"), str(twin), "exec"), genuine_namespace)  # noqa: S102
+        genuine = genuine_namespace["find_spec"]
+
+        # Pin the premise: the top-level fields #556 compares are all equal,
+        # and so is the nested constant table. Only the nested bytecode differs.
+        assert forged.__code__.co_code == genuine.__code__.co_code
+        assert forged.__code__.co_names == genuine.__code__.co_names
+        assert forged.__code__.co_varnames == genuine.__code__.co_varnames
+
+        # Every field the signature reads *besides* the nested recursion is
+        # equal here, so the whole decision rests on recursing into the nested
+        # code object. Assert that directly: comparing only the nested
+        # constant tables would NOT distinguish this pair, which is the entire
+        # gap #557 left open.
+        def _nested_constant_tables(code: object) -> tuple:
+            return tuple(
+                tuple(
+                    (type(item).__name__, repr(item)) for item in getattr(constant, "co_consts", ())
+                )
+                for constant in getattr(code, "co_consts", ())
+                if isinstance(constant, types.CodeType)
+            )
+
+        assert _nested_constant_tables(forged.__code__) == _nested_constant_tables(
+            genuine.__code__
+        ), "the premise: nested constants are identical, only bytecode differs"
+        assert origins._code_signature(forged.__code__) != origins._code_signature(
+            genuine.__code__
+        ), "the signature must distinguish a nested body that differs"
+        for field in ("co_flags", "co_argcount", "co_nlocals", "co_freevars"):
+            assert getattr(forged.__code__, field) == getattr(genuine.__code__, field), (
+                f"the premise: {field} is equal on both"
+            )
+
+        assert not _is_installation_finder(holder), (
+            "a nested-code twin with equal constants must not corroborate"
+        )
+        report = check_origins(root, ("nested_twin_pkg",))
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+    finally:
+        sys.meta_path.remove(holder)
+        try:
+            twin.unlink()
+        except OSError:
+            pass
+
+
+def test_a_genuine_latin1_finder_is_still_corroborated():
+    """Decoding must follow PEP 263, or a real finder is refused.
+
+    Reading the named file as UTF-8 raises ``UnicodeDecodeError`` on a genuine
+    module that declares a latin-1 encoding cookie and holds non-ASCII bytes.
+    The corroboration step catches every exception and refuses, so the finder
+    lost its trust for a reason that has nothing to do with provenance.  That is
+    a false FAIL on the supported install lane, which is the wrong direction to
+    fail: the guard would report an honest install as untrusted.
+
+    This row pins the fix.  ``tokenize.open`` is the import system's own
+    decoder, so the cookie is honoured and the recompiled code matches the
+    running one.
+    """
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    genuine = site_root / "genuine_latin1_finder_row.py"
+    source = (
+        "# -*- coding: latin-1 -*-\n"
+        "def find_spec(self, fullname, path=None, target=None):\n"
+        "    tag = 'café'\n"
+        "    return None\n"
+    )
+    genuine.write_bytes(source.encode("latin-1"))
+    try:
+        with tokenize.open(genuine) as handle:
+            decoded = handle.read()
+        namespace: dict = {}
+        exec(compile(decoded, str(genuine), "exec", dont_inherit=True), namespace)  # noqa: S102
+        function = namespace["find_spec"]
+
+        # The premise: plain UTF-8 reading cannot decode this module at all.
+        with pytest.raises(UnicodeDecodeError):
+            genuine.read_text(encoding="utf-8")
+
+        assert origins._code_matches_source(function, genuine), (
+            "a genuine latin-1 finder must still corroborate against its source"
+        )
+    finally:
+        genuine.unlink()
+
+
+def test_a_foreign_path_portion_is_reported_even_when_file_changes_between_reads(
+    tmp_path, monkeypatch
+):
+    """``__file__`` is read once per check, and a second read cannot skip it.
+
+    ``__file__`` is mutable interpreter state, and a hostile path-like can
+    answer differently on each read.  The origin was resolved from one read and
+    the portion check used to take a second: a first read matching the origin
+    followed by one that did not made the guard skip the portion check entirely,
+    so a package with a genuinely foreign ``__path__`` reported PASS.
+
+    Measured on this branch before the fix, with the suite green at 121
+    passed:
+
+        status         : PASS
+        __file__ reads : 2
+
+    The caller now passes the module whose ``__file__`` it already resolved, so
+    the value is read exactly once and the drifting answer cannot be used to
+    skip the check.
+
+    This is the mutation guard for that plumbing: removing the ``module``
+    argument, or ignoring it in the function, restores the second read and this
+    row reports PASS again.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "drifting_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    local_init = (package_dir / "__init__.py").resolve()
+    foreign = tmp_path / "outside" / "drifting_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "__init__.py").write_text("", encoding="utf-8")
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "drifting_pkg" or name.startswith("drifting_pkg."):
+            del sys.modules[name]
+
+    drifting = __import__("drifting_pkg")
+    # A genuinely foreign portion: this is the finding that must survive.
+    drifting.__path__ = [str(foreign)]
+
+    class Drifting:
+        """Local on the first read, foreign on every later read."""
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def __fspath__(self) -> str:
+            self.reads += 1
+            return str(local_init if self.reads == 1 else foreign / "__init__.py")
+
+    drifting_file = Drifting()
+    monkeypatch.setattr(drifting, "__file__", drifting_file, raising=False)
+
+    report = check_origins(root, ("drifting_pkg",))
+
+    assert report["status"] == "FAIL", report
+    assert "path portion" in report["packages"][0]["detail"] or (
+        "resolves outside" in report["packages"][0]["detail"]
+    ), report
+    # One read only: a second read is exactly the hole this row closes.
+    assert drifting_file.reads <= 1, (
+        f"__file__ was read {drifting_file.reads} times; a second read can disagree"
+    )
+
+    class Hostile:
+        """A path-like whose conversion raises, which must not escape."""
+
+        def __fspath__(self) -> str:
+            raise RuntimeError("boom")
+
+        def __str__(self) -> str:
+            raise RuntimeError("boom-str")
+
+    monkeypatch.setattr(drifting, "__file__", Hostile(), raising=False)
+    hostile_report = check_origins(root, ("drifting_pkg",))
+
+    assert hostile_report["status"] == "FAIL", hostile_report
+    assert "not a usable path" in hostile_report["packages"][0]["detail"], hostile_report
+
+
+def test_a_module_whose_file_attribute_raises_becomes_a_finding(tmp_path):
+    """Reading ``__file__`` is untrusted too, and must not escape the guard.
+
+    A module can override ``__getattribute__`` so that touching ``__file__``
+    raises.  That read sat outside the guard's exception boundary, so the raise
+    escaped ``check_origins`` as a traceback -- the operator sees a crash instead
+    of the FAIL naming the offending package, which is the one outcome this
+    module exists to make impossible.
+
+    The existing hostile rows cover converting a returned value; none of them
+    covers a getter that raises.
+    """
+
+    class RaisingFile(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "__file__":
+                raise RuntimeError("getter boom")
+            return super().__getattribute__(name)
+
+    sys.modules["raising_file_pkg"] = RaisingFile("raising_file_pkg")
+    try:
+        report = check_origins(tmp_path, ("raising_file_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "could not be read" in report["packages"][0]["detail"], report
+        json.dumps(report)
+    finally:
+        del sys.modules["raising_file_pkg"]
+
+
+def test_source_copied_into_site_packages_does_not_certify_an_execed_finder(tmp_path, monkeypatch):
+    """Matching bytes in a site-packages file are not load provenance.
+
+    The content check asks whether the finder's code is *in* the file it names.
+    That is necessary, but it is not the claim the guard needs: the running
+    finder must have been *loaded from* that file.  Writing the finder's own
+    source into site-packages and then running
+    ``exec(compile(source, that_path, "exec"))`` satisfies every content check
+    while the finder has no provenance there at all.
+
+    This row pins the missing half: the defining module must be an entry the
+    import system created for that same file, which a bare ``exec`` never
+    produces.  Dropping ``_finder_was_imported_from`` from the trust decision
+    leaves the content check satisfied and this row fails.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "copied_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_path / "outside"
+    foreign = outside / "copied_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "copied_pkg" or name.startswith("copied_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "copied_source_finder_row.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "import importlib.util\n"
+        "class CopiedSourceFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'copied_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    planted.write_text(source, encoding="utf-8")
+    forged = None
+    try:
+        namespace = {"importlib": importlib, "__name__": "copied_source_finder_row"}
+        # The attack: the file really holds these exact bytes, and the code is
+        # compiled with that file as co_filename -- but it is never imported.
+        exec(compile(source, str(planted), "exec"), namespace)  # noqa: S102
+        forged = namespace["CopiedSourceFinder"]
+        forged.__module__ = "copied_source_finder_row"
+
+        code = forged.find_spec.__func__.__code__
+        assert code.co_filename == str(planted)
+        assert Path(planted).is_file(), "the planted file must really exist"
+        assert any(
+            _is_within(Path(planted), root_, strict=False) for root_ in _site_packages_roots()
+        ), "the planted file must really sit inside site-packages"
+        # The premise: content matching succeeds and is still not enough.
+        assert origins._code_matches_source(forged.find_spec, Path(planted)), (
+            "this row needs the content check to pass so it isolates provenance"
+        )
+        assert "copied_source_finder_row" not in sys.modules, (
+            "a bare exec must not create a module entry"
+        )
+
+        assert not _is_installation_finder(forged), (
+            "code that merely matches a site-packages file was never loaded from it"
+        )
+        sys.meta_path.insert(0, forged)
+        report = check_origins(root, ("copied_pkg",))
+
+        assert report["status"] == "FAIL", report
+        assert "meta_path" in report["packages"][0]["detail"], report
+
+        leaked = importlib.import_module("copied_pkg.leaked")
+        assert leaked.ORIGIN == "foreign"
+    finally:
+        if forged is not None and forged in sys.meta_path:
+            sys.meta_path.remove(forged)
+        planted.unlink(missing_ok=True)
+
+
+def test_a_foreign_portion_that_cannot_be_rendered_is_still_reported(tmp_path, monkeypatch):
+    """The FAIL detail is built from the same untrusted data it reports.
+
+    A finding names the foreign ``__path__`` entries it found, and rendering one
+    of those calls ``str()`` on an object the interpreter -- not this guard --
+    controls.  If that rendering raises, the finding is lost and the traceback
+    that replaces it is precisely the failure this module exists to prevent:
+    the operator sees a crash instead of the FAIL naming the offending package.
+
+    This row pins the reporting half.  ``_describe`` is the only place that
+    coerces untrusted data to text, so the detail must survive an object whose
+    ``__str__`` and ``__repr__`` both raise, and the status must still be FAIL.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "hostile_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "hostile_pkg" or name.startswith("hostile_pkg."):
+            del sys.modules[name]
+
+    hostile = __import__("hostile_pkg")
+
+    class Unprintable:
+        """A path-like that cannot be converted *or* rendered."""
+
+        def __fspath__(self) -> str:
+            raise RuntimeError("boom-fspath")
+
+        def __str__(self) -> str:
+            raise RuntimeError("boom-str")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("boom-repr")
+
+    # A portion the guard cannot resolve *and* cannot render: the reason text
+    # is itself built from the object, so this exercises both coercions.
+    hostile.__path__ = [Unprintable(), tmp_path / "outside" / "hostile_pkg"]
+
+    report = check_origins(root, ("hostile_pkg",))
+
+    assert report["status"] == "FAIL", report
+    detail = report["packages"][0]["detail"]
+    assert detail, "a FAIL must carry a detail naming what was wrong"
+    # The rendering degrades to a placeholder; the finding is not lost.
+    assert "unprintable" in detail or "not a usable path" in detail, detail
+    # The report must stay JSON-serializable, since the CLI emits it verbatim.
+    json.dumps(report)
+
+
+def test_a_forged_module_and_spec_do_not_certify_an_uncertified_finder(tmp_path, monkeypatch):
+    """``sys.modules[name].__spec__`` is attacker-writable, so it is no evidence.
+
+    The previous attempt to supply load provenance asked the defining module's
+    spec to name the file.  Independent review showed the whole pair can be
+    written by hand: build a module with ``types.ModuleType``, attach a spec
+    from ``importlib.util.spec_from_file_location`` -- which sets
+    ``has_location=True`` -- and every check the guard made is satisfied while
+    the import system never loaded anything from that file.  The guard reported
+    PASS, ``cli_rc`` was 0, and a foreign submodule loaded afterwards.
+
+    This row pins the replacement: provenance comes from install records on disk
+    (``RECORD`` hash, or a ``.pth`` that imports the module), which a running
+    process cannot rewrite into a different claim.
+    """
+
+    root = tmp_path / "root"
+    package_dir = root / "forged_spec_pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    foreign = tmp_path / "outside" / "forged_spec_pkg"
+    foreign.mkdir(parents=True)
+    (foreign / "leaked.py").write_text('ORIGIN = "foreign"', encoding="utf-8")
+    monkeypatch.syspath_prepend(str(root))
+    for name in list(sys.modules):
+        if name == "forged_spec_pkg" or name.startswith("forged_spec_pkg."):
+            del sys.modules[name]
+
+    site_root = _site_packages_roots()[0]
+    assert site_root.is_dir()
+    planted = site_root / "forged_spec_finder_row.py"
+    foreign_file = str((foreign / "leaked.py").resolve())
+    source = (
+        "import importlib.util\n"
+        "class ForgedSpecFinder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        if name == 'forged_spec_pkg.leaked':\n"
+        "            return importlib.util.spec_from_file_location(name, "
+        f"{foreign_file!r})\n"
+        "        return None\n"
+    )
+    planted.write_text(source, encoding="utf-8")
+    forged = None
+    try:
+        namespace = {"__name__": "forged_spec_finder_row"}
+        exec(compile(source, str(planted), "exec"), namespace)  # noqa: S102
+        forged = namespace["ForgedSpecFinder"]
+
+        # The forgery: a module the import system never created, carrying a
+        # file-location spec pointing at the planted file.
+        planted_module = types.ModuleType("forged_spec_finder_row")
+        planted_module.__file__ = str(planted)
+        planted_module.__spec__ = importlib.util.spec_from_file_location(
+            "forged_spec_finder_row", planted
+        )
+        sys.modules["forged_spec_finder_row"] = planted_module
+        try:
+            # The premise: every in-memory signal the earlier check relied on is
+            # satisfied, so this row really isolates the new provenance rule.
+            assert planted_module.__spec__.has_location is True
+            assert planted_module.__spec__.origin == str(planted)
+            assert Path(planted).is_file()
+            assert any(
+                _is_within(Path(planted), root_, strict=False) for root_ in _site_packages_roots()
+            ), "the planted file must really sit inside site-packages"
+            assert _finder_code_file(forged) is not None, (
+                "this row needs the content check to pass so it isolates provenance"
+            )
+
+            assert not _is_installation_finder(forged), (
+                "a hand-written module and spec are not load provenance"
+            )
+            sys.meta_path.insert(0, forged)
+            report = check_origins(root, ("forged_spec_pkg",))
+
+            assert report["status"] == "FAIL", report
+            assert "meta_path" in report["packages"][0]["detail"], report
+            json.dumps(report)
+
+            leaked = importlib.import_module("forged_spec_pkg.leaked")
+            assert leaked.ORIGIN == "foreign"
+        finally:
+            sys.modules.pop("forged_spec_finder_row", None)
+    finally:
+        if forged is not None and forged in sys.meta_path:
+            sys.meta_path.remove(forged)
+        planted.unlink(missing_ok=True)
+
+
+def test_a_recorded_file_stops_being_recorded_when_its_bytes_change():
+    """``RECORD`` is provenance only while the bytes still hash to what it says.
+
+    The disk-recorded channel is what replaces the forgeable in-memory one, so
+    the part of it that actually carries the claim is the *hash*: a file being
+    listed in a ``RECORD`` says only that some install laid down that path, not
+    that the bytes now there are the ones it laid down.
+
+    Treating mere presence in ``RECORD`` as provenance was measured to survive
+    its own mutation: replacing the digest comparison with a membership test
+    left every row in the suite green.  This row pins the difference.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_hash_pin_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_hash_pin_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        recorded = dist_info / "RECORD"
+        digest = _file_digest(planted)
+        assert digest is not None, "the planted file must be readable"
+        recorded.write_text(f"pokemon_hash_pin_row_module.py,sha256={digest},6\n", encoding="utf-8")
+
+        assert _is_recorded_by_an_install(planted, root), (
+            "a file whose bytes match its RECORD entry is install-recorded"
+        )
+
+        planted.write_text("VALUE = 'tampered'\n", encoding="utf-8")
+        assert not _is_recorded_by_an_install(planted, root), (
+            "the same path with different bytes is no longer what the install wrote"
+        )
+    finally:
+        sys.modules.pop("pokemon_hash_pin_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_a_quoted_record_path_containing_a_comma_still_establishes_provenance():
+    """``RECORD`` is CSV, and a quoted field's comma must not truncate its name.
+
+    The file name is parsed by splitting from the right -- size, then digest,
+    then everything remaining is the name -- because a name may legally contain
+    a comma.  But pip writes such a field *quoted*, so a name that survives the
+    split still arrives wrapped in quotes, and joining the raw text onto the
+    site-packages root builds a path no record ever listed.  The digest is then
+    compared against a file that does not exist, so a genuinely installed
+    finder whose location contains a comma silently loses its provenance and is
+    refused: a false red, in exchange for no security gain.
+
+    This row pins the decode.  The writer here is ``csv.writer``, the same one
+    pip uses, so the bytes under test are bytes pip really emits.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_csv_path_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon,comma_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        digest = _file_digest(planted)
+        assert digest is not None
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\n").writerow(
+            [planted.name, f"sha256={digest}", str(planted.stat().st_size)]
+        )
+        (dist_info / "RECORD").write_text(buffer.getvalue(), encoding="utf-8")
+
+        assert '"' in (dist_info / "RECORD").read_text(encoding="utf-8"), (
+            "the premise: a comma in the name forces a quoted CSV field"
+        )
+        assert _is_recorded_by_an_install(planted, root), (
+            "an installed file whose name contains a comma keeps its provenance"
+        )
+    finally:
+        sys.modules.pop(planted.stem, None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_a_recorded_path_that_another_record_contradicts_is_not_attested():
+    """Every ``RECORD`` claim about a path must hold, not just the first one.
+
+    ``_record_digests`` maps a path to the digests every record claims for it.
+    Keeping only one claim would let an attacker write a record that agrees
+    with their own bytes and rely on ordering to win against the install that
+    actually laid the file down.  A file whose installs disagree about its
+    contents is not consistently attested by any of them, and the safe answer
+    is to refuse.
+
+    This row kills a mutant that keeps whichever claim sorts *last*, and pins
+    the collection of both claims before the decision is made.  It cannot kill
+    a keep-the-first mutant, and that is a property of the rule rather than a
+    gap in the row: on a genuine conflict the first-claim mutant also refuses
+    here.  Distinguishing those two would need a case where the first claim
+    *agrees* with the file and a later one does not, which is the far more
+    dangerous ordering and is what the ``forgery`` below deliberately is not.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_conflict_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_conflict_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        digest = _file_digest(planted)
+        assert digest is not None
+        record = dist_info / "RECORD"
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\n").writerow(
+            [planted.name, f"sha256={digest}", str(planted.stat().st_size)]
+        )
+        record.write_text(buffer.getvalue(), encoding="utf-8")
+        assert _is_recorded_by_an_install(planted, root), "the premise: attested"
+
+        # A second, disagreeing record for the same path.  Its digest is chosen
+        # to sort *before* the real one, so a keep-only-the-first-claim mutation
+        # would pick the forgery and this row would wrongly survive.
+        forgery = "0" * 43 + "="
+        assert forgery < digest, "the forgery must sort first to isolate the rule"
+        with open(record, "a", encoding="utf-8") as handle:
+            handle.write(f"{planted.name},sha256={forgery},{planted.stat().st_size}\n")
+
+        # Assert what the rule actually decides, not just the refusal: a
+        # keep-only-the-first-claim mutant also refuses here, so asserting only
+        # "not recorded" would let that mutant survive this row unchallenged.
+        # The premise already established that the real digest *is* claimed,
+        # so "one claim matches and one does not" is the state under test.
+        claims = _record_digests(root).get(str(planted))
+        assert claims is not None and len(claims) == 2, (
+            f"the premise: two records disagree about this path, got {claims}"
+        )
+        assert digest in claims and forgery in claims, (
+            "both claims must be collected before the decision is made"
+        )
+        assert not _is_recorded_by_an_install(planted, root), (
+            "installs that disagree about a file's bytes attest to nothing"
+        )
+    finally:
+        sys.modules.pop(planted.stem, None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_the_guard_refuses_rather_than_traceback_on_any_escape(tmp_path, monkeypatch):
+    """``check_origins`` must always answer, even for a read nobody guarded.
+
+    Thirteen review rounds across #558 and #559 each widened one more
+    hostile read, and several of them repaired an *adjacent* read rather
+    than the reported one.  Widening read N therefore never proved read N+1
+    was safe, and this module cannot enumerate every value an attacker
+    controls: ``sys``, ``site``, ``sys.modules``, the meta-path and the
+    on-disk install layout all sit outside the process's own control.
+
+    So the entry point carries the guarantee instead: anything escaping the
+    analysis becomes the same machine-readable FAIL every other refusal
+    produces.  A guard that answers with a traceback is fail-open, because a
+    caller gating on ``status`` sees nothing at all.
+
+    ``KeyboardInterrupt`` and ``SystemExit`` must still escape, so an
+    operator can always stop the run.
+    """
+
+    class Exploding(BaseException):
+        pass
+
+    def explode(*_args, **_kwargs):
+        raise Exploding("novel read boom")
+
+    monkeypatch.setattr(origins, "_allowed_roots", explode)
+
+    report = check_origins(tmp_path, ("anything",))
+
+    assert report["status"] == "FAIL", report
+    assert report["packages"][0]["package"] == "<guard>"
+    assert "could not complete" in report["packages"][0]["detail"]
+
+    def raise_interrupt(*_args, **_kwargs):
+        raise interrupt
+
+    for interrupt in (KeyboardInterrupt(), SystemExit()):
+        monkeypatch.setattr(origins, "_allowed_roots", raise_interrupt)
+        with pytest.raises(type(interrupt)):
+            check_origins(tmp_path, ("anything",))
