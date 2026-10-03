@@ -507,7 +507,10 @@ def _lane_options(lane: tuple[str, ...], benchmark: str) -> list[str]:
                 options.append(tokens[index])
                 index += 1
             continue
-        if token.startswith("-") and "=" not in token and token not in {"--check"}:
+        if token.startswith("-"):
+            # Both `--name=value` and bare `--name` are kept: an option that
+            # silently disables rules (`--ignore=ALL`) hides in either form,
+            # and dropping it would make the probe report a false pass.
             options.append(token)
             index += 1
             continue
@@ -558,7 +561,14 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
 
             # 2. resolved -- an excluded path yields Ruff's "no files" warning
             options = _lane_options(lane, _BENCHMARK)
-            probe = [subcommand, *options, "--force-exclude", "--no-cache"]
+            # Only add `--force-exclude` when the lane does not already carry
+            # it. Ruff rejects a repeated flag, and that argparse error would
+            # abort the probe before the exclusion check ever runs.
+            if "--force-exclude" not in options:
+                options.append("--force-exclude")
+            if "--no-cache" not in options:
+                options.append("--no-cache")
+            probe = [subcommand, *options]
             probe.append("--show-files" if subcommand == "check" else "--check")
             probe.append(_BENCHMARK)
             completed = subprocess.run(
@@ -577,20 +587,40 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
             )
 
     # 3. linted -- `per-file-ignores` can disable a file's rules entirely, and
-    # that leaves both checks above satisfied while Ruff inspects nothing.
-    settings = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "--show-settings", _BENCHMARK],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    ignores = _per_file_ignores_for(settings.stdout)
-    assert not ignores.strip("{} \n\t"), (
-        f"{_BENCHMARK} is covered by a per-file ignore and would not be linted: {ignores}"
-    )
-    enabled = _enabled_rule_count(settings.stdout)
-    assert enabled > 0, f"ruff enables no rules for {_BENCHMARK}; it is unlinted"
+    # that leaves both checks above satisfied while Ruff inspects nothing. The
+    # same is true of a lane-level `--ignore=ALL`, so each check lane's *own*
+    # options are applied here; reading Ruff's bare config would miss it.
+    for source, text in (
+        ("runner", RUNNER.read_text(encoding="utf-8")),
+        ("workflow", WORKFLOW.read_text(encoding="utf-8")),
+    ):
+        lane = _main_lane(_ruff_invocations(text), "check")
+        options = _lane_options(lane, _BENCHMARK)
+        settings = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                *options,
+                "--show-settings",
+                _BENCHMARK,
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        ignores = _per_file_ignores_for(settings.stdout)
+        assert not ignores.strip("{} \n\t"), (
+            f"{source} `ruff check` covers {_BENCHMARK} with a per-file ignore "
+            f"and would not lint it: {ignores}"
+        )
+        enabled = _enabled_rule_count(settings.stdout)
+        assert enabled > 0, (
+            f"{source} `ruff check` enables no rules for {_BENCHMARK}; its "
+            f"options reduce the lint set to nothing"
+        )
 
 
 def _per_file_ignores_for(settings_output: str) -> str:
@@ -617,16 +647,21 @@ def _per_file_ignores_for(settings_output: str) -> str:
 def _enabled_rule_count(settings_output: str) -> int:
     """Count the rule codes Ruff reports as enabled."""
 
-    count = 0
-    inside = False
-    for line in settings_output.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("linter.rules.enabled"):
-            inside = "[" in stripped
-            count += stripped.count(",") + (1 if "[" in stripped and "]" not in stripped else 0)
+    lines = settings_output.splitlines()
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("linter.rules.enabled"):
             continue
-        if inside:
-            if stripped.startswith("]"):
+        body = [line.split("=", 1)[1]]
+        while "]" not in body[-1]:
+            index += 1
+            if index >= len(lines):
                 break
-            count += 1
-    return count
+            body.append(lines[index])
+        # Count entries only, so an empty `[]` scores zero rather than one.
+        entries = [
+            token
+            for token in "".join(body).strip().lstrip("[").rstrip("]").split(",")
+            if token.strip()
+        ]
+        return len(entries)
+    return 0
