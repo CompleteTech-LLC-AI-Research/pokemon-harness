@@ -78,3 +78,30 @@ the fix belongs on the branch, and re-review must cover the resulting head, not
 `c198489`.
 
 Release remains **PARTIAL**. Nothing merged, no issue closed.
+
+## Disposition: fixed shape found, filed as #570 rather than patched into #566
+
+The generalization is small and was implemented and measured before being set
+aside. Resolving the lane's tokens instead of pinning `_BENCHMARK` turns the row
+red on this tree, and the offenders are legitimate:
+
+```
+tests/_sentinel_support_base.py:2    # ruff: noqa: F401
+tests/_sentinel_support_part1.py:2   # ruff: noqa: F821
+... 30 more _sentinel_support_part*.py
+```
+
+Those ignores are load-bearing. Deleting the directive from
+`tests/_sentinel_support_part1.py` yields `Found 105 errors`; it is a generated
+fragment of a merged monolith whose names are supplied by the assembled module.
+
+So the rule cannot be "no file-level ignore anywhere". It has to be **measured**:
+a file-level ignore is acceptable only where the file is clean without it, which
+is a policy decision about generated fragments. That decision needs its own
+justification and review, so it is filed as **#570** instead of being smuggled
+into a focused #106 fix. The exploratory patch was reverted; `wt566fix` is clean
+at `c198489`.
+
+#566 is therefore cleared on this point for what it claims — the benchmark's
+escape is genuinely closed, proven in both directions and against four spellings
+— with the lane-wide generalization tracked separately.
