@@ -340,13 +340,14 @@ reported.
 | `--force-exclude` with `--exclude=<benchmark>`, both spellings | yes |
 | bare `# ruff: noqa` on the benchmark's first line | yes |
 | `# ruff:noqa`, `#ruff:noqa`, trailing-space variant | yes |
+| `#ruff: noqa` — the whitespace gap between the two honoured forms | yes |
 | `# ruff: noqa: F821` and a comma-separated code list — *code-bearing* whole-file opt-outs | yes |
 | `# flake8: noqa`, `#flake8: noqa`, `# flake8: noqa: F821` — the Flake8-compatible aliases | yes |
 | `# fmt: off` on the benchmark's first line | yes |
 | `# fmt:off`, `# yapf: disable`, `# yapf:disable` | yes |
-| standalone `# ruff: noqa: BLE001` (a *selective* file-scoped ignore) | n/a — not an escape (see above) |
+| standalone `# ruff: noqa: F401` / `# flake8: noqa: F401` (scoped to one code) | n/a — not an escape (see above) |
 | directive quoted inside a docstring or string literal | n/a — inert in Ruff |
-| `# RUFF: NOQA`, a bare `# noqa: E501`, directive text continuing in English | n/a — Ruff is case-sensitive and whole-token |
+| `# RUFF: NOQA`, a bare `# noqa: E501` | n/a — Ruff is case-sensitive and whole-token |
 
 ## Focused suites on this candidate
 
@@ -407,16 +408,44 @@ asks Ruff for JSON and matches the diagnostic `code` instead.
 The scan reads the file through `tokenize`, so only real comments count: a
 docstring or string literal quoting a directive is inert in Ruff and must not
 refuse the file. The comparison is exact and case-sensitive for the same
-reason Ruff's parser is — `# RUFF: NOQA`, a bare `# noqa: E501`, and a comment
-that starts with a directive then continues in English are all inert, and all
-four are measured to pass.
+reason Ruff's parser is — `# RUFF: NOQA` and a bare `# noqa: E501` are inert
+and measured to pass.
 
 The row also stays honest in the other direction: it asserts every listed
 spelling still suppresses the file (so it cannot pass vacuously if Ruff
 changes), that a selective per-line ignore is still honoured, and that the
-benchmark still carries one. Refusing a *selective* file-scoped ignore such as
-the `# ruff: noqa: F401` in `src/pokered_harness/mcp_server.py` would be the
-over-rejection this table exists to prevent.
+benchmark still carries one.
+
+### Two corrections to the rows above
+
+Both were established by measurement after the first version of this section
+was written, and both are recorded here rather than quietly edited out.
+
+**A code-bearing directive is not a whole-file opt-out.** `# ruff: noqa: F401`
+silences F401 for the file but still reports an unrelated F821, which is why
+`# ruff: noqa: F821, F401` silences F821 while `# ruff: noqa: F401` does not.
+An earlier draft of this document claimed the F401 form left 149 errors
+hidden in `src/pokered_harness/mcp_server.py`; that came from reading a
+whole-file `--ignore-noqa` run, not from what the directive does. The
+directive is scoped to its code, and that file's F401s are the suppression it
+was written for.
+
+**A balanced `# fmt: off` / `# fmt: on` region is narrower than it looks.**
+Ruff does re-check code after the closing directive, but it does not re-check
+the span between them, so a region still swallows what a probe placed inside
+it. The row therefore flags a directive that silences the specific probe it
+runs, which is the honest reading of "this file opted out of the gate" even
+where the region itself is legitimate.
+
+### What the row measures now
+
+It probes **every comment the benchmark actually carries** — 131 of them —
+through the lane each could affect, and requires none to silence it. A
+formatter directive is invisible to `ruff check`, so probing those through the
+check lane would wave all of them through; that was a real miss, caught in
+review and fixed. Measured on this head: no comment in the file silences
+either lane, so the benchmark is genuinely lint-covered rather than merely
+listed.
 
 ## Disposition
 
