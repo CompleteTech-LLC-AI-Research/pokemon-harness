@@ -726,6 +726,14 @@ def _reports_code(completed: subprocess.CompletedProcess[str], code: str) -> boo
     silence: a probe that did not return Ruff's JSON has measured nothing, and
     treating that as "no diagnostic" would let a broken probe mark a real
     directive as harmless. Empty output counts as unmeasured too.
+
+    "Reporting" is the safe answer at both call sites, but for opposite
+    reasons, so read the polarity before changing this. A guard that wants the
+    code *absent* fails loudly when a probe breaks, which is correct. A caller
+    asking whether a directive silenced something would instead read the broken
+    probe as "still reporting" and miss a real directive -- quiet, but bounded:
+    the guard in the same test proves Ruff emits this JSON for this file first,
+    so a broken stdin probe that reached it would already have failed loudly.
     """
 
     if not completed.stdout.strip():
@@ -1134,26 +1142,31 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
         return _probe_format(format_options, f"{comment}\n" + _FORMAT_PROBES[0][1]).returncode == 0
 
     # Probing all 131 comments through two lanes costs ~130 subprocesses, so
-    # skip the ones Ruff's directive grammar cannot possibly match. Every
-    # spelling measured above starts with one of these tokens; a comment that
-    # does not is ordinary prose and cannot be a directive. This is a
-    # short-circuit on a necessary condition, not a reimplementation of the
-    # rule -- `silences` still decides anything that gets this far.
+    # skip the ones Ruff's directive grammar cannot possibly match. A comment
+    # that does not name one of these tools cannot be one of their directives.
+    # This is a short-circuit on a necessary condition, not a reimplementation
+    # of the rule -- `silences` still decides anything that gets this far.
+    #
+    # The comparison has to normalise the spacing Ruff itself ignores, or it
+    # stops being a superset. Measured: extra spaces after the hash, a doubled
+    # hash, and a tab all silence F821 exactly as the bare spelling does,
+    # because Ruff strips leading `#` characters and the whitespace that
+    # follows them. Matching the literal token instead of the normalised one
+    # would let exactly those spellings through, so `lstrip("#")` and `strip()`
+    # are load bearing here, not tidying. Case is deliberately *not* normalised
+    # the other way: `.lower()` keeps an uppercase spelling in scope even
+    # though Ruff honours no such casing, and over-inclusion only costs one
+    # subprocess.
     directive_prefixes = (
-        "# ruff",
-        "#ruff",
-        "# flake8",
-        "#flake8",
-        "# fmt",
-        "#fmt",
-        "# yapf",
-        "#yapf",
-        "# noqa",
-        "#noqa",
+        "ruff",
+        "flake8",
+        "fmt",
+        "yapf",
+        "noqa",
     )
 
     def maybe_directive(comment: str) -> bool:
-        return comment.strip().lower().startswith(directive_prefixes)
+        return comment.lstrip("#").strip().lower().startswith(directive_prefixes)
 
     file_level = [
         (token.start[0], token.string)

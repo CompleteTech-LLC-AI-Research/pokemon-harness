@@ -591,3 +591,41 @@ the same reason this document records attribution rather than closing #106.
 
 #570 stays open and is the correct home for that work. #566 stays scoped to the
 benchmark, and its lane coverage claim is stated as one file, not all of them.
+
+## Round-9 review: MERGEABLE, with one gap the reviewer under-weighted
+
+Round 9 reviewed head `16d102e2` and returned MERGEABLE, raising two items it
+called non-blocking. One of them was a real gap and is now fixed.
+
+**The prefilter was not a superset.** Round 9 flagged, then dismissed, the
+theory that `#   ruff: noqa` (extra whitespace) could slip past a literal
+`startswith("# ruff")`. Measured, it silences F821 exactly as the bare spelling
+does, because Ruff strips leading `#` characters and the whitespace after them:
+
+    #   ruff: noqa    SILENCED      ## ruff: noqa     SILENCED
+    ##   ruff: noqa   SILENCED      #\truff: noqa     SILENCED
+    ### ruff: noqa    SILENCED      #    flake8: noqa SILENCED
+    #  yapf: disable  SILENCED      #   fmt: off     SILENCED
+    # !!!ruff: noqa   reports  <- text before the keyword, genuinely inert
+
+So the prefilter compared the literal token and would have skipped every one of
+those. It now normalises the way Ruff does — `comment.lstrip("#").strip()` —
+and keys on the tool name rather than the hash. Case still folds with
+`.lower()`, which is deliberately *over*-inclusive: Ruff honours no uppercase
+spelling, and over-inclusion only costs one subprocess, whereas under-inclusion
+is the failure mode that matters. Verified end to end: all five whitespace and
+double-hash forms now fail the row, and two prose comments that begin with a
+tool name are still allowed.
+
+Two rewrites of the new comment reintroduced the trap the previous round
+already hit — quoting a directive verbatim in prose makes Ruff act on it, once
+as an error and once as a warning. The final wording names no directive at all
+and the lane emits zero warnings, matching `master`.
+
+**The docstring described only one of two call-site polarities.** "Reporting"
+is fail-closed for the `invalid-syntax` guard, which wants the code absent and
+so fails loudly when a probe breaks. At the other site, `silences` reads a
+broken probe as "still reporting" and would *miss* a directive — quiet, but
+bounded, because the guard runs first on the same file and config. The
+docstring now states both, so the polarity is clear before the default is
+changed.
