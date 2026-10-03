@@ -57,8 +57,9 @@ def _load_cable_state(session: Session, version: str) -> None:
         sys.exit(
             f"Save state missing: {path}\n"
             "Produce it by playing {version} to the Cerulean PC Cable Club "
-            "attendant, with a 2+ mon party, then call session.save_state()."
-            .format(version=version)
+            "attendant, with a 2+ mon party, then call session.save_state().".format(
+                version=version
+            )
         )
     session.load_state(path.read_bytes())
 

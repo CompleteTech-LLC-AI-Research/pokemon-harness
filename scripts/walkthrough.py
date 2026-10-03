@@ -61,8 +61,9 @@ class WalkthroughDriver:
     def __post_init__(self) -> None:
         self.outdir.mkdir(parents=True, exist_ok=True)
 
-    def press(self, button: str, *, note: str = "", step_ticks: int = 24,
-              duration: int = 6) -> dict:
+    def press(
+        self, button: str, *, note: str = "", step_ticks: int = 24, duration: int = 6
+    ) -> dict:
         self.press_index += 1
         self.session.press(button, duration=duration)
         self.session.step(step_ticks, render=True)
@@ -72,11 +73,11 @@ class WalkthroughDriver:
         )
         (self.outdir / f"{stem}.state").write_bytes(self.session.save_state())
         gs = self.session.read_game_state()
-        (self.outdir / f"{stem}.json").write_text(
-            json.dumps(to_jsonable(gs), indent=2)
-        )
+        (self.outdir / f"{stem}.json").write_text(json.dumps(to_jsonable(gs), indent=2))
         row = {
-            "n": self.press_index, "button": button, "note": note,
+            "n": self.press_index,
+            "button": button,
+            "note": note,
             "tick": self.session.current_tick(),
             "map_id": gs.overworld.map_id,
             "map_name": MAP_NAMES.get(gs.overworld.map_id, f"0x{gs.overworld.map_id:02x}"),
@@ -116,9 +117,7 @@ class WalkthroughDriver:
                     f"{tuple(r['xy'])} | {r['party']} | "
                     f"{'Y' if r['in_battle'] else ''} | {r['note']} |\n"
                 )
-        (self.outdir / "playthrough.json").write_text(
-            json.dumps(self.log_rows, indent=2)
-        )
+        (self.outdir / "playthrough.json").write_text(json.dumps(self.log_rows, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -179,19 +178,24 @@ def run_phase_exit_house(drv: WalkthroughDriver) -> None:
     # (warp settle), so use condition-based walking to reach y=7.
     for _ in range(15):
         gs = drv.session.read_game_state()
-        if gs.overworld.map_id == MAP_PALLET_TOWN: break
-        if gs.overworld.y >= 7: break
+        if gs.overworld.map_id == MAP_PALLET_TOWN:
+            break
+        if gs.overworld.y >= 7:
+            break
         drv.press("down", note="1F → south wall")
     # Walk LEFT to door column (x=3 or x=2).
     for _ in range(8):
         gs = drv.session.read_game_state()
-        if gs.overworld.map_id == MAP_PALLET_TOWN: break
-        if gs.overworld.x <= 3: break
+        if gs.overworld.map_id == MAP_PALLET_TOWN:
+            break
+        if gs.overworld.x <= 3:
+            break
         drv.press("left", note="1F → door col")
     # Step DOWN through the door.
     for _ in range(4):
         gs = drv.session.read_game_state()
-        if gs.overworld.map_id == MAP_PALLET_TOWN: break
+        if gs.overworld.map_id == MAP_PALLET_TOWN:
+            break
         drv.press("down", note="1F → door warp")
     # Wait for pallet fade-in
     for _ in range(20):
@@ -255,7 +259,8 @@ def run_phase_pick_starter(drv: WalkthroughDriver) -> None:
         drv.press("down", note="lab: probe", step_ticks=30)
         gs_after = drv.session.read_game_state()
         if (gs_after.overworld.x, gs_after.overworld.y) != (
-            gs_before.overworld.x, gs_before.overworld.y
+            gs_before.overworld.x,
+            gs_before.overworld.y,
         ):
             # Movement happened — we have control (or it's a menu).
             # Verify with another DOWN — if that ALSO moves, overworld.
@@ -263,7 +268,8 @@ def run_phase_pick_starter(drv: WalkthroughDriver) -> None:
             drv.press("down", note="lab: probe 2", step_ticks=30)
             gs_after2 = drv.session.read_game_state()
             if (gs_after2.overworld.x, gs_after2.overworld.y) != (
-                gs_before2.overworld.x, gs_before2.overworld.y
+                gs_before2.overworld.x,
+                gs_before2.overworld.y,
             ):
                 break
 
@@ -272,12 +278,14 @@ def run_phase_pick_starter(drv: WalkthroughDriver) -> None:
     # Walk right to x=8
     for _ in range(8):
         gs = drv.session.read_game_state()
-        if gs.overworld.x >= 8: break
+        if gs.overworld.x >= 8:
+            break
         drv.press("right", note="lab → Bulbasaur row")
     # Set y to 4
     for _ in range(4):
         gs = drv.session.read_game_state()
-        if gs.overworld.y == 4: break
+        if gs.overworld.y == 4:
+            break
         drv.press("up" if gs.overworld.y > 4 else "down", note="lab → ball col")
     # Face UP toward ball.
     drv.press("up", note="lab: face Bulbasaur")
@@ -358,8 +366,7 @@ def run_phase_pallet_to_route1(drv: WalkthroughDriver) -> None:
     """
     gs = drv.session.read_game_state()
     if gs.overworld.map_id != MAP_PALLET_TOWN:
-        print(f"WARN: not in Pallet, map=0x{gs.overworld.map_id:02x}",
-              file=sys.stderr)
+        print(f"WARN: not in Pallet, map=0x{gs.overworld.map_id:02x}", file=sys.stderr)
         return
     # Post-lab-exit lands on tile (12, 11) = the lab door. Pressing UP
     # from (12, 11) re-enters the lab. Step DOWN first to get off the
@@ -383,10 +390,17 @@ def run_phase_route1_to_viridian(drv: WalkthroughDriver) -> None:
     southbound jumps) by going west then east around each one.
     """
     path = (
-        ["up"] * 7 + ["left"] * 3 + ["up"] * 4 +
-        ["right"] * 5 + ["up"] * 4 + ["left"] * 3 +
-        ["up"] * 6 + ["right"] * 5 + ["up"] * 11 +
-        ["left"] * 3 + ["up"] * 3
+        ["up"] * 7
+        + ["left"] * 3
+        + ["up"] * 4
+        + ["right"] * 5
+        + ["up"] * 4
+        + ["left"] * 3
+        + ["up"] * 6
+        + ["right"] * 5
+        + ["up"] * 11
+        + ["left"] * 3
+        + ["up"] * 3
     )
 
     def _handle_intr() -> bool:
@@ -440,11 +454,11 @@ def run_phase_route1_to_viridian(drv: WalkthroughDriver) -> None:
 
 
 PHASES = [
-    ("intro",           run_phase_intro),
-    ("exit_house",      run_phase_exit_house),
-    ("oak_intercept",   run_phase_oak_intercept),
-    ("pick_starter",    run_phase_pick_starter),
-    ("rival_battle",    run_phase_rival_battle),
+    ("intro", run_phase_intro),
+    ("exit_house", run_phase_exit_house),
+    ("oak_intercept", run_phase_oak_intercept),
+    ("pick_starter", run_phase_pick_starter),
+    ("rival_battle", run_phase_rival_battle),
     ("pallet_to_route1", run_phase_pallet_to_route1),
     ("route1_to_viridian", run_phase_route1_to_viridian),
 ]
@@ -457,8 +471,12 @@ def main() -> int:
     parser.add_argument("--outdir", default="walkthrough_output")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--stop-after", choices=list(STOP_AFTER), default="route1_to_viridian")
-    parser.add_argument("--view", action="store_true", default=False,
-                        help="Open an SDL2 window so the game is visible in color while running.")
+    parser.add_argument(
+        "--view",
+        action="store_true",
+        default=False,
+        help="Open an SDL2 window so the game is visible in color while running.",
+    )
     args = parser.parse_args()
 
     rom = os.environ.get("POKERED_ROM_PATH")
@@ -472,7 +490,8 @@ def main() -> int:
         shutil.rmtree(outdir)
 
     session = Session.from_files(
-        rom, sym,
+        rom,
+        sym,
         expected_rom_sha1=os.environ.get(
             "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
         ),

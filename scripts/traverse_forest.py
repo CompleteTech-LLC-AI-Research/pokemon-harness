@@ -22,14 +22,26 @@ DIR = {"u": "up", "d": "down", "l": "left", "r": "right"}
 
 def pathfind(s: Session, goal: tuple[int, int]) -> str | None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".state") as tf:
-        tf.write(s.save_state()); tp = tf.name
+        tf.write(s.save_state())
+        tp = tf.name
     op = tp + ".txt"
     try:
         r = subprocess.run(
-            [sys.executable, "-u", "scripts/path_from_tiles.py",
-             "--state", tp, "--goal-xy", f"{goal[0]},{goal[1]}",
-             "--save-path-to", op],
-            env=os.environ, capture_output=True, text=True, timeout=30,
+            [
+                sys.executable,
+                "-u",
+                "scripts/path_from_tiles.py",
+                "--state",
+                tp,
+                "--goal-xy",
+                f"{goal[0]},{goal[1]}",
+                "--save-path-to",
+                op,
+            ],
+            env=os.environ,
+            capture_output=True,
+            text=True,
+            timeout=30,
             check=False,
         )
         if r.returncode != 0:
@@ -52,7 +64,8 @@ def fight_with_vine_whip(drv) -> None:
             for _ in range(200):
                 drv.press("a")
                 if not drv.gs().battle.active:
-                    for _ in range(60): drv.press("a")
+                    for _ in range(60):
+                        drv.press("a")
                     return
             return
         # Press B first to escape any sub-menu (PKMN, ITEM), return to main
@@ -76,15 +89,18 @@ def fight_with_vine_whip(drv) -> None:
             if pref in moves:
                 i = moves.index(pref)
                 if pp[i] > 0:
-                    slot = i; break
+                    slot = i
+                    break
         if slot is None:
             # Any damaging move
             for i, mid in enumerate(moves):
                 if mid in rtb.DAMAGING_MOVE_IDS and pp[i] > 0:
-                    slot = i; break
+                    slot = i
+                    break
         if slot is None:
             # Struggle — just press A (game forces Struggle)
-            drv.press("a"); continue
+            drv.press("a")
+            continue
         # Navigate cursor (starts at slot 0)
         for _ in range(slot):
             drv.press("down")
@@ -119,10 +135,13 @@ def main() -> int:
 
     for attempt in range(15):
         gs = drv.gs()
-        print(f"[attempt {attempt}] map=0x{gs.overworld.map_id:02x} "
-              f"xy=({gs.overworld.x},{gs.overworld.y}) "
-              f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp} "
-              f"PP={list(gs.party.mons[0].pp)}", flush=True)
+        print(
+            f"[attempt {attempt}] map=0x{gs.overworld.map_id:02x} "
+            f"xy=({gs.overworld.x},{gs.overworld.y}) "
+            f"HP={gs.party.mons[0].hp}/{gs.party.mons[0].max_hp} "
+            f"PP={list(gs.party.mons[0].pp)}",
+            flush=True,
+        )
         if gs.overworld.map_id == 0x2F:
             print("REACHED Forest North Gate!", flush=True)
             break
@@ -131,7 +150,8 @@ def main() -> int:
             break
         path = pathfind(s, (1, 0))
         if not path:
-            print("no path", flush=True); break
+            print("no path", flush=True)
+            break
         print(f"  path: {len(path)} steps", flush=True)
         for i, c in enumerate(path):
             gs = drv.gs()
@@ -144,14 +164,20 @@ def main() -> int:
             if drv.joy_locked():
                 for _ in range(30):
                     drv.press("a")
-                    if not drv.joy_locked(): break
+                    if not drv.joy_locked():
+                        break
             drv.press(DIR[c])
     gs = drv.gs()
-    print(f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"HP={gs.party.mons[0].hp}", flush=True)
+    print(
+        f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"HP={gs.party.mons[0].hp}",
+        flush=True,
+    )
     s._pyboy.screen.image.save("walkthrough_brock_color/shots/forest_final.png")
     if gs.overworld.map_id == 0x2F:
-        Path("walkthrough_brock_color/milestones/forest_north_gate.state").write_bytes(s.save_state())
+        Path("walkthrough_brock_color/milestones/forest_north_gate.state").write_bytes(
+            s.save_state()
+        )
         print("saved forest_north_gate.state", flush=True)
         return 0
     Path("walkthrough_brock_color/milestones/forest_last.state").write_bytes(s.save_state())

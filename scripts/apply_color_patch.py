@@ -64,8 +64,9 @@ def main() -> int:
     p.add_argument("rom", help="stock Pokémon Red .gb")
     p.add_argument("ips", help="pokered_color_vanilla.ips")
     p.add_argument("out", help="destination .gb (will be overwritten)")
-    p.add_argument("--expected-sha1", default=EXPECTED_COLOR_SHA1,
-                   help="expected SHA-1 of the patched output")
+    p.add_argument(
+        "--expected-sha1", default=EXPECTED_COLOR_SHA1, help="expected SHA-1 of the patched output"
+    )
     args = p.parse_args()
 
     rom = Path(args.rom).read_bytes()
@@ -77,12 +78,12 @@ def main() -> int:
     # checksums from the final patched data so any emulator will accept it.
     s = 0
     for i in range(0x134, 0x14D):
-        s = (s - patched[i] - 1) & 0xff
+        s = (s - patched[i] - 1) & 0xFF
     patched[0x14D] = s
-    gs = sum(patched) & 0xffff
-    gs = (gs - patched[0x14E] - patched[0x14F]) & 0xffff
-    patched[0x14E] = (gs >> 8) & 0xff
-    patched[0x14F] = gs & 0xff
+    gs = sum(patched) & 0xFFFF
+    gs = (gs - patched[0x14E] - patched[0x14F]) & 0xFFFF
+    patched[0x14E] = (gs >> 8) & 0xFF
+    patched[0x14F] = gs & 0xFF
     patched = bytes(patched)
     sha = hashlib.sha1(patched).hexdigest()
     Path(args.out).write_bytes(patched)

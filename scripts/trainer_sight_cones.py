@@ -18,6 +18,7 @@ in their facing direction (blocked by walls). pokered defines 4 in
 the constants but we use a conservative default of 5 here —
 empirically matches what the game treats as "in range".
 """
+
 from __future__ import annotations
 
 import re
@@ -48,14 +49,16 @@ def parse_object_events(path: Path) -> list[dict]:
         m = _OBJECT_RE.search(line)
         if not m:
             continue
-        events.append({
-            "x": int(m.group(1)),
-            "y": int(m.group(2)),
-            "movement": m.group(3),
-            "facing": m.group(4),
-            "trainer_class": m.group(5),
-            "trainer_set": int(m.group(6)) if m.group(6) else None,
-        })
+        events.append(
+            {
+                "x": int(m.group(1)),
+                "y": int(m.group(2)),
+                "movement": m.group(3),
+                "facing": m.group(4),
+                "trainer_class": m.group(5),
+                "trainer_set": int(m.group(6)) if m.group(6) else None,
+            }
+        )
     return events
 
 
@@ -67,8 +70,7 @@ _FACING_DELTA = {
 }
 
 
-def sight_cone_tiles(map_name: str, pret_root: Path,
-                     max_sight: int = 5) -> set[tuple[int, int]]:
+def sight_cone_tiles(map_name: str, pret_root: Path, max_sight: int = 5) -> set[tuple[int, int]]:
     """Return the set of (x, y) step cells in every STAY-trainer's
     sight cone on the given map. ``pret_root`` points at the cloned
     pret/pokeyellow repo.
@@ -94,16 +96,19 @@ def sight_cone_tiles(map_name: str, pret_root: Path,
 
 def trainer_sight_cones_cli() -> int:
     import argparse
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("map", help="Map name (e.g. MtMoon1F, Route3)")
-    p.add_argument("--pret-root", required=True,
-                   help="Path to pret/pokeyellow clone")
+    p.add_argument("--pret-root", required=True, help="Path to pret/pokeyellow clone")
     p.add_argument("--max-sight", type=int, default=5)
-    p.add_argument("--format", choices=("semi", "lines"), default="semi",
-                   help="semi: output as 'x,y;x,y;...' (for --extra-blockers)")
+    p.add_argument(
+        "--format",
+        choices=("semi", "lines"),
+        default="semi",
+        help="semi: output as 'x,y;x,y;...' (for --extra-blockers)",
+    )
     args = p.parse_args()
-    tiles = sight_cone_tiles(args.map, Path(args.pret_root),
-                              max_sight=args.max_sight)
+    tiles = sight_cone_tiles(args.map, Path(args.pret_root), max_sight=args.max_sight)
     if args.format == "semi":
         print(";".join(f"{x},{y}" for x, y in sorted(tiles)))
     else:

@@ -108,9 +108,7 @@ class _Deadline:
     def check(self, stage: str) -> None:
         now = self._clock()
         if now >= self.deadline:
-            raise DeadlineExceeded(
-                f"wall deadline of {self.seconds:g}s exceeded during {stage}"
-            )
+            raise DeadlineExceeded(f"wall deadline of {self.seconds:g}s exceeded during {stage}")
 
 
 class _SignalCancellation:

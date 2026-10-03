@@ -206,9 +206,7 @@ def _version_and_asset_metadata() -> dict[str, object]:
                 rom, sym = helper._ROM_PATHS[version]
                 fixture = helper._state_path(version)
             except Exception as error:  # noqa: BLE001  # helper drift remains reportable
-                assets[version] = {
-                    "error": {"type": type(error).__name__, "message": str(error)}
-                }
+                assets[version] = {"error": {"type": type(error).__name__, "message": str(error)}}
                 continue
         else:
             rom = sym = fixture = Path("")
@@ -264,9 +262,7 @@ def _version_and_asset_metadata() -> dict[str, object]:
             )
     source_fingerprints = {
         (
-            str(path.relative_to(REPO_ROOT))
-            if path.is_relative_to(REPO_ROOT)
-            else str(path)
+            str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
         ): _hash_file(path)
         for path in source_files
     }
@@ -350,14 +346,11 @@ class _CaptureLinkProxy:
         self._target = target
         self._capture = capture
         self._selected = frozenset(
-            _nonnegative_int(item, "capture frame ordinal")
-            for item in selected_frame_ordinals
+            _nonnegative_int(item, "capture frame ordinal") for item in selected_frame_ordinals
         )
         self._deadline = deadline
         if max_operation_frames is not None:
-            max_operation_frames = _positive_int(
-                max_operation_frames, "max_operation_frames"
-            )
+            max_operation_frames = _positive_int(max_operation_frames, "max_operation_frames")
         self._max_operation_frames = max_operation_frames
         self.frame_ordinal = 0
         self._captured: set[int] = set()
@@ -442,8 +435,7 @@ def _copy_hook_counters(counters: Mapping[str, object] | None) -> dict[str, obje
     for key, value in counters.items():
         if isinstance(value, (list, tuple)):
             copied[str(key)] = [
-                int(item) if isinstance(item, int) else _json_safe(item)
-                for item in value
+                int(item) if isinstance(item, int) else _json_safe(item) for item in value
             ]
         else:
             copied[str(key)] = _json_safe(value)
@@ -468,9 +460,7 @@ def _validate_output_root(output_dir: str | Path) -> Path:
     output_root = Path(output_dir).expanduser().resolve()
     repo_root = REPO_ROOT.resolve()
     if output_root == repo_root or output_root.is_relative_to(repo_root):
-        raise ValueError(
-            f"output_dir must be outside the source checkout: {output_root}"
-        )
+        raise ValueError(f"output_dir must be outside the source checkout: {output_root}")
     terminal_path = output_root / TERMINAL_FILENAME
     if terminal_path.exists():
         raise FileExistsError(
@@ -559,9 +549,7 @@ def run_pair_trade(
             "maps": {
                 "side-0": _safe_map_snapshot(session_proxies[0]) if session_proxies else {},
                 "side-1": (
-                    _safe_map_snapshot(session_proxies[1])
-                    if len(session_proxies) > 1
-                    else {}
+                    _safe_map_snapshot(session_proxies[1]) if len(session_proxies) > 1 else {}
                 ),
             },
             "hooks": _copy_hook_counters(counters),
@@ -600,9 +588,7 @@ def run_pair_trade(
             "stage": state.stage,
             "result": state.result,
             "frame_ordinal": (
-                link_proxy.frame_ordinal
-                if link_proxy is not None
-                else state.frame_ordinal
+                link_proxy.frame_ordinal if link_proxy is not None else state.frame_ordinal
             ),
             "requested_capture_frames": list(requested),
             "captured_frames": sorted(captured),
@@ -807,8 +793,7 @@ def run_pair_trade(
                         "message": str(error),
                     }
                 if not (
-                    cancellation.requested
-                    and terminal.get("result") == "completed_inspection"
+                    cancellation.requested and terminal.get("result") == "completed_inspection"
                 ):
                     break
             return_value = terminal

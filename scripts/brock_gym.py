@@ -132,11 +132,7 @@ class BrockDriver(rtb.Driver):
 
         # Step 4: move-menu selection — prefer Vine Whip.
         pp = self.read_pp()
-        moves = (
-            list(self.gs().party.mons[0].moves)
-            if self.gs().party.mons
-            else [0, 0, 0, 0]
-        )
+        moves = list(self.gs().party.mons[0].moves) if self.gs().party.mons else [0, 0, 0, 0]
         target = _select_brock_move(pp, moves)
         print(
             f"    battle: moves={moves} pp={pp} → slot {target}"
@@ -169,6 +165,7 @@ class BrockDriver(rtb.Driver):
 
 # ---- Navigation helpers -------------------------------------------------
 
+
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
@@ -185,8 +182,7 @@ def _enter_gym(drv: BrockDriver) -> bool:
     """
     gs = drv.gs()
     _log(
-        f"  enter_gym: start map=0x{gs.overworld.map_id:02x} "
-        f"xy=({gs.overworld.x},{gs.overworld.y})"
+        f"  enter_gym: start map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})"
     )
     if gs.overworld.map_id == M_PEWTER_GYM:
         _log("  already inside gym")
@@ -200,8 +196,10 @@ def _enter_gym(drv: BrockDriver) -> bool:
         # forest pathfinder failure left the player mid-forest. Return
         # False so the phase layer logs FAIL and moves on instead of
         # spinning for minutes.
-        _log(f"  FAIL: expected map 0x02 PEWTER or 0x36 PEWTER_GYM, "
-             f"got 0x{gs.overworld.map_id:02x}; aborting gym entry")
+        _log(
+            f"  FAIL: expected map 0x02 PEWTER or 0x36 PEWTER_GYM, "
+            f"got 0x{gs.overworld.map_id:02x}; aborting gym entry"
+        )
         return False
 
     # Walk to (16, 18) — the tile directly south of the warp — then UP
@@ -271,8 +269,7 @@ def _walk_up_until_battle(drv: BrockDriver, max_steps: int, label: str) -> bool:
         drv.press("up")
         now = drv.gs()
         if now.battle.active:
-            _log(f"  {label}: battle triggered after step at "
-                 f"({now.overworld.x},{now.overworld.y})")
+            _log(f"  {label}: battle triggered after step at ({now.overworld.x},{now.overworld.y})")
             return True
         if (now.overworld.x, now.overworld.y) == before:
             for _ in range(4):
@@ -376,8 +373,7 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
     )
     if gs.party.mons:
         m = gs.party.mons[0]
-        _log(f"  pre bulba: L{m.level} HP{m.hp}/{m.max_hp} "
-             f"moves={list(m.moves)} pp={list(m.pp)}")
+        _log(f"  pre bulba: L{m.level} HP{m.hp}/{m.max_hp} moves={list(m.moves)} pp={list(m.pp)}")
 
     # --- Phase 1: enter gym ------------------------------------------
     if not _enter_gym(drv):
@@ -423,8 +419,7 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
                 for attempt in range(4):
                     # Clear any lingering post-battle text.
                     for _ in range(30):
-                        if not drv.gs().text.dest_in_vram_tilemap \
-                                and not drv.joy_locked():
+                        if not drv.gs().text.dest_in_vram_tilemap and not drv.joy_locked():
                             break
                         drv.press("a")
                     # Walk toward (4, 2).
@@ -443,27 +438,29 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
                         else:
                             break
                         drv.press("a")
-                        if (drv.gs().overworld.x, drv.gs().overworld.y) \
-                                == before:
+                        if (drv.gs().overworld.x, drv.gs().overworld.y) == before:
                             stall += 1
                             if stall >= 5:
                                 break
                         else:
                             stall = 0
                     gs = drv.gs()
-                    _log(f"  brock: attempt {attempt+1} setup at "
-                         f"({gs.overworld.x},{gs.overworld.y}) "
-                         f"battle={gs.battle.active}")
+                    _log(
+                        f"  brock: attempt {attempt + 1} setup at "
+                        f"({gs.overworld.x},{gs.overworld.y}) "
+                        f"battle={gs.battle.active}"
+                    )
                     # Talk + mash A through monologue.
                     for i in range(60):
                         if drv.gs().battle.active:
-                            _log(f"  brock: attempt {attempt+1} dialog "
-                                 f"closed after {i} A-presses")
+                            _log(
+                                f"  brock: attempt {attempt + 1} dialog closed after {i} A-presses"
+                            )
                             break
                         drv.press("a")
                     if drv.gs().battle.active:
                         drv.resolve_battle()
-                        _log(f"  brock: attempt {attempt+1} battle resolved")
+                        _log(f"  brock: attempt {attempt + 1} battle resolved")
                     if drv.gs().progress.badges_raw & 0x01:
                         _log("  brock: badge obtained!")
                         break
@@ -503,8 +500,7 @@ def run_pewter_to_brock_badge(session: Session, driver: rtb.Driver | None = None
     )
     if gs.party.mons:
         m = gs.party.mons[0]
-        _log(f"  post bulba: L{m.level} HP{m.hp}/{m.max_hp} "
-             f"moves={list(m.moves)} pp={list(m.pp)}")
+        _log(f"  post bulba: L{m.level} HP{m.hp}/{m.max_hp} moves={list(m.moves)} pp={list(m.pp)}")
     return ok
 
 
@@ -531,9 +527,7 @@ def _cli() -> int:
         print("need POKERED_ROM_PATH, POKERED_SYM_PATH env vars", file=sys.stderr)
         return 2
 
-    sha1 = os.environ.get(
-        "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
-    )
+    sha1 = os.environ.get("POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a")
     session = Session.from_files(rom, sym, expected_rom_sha1=sha1)
     register_default_hooks(session)
 

@@ -424,7 +424,7 @@ class SplitModuleChecks(unittest.TestCase):
             def blank(path):
                 path.write_bytes(b"")
 
-            def symlink(path):
+            def symlink(path, stem=stem):
                 path.unlink()
                 path.symlink_to(CORE / f"{stem}.pxd")
 
@@ -446,8 +446,8 @@ class SplitModuleChecks(unittest.TestCase):
                 ]
                 # Swap the two leading entries without touching the digests.
                 lines = text.splitlines(keepends=True)
-                i = lines.index([ln for ln in lines if f"'{first}'" in ln][0])
-                j = lines.index([ln for ln in lines if f"'{second}'" in ln][0])
+                i = lines.index(next(ln for ln in lines if f"'{first}'" in ln))
+                j = lines.index(next(ln for ln in lines if f"'{second}'" in ln))
                 lines[i], lines[j] = lines[j], lines[i]
                 manifest.write_text("".join(lines))
                 with self.assertRaises((OSError, ValueError)):
@@ -487,15 +487,14 @@ class SplitModuleChecks(unittest.TestCase):
 
     def test_native_stage_refuses_overwriting_tracked_package(self):
         for stem in SPLIT_BLOBS:
-            with self.subTest(stem=stem):
-                with self.assertRaises(ValueError):
-                    COMPONENTS["stage_native_source"](
-                        CORE,
-                        stem,
-                        f"pyboy/core/{stem}.py",
-                        declarations=f"{stem}.pxd",
-                        build_root=CORE.parent.parent,
-                    )
+            with self.subTest(stem=stem), self.assertRaises(ValueError):
+                COMPONENTS["stage_native_source"](
+                    CORE,
+                    stem,
+                    f"pyboy/core/{stem}.py",
+                    declarations=f"{stem}.pxd",
+                    build_root=CORE.parent.parent,
+                )
 
     def test_setup_stages_the_split_modules_instead_of_their_facades(self):
         setup = (CORE.parent.parent / "setup.py").read_text()
