@@ -2706,6 +2706,88 @@ def test_no_detail_line_names_an_exception_type_unsafely():
     )
 
 
+def test_a_hostile_site_module_attribute_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """Reading ``site``'s attributes must not escape.
+
+    Round 4 guarded the two site *getters* but left the attribute reads that
+    fetch them unguarded.  An interpreter that replaced ``site`` with a hostile
+    ``ModuleType`` subclass controls what ``getattr`` returns, and that lookup
+    is a call into its code -- so a direct ``BaseException`` subclass raised
+    there escaped before either helper was reached.  The package is planted
+    outside the root so only withheld trust can produce the expected ``FAIL``.
+
+    This is the attribute *read*, which is a separate site from the getter
+    ``test_a_hostile_site_module_cannot_abort_the_guard`` covers: that row
+    installs a module whose ``getsitepackages`` raises, while this one installs
+    a module that raises merely when the attribute is looked up.
+    """
+
+    class ExplodingAttribute(BaseException):
+        pass
+
+    class EvilSite(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "getsitepackages":
+                raise ExplodingAttribute("site attribute escaped")
+            return super().__getattribute__(name)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "evil_site_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "evil_site_pkg" or name.startswith("evil_site_pkg."):
+            del sys.modules[name]
+    monkeypatch.setitem(sys.modules, "site", EvilSite("site"))
+
+    report = check_origins(tmp_path / "checkout", ("evil_site_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_site_path_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """A site entry must be interrogated inside a fail-closed boundary.
+
+    This is the half-guard shape again, one level down: guarding the getter
+    does not guard the value the getter returns.  The conversion was handled
+    for ``(OSError, ValueError, RuntimeError)`` only, and the truth test sat
+    outside the ``try`` entirely -- so a returned path-like raising from
+    ``__fspath__`` or ``__bool__`` escaped.  A site directory that cannot be
+    converted is simply not usable, and an unusable one contributes no root.
+    """
+
+    class ExplodingSiteEntry(BaseException):
+        pass
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "hostile_site_entry_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "hostile_site_entry_pkg" or name.startswith("hostile_site_entry_pkg."):
+            del sys.modules[name]
+
+    class HostileFspath:
+        def __fspath__(self):
+            raise ExplodingSiteEntry("site path escaped")
+
+    class HostileTruth:
+        def __bool__(self):
+            raise ExplodingSiteEntry("site path truth test escaped")
+
+        def __fspath__(self):
+            return "/tmp"
+
+    import site as site_module
+
+    for entry in (HostileFspath(), HostileTruth()):
+        monkeypatch.setattr(site_module, "getsitepackages", lambda entry=entry: [entry])
+
+        report = check_origins(tmp_path / "checkout", ("hostile_site_entry_pkg",))
+
+        assert report["status"] == "FAIL", report
+
+
 def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
     """A genuine site-packages ``__file__`` must not authenticate a stranger.
 
