@@ -53,3 +53,17 @@ yet reported on it.
 
 Independent review is outstanding for every open PR, and #569 has not been
 reviewed by anyone other than its author. Release remains **PARTIAL**.
+
+## Confirmed by CI
+
+    run 37157467035, head 25607fc
+    Native build and complete unit tier (Python 3.12): pass  (8m1s)
+      PASS  unit  total=8314 passed=8314 failed=0 skipped=0 xfailed=0 xpassed=0 errors=0
+
+The same tier that reported `total=8314 passed=8313 failed=1` at `11eb719` is now
+`total=8314 passed=8314 failed=0`. One test changed state and it is the one this
+commit repairs; nothing else moved.
+
+#569 is therefore green on its own head. It is still **not merged**: independent
+review remains outstanding, and #568 must land with it (the producer exclusion
+lives in #569).
