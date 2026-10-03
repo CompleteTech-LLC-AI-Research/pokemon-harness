@@ -968,6 +968,179 @@ operator provisions the allocation declared in §3c, which is an action outside
 this job's authority. Nothing here may be used to promote a shared-host result
 to capacity qualification.
 
+## 3b. Benchmark matrix-worker concurrency
+
+Issue #106. `scripts/benchmark_matrix_concurrency.py` measures whether running
+the declared trade/battle matrices at more than one worker actually increases
+qualified throughput, and it refuses to recommend a worker count that the
+measurement does not support.
+
+The gate's default stays `--matrix-workers 1`, because each matrix row runs an
+emulator pair and the historical four-worker trade matrix failed `18/19`. This
+benchmark exists to replace that assumption with a measurement, not to raise
+the default.
+
+### Command
+
+```bash
+python scripts/benchmark_matrix_concurrency.py \
+  --project-root . \
+  --capacity-policy path/to/capacity-policy.json \
+  --source-python .venv/bin/python \
+  --native-python .venv-cython/bin/python \
+  --worker-counts 1,2,4 \
+  --tiers trade,battle \
+  --evidence-dir target/matrix-concurrency/<run-id>
+```
+
+`--evidence-dir` must be new; the script refuses to overwrite an existing one.
+Each arm gets its own evidence directory and its own raw-output directory, and
+those raw directories are siblings rather than children because
+`production_gate.py` rejects a `--raw-output-dir` nested inside an
+`--evidence-dir`.
+
+The report-facing runtime names are `source` and `native`. The benchmark
+translates `native` to the gate's `cython` spelling when it builds the child
+command, because `production_gate.py` accepts only `source`, `cython`, or
+`both`. A single-runtime arm is given its interpreter through `--python`,
+which the gate applies to whichever runtime it was asked to execute.
+
+Pass `--capacity-policy` on the command line. Setting `POKERED_CAPACITY_POLICY`
+in the environment does not reach the gate, which reports
+`capacity admission is not enforced` unless it receives the flag.
+
+### What is recorded
+
+Every arm records the tested commit, the interpreter for its runtime, the
+input roots, the declared tiers, wall time, reaped child CPU seconds, per-case
+durations with nearest-rank percentiles, deadline headroom, resource pressure,
+and the counts of passing, failed, incomplete, interrupted, and unstarted rows.
+
+Failed, incomplete, interrupted, and unstarted rows all count toward an arm's
+required total, and throughput divides that total by the arm's wall time, so a
+shrinking numerator cannot flatter a configuration. Note that this alone does
+not penalise an arm that *finished early by skipping* — such an arm can still
+post a high per-hour figure. What prevents one from being selected is that
+`select_policy` refuses any arm with an incomplete, interrupted, unstarted, or
+failed row, and refuses any arm whose recorded outcomes fall short of the rows
+it declared. A row that produced no outcome at all is not a passing row, a
+failure, or a skip, so without that check an arm could quietly run less than it
+declared and satisfy every other condition. A tier the gate blocked before
+dispatch — missing ROM or fixture assets — declares its rows and produces no
+per-row results at all; those rows are counted as unstarted, so an arm blocked
+on absent assets reports the work it could not attempt rather than appearing to
+have measured nothing.
+
+The report labels each rate for what it divides. `required_rows_per_hour`
+divides every declared row — passing, failed, skipped, unstarted — by wall time
+and is the figure arms are ranked on, because an arm that skipped work to
+finish sooner must not post a higher figure. `clean_passing_per_hour` divides
+only passing rows and is context for a reader. Calling the first one a
+*passing* rate would misreport an arm that did less work as one that completed
+more, so the two are always named for what they count.
+
+### When a policy is selected
+
+`selection: selected` appears only when every declared worker count has a
+complete, passing, comparable arm in every runtime, and all runtimes agree on
+the best worker count. Any of the following yields `unselected`, which is a
+valid result and never a defect:
+
+- a declared arm is missing, incomplete, or failed a required row;
+- the gate's own verdict for that arm was not `PASS`. `production_gate.py`
+  exits 0 if and only if its overall verdict is `PASS`, so a runtime,
+  collection, evidence, or capacity rejection blocks selection even when
+  individual rows passed;
+- the arm has no admitted capacity ceiling. Selection measures a worker count
+  against a CPU budget, so `--capacity-policy` is required to select;
+- the `workers=1` arm is absent. The shipped default is 1, so a recommendation
+  is only evidence if it is measured against that default;
+- the run did not measure both `trade` and `battle`. A worker policy governs
+  the declared matrix as a whole, so a single-tier run reports measurements but
+  cannot select a policy. Every arm must cover the whole matrix on its own: a
+  union across arms is not evidence, because a benchmark in which `workers=1`
+  measured only `trade` while `workers=2` and `workers=4` measured only `battle`
+  never measured any worker count on both tiers;
+- an arm produced no passing row;
+- an arm ran at a worker count that was never declared. The selector ranks and
+  selects only the declared experiment, so an API caller that supplies an
+  undeclared arm gets a refusal naming it rather than a policy chosen from a
+  concurrency the run never set out to measure;
+- an arm ran at an effective worker count different from the one it requested,
+  which means something below the request clamped it. Three ceilings apply and
+  the smallest one is the arm's real concurrency: the requested count, the
+  capacity policy's admitted pair ceiling, and the smallest declared tier row
+  count. The gate schedules at most one worker per row of a tier
+  (`max_workers = min(matrix_workers, len(nodeids))`), so a 44-worker request
+  runs the 19-row battle tier at 19 in practice. Row counts are read from the
+  report itself rather than hardcoded, and an unreadable tier row count yields
+  no effective count at all, so an unmeasurable arm is never reported as
+  running at exactly the requested count. Each tier really does use its own
+  concurrency, so the per-tier values are recorded as `tier_effective_workers`
+  and the arm-level `effective_workers` is the smallest of them — the count
+  that governs the matrix as a whole, which is the only value a single worker
+  policy could honestly be applied to;
+- two arms of one runtime ran a different number of rows in any given tier.
+  Arms run sequentially, so the manifest can change between them; a shift from
+  43 trade and 19 battle rows to 42 and 20 keeps the combined total at 62 while
+  trading a cheap row for an expensive one, and that timing difference would be
+  attributed to concurrency. Comparability is decided per tier, and an arm that
+  never recorded its per-tier rows is not comparable by assumption;
+- two arms ran different row ids at identical counts, or the two runtimes did.
+  Counts alone cannot prove the same work was timed: if the manifest swaps one
+  43-row trade node id for another between two sequential arms, every count
+  still reads 43/19 while a different set of tests ran. The gate reports the
+  exact `selected_nodeids`, so that is what comparability compares, within a
+  runtime and across the two;
+- the two runtimes measured different matrices. They run sequentially, and a
+  single worker policy has to be satisfied by both, so a per-runtime check
+  alone cannot see a manifest change between the source block and the native
+  block;
+- an arm recorded more outcomes than rows it declared. The gate's own PASS path
+  guards this, but a caller can construct an arm directly, and an inflated
+  denominator would inflate the throughput arms are ranked on;
+- the same runtime and worker count appeared twice. Two runs at one count are
+  run-to-run variance, not a worker-count effect, so ranking a faster repeat
+  against a slower reference would report variance as the effect of concurrency;
+- the runtimes disagree on the best worker count;
+- nothing beat the `workers=1` reference.
+
+`unselected` is reported, not repaired. The `workers=1` default is unchanged
+until a complete measurement selects otherwise, and selection is a report only:
+this script never edits a default, a policy, or a gate.
+
+### The per-arm wall-clock ceiling
+
+`--arm-timeout-seconds` bounds this harness's own child process; it relaxes no
+per-row deadline the gate enforces. When it is not supplied, the bound is
+derived from the same two sources the gate reads: the declared matrix rows in
+`tests/_tier_config.py` and `MATRIX_CASE_TIMEOUT_SECONDS` in
+`scripts/production_gate_model.py`. Each row is charged its full per-row
+budget because the gate may spend that much on one row before it finally
+reports the failure, making the sum a true upper bound rather than an
+estimate. A margin and a floor are applied so the bound still covers process
+start-up, report writing, and the final aggregate flush, and so it stays
+conservative if either source cannot be read. A hardcoded bound is wrong: a
+bound below the serial worst case interrupts a legitimate slow `workers=1`
+baseline and reports an unsupported `unselected` result that looks like a
+measurement rather than a harness artifact.
+
+Both sources are read by file path under `--project-root`, not by module name.
+An ordinary `import` returns whichever copy is already loaded — this checkout,
+or anything imported earlier — so a benchmark pointed at a different tree would
+otherwise budget against another tree's matrix and could return a bound below
+the real one. When the tree cannot be read, the bound is unknown and the floor
+applies; no other checkout's numbers are ever substituted.
+
+### Status
+
+No qualifying measurement is recorded. The benchmark is implemented and its
+accounting and selection logic are tested, but every real-ROM arm requires the
+five ROMs, three symbol files, and external fixture bytes, and the CPU
+admission it is meant to be measured against requires the runner described in
+§3c. Until both exist, #106 remains open and this section documents a command
+rather than a result.
+
 ## 4. Run the evidence tiers
 
 Run the tiers in order and save the complete output with the commit and
