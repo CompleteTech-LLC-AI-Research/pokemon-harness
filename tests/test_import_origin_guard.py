@@ -1889,6 +1889,34 @@ def test_package_flag_replaces_the_defaults_and_says_so(tmp_path, capsys):
     assert returncode == 1
     assert [item["package"] for item in payload["packages"]] == ["widget", "gadget"]
 
+    # The behaviour above is pinned on its own by
+    # ``test_package_flag_still_admits_a_real_install``.  This row additionally
+    # pins the wording the CLI shows, because the flag silently changes meaning
+    # if the help ever reverts to calling it additive.
+    #
+    # The wording is matched against whitespace-normalised text.  ``argparse``
+    # wraps help to the terminal width, and it wraps *inside* the phrase this
+    # row exists to pin: at ``COLUMNS=40`` the correct wording renders as
+    #
+    #     (repeatable;
+    #     replaces -- not adds
+    #     to --
+    #     pokered_harness and
+    #     pyboy)
+    #
+    # so a substring test for "not adds to" fails on a correct tree purely
+    # because of the terminal it ran in.  Collapsing runs of whitespace to a
+    # single space makes the assertion independent of wrapping while still
+    # failing on the misleading pre-#546 wording, which survives normalisation
+    # unchanged.
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "replaces" in help_text
+    assert "not adds to" in help_text
+    assert "additional distribution name" not in help_text
+
 
 def test_regular_package_refuses_a_foreign_path_portion(tmp_path, monkeypatch):
     """A regular package with a foreign ``__path__`` entry must FAIL.
