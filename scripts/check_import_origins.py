@@ -292,6 +292,19 @@ def _code_signature(code: object) -> tuple:
                     )
                 )
             else:
+                # This site reads ``type(constant).__name__`` directly rather
+                # than through ``_type_name``, unlike the finding-rendering
+                # paths.  It is safe anyway, and deliberately left alone:
+                # the whole loop sits inside this function's ``except
+                # BaseException`` boundary, so a hostile metaclass here
+                # refuses the *signature* -- it returns a fresh object that
+                # compares equal only to itself, so the code cannot match.
+                # Swapping in ``_describe`` would look tidier and would be a
+                # real behaviour change: ``repr`` and ``str`` differ for
+                # strings, and these tuples are compared for equality
+                # against a recompiled copy of the same function.  Making the
+                # rendering "safer" without need would risk refusing genuine
+                # finders, which is the worse failure here.
                 items.append((type(constant).__name__, repr(constant)))
         return (
             tuple(items),
