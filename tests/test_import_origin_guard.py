@@ -2573,6 +2573,121 @@ def test_an_interrupt_from_the_site_layout_still_propagates(monkeypatch):
             origins._site_packages_roots()
 
 
+def test_a_hostile_owner_iterable_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """The owner list must be materialised inside a fail-closed boundary.
+
+    The previous repair guarded ``distributions.get(...)``, which protected the
+    *lookup* but not the value it returns.  ``packages_distributions`` is
+    attacker-reachable, so the returned value need not be a list at all:
+    iterating it runs its ``__iter__``, and a direct ``BaseException`` subclass
+    raised there escaped ``check_origins``.  As in the two rows above, the
+    package is planted outside the root so only a withheld allowed root can
+    produce the expected ``FAIL``.
+    """
+
+    class ExplodingOwners(BaseException):
+        pass
+
+    class HostileOwners:
+        def __iter__(self):
+            raise ExplodingOwners("owners iteration")
+
+    class HostileMapping:
+        def get(self, key, default=()):
+            return HostileOwners()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _make_package(outside, "unenumerable_pkg")
+    monkeypatch.syspath_prepend(str(outside))
+    for name in list(sys.modules):
+        if name == "unenumerable_pkg" or name.startswith("unenumerable_pkg."):
+            del sys.modules[name]
+
+    monkeypatch.setattr(origins.importlib.metadata, "packages_distributions", HostileMapping)
+
+    report = check_origins(tmp_path / "checkout", ("unenumerable_pkg",))
+
+    assert report["status"] == "FAIL", report
+
+
+def test_a_hostile_exception_metaclass_cannot_abort_the_guard(tmp_path, monkeypatch):
+    """No finding may read ``type(exc).__name__`` while formatting itself.
+
+    ``_type_name`` was added for exactly this, but the first round used it in
+    one place only.  Four other sites interpolated ``type(exc).__name__``
+    directly into their detail line -- so an exception class with a metaclass
+    that raises on ``__name__`` turned the act of *reporting* a failure into
+    the failure itself.  The row asserts the property rather than the sites:
+    every detail line the guard builds must survive an exception whose type
+    cannot be named.
+
+    ``_resolve_origin`` imports the package it is auditing, so the hostile
+    exception is raised by replacing the importer for the duration.
+    """
+
+    class HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise RuntimeError("hostile exception typename")
+            return super().__getattribute__(name)
+
+    class Hostile(BaseException, metaclass=HostileMeta):
+        pass
+
+    _make_package(tmp_path, "trap_pkg")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in list(sys.modules):
+        if name == "trap_pkg" or name.startswith("trap_pkg."):
+            del sys.modules[name]
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def hostile_import(name, *args, **kwargs):
+        if name == "trap_pkg":
+            raise Hostile()
+        return real_import(name, *args, **kwargs)
+
+    def run():
+        with _import_replaced(hostile_import):
+            return check_origins(tmp_path, ("trap_pkg",))
+
+    # Called through a reporting wrapper: when the guard regresses, the
+    # escaping ``RuntimeError`` names the hostile metaclass, and pytest's
+    # repr of that exception reads the metaclass too -- so a bare
+    # ``check_origins`` call here would abort the whole session instead of
+    # reporting this one row.
+    try:
+        report = run()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - see comment above
+        report = {"status": f"<escaped {type(exc).__name__}>"}
+
+    assert report["status"] == "FAIL", report
+
+
+def test_no_detail_line_names_an_exception_type_unsafely():
+    """Guard against re-introducing a bare ``type(exc).__name__``.
+
+    The round that added ``_type_name`` fixed one site out of five, which is
+    exactly the failure mode a reviewer has to catch by hand.  This row reads
+    the module's own source and fails if a ``type(exc).__name__`` reappears, so
+    the next person to add an error message gets told instead of shipping
+    another escape.  It reads the source rather than the behaviour because the
+    behaviour is already covered above; this is the cheap guard on the pattern.
+    """
+
+    source = Path(origins.__file__).read_text(encoding="utf-8")
+
+    assert "type(exc).__name__" not in source, (
+        "exception type names must go through _type_name(): a hostile exception "
+        "class controls its own metaclass"
+    )
+
+
 def test_a_finder_cannot_borrow_a_real_installed_modules_file(tmp_path, monkeypatch):
     """A genuine site-packages ``__file__`` must not authenticate a stranger.
 

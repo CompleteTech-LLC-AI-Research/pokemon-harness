@@ -944,7 +944,19 @@ def _allowed_roots(
             # An owner list that cannot be read attributes no install to this
             # checkout, so no root is admitted -- fail closed.
             continue
-        for owner in owners:
+        try:
+            owner_list = list(owners)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:  # noqa: BLE001, S112 - metadata iterable is untrusted
+            # The guarded ``.get`` above protects the *lookup*, but the value it
+            # returns is just as attacker-controlled and need not be a list:
+            # iterating it runs its ``__iter__``, which can raise a direct
+            # ``BaseException`` subclass and escape ``check_origins``.  An
+            # owner list that cannot be enumerated attributes no install to
+            # this checkout, so no root is admitted -- fail closed.
+            continue
+        for owner in owner_list:
             if not _is_this_checkout(project_root, _installed_from(owner, project_root)):
                 continue
             try:
@@ -979,7 +991,7 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - a failed import is a finding
-        return None, f"import failed: {type(exc).__name__}: {_describe(exc)}"
+        return None, f"import failed: {_type_name(exc)}: {_describe(exc)}"
     # Publish the module this origin was read from, so the portion check can
     # use it without reading ``__file__`` a second time.  ``__file__`` is
     # mutable interpreter state and a hostile path-like can answer
@@ -1000,7 +1012,7 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - hostile getter is a finding
-        return None, f"__file__ could not be read: {type(exc).__name__}: {_describe(exc)}"
+        return None, f"__file__ could not be read: {_type_name(exc)}: {_describe(exc)}"
     if origin is None:
         # Namespace packages legitimately report ``None``; their search path is
         # the only available statement of where they resolved.
@@ -1009,7 +1021,7 @@ def _resolve_origin(package: str) -> tuple[Path | None, str]:
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException as exc:  # noqa: BLE001 - hostile getter is a finding
-            return None, f"__path__ could not be read: {type(exc).__name__}: {_describe(exc)}"
+            return None, f"__path__ could not be read: {_type_name(exc)}: {_describe(exc)}"
         if not locations:
             return None, "module exposed neither __file__ nor __path__"
         candidate = locations[0]
@@ -1187,7 +1199,7 @@ def _foreign_path_locations(
         # The portions are how a package can smuggle a foreign submodule, so
         # an unreadable ``__path__`` is exactly the condition being guarded.
         # Report it instead of letting the getter's exception escape.
-        return [], [f"__path__ could not be read: {type(exc).__name__}: {_describe(exc)}"]
+        return [], [f"__path__ could not be read: {_type_name(exc)}: {_describe(exc)}"]
     for location in portions:
         if not any(_is_within(location, allowed, strict=False) for allowed in allowed_roots):
             # Coerce through ``_resolve_path`` rather than ``Path(...).resolve``
