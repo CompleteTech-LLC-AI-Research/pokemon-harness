@@ -170,26 +170,57 @@ candidate fixes the omission and adds tests that hold for both subcommands and
 **both** files:
 
 1. the path is **listed** in the lane;
-2. Ruff actually **rejects a violation** in it, probed through the lane's own
+2. Ruff actually **rejects violations** in it, probed through the lane's own
    option vector;
-3. the runner actually **executes** those lanes.
+3. the runner actually **executes** those lanes, and a failure there actually
+   stops it;
+4. the hosted workflow actually runs the step that carries those lanes.
 
 Point 2 is deliberately behavioural rather than a model of Ruff's rule
-resolution. The probe feeds a known-bad snippet to `ruff` on stdin under
+resolution. The probe feeds known-bad snippets to `ruff` on stdin under
 `--stdin-filename <benchmark>` carrying the lane's real options, and asserts
-the verdict is nonzero and not an argparse failure. That single question
-absorbs every way the file could escape linting: an `--exclude` that drops it,
-a lane-level `--ignore=ALL` or a narrowed `--select`, a `per-file-ignores`
-entry of `["ALL"]`, and `--exit-zero` all answer "no violation", and all of
-them fail here. It also stops short of over-rejecting: a *selective* per-file
-ignore such as `["F401"]` still reports `F821`, so the probe passes.
+the verdict is nonzero and not an argparse failure. That question absorbs
+every way the file could escape linting: an `--exclude` that drops it, a
+lane-level `--ignore=ALL`, a `per-file-ignores` entry of `["ALL"]`, and
+`--exit-zero` all answer "no violation", and all of them fail here.
 
-Two lanes of escape cannot be detected by probing and are rejected by name
+One probe rule is not enough, though, and that was found in review. A lane
+narrowed to `--select=F821` still fails an undefined name while an unused
+import goes unreported, and a `per-file-ignores = ["F821"]` entry does the
+same. So the check lane is probed with three independent violations — F821,
+F401 and F811 — and must reject at least two of them. That catches a narrowed
+or blanket-disabled rule set while leaving a *selective* ignore of one rule
+alone, which is a legitimate reviewable decision rather than an escape.
+Measured behaviour of that probe set:
+
+| lane configuration | F821 | F401 | F811 |
+|---|---|---|---|
+| unmodified | rejected | rejected | rejected |
+| `--select=F821` | rejected | **silent** | **silent** |
+| `per-file-ignores = ["F821"]` | silent | rejected | rejected |
+| `per-file-ignores = ["ALL"]` | silent | silent | silent |
+| `--ignore=ALL` | silent | silent | silent |
+
+F841 was the third probe at first and was dropped: Ruff lists it as enabled in
+`--show-settings` but does not report it for that input, so a probe whose rule
+never fires would assert nothing. `ruff format --check` has no diagnostic to
+match at all — it exits nonzero and prints nothing — so the format lane is
+judged on exit status across two independent unformatted snippets, requiring
+both.
+
+Four lanes of escape cannot be detected by probing and are rejected by name
 instead. `--exit-zero` keeps printing diagnostics while forcing exit 0, so a
-real violation no longer fails CI; `--range` format-checks only a line span, so
-an unformatted region outside the span is never checked — measured directly:
-with `--range=1-1` an unformatted line 2 passes while a full `--check` on the
-same input fails.
+real violation no longer fails CI; `--fix` repairs the violation and also exits
+0, so a gate that silently rewrites the benchmark is not a gate; `--range`
+format-checks only a line span, so an unformatted region outside the span is
+never checked — measured directly, with `--range=1-1` an unformatted line 2
+passes while a full `--check` on the same input fails; and `--diff` changes
+what the formatter emits.
+
+`--select` and `--ignore` themselves are deliberately *not* rejected. Narrowing
+a rule set is a reviewable decision, and refusing the option would be
+over-rejecting; the probe above already fails when the narrowing drops a rule
+CI depends on.
 
 An earlier revision of this probe injected `--force-exclude`, which changed the
 lane's own behaviour rather than measuring it: with an `extend-exclude` naming
@@ -207,6 +238,15 @@ no dependency install, no gate, no wheel build, no network — and redirects
 `TMPDIR` into a scratch directory that is removed afterwards. It costs about
 4 seconds.
 
+That trace alone was still not enough, because the stub exits 0: wrapping the
+lanes in `set +e` left every test green, since the trace showed the lanes
+running but never showed a nonzero exit mattering. So the runner is executed a
+second time with the stub failing the main `ruff check` lane exactly as a real
+violation would, and the trace must end there. Point 4 covers the hosted path,
+which the trace cannot reach: `if: ${{ false }}` on the lint/format step also
+left every test green, because GitHub replaces the implicit `success()` with a
+step-level condition.
+
 ### What is deliberately *not* rejected
 
 Two mutations leave the test green, and that is correct rather than a gap.
@@ -218,7 +258,10 @@ contain a real `F821`:
 | (none) | yes | yes |
 | `--force-exclude` alone | yes | yes |
 | `--exclude=scripts` alone | yes | yes |
+| `--exclude=<benchmark>` alone | yes | yes |
+| `--exclude <benchmark>` (operand form) alone | yes | yes |
 | `--exclude=scripts --force-exclude` | **no** | no |
+| `--exclude <benchmark> --force-exclude` | **no** | no |
 
 Ruff's `--exclude` does not drop an explicitly-passed file unless
 `--force-exclude` is also present, so the first three rows are true passes: the
@@ -236,21 +279,27 @@ suite re-run; every row was observed to fail.
 | entry removed from the format lane | yes |
 | `--force-exclude --exclude=<benchmark>` in the runner's lanes | yes |
 | `--force-exclude --exclude=<benchmark>` in the workflow's lanes only | yes |
-| `--exclude <benchmark>` in the space-separated operand form | yes |
 | `per-file-ignores = ["ALL"]` for the benchmark in `pyproject.toml` | yes |
 | `--ignore=ALL` in a check lane | yes |
 | `--select=E501` narrowing a check lane past every diagnostic rule | yes |
+| `--select=F821` narrowing a check lane past the other rules | yes |
 | `--exit-zero` in both check lanes | yes |
+| `--fix` in both check lanes | yes |
 | `--range=1-1` in both format lanes | yes |
 | both main lanes wrapped in `if false; then ... fi` | yes |
+| `set +e` around both main lanes | yes |
+| `if: ${{ false }}` on the workflow's lint/format step | yes |
+| `if: always()` on the workflow's unit job | yes |
 | `--force-exclude` alone in the lanes | n/a — not an escape (see above) |
 | `--exclude=scripts` alone in the lanes | n/a — not an escape (see above) |
+| `--exclude <benchmark>` in the space-separated operand form | n/a — not an escape (see above) |
+| `per-file-ignores = ["F821"]` only, for the benchmark | n/a — selective, not a blanket disable |
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 118 passed
+-> 120 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
