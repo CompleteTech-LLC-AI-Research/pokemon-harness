@@ -47,7 +47,7 @@ def _arm(
     *,
     runtime: str = "source",
     workers: int = 1,
-    passing: int = 18,
+    passing: int = 62,
     failed: int = 0,
     incomplete: int = 0,
     not_started: int = 0,
@@ -93,8 +93,13 @@ def _tier(name: str, *, rows: int, with_cases: bool = True):
     return tier
 
 
-def _full_set(*, source_walls, native_walls, passing: int = 18):
-    """Return complete arms for both runtimes at workers 1/2/4."""
+def _full_set(*, source_walls, native_walls, passing: int = 62):
+    """Return complete arms for both runtimes at workers 1/2/4.
+
+    ``passing`` defaults to the full declared matrix (43 trade + 19 battle) so
+    a positive selection fixture describes an arm that actually produced an
+    outcome for every row it declared.
+    """
 
     arms = []
     for runtime, walls in (("source", source_walls), ("native", native_walls)):
@@ -1113,3 +1118,119 @@ class TestArmBoundIsScopedToTheRequestedRoot:
         assert worst == 600 * 900.0 + 300 * 1200.0
         # The floor is a floor, not a cap: a larger matrix must raise the bound.
         assert bench.default_arm_timeout_seconds(tmp_path) > worst > 108000.0
+
+
+class TestDeclaredRowsMustAllProduceAnOutcome:
+    """An arm cannot select a policy having run less than it declared."""
+
+    def test_a_single_passing_row_cannot_satisfy_a_sixty_two_row_declaration(self):
+        # Every other check passes: no row failed, none was skipped, and the
+        # positive-passing test is satisfied.  But 61 declared rows produced no
+        # outcome at all, so the arm ran less than it declared and cannot be
+        # compared against an arm that ran all of them.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall, passing=1)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0), (4, 80.0))
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any(
+            "recorded 1 outcome(s) for 62 declared row(s)" in reason
+            for reason in selection["reasons"]
+        )
+
+    def test_a_full_arm_is_unaffected_by_the_new_check(self):
+        arms = _full_set(source_walls=(120.0, 90.0, 80.0), native_walls=(120.0, 90.0, 80.0))
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "selected"
+        assert selection["policy"]["matrix_workers"] == 4
+
+    def test_a_partial_declaration_is_not_reported_as_complete_work(self):
+        # A single-tier arm declares 43 rows; recording all 43 is fine.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall, passing=43, tiers=("trade",))
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0))
+        ]
+        for arm in arms:
+            arm.tier_row_totals = {"trade": 43}
+        reasons = bench.select_policy(arms, worker_counts=(1, 2))["reasons"]
+        assert not any("produced no outcome" in reason for reason in reasons)
+
+
+class TestRuntimesMustMeasureTheSameMatrix:
+    """A single worker policy is selected from both runtimes together."""
+
+    def test_runtimes_with_different_per_tier_rows_are_refused(self):
+        # Each runtime is internally consistent, so per-runtime comparability
+        # cannot see this.  A manifest change between the sequential runtime
+        # blocks would otherwise be folded into the concurrency comparison.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt, walls in (("source", (120.0, 90.0, 80.0)), ("native", (120.0, 90.0, 80.0)))
+            for w, wall in zip((1, 2, 4), walls, strict=True)
+        ]
+        for arm in arms:
+            arm.tier_row_totals = (
+                {"trade": 43, "battle": 19}
+                if arm.plan.runtime == "source"
+                else {"trade": 42, "battle": 20}
+            )
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("did not measure the same matrix" in reason for reason in selection["reasons"])
+
+    def test_matching_runtimes_are_still_selectable(self):
+        arms = _full_set(source_walls=(120.0, 90.0, 80.0), native_walls=(120.0, 90.0, 80.0))
+        assert bench.select_policy(arms, worker_counts=(1, 2, 4))["outcome"] == "selected"
+
+
+class TestBlockedTiersKeepTheirDeclaredRows:
+    """A pre-dispatch BLOCKED tier must not erase the work it declared."""
+
+    def test_a_blocked_tier_counts_every_declared_row_as_unstarted(self):
+        # production_gate_matrix returns BLOCKED with selected_nodeids and no
+        # case_results when required assets are missing.  Reading only the
+        # aggregates reports zero, which would drop all 62 rows from the
+        # denominator and describe an arm that attempted nothing as an arm that
+        # measured nothing.
+        report = {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "BLOCKED",
+                    "reason": "required assets unavailable",
+                    "counts": {"passed": 0, "failed": 0, "errors": 0, "skipped": 0},
+                    "selected_nodeids": [f"tests/t.py::test[trade-{i}]" for i in range(43)],
+                    "case_results": [],
+                },
+                {
+                    "name": "battle",
+                    "status": "BLOCKED",
+                    "reason": "required assets unavailable",
+                    "counts": {"passed": 0, "failed": 0, "errors": 0, "skipped": 0},
+                    "selected_nodeids": [f"tests/t.py::test[battle-{i}]" for i in range(19)],
+                    "case_results": [],
+                },
+            ]
+        }
+        counts = bench.tier_counts(report, ("trade", "battle"))
+        assert counts["not_started"] == 62
+        assert counts["completed_passing"] == 0
+        arm = bench.ArmResult(
+            plan=_plan(),
+            completed_passing=counts["completed_passing"],
+            not_started=counts["not_started"],
+            tier_row_totals={"trade": 43, "battle": 19},
+        )
+        assert arm.required_rows == 62
+        assert arm.complete is False
+
+    def test_a_blocked_tier_without_declared_rows_is_incomplete(self):
+        report = {
+            "tiers": [{"name": "trade", "status": "BLOCKED", "counts": {"passed": 0, "failed": 0}}]
+        }
+        counts = bench.tier_counts(report, ("trade",))
+        assert counts["incomplete"] == 1
+        assert counts["not_started"] == 0

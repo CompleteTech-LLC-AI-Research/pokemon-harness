@@ -226,6 +226,42 @@ run in its read-only sandbox because pytest could not create a temporary file,
 so its counterexamples were reproduced by importing the module directly rather
 than by running the suite.
 
+## Seventh review round: three findings on `50f1a19e`
+
+A sixth independent review of the rebased head `50f1a19e` raised three
+findings. All three were confirmed and fixed; the reviewer reproduced each one
+by importing the module directly.
+
+| # | finding | disposition |
+|---|---|---|
+| 1 | selection never checked that recorded outcomes covered the declared rows | fixed — an arm declaring 62 rows but recording one passing row passed every other check: nothing failed, nothing was skipped, and the positive-passing test was satisfied by that single row. Selection now refuses an arm whose recorded outcomes fall short of its declared rows |
+| 2 | comparability was checked only within a runtime, so the two runtimes could measure different matrices | fixed — the runtimes run sequentially and one worker policy must satisfy both, so a per-runtime check cannot see a manifest change between the source and native blocks. The selector now also requires both runtimes to report the same per-tier row counts |
+| 3 | a pre-dispatch `BLOCKED` tier reported zero rows | fixed — `production_gate_matrix` returns `BLOCKED` with `selected_nodeids` and no `case_results` when required assets are missing. Reading only the aggregates returned zero, dropping all 62 declared rows from the denominator and describing an arm that attempted nothing as one that measured nothing. Those rows now count as unstarted |
+
+The reviewer also found that the `_arm` fixture defaulted to 18 passing outcomes
+against 62 declared rows, so every positive selection test was passing on
+evidence the selector would now refuse. The fixture default is now the full
+declared matrix, which makes the positive tests describe arms that really did
+produce an outcome for every row they declared.
+
+Each finding was re-checked by re-running the reviewer's own reproduction:
+
+```
+finding1 -> unselected ['source/workers-1 recorded 1 outcome(s) for 62 declared row(s); 61 row(s) produced no outcome']
+finding2 -> unselected ["runtimes did not measure the same matrix; per-tier row counts differ between them: ..."]
+finding3 -> {'completed_passing': 0, 'failed': 0, 'incomplete': 0, 'interrupted': 0, 'not_started': 62}
+```
+
+Seven regression tests were added: a single passing row cannot satisfy a 62-row
+declaration, a full arm is unaffected by the new check, a partial single-tier
+declaration is not flagged, runtimes with different per-tier rows are refused,
+matching runtimes remain selectable, a blocked tier counts all its declared
+rows as unstarted, and a blocked tier with no declared rows is incomplete.
+
+The reviewer confirmed the derived serial row budget is 61,500 s against a
+108,000 s default bound, and found no deadline, threshold, skip, xfail, gate, or
+assertion relaxation in the diff.
+
 ## Policy selection is deliberately withheld
 
 No worker policy is recommended and the `workers=1` default is unchanged.

@@ -1022,7 +1022,14 @@ shrinking numerator cannot flatter a configuration. Note that this alone does
 not penalise an arm that *finished early by skipping* — such an arm can still
 post a high per-hour figure. What prevents one from being selected is that
 `select_policy` refuses any arm with an incomplete, interrupted, unstarted, or
-failed row. The separate passing-row rate is reported as context and is never
+failed row, and refuses any arm whose recorded outcomes fall short of the rows
+it declared. A row that produced no outcome at all is not a passing row, a
+failure, or a skip, so without that check an arm could quietly run less than it
+declared and satisfy every other condition. A tier the gate blocked before
+dispatch — missing ROM or fixture assets — declares its rows and produces no
+per-row results at all; those rows are counted as unstarted, so an arm blocked
+on absent assets reports the work it could not attempt rather than appearing to
+have measured nothing. The separate passing-row rate is reported as context and is never
 used to rank arms or choose a policy.
 
 ### When a policy is selected
@@ -1072,6 +1079,10 @@ valid result and never a defect:
   trading a cheap row for an expensive one, and that timing difference would be
   attributed to concurrency. Comparability is decided per tier, and an arm that
   never recorded its per-tier rows is not comparable by assumption;
+- the two runtimes measured different matrices. They run sequentially, and a
+  single worker policy has to be satisfied by both, so a per-runtime check
+  alone cannot see a manifest change between the source block and the native
+  block;
 - the runtimes disagree on the best worker count;
 - nothing beat the `workers=1` reference.
 

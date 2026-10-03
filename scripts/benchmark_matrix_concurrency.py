@@ -387,6 +387,19 @@ def tier_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, int]:
         if isinstance(case_results, list) and case_results:
             for case in case_results:
                 _accumulate_case(totals, case)
+        elif tier.get("status") == "BLOCKED":
+            # A tier the gate blocked before dispatch declares its rows in
+            # ``selected_nodeids`` and produces no ``case_results`` at all.
+            # Reading only the aggregates returns zero for it, which erases
+            # every row it was required to run and makes the arm's denominator
+            # describe work the gate never even attempted.  Each of those rows
+            # had no admission decision and no lifecycle state, so it is
+            # unattempted work, not a row that produced an outcome.
+            declared = tier.get("selected_nodeids")
+            if isinstance(declared, list) and declared:
+                totals["not_started"] += len(declared)
+            else:
+                totals["incomplete"] += 1
         else:
             totals["completed_passing"] += _as_int(counts.get("passed"))
             totals["failed"] += _as_int(counts.get("failed")) + _as_int(counts.get("errors"))
@@ -864,6 +877,20 @@ def select_policy(
             reasons.append(f"{result.plan.key()} failed {result.failed} required row(s)")
         if result.completed_passing <= 0:
             reasons.append(f"{result.plan.key()} produced no passing row")
+        declared_rows = sum(result.tier_row_totals.values())
+        if declared_rows and result.required_rows < declared_rows:
+            # Every declared row must have produced a terminal outcome.  Without
+            # this, an arm declaring 62 rows but recording one passing row passes
+            # every other check: no row failed, none was skipped, and the
+            # positive-passing test is satisfied by that single row.  The gap
+            # between declared and recorded work is unaccounted-for work, and an
+            # arm that ran less than it declared cannot be compared against one
+            # that ran all of it.
+            reasons.append(
+                f"{result.plan.key()} recorded {result.required_rows} outcome(s) for "
+                f"{declared_rows} declared row(s); "
+                f"{declared_rows - result.required_rows} row(s) produced no outcome"
+            )
         if (
             result.effective_workers is not None
             and result.effective_workers != result.plan.requested_workers
@@ -896,6 +923,25 @@ def select_policy(
                 f"{runtime} arms are not comparable; their declared tiers or "
                 f"per-tier row counts differ: "
                 f"{ {a.plan.key(): a.tier_row_totals for a in arms} }"
+            )
+
+    # The runtimes must also have measured the same work.  They run
+    # sequentially, so a manifest change between the source block and the
+    # native block would otherwise be invisible: each runtime is internally
+    # consistent, yet a single worker policy would then be selected from two
+    # different matrices.
+    if len(by_runtime) > 1:
+        runtime_shapes = {
+            runtime: frozenset(
+                (tier, rows) for arm in arms for tier, rows in arm.tier_row_totals.items()
+            )
+            for runtime, arms in by_runtime.items()
+        }
+        if len(set(runtime_shapes.values())) > 1:
+            reasons.append(
+                "runtimes did not measure the same matrix; per-tier row counts "
+                f"differ between them: "
+                f"{ {rt: sorted(shape) for rt, shape in runtime_shapes.items()} }"
             )
 
     if reasons:
