@@ -26,6 +26,57 @@ VENDOR_CORE = ROOT / "vendor" / "pyboy-src" / "pyboy" / "core"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-hygiene.yml"
 RUNNER = ROOT / "scripts" / "run_local_ci.sh"
 
+
+def _ruff_resolved_scripts() -> set[str]:
+    """Return the `scripts/` files Ruff itself resolves for the main lanes.
+
+    Reused from the CI policy module rather than reimplemented, so this row and
+    `tests/test_local_ci_policy.py` cannot drift into measuring the boundary
+    two different ways. Asking Ruff is what makes the answer authoritative:
+    it honours `extend-exclude`, its default excludes and directory recursion.
+    """
+
+    sys.path.insert(0, str(ROOT))
+    try:
+        from tests.test_local_ci_policy import _ruff_lint_resolved_files
+    finally:
+        sys.path.pop(0)
+    return _ruff_lint_resolved_files("scripts")
+
+
+def _ruff_extend_exclude() -> tuple[str, ...]:
+    """Return `extend-exclude`, read only so a failure names the offending entry."""
+
+    sys.path.insert(0, str(ROOT))
+    try:
+        from tests.test_local_ci_policy import _ruff_excluded_patterns
+    finally:
+        sys.path.pop(0)
+    return _ruff_excluded_patterns()
+
+
+def _ruff_invocations(text: str) -> list[tuple[str, ...]]:
+    """Return each `python -m ruff` argument vector, in order."""
+
+    sys.path.insert(0, str(ROOT))
+    try:
+        from tests.test_local_ci_policy import _ruff_invocations as parse
+    finally:
+        sys.path.pop(0)
+    return parse(text)
+
+
+def _main_lane(invocations: list[tuple[str, ...]], subcommand: str) -> tuple[str, ...]:
+    """Return the single main lane that covers all of `tests/`."""
+
+    sys.path.insert(0, str(ROOT))
+    try:
+        from tests.test_local_ci_policy import _main_lane as select
+    finally:
+        sys.path.pop(0)
+    return select(invocations, subcommand)
+
+
 # Independent opcode/cycle table. Every declared mix must agree with it, so a
 # typo in the probe's own table cannot silently move the oracle, and a mnemonic
 # missing from this table is reported rather than assumed.
@@ -516,8 +567,31 @@ def test_probe_module_and_its_tier_are_part_of_the_ci_contract():
     relative = "scripts/stepping_loop_profile.py"
 
     # Ruff check and format must both cover it, in the workflow and locally.
-    assert workflow.count(relative) >= 2
-    assert runner.count(relative) >= 2
+    #
+    # This used to count occurrences of the literal path, which asserted the
+    # enumerated-list style rather than the coverage it was trying to protect.
+    # Both CI files now pass the `scripts` directory to every main lane (#567),
+    # so the path is no longer spelled out and the count is legitimately zero
+    # while the file is still very much linted and format-checked.
+    #
+    # Ask Ruff which files the `scripts` token resolves to instead, so the row
+    # keeps its actual guarantee: this probe cannot escape the gate. A future
+    # `extend-exclude` that dropped it would fail here with the offending entry.
+    resolved = _ruff_resolved_scripts()
+    assert relative in resolved, (
+        f"{relative} is excluded from the Ruff lanes; extend-exclude={_ruff_extend_exclude()!r}"
+    )
+
+    # The `scripts` token must be the boundary in both lanes of both files, so
+    # the coverage above is not an accident of some other listed path.
+    for label, text in (("workflow", workflow), ("runner", runner)):
+        lanes = _ruff_invocations(text)
+        for subcommand in ("check", "format"):
+            assert "scripts" in _main_lane(lanes, subcommand), (
+                f"{label} `ruff {subcommand}` lane no longer passes the "
+                f"`scripts` directory, so {relative} coverage is not guaranteed"
+            )
+
     assert classify_test(
         __file__, "test_expected_cycles_is_exact_and_detects_a_misdeclaration"
     ) == (frozenset({"unit"}))
