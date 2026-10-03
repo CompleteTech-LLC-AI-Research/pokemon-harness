@@ -32,6 +32,7 @@ from scripts.check_import_origins import (
     _file_digest,
     _finder_code_file,
     _finder_source,
+    _is_imported_by_a_pth,
     _is_installation_finder,
     _is_recorded_by_an_install,
     _is_trusted_stdlib_finder,
@@ -2038,9 +2039,7 @@ def test_meta_path_finder_cannot_smuggle_a_foreign_submodule(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
-def test_an_interrupt_while_naming_a_refused_finder_still_propagates(
-    tmp_path, monkeypatch, raised
-):
+def test_an_interrupt_while_naming_a_refused_finder_still_propagates(tmp_path, monkeypatch, raised):
     """``_describe_finder`` builds a FAIL detail, and must not eat an interrupt.
 
     This is the one site in the class that is reachable from the public entry
@@ -2157,6 +2156,160 @@ def test_standard_and_installation_finders_are_still_trusted():
             f"{entry!r} should be recognised as an installation finder, "
             "otherwise the release lane is refused"
         )
+
+
+def test_a_planted_pth_pair_does_not_certify_a_finder(tmp_path):
+    """A ``.pth`` naming a module is not evidence until an install vouches.
+
+    ``_is_imported_by_a_pth`` decides whether a finder module in
+    site-packages is trusted.  Requiring only that some ``.pth`` in the same
+    directory import it by name is no evidence at all: an attacker who can
+    write into site-packages writes both halves.  The pair only counts when
+    one distribution's ``RECORD`` claims *both* files.
+
+    Both directions are pinned.  A ``.pth`` nobody installed must not certify
+    the module it names, and the genuine editable-install shape -- where one
+    owner records the ``.pth`` and the module together -- must stay trusted
+    or the release lane refuses every editable checkout.
+    """
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    shim = root / "planted_shim.py"
+    shim.write_text(
+        "class Finder:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, name, path=None, target=None):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    pth = root / "planted.pth"
+    pth.write_text("import planted_shim\n", encoding="utf-8")
+
+    assert "import planted_shim" in pth.read_text(encoding="utf-8"), (
+        "the premise: the .pth does name the module"
+    )
+    assert not _is_imported_by_a_pth(shim, root), (
+        "a .pth nobody installed must not certify the module it names"
+    )
+
+    # Recording the .pth alone is still not enough: it leaves the module owned
+    # by nobody, so no single distribution vouches for the pair.
+    dist_info = root / "planted_shim-1.0.dist-info"
+    dist_info.mkdir()
+    digest = _file_digest(pth)
+    assert digest is not None
+    (dist_info / "RECORD").write_text(
+        f"{pth.name},sha256={digest},{pth.stat().st_size}\n", encoding="utf-8"
+    )
+    assert not _is_imported_by_a_pth(shim, root), (
+        "the .pth being recorded does not carry the module: one install vouched "
+        "for the .pth and nobody vouched for the module, so the pair is owned by "
+        "no single distribution and must not certify the finder"
+    )
+
+    # Recording the module too -- by the *same* owner -- is the shape a real
+    # editable install produces, and it must still be accepted.
+    shim_digest = _file_digest(shim)
+    assert shim_digest is not None
+    with open(dist_info / "RECORD", "a", encoding="utf-8") as handle:
+        handle.write(f"{shim.name},sha256={shim_digest},{shim.stat().st_size}\n")
+    assert _is_imported_by_a_pth(shim, root), (
+        "an install-recorded .pth activating an install-recorded shim is the "
+        "genuine editable-install shape and must stay trusted"
+    )
+
+
+def test_a_recorded_pth_cannot_certify_a_module_another_owner_planted(tmp_path):
+    """One attested half of a ``.pth`` pairing cannot vouch for the other.
+
+    Attesting only the ``.pth`` was a working bypass.  An attacker who can
+    write into site-packages does not need to plant a ``.pth`` at all -- every
+    editable install already left one behind that a genuine distribution
+    recorded -- only a module beside it whose name that ``.pth`` happens to
+    import.  The pairing then read as install-attested while the module was
+    owned by nobody at all.
+    """
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+
+    # A genuine install's .pth -- attested, and naming the planted module.
+    pth = root / "__editable__.pokered_harness-0.1.0.pth"
+    pth.write_text("import planted_borrower\n", encoding="utf-8")
+    pth_digest = _file_digest(pth)
+    assert pth_digest is not None
+    dist_info = root / "pokered_harness-0.1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "RECORD").write_text(
+        f"{pth.name},sha256={pth_digest},{pth.stat().st_size}\n", encoding="utf-8"
+    )
+    assert _is_recorded_by_an_install(pth, root), (
+        "the premise: the .pth itself is genuinely install-attested"
+    )
+
+    # The attacker's module: named by that .pth, recorded by nobody.
+    borrower = root / "planted_borrower.py"
+    borrower.write_text(
+        "class Borrower:\n    def find_spec(self, *args, **kwargs):\n        return None\n",
+        encoding="utf-8",
+    )
+    assert not _is_recorded_by_an_install(borrower, root), (
+        "the premise: no install claimed the module"
+    )
+    assert not _is_imported_by_a_pth(borrower, root), (
+        "an install-recorded .pth must not certify a module that install never "
+        "recorded: the attacker plants only the module, not the .pth"
+    )
+
+
+def test_a_rewritten_recorded_pth_stops_certifying_its_module(tmp_path):
+    """An owner that no longer matches the bytes on disk cannot certify anything.
+
+    A ``RECORD`` entry is a historical claim, not a live one.  A ``.pth`` can
+    be rewritten after its install without the record changing at all, so the
+    file then imports whatever the attacker chose while the ``RECORD`` still
+    carries the original digest for it.  Consulting only *which* owner claimed
+    the ``.pth`` reads that rewritten file as attested and hands it the module.
+
+    Both halves therefore have to match the owner's recorded digests as they
+    are now, not merely be named by the same owner.
+    """
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+
+    # A genuine install: the .pth and two modules it could name, both recorded.
+    pth = root / "__editable__.pokered_harness-0.1.0.pth"
+    pth.write_text("import harmless_thing\n", encoding="utf-8")
+    module = root / "some_other_installed_module.py"
+    module.write_text("VALUE = 1\n", encoding="utf-8")
+    harmless = root / "harmless_thing.py"
+    harmless.write_text("VALUE = 0\n", encoding="utf-8")
+
+    dist_info = root / "pokered_harness-0.1.0.dist-info"
+    dist_info.mkdir()
+    rows = [
+        f"{path.name},sha256={_file_digest(path)},{path.stat().st_size}"
+        for path in (pth, module, harmless)
+    ]
+    (dist_info / "RECORD").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    assert _is_recorded_by_an_install(pth, root), "the premise: the .pth is attested"
+    assert not _is_imported_by_a_pth(module, root), (
+        "the premise: the .pth does not yet import this module"
+    )
+
+    # The attack: rewrite only the .pth so it imports a *different* module the
+    # same install also recorded.  The RECORD is untouched and now stale.
+    pth.write_text("import some_other_installed_module\n", encoding="utf-8")
+    assert not _is_recorded_by_an_install(pth, root), (
+        "the premise: the rewritten .pth no longer matches its RECORD"
+    )
+    assert not _is_imported_by_a_pth(module, root), (
+        "a .pth whose bytes no longer match its RECORD must not certify anything, "
+        "even though the same owner recorded both files"
+    )
 
 
 def test_a_finder_cannot_trust_itself_by_claiming_a_site_packages_module(tmp_path, monkeypatch):
@@ -2716,9 +2869,7 @@ def _plain_finder(raised):
         "spec origin",
     ],
 )
-def test_an_interrupt_while_identifying_a_finder_still_propagates(
-    monkeypatch, raised, clause
-):
+def test_an_interrupt_while_identifying_a_finder_still_propagates(monkeypatch, raised, clause):
     """``_finder_source`` must not launder an operator interrupt into a finding.
 
     ``_finder_module`` re-raises ``KeyboardInterrupt`` and ``SystemExit`` on
@@ -2762,9 +2913,7 @@ def test_an_interrupt_while_identifying_a_finder_still_propagates(
     else:
         finder = _plain_finder(raised)
         monkeypatch.setattr(origins, "_finder_module", lambda f: None)
-        monkeypatch.setattr(
-            importlib.util, "find_spec", lambda *a, **k: _Interrupting(raised)
-        )
+        monkeypatch.setattr(importlib.util, "find_spec", lambda *a, **k: _Interrupting(raised))
 
     with pytest.raises((KeyboardInterrupt, SystemExit)):
         origins._finder_source(finder)

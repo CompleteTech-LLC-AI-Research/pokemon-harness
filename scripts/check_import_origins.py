@@ -75,9 +75,7 @@ _MAX_RECORDED_DIGEST_LENGTH = 1024
 # ``_file_digest`` encodes URL-safe base64, so the alphabet here is the URL-safe
 # one: a digest can legitimately contain ``-`` and ``_``, and rejecting them
 # would refuse the very rows this length exists to honour.
-_BASE64_ALPHABET = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-)
+_BASE64_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
 def _decoded_digest_length(digest: str) -> int | None:
@@ -104,6 +102,7 @@ def _decoded_digest_length(digest: str) -> int | None:
         return None
     decoded = len(stripped) * 3 // 4
     return decoded if decoded else None
+
 
 # The distributions whose import origins decide what the suite actually
 # measures.  ``pokered_harness`` is the harness under test and ``pyboy`` is the
@@ -589,13 +588,18 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
     return False
 
 
-def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
-    """Return the ``RECORD`` hash for every file an installed distribution owns.
+def _record_attestations(root: Path) -> dict[str, dict[str, set[tuple[str, str]]]]:
+    """Return every ``RECORD`` claim about every file, keyed by attesting owner.
 
     ``RECORD`` is written at install time and names each installed file with
     the hash of its contents.  Keys are resolved paths, so a caller compares
     resolved paths on both sides and cannot be misled by a relative or
     ``..``-laden spelling of the same file.
+
+    The value is keyed by the attesting *owner* -- the name of the
+    ``*.dist-info`` directory the ``RECORD`` lives in -- because proving that
+    two files came from one install means knowing which distribution claimed
+    each of them, which a bare path key cannot express.
 
     The value is a *set* because several records may claim the same path.  The
     caller has to satisfy all of them: if one record disagrees about what a
@@ -607,12 +611,13 @@ def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
     the safe direction.
     """
 
-    digests: dict[str, set[tuple[str, str]]] = {}
+    digests: dict[str, dict[str, set[tuple[str, str]]]] = {}
     try:
         records = sorted(root.glob("*.dist-info/RECORD"))
     except (OSError, ValueError):
         return digests
     for record in records:
+        owner = record.parent.name
         try:
             text = record.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
@@ -666,8 +671,26 @@ def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
                 # first.  Two records may disagree about the same file, and
                 # the caller must not be able to win by writing one that
                 # happens to sort first.
-                digests.setdefault(str(resolved), set()).add((algorithm, expected))
+                digests.setdefault(str(resolved), {}).setdefault(owner, set()).add(
+                    (algorithm, expected)
+                )
     return digests
+
+
+def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
+    """Return every ``RECORD`` claim about every file, ignoring which owner made it.
+
+    A projection of ``_record_attestations`` for callers that only need to know
+    *whether* the claims agree with the file on disk.  Callers that have to
+    prove two files came from the *same* install must use
+    ``_record_attestations`` instead, because collapsing the owner away loses
+    the one thing that pairing depends on.
+    """
+
+    return {
+        path: {claim for claims in owners.values() for claim in claims}
+        for path, owners in _record_attestations(root).items()
+    }
 
 
 def _file_digest(
@@ -758,11 +781,28 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
 def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
     """Return whether a ``.pth`` file in ``root`` imports the defining module.
 
-    ``_virtualenv`` and the ``__editable__`` shim are not owned by any
-    distribution's ``RECORD``: they are dropped into site-packages and
-    activated by a ``.pth`` file that imports them by name.  Requiring that a
-    ``.pth`` in the *same* directory names the module is what distinguishes a
-    real environment shim from a module an attacker merely wrote there.
+    ``_virtualenv`` and the ``__editable__`` shim are dropped into
+    site-packages and activated by a ``.pth`` file that imports them by name,
+    so that pairing is what a real environment shim looks like.
+
+    A ``.pth`` naming the module is not on its own evidence of anything: an
+    attacker who can write into site-packages writes both halves.  The pair is
+    only trustworthy when one distribution vouches for both of them, so the
+    ``.pth`` and the module have to be attested by the *same* ``RECORD``.  An
+    editable install records exactly that -- ``pip install -e`` lists the
+    ``__editable__.<dist>-<ver>.pth`` and its finder module in one dist-info
+    RECORD -- whereas a planted pair is owned by nothing.
+
+    Two earlier rounds of this function were rejected in review, and each is
+    why one of these rules exists.  Attesting only the ``.pth`` let an
+    attacker plant just the module beside a ``.pth`` a genuine install already
+    recorded, so the attacker never had to plant the ``.pth`` itself.
+    Consulting only *which* owner claimed the ``.pth`` then let that recorded
+    file be rewritten after its install: a ``RECORD`` entry is a historical
+    claim, so the bytes change while the record does not, and the file starts
+    importing whatever the attacker chose.  So the shared owner has to match
+    *both* files as they are on disk now, which is the same rule
+    ``_is_recorded_by_an_install`` applies to a single file.
     """
 
     if source_file.name == "__init__.py":
@@ -776,12 +816,30 @@ def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
     except (OSError, ValueError):
         return False
     needle = f"import {stem}"
+    owners = _record_attestations(root)
+    module_owners = owners.get(str(source_file))
+    if not module_owners:
+        # No install ever claimed the module itself, so no owner can vouch for
+        # the pairing whatever the ``.pth`` says.
+        return False
     for entry in entries:
         try:
             text = entry.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             continue
-        if needle in text:
+        if needle not in text:
+            continue
+        entry_owners = owners.get(str(entry))
+        if not entry_owners:
+            continue
+        if not any(owner in entry_owners for owner in module_owners):
+            continue
+        # The shared owner has to describe the bytes that are there now, for
+        # both halves.  A rewritten ``.pth`` keeps its owner but loses the
+        # match, and the pairing stops reading as attested.
+        if _is_recorded_by_an_install(entry, root) and _is_recorded_by_an_install(
+            source_file, root
+        ):
             return True
     return False
 
@@ -1474,8 +1532,7 @@ def _check_origins(project_root: Path, packages: tuple[str, ...]) -> dict:
                     "origin": None,
                     "status": "FAIL",
                     "detail": (
-                        "project root could not be resolved: "
-                        f"{_type_name(exc)}: {_describe(exc)}"
+                        f"project root could not be resolved: {_type_name(exc)}: {_describe(exc)}"
                     ),
                 }
             ],
