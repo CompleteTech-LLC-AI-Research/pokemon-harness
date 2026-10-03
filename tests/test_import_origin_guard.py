@@ -3855,6 +3855,119 @@ def test_a_recorded_file_stops_being_recorded_when_its_bytes_change():
         dist_info.rmdir()
 
 
+@pytest.mark.parametrize("algorithm", ["sha512", "sha384", "blake2b", "md5"])
+def test_a_record_naming_a_non_sha256_algorithm_still_establishes_provenance(algorithm):
+    """``RECORD`` permits any algorithm ``hashlib`` guarantees, so honour it.
+
+    The guard used to skip every row whose label was not ``sha256``, which
+    meant ``_record_digests`` found no claim for the file and
+    ``_is_recorded_by_an_install`` refused it.  Wheel may legitimately ship a
+    SHA-512 ``RECORD``, so that is a false refusal of a genuine install: the
+    origin is well attested and the guard reports it as unproven.
+
+    The label is honoured rather than trusted, so this is wider than believing
+    whatever the record says and narrower than discarding the row: the digest
+    is recomputed under the named algorithm and must match.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_record_algo_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_record_algo_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        digest = _file_digest(planted, algorithm)
+        assert digest is not None, f"the planted file must be readable as {algorithm}"
+        recorded = dist_info / "RECORD"
+        recorded.write_text(
+            f"pokemon_record_algo_row_module.py,{algorithm}={digest},"
+            f"{planted.stat().st_size}\n",
+            encoding="utf-8",
+        )
+
+        assert _is_recorded_by_an_install(planted, root), (
+            f"a genuine {algorithm} RECORD must establish provenance, not refuse it"
+        )
+
+        planted.write_text("VALUE = 'tampered'\n", encoding="utf-8")
+        assert not _is_recorded_by_an_install(planted, root), (
+            f"a {algorithm} record must still pin the bytes it claims"
+        )
+    finally:
+        sys.modules.pop("pokemon_record_algo_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_a_record_whose_label_does_not_match_its_digest_is_refused():
+    """The algorithm label is part of the claim, so a mismatch must fail.
+
+    Honouring the label is only safe because the digest is recomputed under
+    it.  A row reading ``sha512=<a sha256 digest>`` is therefore not evidence
+    of anything: trusting the label without recomputing would attest it, and
+    discarding labelled rows would reintroduce the false refusal above.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_record_mislabel_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_record_mislabel_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        sha256_digest = _file_digest(planted, "sha256")
+        assert sha256_digest is not None
+        recorded = dist_info / "RECORD"
+        recorded.write_text(
+            f"pokemon_record_mislabel_row_module.py,sha512={sha256_digest},"
+            f"{planted.stat().st_size}\n",
+            encoding="utf-8",
+        )
+
+        assert not _is_recorded_by_an_install(planted, root), (
+            "a sha256 digest labelled sha512 is not a claim about these bytes"
+        )
+    finally:
+        sys.modules.pop("pokemon_record_mislabel_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
+def test_a_record_naming_an_unknown_algorithm_attests_nothing():
+    """A label this interpreter cannot compute must fail the whole set.
+
+    Falling back to a default algorithm would turn an unverifiable claim into
+    a passing one, which is exactly the fail-open direction the guard exists to
+    prevent.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_record_unknown_algo_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_record_unknown_algo_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        recorded = dist_info / "RECORD"
+        recorded.write_text(
+            f"pokemon_record_unknown_algo_row_module.py,notarealalgo=AAAA,"
+            f"{planted.stat().st_size}\n",
+            encoding="utf-8",
+        )
+
+        assert _file_digest(planted, "notarealalgo") is None, (
+            "the premise: an unknown algorithm has no digest to compare"
+        )
+        assert not _is_recorded_by_an_install(planted, root), (
+            "a claim this interpreter cannot check must not certify the file"
+        )
+    finally:
+        sys.modules.pop("pokemon_record_unknown_algo_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
 def test_a_quoted_record_path_containing_a_comma_still_establishes_provenance():
     """``RECORD`` is CSV, and a quoted field's comma must not truncate its name.
 
@@ -3950,7 +4063,7 @@ def test_a_recorded_path_that_another_record_contradicts_is_not_attested():
         assert claims is not None and len(claims) == 2, (
             f"the premise: two records disagree about this path, got {claims}"
         )
-        assert digest in claims and forgery in claims, (
+        assert ("sha256", digest) in claims and ("sha256", forgery) in claims, (
             "both claims must be collected before the decision is made"
         )
         assert not _is_recorded_by_an_install(planted, root), (
