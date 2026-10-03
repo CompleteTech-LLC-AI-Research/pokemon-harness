@@ -604,12 +604,20 @@ def _weakening_options(lane: tuple[str, ...]) -> list[str]:
 # an entry naming a single rule leaves the other four firing. Three probes
 # could not do this -- with `--select=F401,F811` two of three still fired and
 # F821 was silently accepted.
+#
+# Two earlier probes were replaced after measuring that they were not doing
+# what they claimed. F841 is listed as enabled by `--show-settings` but is not
+# reported for a local assignment, and an `E711` snippet using an undefined
+# name tripped F821 instead of E711 -- so one "probe" was silently re-testing
+# another rule, and `--extend-ignore=E711` passed unnoticed. Every rule below
+# was confirmed to fire on its own, and to still fire when a *different* rule
+# is ignored.
 _CHECK_PROBES = (
     ("F821", "def _probe():\n    return _pokered_undefined_probe_name\n"),
     ("F401", "import os\n"),
     ("F811", "def f():\n    pass\ndef f():\n    pass\n"),
-    ("F632", "x = 1\nif x is 1:\n    pass\n"),
-    ("E711", "if x == None:\n    pass\n"),
+    ("F632", "def _probe():\n    x = 1\n    if x is 1:\n        pass\n"),
+    ("F541", "x = f'hello'\n"),
 )
 
 # Unformatted in two independent ways, so a lane cannot pass by rejecting only
@@ -732,6 +740,41 @@ def test_main_ruff_lanes_do_not_narrow_their_own_verdict() -> None:
             "own verdict; the benchmark (and every other lane path) would stop "
             "being enforced"
         )
+
+
+def test_each_check_probe_detects_its_own_rule() -> None:
+    """Every probe must fire on its own rule, and be independent of the others.
+
+    Two probes were wrong for a long time and neither showed up as a failure.
+    F841 is listed as enabled by `--show-settings` but is never reported for a
+    local assignment, so its probe asserted nothing. An `E711` snippet that used
+    an undefined name tripped F821 instead, so one probe was silently
+    re-testing another rule -- and `--extend-ignore=E711` then passed unnoticed.
+
+    This row pins both properties directly, so a future probe cannot quietly
+    stop testing what it claims: it must report its own named rule, and it must
+    keep reporting that rule when any *other* probed rule is ignored. The
+    second half is the independence check that caught the E711 mix-up.
+    """
+
+    options = _lane_options(
+        _main_lane(_ruff_invocations(RUNNER.read_text(encoding="utf-8")), "check")
+    )
+    for rule, snippet in _CHECK_PROBES:
+        probe = _probe_check(options, snippet)
+        assert probe.returncode != 0 and rule in _diagnostics(probe), (
+            f"the {rule} probe does not report {rule} on an unmodified lane: "
+            f"{_diagnostics(probe)!r}"
+        )
+        # Ignore each *other* probed rule in turn; this one must survive.
+        for other, _other_snippet in _CHECK_PROBES:
+            if other == rule:
+                continue
+            isolated = _probe_check(options + [f"--ignore={other}"], snippet)
+            assert isolated.returncode != 0 and rule in _diagnostics(isolated), (
+                f"the {rule} probe stops reporting {rule} when {other} is ignored, "
+                f"so it is not testing its own rule: {_diagnostics(isolated)!r}"
+            )
 
 
 def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
