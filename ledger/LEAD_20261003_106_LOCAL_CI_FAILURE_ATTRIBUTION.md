@@ -193,11 +193,12 @@ probed with **five** independent violations spanning five rule codes, every one
 of which must be reported, with a majority additionally required. Measured
 behaviour of that probe set:
 
-| lane configuration | F821 | F401 | F811 | F632 | E711 |
+| lane configuration | F821 | F401 | F811 | F632 | F541 |
 |---|---|---|---|---|---|
 | unmodified | rejected | rejected | rejected | rejected | rejected |
-| `--select=F821` | rejected | **silent** | **silent** | **silent** | rejected |
+| `--select=F821` | rejected | **silent** | **silent** | **silent** | **silent** |
 | `--select=F401,F811` | **silent** | rejected | rejected | **silent** | **silent** |
+| `--extend-ignore=<any one rule>` | silent | 4 of 5 still rejected |
 | `per-file-ignores = ["F821"]` | silent | rejected | rejected | rejected | rejected |
 | `per-file-ignores = ["ALL"]` | silent | silent | silent | silent | silent |
 | `--ignore=ALL` | silent | silent | silent | silent | silent |
@@ -214,12 +215,20 @@ separate a blanket disable from a selective one:
   blanket entry leaves every rule firing for the control file and failing for
   the benchmark, so the width of the probe set is what tells the two apart.
 
-F841 was the third probe at first and was dropped: Ruff lists it as enabled in
-`--show-settings` but does not report it for that input, so a probe whose rule
-never fires would assert nothing. `ruff format --check` has no diagnostic to
-match at all — it exits nonzero and prints nothing — so the format lane is
-judged on exit status across two independent unformatted snippets, requiring
-both.
+Two of those five probes were themselves wrong for a while, and neither
+showed up as a failure. F841 is listed as enabled in `--show-settings` but is
+never reported for a local assignment, so its probe asserted nothing. An E711
+snippet that used an undefined name tripped F821 instead, so that probe was
+silently re-testing a different rule — and `--extend-ignore=E711` then passed
+because ignoring E711 drops none of the rules actually being watched. Both
+were replaced after measuring that the new rules fire on their own, and a
+dedicated row now pins the property that had been missing: every probe must
+report its own named rule, and must keep reporting it when any *other* probed
+rule is ignored. Reintroducing either broken probe fails that row.
+
+`ruff format --check` has no diagnostic to match at all — it exits nonzero and
+prints nothing — so the format lane is judged on exit status across two
+independent unformatted snippets, requiring both.
 
 Four lanes of escape cannot be detected by probing and are rejected by name
 instead. `--exit-zero` keeps printing diagnostics while forcing exit 0, so a
@@ -308,6 +317,11 @@ reported.
 | `--select=E501` narrowing a check lane past every diagnostic rule | yes |
 | `--select=F821` narrowing a check lane past the other rules | yes |
 | `--select=F401,F811`, keeping a two-of-three quorum while dropping F821 | yes |
+| `--extend-ignore=` of any single probed rule | yes |
+| `per-file-ignores` naming two of the five probed rules | yes |
+| `--fix-only` in a check lane | yes |
+| `--diff` in a format lane | yes |
+| `--config` pointing at a config with `lint.select = []` | yes |
 | `--exit-zero` in both check lanes | yes |
 | `--fix` in both check lanes | yes |
 | `--range=1-1` in both format lanes | yes |
@@ -321,14 +335,15 @@ reported.
 | `--force-exclude` alone in the lanes | n/a — not an escape (see above) |
 | `--exclude=scripts` alone in the lanes | n/a — not an escape (see above) |
 | `--exclude <benchmark>` in the space-separated operand form | n/a — not an escape (see above) |
-| `per-file-ignores = ["F821"]` only, for the benchmark | n/a — selective, not a blanket disable |
+| `per-file-ignores = ["F821"]` only, for the benchmark | n/a for the coverage row — selective, not a blanket disable |
+| `--extend-ignore=E711`, a rule no probe covers | n/a — drops no rule CI depends on |
 | `--force-exclude` with `--exclude=<benchmark>`, both spellings | yes |
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 122 passed
+-> 123 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
