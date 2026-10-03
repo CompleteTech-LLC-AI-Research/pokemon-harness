@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tokenize
@@ -1134,26 +1135,25 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
         return _probe_format(format_options, f"{comment}\n" + _FORMAT_PROBES[0][1]).returncode == 0
 
     # Probing all 131 comments through two lanes costs ~130 subprocesses, so
-    # skip the ones Ruff's directive grammar cannot possibly match. Every
-    # spelling measured above starts with one of these tokens; a comment that
-    # does not is ordinary prose and cannot be a directive. This is a
-    # short-circuit on a necessary condition, not a reimplementation of the
-    # rule -- `silences` still decides anything that gets this far.
-    directive_prefixes = (
-        "# ruff",
-        "#ruff",
-        "# flake8",
-        "#flake8",
-        "# fmt",
-        "#fmt",
-        "# yapf",
-        "#yapf",
-        "# noqa",
-        "#noqa",
-    )
+    # skip the ones Ruff's directive grammar cannot possibly match.
+    #
+    # The keyword set below is the set this file already enumerates in
+    # `lint_directives`/`format_directives` and measures above. The match must
+    # be on the *normalized* form, not on a literal prefix: Ruff accepts any
+    # run of whitespace between the comment marker and the keyword, so a
+    # file-level opt-out written with two spaces, three spaces, or a tab
+    # silences the whole file exactly as the single-space spelling does. A
+    # prefix list misses every one of those, and the miss is invisible in a
+    # green run -- it would leave a fully unlinted file looking clean.
+    # Normalizing to "leading `#`, then any run of whitespace, then the
+    # keyword" is a necessary condition over that grammar rather than an
+    # enumeration of spellings; `silences` still decides anything that gets
+    # this far, so an over-broad match here costs a subprocess and nothing
+    # else.
+    directive_keyword = re.compile(r"\A#+\s*(?:ruff|flake8|fmt|yapf|noqa)\b", re.IGNORECASE)
 
     def maybe_directive(comment: str) -> bool:
-        return comment.strip().lower().startswith(directive_prefixes)
+        return directive_keyword.match(comment.strip()) is not None
 
     file_level = [
         (token.start[0], token.string)
