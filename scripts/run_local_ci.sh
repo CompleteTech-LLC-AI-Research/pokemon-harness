@@ -158,6 +158,7 @@ python -m ruff check \
     scripts/_coverage_report_catalog.py \
     scripts/_coverage_report_model.py \
     scripts/_coverage_report_schema.py \
+    scripts/benchmark_matrix_concurrency.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \
@@ -212,6 +213,7 @@ python -m ruff format --check \
     scripts/_coverage_report_catalog.py \
     scripts/_coverage_report_model.py \
     scripts/_coverage_report_schema.py \
+    scripts/benchmark_matrix_concurrency.py \
     scripts/bootstrap_pyboy.py \
     scripts/coverage_report.py \
     scripts/network_concurrency_probe.py \

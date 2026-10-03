@@ -326,6 +326,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # it enumerates the boundary; a path missing here is not by itself evidence
     # that the boundary lost it.
     workflow_paths = (
+        "scripts/benchmark_matrix_concurrency.py",
         "scripts/bootstrap_pyboy.py",
         "scripts/coverage_report.py",
         "scripts/gate_capacity.py",
