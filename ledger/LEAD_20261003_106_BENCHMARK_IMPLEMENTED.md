@@ -290,6 +290,24 @@ counts, matching ids, missing ids, reading identity from the gate report,
 unreadable identity, outcomes exceeding declarations, duplicate arms, one arm
 per count, and both throughput labels.
 
+### A phantom row surfaced by the eighth round's own check
+
+Running the benchmark end to end after the eighth round produced a reason the
+code had never emitted before: `recorded 63 outcome(s) for 62 declared row(s)`.
+The extra outcome was `run_arm`'s synthetic "incomplete" sentinel, added
+whenever the gate exited non-zero without another classification. That
+sentinel is not a row the matrix declared, so it inflated the arm's
+required-row total above the declaration — and the consistency check added in
+the same round correctly reported the inconsistency it created.
+
+The sentinel was redundant. `gate_passed` already blocks selection on its own,
+so removing it preserves the real row counts exactly as the gate reported them
+without weakening any refusal. The end-to-end run on the fixed head shows both
+runtimes at `not_started=62` with no phantom row and no spurious reason. The
+test that asserted the sentinel was rewritten to assert the contract it stood
+in for: a non-PASS verdict blocks selection, and the required-row total equals
+what the gate actually reported.
+
 ## Policy selection is deliberately withheld
 
 No worker policy is recommended and the `workers=1` default is unchanged.
