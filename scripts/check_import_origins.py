@@ -136,17 +136,55 @@ def _is_trusted_stdlib_finder(finder: object) -> bool:
     is therefore attacker-controlled data reached before any of the guards
     around the caller's own attribute reads, so it has to be guarded here.
 
+    Identity alone is not enough, and this is the third round of that lesson.
+    A ``sys.meta_path`` entry is a mutable class in a live process: rebinding
+    ``PathFinder.find_spec`` keeps the very same object while replacing the
+    code that runs.  Every check below then reads PASS while the rebound
+    finder serves submodules from anywhere, and the guard certifies an
+    interpreter it has just been shown to be compromised.  So the interpreter's
+    own finders are additionally required to be *frozen* -- the three classes
+    below are defined in ``_frozen_importlib``, so the code that executes
+    cannot have been reassigned in this process, and a rebound one reports
+    wherever the attacker compiled it instead.
+
     An exception that is not an operator interrupt means this finder is not
     one of the interpreter's own, which is the same answer an identity
     mismatch gives: untrusted by default.
     """
 
     try:
-        return finder in _trusted_stdlib_finders()
+        if finder not in _trusted_stdlib_finders():
+            return False
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException:  # noqa: BLE001 - untrusted data, see docstring
         return False
+    return _is_unmodified(finder)
+
+
+def _is_unmodified(finder: object) -> bool:
+    """Return whether ``finder``'s ``find_spec`` is the interpreter's own code.
+
+    ``finder`` has already passed the identity check, so this only has to
+    answer whether the callable that will run is still the one the interpreter
+    shipped.  A genuine finder is defined in a frozen module and reports a
+    ``<frozen ...>`` code file; code an attacker compiled and assigned in this
+    process reports the path it was compiled under.
+
+    Every read is guarded: ``find_spec`` is an attribute on a class the caller
+    supplied, so reaching for it is a call into code the caller controls.
+    """
+
+    try:
+        method = getattr(finder, "find_spec", None)
+        function = getattr(method, "__func__", method)
+        code = getattr(function, "__code__", None)
+        code_file = getattr(code, "co_filename", None)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - untrusted data, see docstring
+        return False
+    return isinstance(code_file, str) and code_file.startswith("<frozen ")
 
 
 def _site_packages_roots() -> list[Path]:

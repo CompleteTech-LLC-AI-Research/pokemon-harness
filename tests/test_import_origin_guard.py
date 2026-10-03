@@ -2158,6 +2158,91 @@ def test_standard_and_installation_finders_are_still_trusted():
         )
 
 
+def test_a_rebound_stdlib_finder_loses_trust(tmp_path, monkeypatch):
+    """Identity alone does not make a ``sys.meta_path`` entry the interpreter's own.
+
+    A ``sys.meta_path`` entry is a mutable class in a live process, so rebinding
+    ``PathFinder.find_spec`` keeps the identical object while replacing the code
+    that runs.  Trust decided by identity alone then reads PASS while the
+    rebound finder serves submodules from anywhere -- a full false green with no
+    ``.pth``, no ``RECORD`` and no new finder in sight.
+
+    The interpreter's own finders are defined in frozen modules, so requiring
+    the executing code to be frozen is what separates the two.
+    """
+
+    import importlib.machinery
+
+    assert _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+        "premise: the untouched finder is trusted"
+    )
+
+    original = importlib.machinery.PathFinder.find_spec
+
+    def rebound(cls, name, path=None, target=None):
+        return original(name, path, target)
+
+    importlib.machinery.PathFinder.find_spec = classmethod(rebound)
+    try:
+        assert not _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+            "a finder whose find_spec was rebound in this process is no longer "
+            "the interpreter's own, even though the object is unchanged"
+        )
+    finally:
+        importlib.machinery.PathFinder.find_spec = original
+
+    assert _is_trusted_stdlib_finder(importlib.machinery.PathFinder), (
+        "restoring the original method restores trust; a genuine environment must not be refused"
+    )
+
+
+def test_a_rebound_stdlib_finder_is_refused_end_to_end(tmp_path, monkeypatch):
+    """The rebound-finder false green, measured through the report.
+
+    The unit row above pins the helper.  This row pins the consequence, which
+    is what the guard actually promises: a submodule that really did come from
+    a foreign tree must not be certified by a report that says PASS.
+    """
+
+    import importlib.machinery
+
+    root = tmp_path / "root"
+    checkout = root / "checkout"
+    (checkout / "rebound_pkg").mkdir(parents=True)
+    (checkout / "rebound_pkg" / "__init__.py").write_text("", encoding="utf-8")
+    foreign = root / "foreign"
+    foreign.mkdir()
+    (foreign / "leaked.py").write_text("ORIGIN = 'FOREIGN'\n", encoding="utf-8")
+
+    original = importlib.machinery.PathFinder.find_spec
+
+    def rebound(cls, name, path=None, target=None):
+        if name == "rebound_pkg.leaked":
+            return importlib.util.spec_from_file_location(name, str(foreign / "leaked.py"))
+        return original(name, path, target)
+
+    importlib.machinery.PathFinder.find_spec = classmethod(rebound)
+    monkeypatch.syspath_prepend(str(checkout))
+    for name in list(sys.modules):
+        if name == "rebound_pkg" or name.startswith("rebound_pkg."):
+            del sys.modules[name]
+    try:
+        import rebound_pkg.leaked
+
+        assert rebound_pkg.leaked.ORIGIN == "FOREIGN", (
+            "the premise: the rebound finder really did serve a foreign module"
+        )
+        report = check_origins(checkout, ("rebound_pkg",))
+        assert report["status"] == "FAIL", (
+            f"the guard certified an interpreter whose finder was rebound: {report}"
+        )
+    finally:
+        importlib.machinery.PathFinder.find_spec = original
+        for name in list(sys.modules):
+            if name == "rebound_pkg" or name.startswith("rebound_pkg."):
+                del sys.modules[name]
+
+
 def test_a_planted_pth_pair_does_not_certify_a_finder(tmp_path):
     """A ``.pth`` naming a module is not evidence until an install vouches.
 
