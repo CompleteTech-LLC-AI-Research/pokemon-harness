@@ -559,7 +559,8 @@ class TestMatrixRowAccounting:
         report["tiers"][0]["duration_seconds"] = 999.0
         durations, deadline = bench.case_durations(report, ("trade",))
         assert durations == [1.0, 1.0]
-        assert deadline == 600.0
+        # Headroom is per row: 600 s deadline minus 1 s duration.
+        assert deadline == pytest.approx(599.0)
 
 
 class TestInputRootsAreForwarded:
@@ -584,3 +585,169 @@ class TestInputRootsAreForwarded:
         )
         assert "--rom-root" not in command
         assert "--fixture-root" not in command
+
+
+class TestGateVerdictIsRecordedOnBothPaths:
+    """A passing gate must actually be able to select."""
+
+    def _gate_report(self):
+        return {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "PASS",
+                    "duration_seconds": 42.0,
+                    "counts": {"passed": 19, "failed": 0, "errors": 0},
+                    "case_results": [
+                        {
+                            "status": "PASSED",
+                            "duration_seconds": 2.0,
+                            "deadline_seconds": 900.0,
+                            "counts": {"passed": 1, "failed": 0, "errors": 0},
+                        }
+                        for _ in range(19)
+                    ],
+                }
+            ],
+            "capacity": {"admission": {"max_concurrent_pairs": 8}},
+        }
+
+    def test_a_zero_returncode_records_a_passing_verdict(self, tmp_path, monkeypatch):
+        # Regression: run_arm only ever assigned False, so a passing gate could
+        # never select a policy and the requirement was unreachable.
+        import json as _json
+
+        report = self._gate_report()
+
+        class _Completed:
+            returncode = 0
+            stdout = _json.dumps(report)
+            stderr = ""
+
+        monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: _Completed())
+        plan = _plan(runtime="source", workers=1, tiers=("trade",))
+        result = bench.run_arm(
+            plan,
+            project_root=tmp_path,
+            evidence_root=tmp_path / "evidence",
+            timeout_seconds=5.0,
+            capacity_policy=Path("/policy.json"),
+        )
+        assert result.error == ""
+        assert result.gate_passed is True
+        assert result.completed_passing == 19
+        assert result.failed == 0
+        assert result.effective_workers == 1
+
+    def test_a_nonzero_returncode_records_a_failing_verdict(self, tmp_path, monkeypatch):
+        import json as _json
+
+        report = self._gate_report()
+
+        class _Completed:
+            returncode = 1
+            stdout = _json.dumps(report)
+            stderr = ""
+
+        monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: _Completed())
+        plan = _plan(runtime="source", workers=1, tiers=("trade",))
+        result = bench.run_arm(
+            plan,
+            project_root=tmp_path,
+            evidence_root=tmp_path / "evidence",
+            timeout_seconds=5.0,
+            capacity_policy=Path("/policy.json"),
+        )
+        assert result.gate_passed is False
+        assert result.complete is False
+
+    def test_a_full_passing_run_reaches_a_selection(self, tmp_path, monkeypatch):
+        import json as _json
+
+        report = self._gate_report()
+
+        class _Completed:
+            returncode = 0
+            stdout = _json.dumps(report)
+            stderr = ""
+
+        monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: _Completed())
+        arms = []
+        for workers, wall in ((1, 120.0), (2, 90.0), (4, 80.0)):
+            for runtime in ("source", "native"):
+                plan = _plan(runtime=runtime, workers=workers, tiers=("trade",))
+                arm = bench.run_arm(
+                    plan,
+                    project_root=tmp_path,
+                    evidence_root=tmp_path / f"evidence-{runtime}-{workers}",
+                    timeout_seconds=5.0,
+                    capacity_policy=Path("/policy.json"),
+                )
+                arm.wall_seconds = wall
+                arms.append(arm)
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "selected"
+        assert selection["policy"]["matrix_workers"] == 4
+
+
+class TestDeadlineHeadroomIsPerRow:
+    """Headroom must not mix one row's duration with another's deadline."""
+
+    def test_rows_under_their_own_deadlines_report_positive_headroom(self):
+        # A 1000 s battle row under a 1200 s deadline and a 100 s trade row
+        # under a 900 s deadline both pass.  min-deadline minus max-duration
+        # would wrongly report -100 s.
+        report = {
+            "tiers": [
+                {
+                    "name": "battle",
+                    "status": "PASS",
+                    "counts": {"passed": 1, "failed": 0, "errors": 0},
+                    "case_results": [
+                        {
+                            "status": "PASSED",
+                            "duration_seconds": 1000.0,
+                            "deadline_seconds": 1200.0,
+                            "counts": {"passed": 1},
+                        }
+                    ],
+                },
+                {
+                    "name": "trade",
+                    "status": "PASS",
+                    "counts": {"passed": 1, "failed": 0, "errors": 0},
+                    "case_results": [
+                        {
+                            "status": "PASSED",
+                            "duration_seconds": 100.0,
+                            "deadline_seconds": 900.0,
+                            "counts": {"passed": 1},
+                        }
+                    ],
+                },
+            ]
+        }
+        durations, headroom = bench.case_durations(report, ("trade", "battle"))
+        assert sorted(durations) == [100.0, 1000.0]
+        assert headroom == pytest.approx(200.0)
+
+    def test_an_overrunning_row_reports_negative_headroom(self):
+        report = {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "FAIL",
+                    "counts": {"passed": 0, "failed": 1},
+                    "case_results": [
+                        {
+                            "status": "FAILED",
+                            "duration_seconds": 950.0,
+                            "deadline_seconds": 900.0,
+                            "counts": {"failed": 1},
+                        }
+                    ],
+                }
+            ]
+        }
+        _, headroom = bench.case_durations(report, ("trade",))
+        assert headroom == pytest.approx(-50.0)

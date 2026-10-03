@@ -119,7 +119,6 @@ class ArmResult:
     wall_seconds: float = 0.0
     cpu_seconds: float = 0.0
     per_case_seconds: list[float] = field(default_factory=list)
-    deadline_seconds: float | None = None
     deadline_headroom_seconds: float | None = None
     pressure_avg300: float | None = None
     returncode: int | None = None
@@ -293,17 +292,22 @@ def effective_workers(report: dict[str, Any], requested: int) -> int | None:
 def case_durations(
     report: dict[str, Any], tiers: Iterable[str]
 ) -> tuple[list[float], float | None]:
-    """Return observed per-row durations and the declared per-row deadline.
+    """Return observed per-row durations and the worst per-row deadline margin.
 
     Only matrix ``case_results`` rows are per-case samples.  A tier's aggregate
     ``duration_seconds`` is the sum of a whole tier's rows and is never a
-    per-case latency, so it is not used here.  The deadline is taken from the
-    rows themselves rather than a top-level field the gate does not emit.
+    per-case latency, so it is not used here.
+
+    Headroom is computed per row as ``deadline_seconds - duration_seconds`` and
+    the minimum is reported.  Comparing one row's duration against a different
+    row's deadline would report a false overrun: a 1000 s battle row under a
+    1200 s deadline and a 100 s trade row under a 900 s deadline both pass,
+    while min-deadline minus max-duration reports -100 s.
     """
 
     wanted = set(tiers)
     durations: list[float] = []
-    deadlines: list[float] = []
+    margins: list[float] = []
     payload = report.get("tiers")
     if not isinstance(payload, list):
         return durations, None
@@ -321,10 +325,10 @@ def case_durations(
                 durations.append(float(value))
             deadline = case.get("deadline_seconds")
             if isinstance(deadline, (int, float)) and deadline > 0:
-                deadlines.append(float(deadline))
-    # The strictest declared deadline is the one every row had to meet.
-    observed_deadline = min(deadlines) if deadlines else None
-    return durations, observed_deadline
+                margins.append(
+                    float(deadline) - float(value if isinstance(value, (int, float)) else 0.0)
+                )
+    return durations, (min(margins) if margins else None)
 
 
 def report_pressure(report: dict[str, Any]) -> float | None:
@@ -503,19 +507,16 @@ def run_arm(
     result.not_started = counts["not_started"]
     result.interrupted = counts["interrupted"]
     result.effective_workers = effective_workers(report, plan.requested_workers)
-    result.per_case_seconds, result.deadline_seconds = case_durations(report, plan.tiers)
-    if result.per_case_seconds and result.deadline_seconds:
-        result.deadline_headroom_seconds = result.deadline_seconds - max(result.per_case_seconds)
+    result.per_case_seconds, result.deadline_headroom_seconds = case_durations(report, plan.tiers)
     result.pressure_avg300 = report_pressure(report)
     # The gate's exit status is authoritative: production_gate.py returns 0 if
     # and only if its overall verdict is PASS.  Counting rows alone would accept
     # an arm whose runtime, collection, evidence, or capacity prerequisite was
     # rejected while some rows still happened to pass.
-    if result.returncode != 0:
-        result.gate_passed = False
-        if not result.failed and not result.incomplete:
-            # Preserve the row counts, but the arm is not a clean pass.
-            result.incomplete = max(result.incomplete, 1)
+    result.gate_passed = result.returncode == 0
+    if not result.gate_passed and not result.failed and not result.incomplete:
+        # Preserve the row counts, but the arm is not a clean pass.
+        result.incomplete = max(result.incomplete, 1)
     return result
 
 
