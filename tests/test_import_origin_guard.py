@@ -3953,6 +3953,44 @@ def test_a_record_naming_a_variable_length_algorithm_still_establishes_provenanc
         dist_info.rmdir()
 
 
+@pytest.mark.parametrize("algorithm", ["shake_128", "sha256"])
+def test_a_record_whose_digest_length_is_absurd_is_refused_without_allocating_it(algorithm):
+    """A ``RECORD`` may not choose the size of an allocation the guard makes.
+
+    The digest's own length says how large a ``shake_128`` output was, so the
+    guard has to read that length before hashing.  Reading it by *decoding* the
+    claim is the trap: a planted row naming a gigabyte of output would make the
+    decode allocate a gigabyte before anything was compared, turning a refused
+    file into an out-of-memory failure.
+
+    This row claims far more output than any digest can be, and requires the
+    guard to refuse it.  The bound is textual, so it costs nothing to apply and
+    nothing to exceed with a legitimate record.
+    """
+
+    root = _site_packages_roots()[0]
+    dist_info = root / "pokemon_record_huge_row.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    planted = root / "pokemon_record_huge_row_module.py"
+    try:
+        planted.write_text("VALUE = 'original'\n", encoding="utf-8")
+        absurd = "A" * 2_000_000
+        recorded = dist_info / "RECORD"
+        recorded.write_text(
+            f"pokemon_record_huge_row_module.py,{algorithm}={absurd},{planted.stat().st_size}\n",
+            encoding="utf-8",
+        )
+
+        assert not _is_recorded_by_an_install(planted, root), (
+            "a record claiming an impossible digest must attest nothing"
+        )
+    finally:
+        sys.modules.pop("pokemon_record_huge_row_module", None)
+        for disposable in (planted, dist_info / "RECORD"):
+            disposable.unlink(missing_ok=True)
+        dist_info.rmdir()
+
+
 def test_a_record_whose_label_does_not_match_its_digest_is_refused():
     """The algorithm label is part of the claim, so a mismatch must fail.
 

@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import binascii
 import csv
 import hashlib
 import importlib.metadata
@@ -64,6 +63,47 @@ from urllib.parse import unquote, urlparse
 # none.  Detecting them by name keeps ``_file_digest`` from probing with a
 # length it would then have to catch an exception to undo.
 _VARIABLE_LENGTH_ALGORITHMS = frozenset({"shake_128", "shake_256"})
+
+# The largest digest any of those algorithms produces is SHAKE-256 at an
+# unbounded size, so a size cap cannot come from the algorithm set.  It comes
+# from the other direction instead: nothing a real installer writes is longer
+# than the widest fixed digest's encoding, so this bound only refuses claims no
+# genuine ``RECORD`` could have made -- and it stops a planted record from
+# choosing the size of an allocation the guard performs on its behalf.
+_MAX_RECORDED_DIGEST_LENGTH = 1024
+
+# ``_file_digest`` encodes URL-safe base64, so the alphabet here is the URL-safe
+# one: a digest can legitimately contain ``-`` and ``_``, and rejecting them
+# would refuse the very rows this length exists to honour.
+_BASE64_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+
+def _decoded_digest_length(digest: str) -> int | None:
+    """Return how many bytes an unpadded base64 ``digest`` encodes, or ``None``.
+
+    The length is derived arithmetically rather than by decoding, so an
+    attacker-sized claim is never materialised in memory.  ``None`` means the
+    text is not a well-formed unpadded base64 digest of a plausible size, and
+    the caller treats that as a claim it cannot verify.
+    """
+
+    if not digest or len(digest) > _MAX_RECORDED_DIGEST_LENGTH:
+        return None
+    stripped = digest.rstrip("=")
+    if not stripped or any(character not in _BASE64_ALPHABET for character in stripped):
+        return None
+    remainder = len(stripped) % 4
+    if remainder == 1:
+        # A single leftover base64 character cannot encode any whole byte.
+        return None
+    # Padding may only bring the text up to a multiple of four, and at most two
+    # characters of it.
+    if len(digest) != len(stripped) and (len(digest) % 4 or len(digest) - len(stripped) > 2):
+        return None
+    decoded = len(stripped) * 3 // 4
+    return decoded if decoded else None
 
 # The distributions whose import origins decide what the suite actually
 # measures.  ``pokered_harness`` is the harness under test and ``pyboy`` is the
@@ -678,10 +718,15 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
         # hashed at exactly the size the record says it was hashed at, and a
         # record whose digest is too short for its algorithm simply fails to
         # match instead of being honoured at some other size.
-        try:
-            recorded_length = len(base64.urlsafe_b64decode(digest + "=" * (-len(digest) % 4)))
-        except (ValueError, binascii.Error):
-            recorded_length = None
+        #
+        # The length is computed from the base64 *text*, never by decoding it.
+        # A ``RECORD`` is attacker-writable, and decoding the claim first would
+        # allocate whatever the claim asked for -- a row naming a gigabyte of
+        # output would exhaust memory before the guard ever compared anything.
+        # A digest string also bounds itself: nothing legitimate is longer
+        # than the largest fixed digest plus its encoding, so the cap is not a
+        # policy choice but a refusal to size an allocation off untrusted text.
+        recorded_length = _decoded_digest_length(digest)
         actual = _file_digest(source_file, algorithm, recorded_length)
         if actual is None or actual != digest:
             return False
