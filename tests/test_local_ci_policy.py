@@ -464,94 +464,169 @@ def test_local_runner_has_no_hosted_or_paid_service_dependency() -> None:
     assert "download-artifact" not in runner
 
 
+_BENCHMARK = "scripts/benchmark_matrix_concurrency.py"
+
+# Ruff options that take a separate operand token. A lane may spell an exclude
+# either `--exclude=path` or `--exclude path`, and both forms are honoured by
+# Ruff, so the probe must carry an operand through rather than dropping it as
+# if it were a path.
+_RUFF_OPTIONS_WITH_OPERAND = frozenset(
+    {
+        "--exclude",
+        "--extend-exclude",
+        "--config",
+        "--line-length",
+        "--target-version",
+        "--output-format",
+    }
+)
+
+
+def _lane_options(lane: tuple[str, ...], benchmark: str) -> list[str]:
+    """Return the lane's Ruff options with its path list replaced.
+
+    The path list is swapped for `benchmark` alone so the probe reports on that
+    one file, but every option is preserved -- an `--exclude` hiding the
+    benchmark would live in exactly this part of the lane. Both spellings of an
+    option and its operand are carried through, so `--exclude <path>` is not
+    mistaken for two path arguments.
+
+    `lane[3]` is the subcommand itself and is not returned here; the caller
+    rebuilds the command around it.
+    """
+
+    tokens = list(lane[4:])
+    options: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _RUFF_OPTIONS_WITH_OPERAND:
+            options.append(token)
+            index += 1
+            if index < len(tokens):
+                options.append(tokens[index])
+                index += 1
+            continue
+        if token.startswith("-") and "=" not in token and token not in {"--check"}:
+            options.append(token)
+            index += 1
+            continue
+        index += 1
+
+    # `--check` and `--show-files` are re-added by the probe; Ruff rejects a
+    # repeated flag, and that argparse error would mask the real result.
+    return [option for option in options if option not in {"--check", "--show-files"}]
+
+
 def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
-    """The #106 benchmark must sit in both main lanes of both CI files.
+    """The #106 benchmark must be really linted, in both lanes of both files.
 
     `scripts/` is enumerated explicitly in these lanes rather than globbed, so
     a new script ships outside the lint boundary until someone lists it. When
-    PR #564 landed, `scripts/benchmark_matrix_concurrency.py` did exactly that:
-    1409 lines of new code in neither the check nor the format lane.
+    PR #564 landed, `scripts/benchmark_matrix_concurrency.py` -- 1409 lines of
+    new code -- was added to neither the check lane nor the format lane, in
+    neither the local runner nor the hosted workflow.
 
-    The lockstep test above cannot catch this on its own. It only proves the
-    runner and the workflow list the same files, and both omitted the path
-    together. The membership floor further down pins the path against the
-    enumerated tuple, but that tuple is documented as a floor rather than the
-    boundary, so dropping the path from a lane still leaves every other test
-    green. This asserts membership in each lane directly.
+    Three separate things have to hold, and each has been refuted in review:
+
+    1. The path is *listed*. The lockstep test cannot see this, because it only
+       proves the runner and the workflow agree -- they omitted it together.
+    2. Ruff actually *resolves* it. A lane carrying
+       `--force-exclude --exclude=<benchmark>` names the path and then drops
+       it, and a membership assertion still passes.
+    3. Ruff applies its *rules* to it. A `per-file-ignores` entry of `["ALL"]`
+       leaves the file resolved but silently unlinted, and Ruff then reports
+       "All checks passed" for anything, including an undefined name.
+
+    So this probes Ruff directly for each source's own lanes rather than
+    reading the declared text.
     """
-
-    benchmark = "scripts/benchmark_matrix_concurrency.py"
 
     for source, text in (
         ("runner", RUNNER.read_text(encoding="utf-8")),
         ("workflow", WORKFLOW.read_text(encoding="utf-8")),
     ):
+        lanes = _ruff_invocations(text)
         for subcommand in ("check", "format"):
-            lane = _main_lane(_ruff_invocations(text), subcommand)
-            assert benchmark in lane, (
-                f"{source} `ruff {subcommand}` lane lost {benchmark}; "
+            lane = _main_lane(lanes, subcommand)
+
+            # 1. listed
+            assert _BENCHMARK in lane, (
+                f"{source} `ruff {subcommand}` lane does not list {_BENCHMARK}; "
                 f"the benchmark would ship unlinted"
             )
 
+            # 2. resolved -- an excluded path yields Ruff's "no files" warning
+            options = _lane_options(lane, _BENCHMARK)
+            probe = [subcommand, *options, "--force-exclude", "--no-cache"]
+            probe.append("--show-files" if subcommand == "check" else "--check")
+            probe.append(_BENCHMARK)
+            completed = subprocess.run(
+                [sys.executable, "-m", "ruff", *probe],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert completed.returncode == 0, (
+                f"{source} `ruff {subcommand}` probe failed to run: {completed.stderr.strip()}"
+            )
+            assert "No Python files found" not in completed.stderr, (
+                f"{source} `ruff {subcommand}` lane lists {_BENCHMARK} but Ruff "
+                f"excludes it: {completed.stderr.strip()}"
+            )
 
-def test_matrix_benchmark_is_actually_resolved_by_ruff() -> None:
-    """Listing the benchmark is not enough; Ruff must really lint it.
+    # 3. linted -- `per-file-ignores` can disable a file's rules entirely, and
+    # that leaves both checks above satisfied while Ruff inspects nothing.
+    settings = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "--show-settings", _BENCHMARK],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ignores = _per_file_ignores_for(settings.stdout)
+    assert not ignores.strip("{} \n\t"), (
+        f"{_BENCHMARK} is covered by a per-file ignore and would not be linted: {ignores}"
+    )
+    enabled = _enabled_rule_count(settings.stdout)
+    assert enabled > 0, f"ruff enables no rules for {_BENCHMARK}; it is unlinted"
 
-    Membership in the lane's argument vector can be satisfied while the file is
-    still excluded. A lane carrying `--force-exclude
-    --exclude=scripts/benchmark_matrix_concurrency.py` lists the path and then
-    silently drops it, and the membership test above passes regardless, because
-    it only ever inspects the declared text.
 
-    So this asks Ruff, which is the only component that knows how it resolves
-    excludes, exactly as `_ruff_lint_resolved_files` already does for `tests/`.
-    `ruff check` has `--show-files`; `ruff format` has no equivalent, so the
-    format lane is probed for its warning instead. Both subcommands accept
-    `--force-exclude`, and `--force-exclude` is what makes an explicitly listed
-    path droppable at all: without it a bare file argument is linted even if
-    `extend-exclude` matches it. So the probe runs the lane with
-    `--force-exclude` and asks Ruff to resolve the benchmark on its own. A
-    genuinely excluded path yields "No Python files found under the given
-    path(s)" and no output, which is what this rejects.
+def _per_file_ignores_for(settings_output: str) -> str:
+    """Return the `linter.per_file_ignores` table Ruff resolved for the file.
+
+    The table prints as `{}` when no per-file ignore applies, and as a
+    multi-line mapping with `absolute_matcher` / `basename_matcher` entries when
+    one does, so its body is what decides whether the file is linted.
     """
 
-    benchmark = "scripts/benchmark_matrix_concurrency.py"
-    runner_lanes = _ruff_invocations(RUNNER.read_text(encoding="utf-8"))
+    lines = settings_output.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().startswith("linter.per_file_ignores"):
+            body = [line.split("=", 1)[1]]
+            while "}" not in body[-1]:
+                index += 1
+                if index >= len(lines):
+                    break
+                body.append(lines[index])
+            return "".join(body)
+    return "{}"
 
-    for subcommand in ("check", "format"):
-        lane = _main_lane(runner_lanes, subcommand)
-        # Keep the lane's Ruff options -- that is where an `--exclude` hiding
-        # the benchmark would live -- but replace the path list with the
-        # benchmark alone, so the probe reports on that one file.
-        # `--check` and `--show-files` are re-added below, so drop the lane's
-        # own copies to avoid the repeated-flag error Ruff rejects.
-        probes = {"--check", "--show-files", "--diff"}
-        options = [
-            argument
-            for argument in lane[3:]
-            if not (argument.endswith(".py") and "=" not in argument)
-            and argument != "tests"
-            and argument not in probes
-        ]
-        # The lane may already carry some of these; Ruff rejects a repeated
-        # flag, and that argparse error would mask the resolution check.
-        for flag in ("--force-exclude", "--no-cache"):
-            if flag not in options:
-                options.append(flag)
-        arguments = [*options]
-        arguments.append("--show-files" if subcommand == "check" else "--check")
-        arguments.append(benchmark)
-        completed = subprocess.run(
-            [sys.executable, "-m", "ruff", *arguments],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert completed.returncode == 0, (
-            f"`ruff {subcommand}` probe failed to run: {completed.stderr.strip()}"
-        )
-        assert "No Python files found" not in completed.stderr, (
-            f"`ruff {subcommand}` declares {benchmark} but Ruff excludes it, so "
-            f"the benchmark would ship unlinted: {completed.stderr.strip()}"
-        )
+
+def _enabled_rule_count(settings_output: str) -> int:
+    """Count the rule codes Ruff reports as enabled."""
+
+    count = 0
+    inside = False
+    for line in settings_output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("linter.rules.enabled"):
+            inside = "[" in stripped
+            count += stripped.count(",") + (1 if "[" in stripped and "]" not in stripped else 0)
+            continue
+        if inside:
+            if stripped.startswith("]"):
+                break
+            count += 1
+    return count

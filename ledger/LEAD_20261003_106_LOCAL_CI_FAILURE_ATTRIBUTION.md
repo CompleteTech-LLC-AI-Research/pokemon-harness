@@ -106,7 +106,9 @@ code change. None of the three is in a module this candidate touches.
 
 Two further host-dependent failures in the 19 are worth naming for the same
 reason: `tests/test_mcp_timed_stdio.py::test_authored_timed_stdio_pair_frames_and_cleanup`
-failed **3/3** isolated runs on unmodified master.
+failed **3/3** isolated runs on unmodified master. That is a separate
+three-run experiment from the 13-module comparison above, and it is recorded
+in its own retained per-run logs rather than in the combined ones.
 
 **The honest summary:** this candidate's failure set is a superset of master's,
 and every member of the difference also fails on unmodified master. Nothing in
@@ -137,7 +139,7 @@ The complete candidate diff is three code files plus this ledger:
 ```
 .github/workflows/release-hygiene.yml  |  2 +
 scripts/run_local_ci.sh                 |  2 +
-tests/test_local_ci_policy.py           | 31 +
+tests/test_local_ci_policy.py           | 173 +
 ledger/LEAD_20261003_106_LOCAL_CI_FAILURE_ATTRIBUTION.md
 ```
 
@@ -153,28 +155,40 @@ new code — was added to neither the check lane nor the format lane in either
 
 The existing lockstep test could not catch it: it only proves the runner and
 the workflow list the *same* files, and both omitted the path together. This
-candidate fixes the omission and adds two tests.
+candidate fixes the omission and adds one test that checks all three things
+that have to hold, for both subcommands and **both** files:
 
-The first pins the benchmark to each of the four lane/file combinations by
-membership. That test alone was not enough: a lane can list a path and still
-drop it, by carrying `--force-exclude --exclude=<benchmark>`, and a membership
-assertion cannot see that. The second test therefore asks Ruff itself whether
-it resolves the file under the lane's own options, which is the same technique
-`_ruff_lint_resolved_files` already uses for `tests/`.
+1. the path is **listed** in the lane;
+2. Ruff actually **resolves** it — a lane can list a path and still drop it by
+   carrying `--force-exclude --exclude=<benchmark>`;
+3. Ruff actually applies its **rules** to it — a `per-file-ignores` entry of
+   `["ALL"]` leaves the file resolved but silently unlinted, and Ruff then
+   reports "All checks passed" for anything, including an undefined name.
 
-Both were verified non-vacuous by mutation:
+Each of those was refuted in review before being fixed, and each is verified
+non-vacuous by mutation:
 
-| mutation | caught by |
+| mutation | caught |
 |---|---|
-| entry removed from the check lane | membership test |
-| entry removed from the format lane | membership test |
-| `--force-exclude --exclude=<benchmark>` added to both lanes | resolution test |
+| entry removed from the check lane | yes |
+| entry removed from the format lane | yes |
+| `--force-exclude --exclude=<benchmark>` in the runner's lanes | yes |
+| `--force-exclude --exclude=<benchmark>` in the workflow's lanes only | yes |
+| `--exclude <benchmark>` in the space-separated operand form | yes |
+| `per-file-ignores = ["ALL"]` for the benchmark in `pyproject.toml` | yes |
+
+Point 3 needed a correction found while verifying it: a per-file ignore does
+not show up in `ruff check --show-settings` unless the table is nested under
+`[tool.ruff.lint]`, and with the table misplaced Ruff reported "All checks
+passed" for a file containing an undefined name while
+`per_file_ignores` still read `{}`. The test asserts against Ruff's resolved
+settings, so it now fails on the ignore that actually applies.
 
 ## Focused suites on this candidate
 
 ```
 python -m pytest -p no:randomly -q tests/test_matrix_concurrency_policy.py tests/test_local_ci_policy.py
--> 117 passed
+-> 116 passed
 python -m ruff check <changed python files>      -> clean
 python -m ruff format --check <changed files>    -> clean
 bash -n scripts/run_local_ci.sh                  -> clean
