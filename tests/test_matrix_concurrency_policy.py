@@ -677,9 +677,7 @@ class TestGateVerdictIsRecordedOnBothPaths:
         arms = []
         for workers, wall in ((1, 120.0), (2, 90.0), (4, 80.0)):
             for runtime in ("source", "native"):
-                plan = _plan(
-                    runtime=runtime, workers=workers, tiers=("trade", "battle")
-                )
+                plan = _plan(runtime=runtime, workers=workers, tiers=("trade", "battle"))
                 arm = bench.run_arm(
                     plan,
                     project_root=tmp_path,
