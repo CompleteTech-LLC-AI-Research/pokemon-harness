@@ -609,9 +609,7 @@ def test_operator_interrupt_is_not_swallowed_as_a_finding(tmp_path, monkeypatch,
         check_origins(tmp_path, ("interrupting_ns",))
 
 
-def test_a_finder_that_raises_on_hash_becomes_a_finding_not_a_traceback(
-    tmp_path, monkeypatch
-):
+def test_a_finder_that_raises_on_hash_becomes_a_finding_not_a_traceback(tmp_path, monkeypatch):
     """A membership test against a finder set calls the finder's ``__hash__``.
 
     ``_is_trusted_stdlib_finder`` decides trust with ``finder in <set>``, and
@@ -640,9 +638,9 @@ def test_a_finder_that_raises_on_hash_becomes_a_finding_not_a_traceback(
     report = check_origins(tmp_path, ("interrupting_ns",))
 
     assert report["status"] == "FAIL"
-    assert any(
-        package["package"] == "<interpreter>" for package in report["packages"]
-    ), f"the hostile finder must be refused as an interpreter finding: {report}"
+    assert any(package["package"] == "<interpreter>" for package in report["packages"]), (
+        f"the hostile finder must be refused as an interpreter finding: {report}"
+    )
 
 
 @pytest.mark.parametrize("raised", [KeyboardInterrupt(), SystemExit()])
@@ -869,9 +867,7 @@ def test_a_hostile_site_module_cannot_abort_the_guard(tmp_path):
     assert report["status"] == "FAIL", report
 
 
-def test_an_unreadable_finder_descriptor_refuses_installation_trust(
-    tmp_path, monkeypatch
-):
+def test_an_unreadable_finder_descriptor_refuses_installation_trust(tmp_path, monkeypatch):
     """``_is_installation_finder``'s own descriptor reads must refuse, not escape.
 
     Round 3 repaired the descriptor reads in ``_finder_code_file``, but the
@@ -895,9 +891,7 @@ def test_an_unreadable_finder_descriptor_refuses_installation_trust(
     code_file = tmp_path / "installed.py"
     code_file.write_text("", encoding="utf-8")
     monkeypatch.setattr(origins, "_finder_code_file", lambda _finder: code_file)
-    monkeypatch.setattr(
-        origins, "_finder_was_imported_from", lambda _finder, _code_file: True
-    )
+    monkeypatch.setattr(origins, "_finder_was_imported_from", lambda _finder, _code_file: True)
     monkeypatch.setattr(origins, "_site_packages_roots", lambda: [tmp_path])
     monkeypatch.setattr(origins, "_is_within", lambda *_a, **_k: True)
 
@@ -932,9 +926,7 @@ def test_an_unreadable_code_object_cannot_abort_the_guard():
     def genuine() -> None:
         return None
 
-    assert origins._code_signature(HostileCode()) != origins._code_signature(
-        HostileCode()
-    )
+    assert origins._code_signature(HostileCode()) != origins._code_signature(HostileCode())
     assert isinstance(origins._code_signature(genuine.__code__), tuple)
     # The walk yields the object itself, then stops rather than raising.
     walked = list(origins._code_objects(HostileCode()))
@@ -2551,9 +2543,7 @@ def test_a_hostile_distribution_object_cannot_abort_the_guard(tmp_path, monkeypa
         "packages_distributions",
         lambda: {"unattributable_pkg": ["evil"]},
     )
-    monkeypatch.setattr(
-        origins.importlib.metadata, "distribution", lambda name: EvilDistribution()
-    )
+    monkeypatch.setattr(origins.importlib.metadata, "distribution", lambda name: EvilDistribution())
 
     report = check_origins(tmp_path / "checkout", ("unattributable_pkg",))
 
@@ -2586,9 +2576,7 @@ def test_a_hostile_owners_mapping_cannot_abort_the_guard(tmp_path, monkeypatch):
         if name == "unmappable_pkg" or name.startswith("unmappable_pkg."):
             del sys.modules[name]
 
-    monkeypatch.setattr(
-        origins.importlib.metadata, "packages_distributions", HostileOwners
-    )
+    monkeypatch.setattr(origins.importlib.metadata, "packages_distributions", HostileOwners)
 
     report = check_origins(tmp_path / "checkout", ("unmappable_pkg",))
 
