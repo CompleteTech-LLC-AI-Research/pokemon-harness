@@ -641,3 +641,30 @@ feed *stdin*, so it proves nothing about that path. The real bound is the
 stdin path. Confirmed here by simulating a probe that stopped emitting JSON:
 the `silencing` list comes back empty, so that equality fires loudly instead of
 quietly excusing a comment. The docstring now names the right assertion.
+
+## Disposition: merged as `a413eeb5`
+
+PR #566 merged into `master` at 2026-10-03T23:08:39Z under a head-SHA guard —
+the PR head was re-read as `d1307cbb` and `origin/master` as `b5302d09`
+immediately before the merge, so neither had moved underneath the decision.
+
+    master before : b5302d091e5c809bd343f0f15996b8a47bdb4d3d
+    PR head       : d1307cbbd1b05ff3f36674eec088f952b85194cc
+    merge commit  : a413eeb5ba4bc8e5407fc31cd84c31efe855f314
+
+The required check `Native build and complete unit tier (Python 3.12)` passed
+on `d1307cbb` in 7m55s; the PR was MERGEABLE/CLEAN at merge time. Post-merge
+verification ran against the merged tree itself in a clean detached checkout:
+both Ruff lanes clean with zero warnings, `bash -n` clean, `git diff --check`
+clean, and 124 passed in the two policy test files.
+
+A first post-merge run used an interpreter bound to a different checkout and
+the suite **refused to report**, exiting 4 with an explicit warning that the
+results would describe another tree. That guard is the right behaviour, and it
+is why the count above comes from a virtualenv installed from `a413eeb5`
+rather than a reused one.
+
+This closes the harness increment and nothing else. The qualifying CPU-budget
+measurement is still unrun for want of real ROM and symbol assets and an
+operator-declared CPU allocation (#85, #86), so #106 stays open, #570 stays
+open for the generalised row, and release remains PARTIAL.
