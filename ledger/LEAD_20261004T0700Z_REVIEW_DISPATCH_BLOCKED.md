@@ -91,3 +91,51 @@ and confirming the row goes red.
 - Protected checkout unchanged: `lead/259-widen-lint-lanes` at `bd2c167`,
   3 staged files, 2 stashes, untracked `.scratch/` and `ledger/`.
 - `origin/master` unchanged at `b5302d0`.
+
+## Update, 2026-10-04 later pass: still blocked
+
+Retried on a new PR (#571), so this is not a stale-agent problem:
+
+| mechanism | target | result |
+|---|---|---|
+| `spawn_agent` | `indep569_scripts_lane` | returned a Codex-settings reply; cited `ledger/INCIDENT_STALE_BOARD_HIJACK.md`, which does not exist |
+| `followup_task` | `indep569_scripts_lane` | `unsupported call` |
+| `spawn_agent` | `indep571_review` | returned a workspace/config inventory; "no task in your message" |
+| `list_agents` | — | `unsupported call` |
+
+So a **freshly created** agent also receives no task text. That rules out stale
+agent state and points at the dispatch path itself: the brief is not reaching the
+subagent at all. All four briefs are readable at dispatch time, so this is not
+file access or permissions.
+
+An earlier responding agent also fabricated a `BRIEF_REVIEW_539_1827e8d.md` and
+claimed to have verified a "51-entry list" by reading `.github/workflows/*`,
+a path that does not exist in this repository. Its output is not usable.
+
+## Structural consequence
+
+Per the run's own rule — "An author may not independently approve their own
+change" — no PR can merge while this holds. The lead authored the #566 fix, so
+the lead's own measurements on #571, #568, and #569 **cannot** substitute for the
+missing independent verdict, no matter how much time is spent re-running them.
+
+Review briefs are on disk and committed, so any reviewer — human or agent — can
+execute them verbatim:
+
+- `briefs/REVIEW_565.md`
+- `briefs/REVIEW_566.md`
+- `briefs/REVIEW_569.md`
+- `briefs/REVIEW_571.md`
+
+## What is still actionable without a reviewer
+
+Independent of the dispatch problem, real work continued this pass:
+
+- Found and proved a **blocking defect** on #566 head `16d102e`.
+- **Repaired it** on branch `fix/106-directive-normalization`, commit `23333c8`,
+  opened as PR **#571**: mutation matrix green across seven directives,
+  45 tests pass, lint and format clean.
+- Reduced the review bottleneck from four unreviewed PRs to three, since #571 is
+  a candidate replacement for #566's rejected head.
+
+Merging still requires the independent verdict the tooling cannot deliver.
