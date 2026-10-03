@@ -62,6 +62,10 @@ def _arm(
     # arms comparable.  Model that here so fixtures are not incomparable by
     # omission; tests that care about the row identity override it.
     tier_rows = {"trade": 43, "battle": 19}
+    nodeids = {
+        tier: frozenset(f"tests/t.py::test[{tier}-{index}]" for index in range(count))
+        for tier, count in tier_rows.items()
+    }
     return bench.ArmResult(
         plan=plan,
         completed_passing=passing,
@@ -71,6 +75,7 @@ def _arm(
         not_started=not_started,
         effective_workers=workers if effective is None else effective,
         tier_row_totals={tier: tier_rows[tier] for tier in plan.tiers if tier in tier_rows},
+        tier_rows={tier: nodeids[tier] for tier in plan.tiers if tier in nodeids},
         wall_seconds=wall,
         gate_passed=gate_passed,
     )
@@ -111,9 +116,9 @@ def _full_set(*, source_walls, native_walls, passing: int = 62):
 class TestThroughputAccounting:
     """Failed and unstarted rows must stay in the denominator."""
 
-    def test_passing_per_hour_uses_passing_rows_over_wall_time(self):
+    def test_required_rows_per_hour_uses_required_rows_over_wall_time(self):
         arm = _arm(passing=36, wall=72.0)
-        assert arm.passing_per_hour == pytest.approx(36 / 72.0 * 3600.0)
+        assert arm.required_rows_per_hour == pytest.approx(36 / 72.0 * 3600.0)
 
     def test_more_passing_rows_never_reduce_throughput(self):
         # Holding wall time fixed, doing more passing rows must score higher.
@@ -121,7 +126,7 @@ class TestThroughputAccounting:
         # smaller job look faster and tested nothing about row count.
         few_rows = _arm(passing=10, wall=100.0)
         many_rows = _arm(passing=18, wall=100.0)
-        assert many_rows.passing_per_hour > few_rows.passing_per_hour
+        assert many_rows.required_rows_per_hour > few_rows.required_rows_per_hour
 
     def test_dropping_failed_rows_would_inflate_speed_and_is_not_done(self):
         # Two arms execute the same 19 declared rows in the same wall time, but
@@ -136,7 +141,7 @@ class TestThroughputAccounting:
 
     def test_zero_wall_time_never_reports_infinite_throughput(self):
         arm = _arm(passing=18, wall=0.0)
-        assert arm.passing_per_hour == 0.0
+        assert arm.required_rows_per_hour == 0.0
 
 
 class TestCompleteness:
@@ -708,6 +713,11 @@ class TestGateVerdictIsRecordedOnBothPaths:
                     "status": "PASS",
                     "duration_seconds": 42.0,
                     "counts": {"passed": 19, "failed": 0, "errors": 0},
+                    # A real report carries the exact rows it declared, which
+                    # is what makes two arms provably comparable.
+                    "selected_nodeids": [
+                        f"tests/t.py::test[{tier}-{index}]" for index in range(19)
+                    ],
                     "case_results": [
                         {
                             "status": "PASSED",
@@ -941,14 +951,14 @@ class TestThroughputCountsAllRequiredWork:
         # selector separately refuses it for the failure.
         assert partial.required_rows == complete.required_rows == 19
         assert partial.clean_pass is False
-        assert partial.passing_per_hour > complete.passing_per_hour
+        assert partial.required_rows_per_hour > complete.required_rows_per_hour
 
     def test_the_passing_only_rate_is_still_reported_separately(self):
         partial = _arm(passing=18, not_started=1, wall=10.0)
         # clean_passing_per_hour divides only passing rows by wall time and is
         # reported for context, never used to rank or select.  The two differ,
         # so a reader can see that a row was skipped.
-        assert partial.clean_passing_per_hour < partial.passing_per_hour
+        assert partial.clean_passing_per_hour < partial.required_rows_per_hour
         assert partial.required_rows == 19
 
 
@@ -1172,11 +1182,16 @@ class TestRuntimesMustMeasureTheSameMatrix:
             for w, wall in zip((1, 2, 4), walls, strict=True)
         ]
         for arm in arms:
-            arm.tier_row_totals = (
+            counts = (
                 {"trade": 43, "battle": 19}
                 if arm.plan.runtime == "source"
                 else {"trade": 42, "battle": 20}
             )
+            arm.tier_row_totals = counts
+            arm.tier_rows = {
+                tier: frozenset(f"tests/t.py::test[{tier}-{index}]" for index in range(count))
+                for tier, count in counts.items()
+            }
         selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
         assert selection["outcome"] == "unselected"
         assert any("did not measure the same matrix" in reason for reason in selection["reasons"])
@@ -1234,3 +1249,132 @@ class TestBlockedTiersKeepTheirDeclaredRows:
         counts = bench.tier_counts(report, ("trade",))
         assert counts["incomplete"] == 1
         assert counts["not_started"] == 0
+
+
+class TestRowIdentityNotJustCounts:
+    """Matching counts must not stand in for matching work."""
+
+    def test_a_swapped_row_id_at_identical_counts_is_not_comparable(self):
+        # The manifest can swap one 43-row trade node id for another between two
+        # sequential arms.  Every count still reads 43/19 while a different set
+        # of tests was timed, so counts alone would let selection proceed.
+        arms = [
+            _arm(runtime="source", workers=w, wall=wall)
+            for w, wall in ((1, 100.0), (2, 90.0), (4, 80.0))
+        ]
+        swapped = frozenset({"tests/t.py::test[trade-swapped]"}) | frozenset(
+            f"tests/t.py::test[trade-{index}]" for index in range(1, 43)
+        )
+        arms[2].tier_rows = {"trade": swapped, "battle": arms[2].tier_rows["battle"]}
+        assert bench.comparable(arms) is False
+        assert bench.select_policy(arms, worker_counts=(1, 2, 4))["outcome"] == "unselected"
+
+    def test_matching_row_ids_are_comparable(self):
+        arms = [
+            _arm(runtime="source", workers=w, wall=wall)
+            for w, wall in ((1, 100.0), (2, 90.0), (4, 80.0))
+        ]
+        assert bench.comparable(arms) is True
+
+    def test_an_arm_without_recorded_row_ids_is_not_comparable(self):
+        arms = [
+            _arm(runtime="source", workers=w, wall=wall)
+            for w, wall in ((1, 100.0), (2, 90.0), (4, 80.0))
+        ]
+        arms[1].tier_rows = {}
+        assert bench.comparable(arms) is False
+
+    def test_row_identity_is_read_from_the_gate_report(self):
+        report = {
+            "tiers": [
+                {
+                    "name": "trade",
+                    "status": "PASS",
+                    "counts": {"passed": 2, "failed": 0},
+                    "selected_nodeids": ["tests/a.py::test[1]", "tests/a.py::test[2]"],
+                },
+                {
+                    "name": "battle",
+                    "status": "PASS",
+                    "counts": {"passed": 1, "failed": 0},
+                    "selected_nodeids": ["tests/b.py::test[1]"],
+                },
+            ]
+        }
+        assert bench.tier_row_identity(report, ("trade", "battle")) == {
+            "trade": frozenset({"tests/a.py::test[1]", "tests/a.py::test[2]"}),
+            "battle": frozenset({"tests/b.py::test[1]"}),
+        }
+
+    def test_an_unreadable_row_identity_is_empty_not_inferred(self):
+        assert bench.tier_row_identity({"tiers": "oops"}, ("trade",)) == {"trade": frozenset()}
+
+
+class TestArmTotalsMustBeInternallyConsistent:
+    """Outcomes and declarations must agree in both directions."""
+
+    def test_more_outcomes_than_declared_rows_is_refused(self):
+        # The gate's own PASS path guards this, but a caller can construct the
+        # arm directly, and an inflated denominator inflates the throughput
+        # used to rank arms.
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall, passing=63)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0), (4, 80.0))
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "unselected"
+        assert any("outcome(s) exceed the declaration" in r for r in selection["reasons"])
+
+
+class TestDuplicateArmsCannotFakeAnImprovement:
+    """Two runs at one worker count are variance, not a concurrency effect."""
+
+    def test_two_runs_at_the_same_count_are_not_ranked_against_each_other(self):
+        # With only workers=1 declared, ranking a second 60 s run above the
+        # 120 s reference would report run-to-run variance as the effect of
+        # concurrency.  No worker-count effect was measured at all.
+        arms = [
+            _arm(runtime=rt, workers=1, wall=wall)
+            for rt in ("source", "native")
+            for wall in (120.0, 60.0)
+        ]
+        selection = bench.select_policy(arms, worker_counts=(1,))
+        assert selection["outcome"] == "unselected"
+        assert any("duplicate arm" in r for r in selection["reasons"])
+
+    def test_one_arm_per_count_is_accepted(self):
+        arms = [
+            _arm(runtime=rt, workers=w, wall=wall)
+            for rt in ("source", "native")
+            for w, wall in ((1, 120.0), (2, 90.0))
+        ]
+        assert bench.select_policy(arms, worker_counts=(1, 2))["outcome"] == "selected"
+
+
+class TestThroughputIsLabelledForWhatItDivides:
+    """Required-row rate must not be reported as a passing-row rate."""
+
+    def test_the_report_names_the_rate_it_actually_measures(self):
+        arm = _arm(passing=61, failed=1, wall=10.0)
+        record = arm.as_dict()
+        assert "required_rows_per_hour" in record
+        assert "clean_passing_per_hour" in record
+        # 62 required rows over 10 s is not a passing rate: only 61 passed.
+        assert record["required_rows_per_hour"] == pytest.approx(62 / 10.0 * 3600.0)
+        assert record["clean_passing_per_hour"] == pytest.approx(61 / 10.0 * 3600.0)
+        assert record["required_rows_per_hour"] != record["clean_passing_per_hour"]
+
+    def test_a_failing_arm_is_never_reported_as_a_passing_rate(self):
+        arm = _arm(passing=61, failed=1, wall=10.0)
+        assert arm.required_rows_per_hour > arm.clean_passing_per_hour
+        assert "passing_per_hour" not in arm.as_dict()
+
+    def test_the_selection_summary_uses_the_required_row_rate(self):
+        arms = _full_set(source_walls=(120.0, 90.0, 80.0), native_walls=(120.0, 90.0, 80.0))
+        selection = bench.select_policy(arms, worker_counts=(1, 2, 4))
+        assert selection["outcome"] == "selected"
+        per_runtime = selection["per_runtime"]
+        assert "best_required_rows_per_hour" in per_runtime["source"]
+        assert "reference_required_rows_per_hour" in per_runtime["source"]
+        assert "best_passing_per_hour" not in per_runtime["source"]

@@ -1029,8 +1029,15 @@ declared and satisfy every other condition. A tier the gate blocked before
 dispatch — missing ROM or fixture assets — declares its rows and produces no
 per-row results at all; those rows are counted as unstarted, so an arm blocked
 on absent assets reports the work it could not attempt rather than appearing to
-have measured nothing. The separate passing-row rate is reported as context and is never
-used to rank arms or choose a policy.
+have measured nothing.
+
+The report labels each rate for what it divides. `required_rows_per_hour`
+divides every declared row — passing, failed, skipped, unstarted — by wall time
+and is the figure arms are ranked on, because an arm that skipped work to
+finish sooner must not post a higher figure. `clean_passing_per_hour` divides
+only passing rows and is context for a reader. Calling the first one a
+*passing* rate would misreport an arm that did less work as one that completed
+more, so the two are always named for what they count.
 
 ### When a policy is selected
 
@@ -1079,10 +1086,22 @@ valid result and never a defect:
   trading a cheap row for an expensive one, and that timing difference would be
   attributed to concurrency. Comparability is decided per tier, and an arm that
   never recorded its per-tier rows is not comparable by assumption;
+- two arms ran different row ids at identical counts, or the two runtimes did.
+  Counts alone cannot prove the same work was timed: if the manifest swaps one
+  43-row trade node id for another between two sequential arms, every count
+  still reads 43/19 while a different set of tests ran. The gate reports the
+  exact `selected_nodeids`, so that is what comparability compares, within a
+  runtime and across the two;
 - the two runtimes measured different matrices. They run sequentially, and a
   single worker policy has to be satisfied by both, so a per-runtime check
   alone cannot see a manifest change between the source block and the native
   block;
+- an arm recorded more outcomes than rows it declared. The gate's own PASS path
+  guards this, but a caller can construct an arm directly, and an inflated
+  denominator would inflate the throughput arms are ranked on;
+- the same runtime and worker count appeared twice. Two runs at one count are
+  run-to-run variance, not a worker-count effect, so ranking a faster repeat
+  against a slower reference would report variance as the effect of concurrency;
 - the runtimes disagree on the best worker count;
 - nothing beat the `workers=1` reference.
 

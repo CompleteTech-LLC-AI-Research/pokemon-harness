@@ -242,6 +242,7 @@ class ArmResult:
     # between two of them; these are what make that difference visible instead
     # of letting a combined total hide a trade/battle shift.
     tier_row_totals: dict[str, int] = field(default_factory=dict)
+    tier_rows: dict[str, frozenset[str]] = field(default_factory=dict)
     tier_effective_workers: dict[str, int] = field(default_factory=dict)
     wall_seconds: float = 0.0
     cpu_seconds: float = 0.0
@@ -278,7 +279,7 @@ class ArmResult:
         return self.complete and self.failed == 0 and self.completed_passing > 0
 
     @property
-    def passing_per_hour(self) -> float:
+    def required_rows_per_hour(self) -> float:
         """Return throughput over the arm's whole declared work.
 
         The numerator is every row the arm was required to produce, not only
@@ -327,7 +328,12 @@ class ArmResult:
             },
             "wall_seconds": round(self.wall_seconds, 6),
             "cpu_seconds": round(self.cpu_seconds, 6),
-            "passing_per_hour": round(self.passing_per_hour, 6),
+            # Named for what it divides: required rows by wall time.  Calling
+            # this "passing_per_hour" while it includes failed, skipped and
+            # unstarted rows would misreport a run that did less work as one
+            # that completed more.
+            "required_rows_per_hour": round(self.required_rows_per_hour, 6),
+            "clean_passing_per_hour": round(self.clean_passing_per_hour, 6),
             "per_case_seconds": {
                 "count": len(self.per_case_seconds),
                 "min": min(self.per_case_seconds) if self.per_case_seconds else None,
@@ -503,6 +509,31 @@ def effective_workers(report: dict[str, Any], requested: int, tiers: Iterable[st
             return None
         ceiling = min(ceiling, rows)
     return max(1, ceiling)
+
+
+def tier_row_identity(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, frozenset[str]]:
+    """Return the exact declared row ids each requested tier carried.
+
+    Counts alone cannot prove two arms ran the same work: if the manifest swaps
+    one 43-row trade node id for another between two sequential arms, every
+    count still reads 43/19 while a different set of tests was timed.  The gate
+    reports the exact ids in ``selected_nodeids``, so that is what identity is
+    built from.  A tier whose ids are unreadable maps to an empty set, which is
+    not equal to any populated set and therefore blocks comparability.
+    """
+
+    wanted = set(tiers)
+    identity: dict[str, frozenset[str]] = {tier: frozenset() for tier in wanted}
+    payload = report.get("tiers")
+    if not isinstance(payload, list):
+        return identity
+    for tier in payload:
+        if not isinstance(tier, dict) or tier.get("name") not in wanted:
+            continue
+        selected = tier.get("selected_nodeids")
+        if isinstance(selected, list):
+            identity[tier["name"]] = frozenset(str(nodeid) for nodeid in selected)
+    return identity
 
 
 def tier_effective_workers(
@@ -758,6 +789,9 @@ def run_arm(
         for tier, rows in tier_row_counts(report, plan.tiers).items()
         if isinstance(rows, int) and rows > 0
     }
+    result.tier_rows = {
+        tier: nodeids for tier, nodeids in tier_row_identity(report, plan.tiers).items() if nodeids
+    }
     per_tier_workers = tier_effective_workers(report, plan.requested_workers, plan.tiers)
     if per_tier_workers is not None:
         result.tier_effective_workers = per_tier_workers
@@ -778,8 +812,8 @@ def comparable(results: Sequence[ArmResult]) -> bool:
     """Return whether these arms may be compared against each other.
 
     Two arms are comparable only when they ran the same declared work: a shared
-    runtime, the same set of declared tiers, and the same number of rows in
-    *each* tier.
+    runtime, the same set of declared tiers, the same number of rows in *each*
+    tier, and the same row ids in each tier.
 
     The effective worker count deliberately varies across the arms being
     compared -- that difference is the experiment.  What must not vary is the
@@ -787,7 +821,10 @@ def comparable(results: Sequence[ArmResult]) -> bool:
     combined total matters because arms run sequentially: if the manifest
     changes between them, a shift from 43 trade and 19 battle rows to 42 and 20
     keeps the total at 62 while trading a cheap row for an expensive one.  The
-    timing difference would then be attributed to concurrency.
+    timing difference would then be attributed to concurrency.  Counts alone
+    are still not enough: swapping one node id for another leaves every count
+    identical while a different set of tests is timed, so the recorded row ids
+    are compared directly.
 
     A capacity-policy clamp is detected separately, by comparing each arm's
     effective worker count against the worker count it requested.  An arm that
@@ -803,10 +840,15 @@ def comparable(results: Sequence[ArmResult]) -> bool:
             frozenset(r.plan.tiers),
             r.required_rows,
             tuple(sorted(r.tier_row_totals.items())),
+            tuple(sorted((tier, frozenset(rows)) for tier, rows in r.tier_rows.items())),
         )
         for r in results
     }
     if len(identity) != 1:
+        return False
+    # Row ids are only meaningful when every declared tier actually reported
+    # them; an arm that recorded none cannot be shown to have run the same work.
+    if any(not all(r.tier_rows.get(tier) for tier in r.plan.tiers) for r in results):
         return False
     # An arm that never recorded per-tier rows cannot be shown to have run the
     # same work as its peers, so it is not comparable by assumption.
@@ -867,6 +909,20 @@ def select_policy(
                 f"which is not a declared worker count {declared}"
             )
 
+    # One arm per (runtime, worker count).  Two runs at the same count are not a
+    # worker-count effect: ranking them against each other and against the
+    # workers=1 reference would report run-to-run variance as an improvement
+    # caused by concurrency.
+    seen_arms: set[tuple[str, int]] = set()
+    for result in results:
+        arm_key = (result.plan.runtime, result.plan.requested_workers)
+        if arm_key in seen_arms:
+            reasons.append(
+                f"{result.plan.key()} is a duplicate arm; exactly one result per "
+                "runtime and worker count is required"
+            )
+        seen_arms.add(arm_key)
+
     for result in results:
         if not result.complete:
             reasons.append(
@@ -890,6 +946,16 @@ def select_policy(
                 f"{result.plan.key()} recorded {result.required_rows} outcome(s) for "
                 f"{declared_rows} declared row(s); "
                 f"{declared_rows - result.required_rows} row(s) produced no outcome"
+            )
+        if declared_rows and result.required_rows > declared_rows:
+            # The mirror case: an arm claiming more outcomes than it declared
+            # rows is internally inconsistent.  The gate's own PASS path guards
+            # this, but a caller can construct one directly, and an inflated
+            # denominator would inflate the throughput used to rank arms.
+            reasons.append(
+                f"{result.plan.key()} recorded {result.required_rows} outcome(s) for "
+                f"{declared_rows} declared row(s); "
+                f"{result.required_rows - declared_rows} outcome(s) exceed the declaration"
             )
         if (
             result.effective_workers is not None
@@ -933,15 +999,19 @@ def select_policy(
     if len(by_runtime) > 1:
         runtime_shapes = {
             runtime: frozenset(
-                (tier, rows) for arm in arms for tier, rows in arm.tier_row_totals.items()
+                (tier, rows)
+                for arm in arms
+                for tier, rows in (
+                    (name, frozenset(nodeids)) for name, nodeids in arm.tier_rows.items()
+                )
             )
             for runtime, arms in by_runtime.items()
         }
         if len(set(runtime_shapes.values())) > 1:
             reasons.append(
-                "runtimes did not measure the same matrix; per-tier row counts "
-                f"differ between them: "
-                f"{ {rt: sorted(shape) for rt, shape in runtime_shapes.items()} }"
+                "runtimes did not measure the same matrix; their declared rows "
+                f"differ: "
+                f"{ {rt: sorted((t, len(rows)) for t, rows in shape) for rt, shape in runtime_shapes.items()} }"
             )
 
     if reasons:
@@ -958,15 +1028,17 @@ def select_policy(
     per_runtime: dict[str, dict[str, Any]] = {}
     for runtime, arms in by_runtime.items():
         reference = next((a for a in arms if a.plan.requested_workers == min(declared)), None)
-        ranked = sorted(arms, key=lambda a: (-a.passing_per_hour, a.plan.requested_workers))
+        ranked = sorted(arms, key=lambda a: (-a.required_rows_per_hour, a.plan.requested_workers))
         best = ranked[0]
         per_runtime[runtime] = {
             "reference_workers": reference.plan.requested_workers if reference else None,
-            "reference_passing_per_hour": reference.passing_per_hour if reference else None,
+            "reference_required_rows_per_hour": (
+                reference.required_rows_per_hour if reference else None
+            ),
             "best_workers": best.plan.requested_workers,
-            "best_passing_per_hour": best.passing_per_hour,
+            "best_required_rows_per_hour": best.required_rows_per_hour,
             "improves_on_reference": bool(
-                reference and best.passing_per_hour > reference.passing_per_hour
+                reference and best.required_rows_per_hour > reference.required_rows_per_hour
             ),
         }
 
@@ -1091,7 +1163,7 @@ def render_text(report: dict[str, Any]) -> str:
             f"  [{arm.get('arm')}] effective_workers={arm.get('effective_workers')} "
             f"passing={rows.get('completed_passing')} failed={rows.get('failed')} "
             f"not_started={rows.get('not_started')} wall={arm.get('wall_seconds')}s "
-            f"passing/hour={arm.get('passing_per_hour')}"
+            f"required-rows/hour={arm.get('required_rows_per_hour')}"
         )
     selection = report.get("selection", {})
     lines.append(f"  selection: {selection.get('outcome')}")

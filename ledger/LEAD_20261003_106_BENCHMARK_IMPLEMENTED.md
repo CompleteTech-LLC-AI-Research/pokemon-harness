@@ -262,6 +262,34 @@ The reviewer confirmed the derived serial row budget is 61,500 s against a
 108,000 s default bound, and found no deadline, threshold, skip, xfail, gate, or
 assertion relaxation in the diff.
 
+## Eighth review round: four findings on `29ed5bb4`
+
+A seventh independent review raised four new findings. All four were confirmed
+and fixed. Its first finding was against `50f1a19e` and is stale: it confirmed
+on the actual head that the declared-row check added in the seventh round
+already refuses that case.
+
+| # | finding | disposition |
+|---|---|---|
+| 2 | comparability used per-tier counts, so a manifest swapping one node id for another at identical counts was still comparable | fixed — the gate reports exact `selected_nodeids`, so comparability now compares the recorded row ids per tier, within a runtime and across the two |
+| 3 | outcomes exceeding the declared rows were accepted | fixed — only a shortfall was checked. An arm recording 63 outcomes for 62 declared rows inflated the denominator used to rank arms; the mirror case is now refused too |
+| 4 | duplicate arms at the same worker count could fake an improvement | fixed — with only `workers=1` declared, two runs per runtime at 120 s and 60 s ranked the repeat above the reference and reported variance as a concurrency effect. Exactly one result per runtime and worker count is now required |
+| 5 | `passing_per_hour` reported a required-row rate | fixed — the value divides every declared row by wall time, so for 61 passes and one failure in 10 s the JSON claimed 22,320 passing/hour against an actual 21,960. Renamed to `required_rows_per_hour`, with `clean_passing_per_hour` now emitted alongside it rather than only existing as an in-memory property |
+
+Each was re-checked by re-running the reviewer's own reproduction:
+
+```
+finding2 -> comparable= False selection= unselected
+finding3 -> unselected
+finding4 -> unselected
+finding5 -> required= 22320.0 clean= 21960.0 old_key= False
+```
+
+Eleven regression tests were added covering swapped row ids at identical
+counts, matching ids, missing ids, reading identity from the gate report,
+unreadable identity, outcomes exceeding declarations, duplicate arms, one arm
+per count, and both throughput labels.
+
 ## Policy selection is deliberately withheld
 
 No worker policy is recommended and the `workers=1` default is unchanged.
