@@ -113,3 +113,16 @@ target-version = "py311"
 # src/, tests/, and scripts/; audit the vendored runtime separately with
 # explicit Ruff/compile/import checks rather than mass-rewriting upstream code.
 extend-exclude = ["vendor/pyboy-src"]
+# `produce_battle_state_fixtures.py` recorded its capture identity by SHA-1 in
+# release-evidence/fixture-manifest.json, and merge_fixture_manifest_rows.py
+# recomputes that SHA-1 from the committed file and refuses any row that no
+# longer matches. Reformatting it would invalidate the only proof that the
+# boundary fixtures came from the tool recorded as their producer, and fixing
+# that requires re-capturing those fixtures from a real ROM. It is therefore
+# held at its committed bytes until that re-capture happens; it is still
+# lint-checked. tests/test_local_ci_policy.py pins this exclusion and fails if
+# the file drifts from the SHA-1 the manifest records.
+force-exclude = true
+exclude = [
+    "scripts/produce_battle_state_fixtures.py",
+]
