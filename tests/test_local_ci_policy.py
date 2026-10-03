@@ -731,9 +731,12 @@ def _reports_code(completed: subprocess.CompletedProcess[str], code: str) -> boo
     reasons, so read the polarity before changing this. A guard that wants the
     code *absent* fails loudly when a probe breaks, which is correct. A caller
     asking whether a directive silenced something would instead read the broken
-    probe as "still reporting" and miss a real directive -- quiet, but bounded:
-    the guard in the same test proves Ruff emits this JSON for this file first,
-    so a broken stdin probe that reached it would already have failed loudly.
+    probe as "still reporting" and miss a real directive. That direction is
+    quiet, and what bounds it is *not* the guard above -- that one lints the
+    file on disk, not the stdin path these probes use. It is the
+    `lint_directives` assertion in the same test: those ten probes go through
+    this same stdin path, so a probe that had stopped emitting JSON would fail
+    that equality loudly instead of quietly excusing a comment here.
     """
 
     if not completed.stdout.strip():

@@ -629,3 +629,15 @@ broken probe as "still reporting" and would *miss* a directive — quiet, but
 bounded, because the guard runs first on the same file and config. The
 docstring now states both, so the polarity is clear before the default is
 changed.
+
+Round 10 reviewed head `d2064691` and returned MERGEABLE. It confirmed the
+prefilter is a true superset — every spelling that can silence either lane is
+admitted, and it could not construct one that both silences and evades — and it
+caught one wrong attribution in the new `_reports_code` docstring. The masking
+direction at `silences` is bounded, but not by the assertion the docstring
+named: the `invalid-syntax` guard lints the file *on disk*, while these probes
+feed *stdin*, so it proves nothing about that path. The real bound is the
+`lint_directives` equality assertion, whose ten probes run through the same
+stdin path. Confirmed here by simulating a probe that stopped emitting JSON:
+the `silencing` list comes back empty, so that equality fires loudly instead of
+quietly excusing a comment. The docstring now names the right assertion.
