@@ -326,6 +326,7 @@ def test_local_runner_copies_every_workflow_check_command() -> None:
     # it enumerates the boundary; a path missing here is not by itself evidence
     # that the boundary lost it.
     workflow_paths = (
+        "scripts/benchmark_matrix_concurrency.py",
         "scripts/bootstrap_pyboy.py",
         "scripts/coverage_report.py",
         "scripts/gate_capacity.py",
@@ -461,3 +462,33 @@ def test_local_runner_has_no_hosted_or_paid_service_dependency() -> None:
     assert "pyyaml" not in runner
     assert "upload-artifact" not in runner
     assert "download-artifact" not in runner
+
+
+def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
+    """The #106 benchmark must sit in both main lanes of both CI files.
+
+    `scripts/` is enumerated explicitly in these lanes rather than globbed, so
+    a new script ships outside the lint boundary until someone lists it. When
+    PR #564 landed, `scripts/benchmark_matrix_concurrency.py` did exactly that:
+    1409 lines of new code in neither the check nor the format lane.
+
+    The lockstep test above cannot catch this on its own. It only proves the
+    runner and the workflow list the same files, and both omitted the path
+    together. The membership floor further down pins the path against the
+    enumerated tuple, but that tuple is documented as a floor rather than the
+    boundary, so dropping the path from a lane still leaves every other test
+    green. This asserts membership in each lane directly.
+    """
+
+    benchmark = "scripts/benchmark_matrix_concurrency.py"
+
+    for source, text in (
+        ("runner", RUNNER.read_text(encoding="utf-8")),
+        ("workflow", WORKFLOW.read_text(encoding="utf-8")),
+    ):
+        for subcommand in ("check", "format"):
+            lane = _main_lane(_ruff_invocations(text), subcommand)
+            assert benchmark in lane, (
+                f"{source} `ruff {subcommand}` lane lost {benchmark}; "
+                f"the benchmark would ship unlinted"
+            )
