@@ -57,6 +57,54 @@ import types
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+# ``shake_128`` and ``shake_256`` are extendable-output functions: ``hashlib``
+# guarantees them, so ``RECORD`` may legitimately name either, but their
+# ``digest()`` requires an output length where every fixed-size algorithm takes
+# none.  Detecting them by name keeps ``_file_digest`` from probing with a
+# length it would then have to catch an exception to undo.
+_VARIABLE_LENGTH_ALGORITHMS = frozenset({"shake_128", "shake_256"})
+
+# SHAKE output is unbounded by definition, so no cap derived from the algorithm
+# set would bound it; this one is a deliberate refusal to size an allocation off
+# untrusted text.  1024 characters is 768 decoded bytes, far above any fixed
+# digest pip writes -- its ``RECORD`` writer emits ``sha256`` only -- so the
+# bound costs no realistic install anything while capping what a planted record
+# can ask the guard to allocate.
+_MAX_RECORDED_DIGEST_LENGTH = 1024
+
+# ``_file_digest`` encodes URL-safe base64, so the alphabet here is the URL-safe
+# one: a digest can legitimately contain ``-`` and ``_``, and rejecting them
+# would refuse the very rows this length exists to honour.
+_BASE64_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+
+def _decoded_digest_length(digest: str) -> int | None:
+    """Return how many bytes an unpadded base64 ``digest`` encodes, or ``None``.
+
+    The length is derived arithmetically rather than by decoding, so an
+    attacker-sized claim is never materialised in memory.  ``None`` means the
+    text is not a well-formed unpadded base64 digest of a plausible size, and
+    the caller treats that as a claim it cannot verify.
+    """
+
+    if not digest or len(digest) > _MAX_RECORDED_DIGEST_LENGTH:
+        return None
+    stripped = digest.rstrip("=")
+    if not stripped or any(character not in _BASE64_ALPHABET for character in stripped):
+        return None
+    remainder = len(stripped) % 4
+    if remainder == 1:
+        # A single leftover base64 character cannot encode any whole byte.
+        return None
+    # Padding may only bring the text up to a multiple of four, and at most two
+    # characters of it.
+    if len(digest) != len(stripped) and (len(digest) % 4 or len(digest) - len(stripped) > 2):
+        return None
+    decoded = len(stripped) * 3 // 4
+    return decoded if decoded else None
+
 # The distributions whose import origins decide what the suite actually
 # measures.  ``pokered_harness`` is the harness under test and ``pyboy`` is the
 # vendored emulator it drives; a stale copy of either invalidates a release.
@@ -519,7 +567,7 @@ def _finder_was_imported_from(finder: object, source_file: Path) -> bool:
     return False
 
 
-def _record_digests(root: Path) -> dict[str, set[str]]:
+def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
     """Return the ``RECORD`` hash for every file an installed distribution owns.
 
     ``RECORD`` is written at install time and names each installed file with
@@ -537,7 +585,7 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
     the safe direction.
     """
 
-    digests: dict[str, set[str]] = {}
+    digests: dict[str, set[tuple[str, str]]] = {}
     try:
         records = sorted(root.glob("*.dist-info/RECORD"))
     except (OSError, ValueError):
@@ -575,26 +623,74 @@ def _record_digests(root: Path) -> dict[str, set[str]]:
                     continue
                 name_field = decoded[0]
             algorithm, _, expected = digest.partition("=")
-            if algorithm.lower() != "sha256" or not expected or not name_field:
+            algorithm = algorithm.lower()
+            # A record names the algorithm that produced its digest, so the
+            # label is part of the claim rather than decoration.  ``RECORD``
+            # permits any algorithm ``hashlib`` guarantees and wheel may ship
+            # SHA-512, so insisting on ``sha256`` here refused a genuine
+            # install outright.  Storing the pair lets the caller recompute
+            # under the algorithm the record actually names, which is both
+            # wider than trusting the label blindly and narrower than
+            # discarding it.
+            if not algorithm or not expected or not name_field:
                 continue
+            # An empty hash field is how ``RECORD`` marks a file it installed
+            # without recording contents (a generated script, a compiled
+            # extension).  That is not evidence of provenance, so it
+            # contributes no claim and the path stays unattested.
             resolved = _safe_resolve(root / name_field)
             if resolved is not None:
                 # Collect *every* claim about a path rather than keeping the
                 # first.  Two records may disagree about the same file, and
                 # the caller must not be able to win by writing one that
                 # happens to sort first.
-                digests.setdefault(str(resolved), set()).add(expected)
+                digests.setdefault(str(resolved), set()).add((algorithm, expected))
     return digests
 
 
-def _file_digest(candidate: Path) -> str | None:
-    """Return the URL-safe base64 SHA-256 of ``candidate``, or ``None``."""
+def _file_digest(
+    candidate: Path, algorithm: str = "sha256", expected_length: int | None = None
+) -> str | None:
+    """Return the URL-safe base64 digest of ``candidate``, or ``None``.
+
+    The digest is recomputed under ``algorithm`` rather than a hardcoded
+    SHA-256, because ``RECORD`` names the algorithm that produced each claim.
+    Returns ``None`` for an unknown or unavailable algorithm, so a record
+    naming something this interpreter cannot compute attests nothing.
+
+    ``expected_length`` is the caller's own decoded digest length.  It is
+    needed only by ``shake_128``/``shake_256``, whose ``digest()`` requires an
+    output size, and is ignored by every fixed-size algorithm.
+    """
 
     try:
         data = candidate.read_bytes()
     except (OSError, ValueError):
         return None
-    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+    try:
+        hasher = hashlib.new(algorithm)
+    except (ValueError, TypeError):
+        return None
+    try:
+        hasher.update(data)
+        # ``shake_128`` and ``shake_256`` are the two algorithms ``RECORD``
+        # permits that ``hashlib`` guarantees but whose ``digest()`` takes a
+        # required output length.  Calling it bare raises ``TypeError``, which
+        # the guard would otherwise swallow into ``None`` -- so a perfectly
+        # valid ``shake_128=`` row would attest nothing and the file would be
+        # refused.  That is the same false refusal of a genuine install this
+        # change exists to remove, so the digest is requested at the record's
+        # own encoded length.  A length the algorithm rejects still yields
+        # ``None``, which fails closed as before.
+        if algorithm in _VARIABLE_LENGTH_ALGORITHMS:
+            if expected_length is None:
+                return None
+            raw = hasher.digest(expected_length)
+        else:
+            raw = hasher.digest()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    except (ValueError, TypeError):
+        return None
 
 
 def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
@@ -607,14 +703,34 @@ def _is_recorded_by_an_install(source_file: Path, root: Path) -> bool:
 
     Every recorded claim must match, so an extra record asserting different
     content for the same path cannot be ignored: keeping only one claim --
-    whichever sorted first -- would let a planted record decide.
+    whichever sorted first -- would let a planted record decide.  Each claim
+    is recomputed with the algorithm it names, so a row reading
+    ``sha512=<a sha256 digest>`` fails rather than being quietly honoured.
     """
 
     expected = _record_digests(root).get(str(source_file))
     if not expected:
         return False
-    actual = _file_digest(source_file)
-    return actual is not None and all(actual == claim for claim in expected)
+    for algorithm, digest in expected:
+        # ``shake_128``/``shake_256`` need an output length, and the record
+        # states it implicitly by how long the digest it carries is.  The
+        # length is derived from that claim rather than assumed, so the file is
+        # hashed at exactly the size the record says it was hashed at, and a
+        # record whose digest is too short for its algorithm simply fails to
+        # match instead of being honoured at some other size.
+        #
+        # The length is computed from the base64 *text*, never by decoding it.
+        # A ``RECORD`` is attacker-writable, and decoding the claim first would
+        # allocate whatever the claim asked for -- a row naming a gigabyte of
+        # output would exhaust memory before the guard ever compared anything.
+        # A digest string also bounds itself: nothing legitimate is longer
+        # than the largest fixed digest plus its encoding, so the cap is not a
+        # policy choice but a refusal to size an allocation off untrusted text.
+        recorded_length = _decoded_digest_length(digest)
+        actual = _file_digest(source_file, algorithm, recorded_length)
+        if actual is None or actual != digest:
+            return False
+    return True
 
 
 def _is_imported_by_a_pth(source_file: Path, root: Path) -> bool:
