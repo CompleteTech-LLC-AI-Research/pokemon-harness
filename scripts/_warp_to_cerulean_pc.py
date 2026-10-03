@@ -141,10 +141,12 @@ def main() -> int:
         s.step(60, render=False)
         gs = drv.gs()
         if gs.overworld.map_id == CERULEAN_CITY and not drv.joy_locked():
-            print(f"  arrived at Cerulean City after {(phase+1)*60} frames")
+            print(f"  arrived at Cerulean City after {(phase + 1) * 60} frames")
             break
         if phase % 3 == 2:
-            print(f"  phase {phase+1}: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) joy={drv.joy_locked()}")
+            print(
+                f"  phase {phase + 1}: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) joy={drv.joy_locked()}"
+            )
 
     gs = drv.gs()
     print(f"post-blackout: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})")
@@ -243,7 +245,9 @@ def main() -> int:
     args.fixture.write_bytes(args.out_state.read_bytes())
 
     gs = drv.gs()
-    print(f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) party={gs.party.count}")
+    print(
+        f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) party={gs.party.count}"
+    )
     print(f"saved {args.out_state}")
     print(f"fixture {args.fixture}")
     s.close()

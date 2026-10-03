@@ -150,17 +150,12 @@ def _verify_captured_source(document: dict[str, Any], row: dict[str, Any]) -> No
     match = _SOURCE_STATE_RE.match(source_state)
     if match is None:
         raise ValueError(
-            f"boundary row {fixture_id} does not record its capture input path, "
-            "SHA-1, and SHA-256"
+            f"boundary row {fixture_id} does not record its capture input path, SHA-1, and SHA-256"
         )
 
     source_id = f"{row.get('version')}-{row.get('variant')}{_SOURCE_FIXTURE_SUFFIX}"
     source = next(
-        (
-            entry
-            for entry in document.get("fixtures", [])
-            if entry.get("id") == source_id
-        ),
+        (entry for entry in document.get("fixtures", []) if entry.get("id") == source_id),
         None,
     )
     if source is None:

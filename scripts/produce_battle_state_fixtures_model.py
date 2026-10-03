@@ -145,5 +145,3 @@ def _repo_commit(repo_root: Path) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout.strip() or None
-
-

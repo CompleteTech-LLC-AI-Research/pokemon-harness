@@ -115,14 +115,19 @@ def main() -> int:
 
     # Clear audio fade-out + active-sound state that tends to stall Yellow's
     # HandleBlackOut → StopMusic loop when invoked from a synthetic state.
-    for tag in ("wAudioFadeOutControl", "wAudioFadeOutCounter",
-                "wAudioFadeOutCounterReloadValue", "wNewSoundID",
-                "wSoundID", "wLastMusicSoundID"):
+    for tag in (
+        "wAudioFadeOutControl",
+        "wAudioFadeOutCounter",
+        "wAudioFadeOutCounterReloadValue",
+        "wNewSoundID",
+        "wSoundID",
+        "wLastMusicSoundID",
+    ):
         if tag in sym:
             mem[sym.addr_of(tag)] = 0
 
     mem[sym.addr_of("wLastBlackoutMap")] = CERULEAN_CITY
-    mem[sym.addr_of("wStatusFlags6")] |= (1 << 6)  # BIT_ESCAPE_WARP
+    mem[sym.addr_of("wStatusFlags6")] |= 1 << 6  # BIT_ESCAPE_WARP
 
     handle_blackout = sym.addr_of("HandleBlackOut")
     pb.register_file.PC = handle_blackout
@@ -133,7 +138,7 @@ def main() -> int:
         s.step(60, render=False)
         gs = drv.gs()
         if gs.overworld.map_id == CERULEAN_CITY and not drv.joy_locked():
-            print(f"  arrived at Cerulean City after {(phase+1)*60} frames")
+            print(f"  arrived at Cerulean City after {(phase + 1) * 60} frames")
             break
         # Keep stomping audio state so any wait loops don't hang forever.
         for tag in ("wAudioFadeOutControl", "wAudioFadeOutCounter"):
@@ -201,7 +206,9 @@ def main() -> int:
     args.fixture.write_bytes(args.out_state.read_bytes())
 
     gs = drv.gs()
-    print(f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) party={gs.party.count}")
+    print(
+        f"FINAL: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) party={gs.party.count}"
+    )
     print(f"fixture {args.fixture}")
     s.close()
     return 0
