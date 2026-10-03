@@ -802,9 +802,12 @@ def run_arm(
     # an arm whose runtime, collection, evidence, or capacity prerequisite was
     # rejected while some rows still happened to pass.
     result.gate_passed = result.returncode == 0
-    if not result.gate_passed and not result.failed and not result.incomplete:
-        # Preserve the row counts, but the arm is not a clean pass.
-        result.incomplete = max(result.incomplete, 1)
+    # No synthetic "incomplete" row is added for a non-PASS verdict.  Such a
+    # row is not a row the matrix declared, and adding one inflated the arm's
+    # required-row total above the declaration -- which then made the arm look
+    # like it had run more work than it declared.  ``gate_passed`` already
+    # blocks selection on its own, so the real row counts are preserved as
+    # reported.
     return result
 
 

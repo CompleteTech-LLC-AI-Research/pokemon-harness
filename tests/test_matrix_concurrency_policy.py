@@ -780,7 +780,14 @@ class TestGateVerdictIsRecordedOnBothPaths:
             capacity_policy=Path("/policy.json"),
         )
         assert result.gate_passed is False
-        assert result.complete is False
+        # A non-PASS verdict blocks selection through gate_passed itself.  No
+        # synthetic row is invented for it, so the arm's required-row total
+        # still matches what the gate actually reported rather than exceeding
+        # the declaration.
+        assert result.required_rows == sum(result.tier_row_totals.values())
+        selection = bench.select_policy([result], worker_counts=(1,))
+        assert selection["outcome"] == "unselected"
+        assert any("gate verdict is not PASS" in reason for reason in selection["reasons"])
 
     def test_a_full_passing_run_reaches_a_selection(self, tmp_path, monkeypatch):
         import json as _json
