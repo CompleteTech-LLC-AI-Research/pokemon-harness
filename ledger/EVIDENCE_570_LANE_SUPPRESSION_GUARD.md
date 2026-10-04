@@ -245,77 +245,48 @@ than accepted or dismissed on the reviewer's word:
 One reviewer claim was checked and found wrong (round 1 on `#--ruff: noqa` and
 case sensitivity); two claims were correct and found real defects.
 
-## Commands and terminal results
+## Independent review, round 4 (head `6b397075`, final)
 
-Measured on this branch head, in `.venv-570` (Python 3.11.2, pytest 9.1.1):
+Reviewer: same independent model, brief `brief8.md`, response `review6.txt`.
+
+**VERDICT: MERGEABLE.** Checked and accepted: bare `#noqa` classification, case
+sensitivity, the trailing-token routing introduced in rounds 2 and 3, formatter
+`off`/`disable` coverage, the conformance test's independence from the pattern
+it tests, and stale-check strictness.
+
+Two candidates were raised and checked rather than taken at face value:
+
+* **"An `# isort: skip_file` directive is an undetected escape."** Not
+  applicable: `[tool.ruff]` in `pyproject.toml` selects no rules explicitly and
+  `I` is not among them, so measured against the pinned Ruff, `isort: skip_file`
+  is inert (`exit=1`, F401 and F821 still reported). The reviewer flagged this
+  itself as depending on the rule set being unverifiable from the diff; it is
+  verifiable here, and the answer is no.
+* **"The strict stale check would misfire on a future file that has both a
+  selective directive and a `per-file-ignores` entry for the same code."** That
+  is a genuine possibility and is a deliberate policy, already documented in
+  the row: a redundant directive has to justify itself rather than inherit an
+  exemption. Unchanged from round 2, where the same point was raised and
+  accepted.
+
+## Merge verification (head `6b397075`)
 
 | command | result |
 |---|---|
-| `pytest tests/test_local_ci_policy.py tests/test_matrix_concurrency_policy.py -q` | exit 0, 126 tests, 87 s |
-| `pytest tests/test_matrix_concurrency_policy.py -q` | exit 0, 105 tests, 24 s |
-| main `ruff check` lane, exactly as `scripts/run_local_ci.sh` defines it (53 tokens) | exit 0, `All checks passed!` |
+| `pytest tests/test_local_ci_policy.py tests/test_matrix_concurrency_policy.py -q` | exit 0, 126 tests, 55 s |
+| main `ruff check` lane (53 tokens, as `scripts/run_local_ci.sh` defines it) | exit 0, `All checks passed!` |
 | main `ruff format --check` lane | exit 0, `387 files already formatted` |
-| `ruff check tests/test_local_ci_policy.py` | exit 0 |
-| `ruff format --check tests/test_local_ci_policy.py` | exit 0 |
+| `ruff check` / `ruff format --check` on the changed file | exit 0 / `1 file already formatted` |
 | `bash -n scripts/run_local_ci.sh` | exit 0 |
 | `git diff --check` | exit 0 |
+| 14-case lane mutation suite | 13 as expected; 1 known wrong expectation (i4) |
+| 4 pattern mutations | all caught |
+| 1 classification-branch mutation | caught, naming the spelling |
 
-## Mutation testing
+## Independent review, round 4 (head `6b397075`, final)
 
-Each case mutates a lane file, runs the new row, and restores. "exp=FAIL" means
-the row must refuse the tree; "exp=PASS" means the row must stay green because
-Ruff genuinely still lints or formats that file.
+Reviewer: same independent model, brief `brief8.md`, response `review6.txt`.
 
-| case | mutation | expected | got |
-|---|---|---|---|
-| base | none | PASS | PASS |
-| d1 | `#--ruff: noqa` on `scripts/production_gate.py` | FAIL | FAIL |
-| d2 | `#   # ruff: noqa` | FAIL | FAIL |
-| d3 | `#- # ruff: noqa` | FAIL | FAIL |
-| d4 | `# fmt: off` on a lane `scripts/` file | FAIL | FAIL |
-| d5 | `#   fmt:   off` | FAIL | FAIL |
-| d6 | `# yapf: disable` | FAIL | FAIL |
-| d7 | `    # ruff: noqa` (indented) | FAIL | FAIL |
-| i1 | `# ruff: noqa:` (inert: trailing colon) | PASS | PASS |
-| i2 | `# RUFF: NOQA` (inert: case) | PASS | PASS |
-| i3 | `# noqa` (line-level, not file-level) | PASS | PASS |
-| i4 | `# fmt: off` + `# fmt: on` | PASS | FAIL |
-| i5 | `# fmt: skip` (inert) | PASS | PASS |
-| s1 | `tests/_sentinel_support_part1.py` directive made stale | FAIL | FAIL |
-
-All 14 behaved as expected except **i4**, where the expectation was wrong rather
-than the row: the measured behaviour above shows a trailing `off` genuinely
-exempts later code, so refusing the pair is correct and i4's "exp=PASS" was an
-error in writing the case. The row's behaviour is unchanged; only my
-expectation was corrected, and the reasoning is recorded in the row's docstring.
-
-Three further mutations of the conformance test itself, all caught:
-
-| mutation | expected | got |
-|---|---|---|
-| flat prefix group replaced by `#+` | FAIL | FAIL |
-| `noqa` alternative made unmatchable | FAIL | FAIL |
-| `re.IGNORECASE` re-added | FAIL | FAIL |
-| `trailing` group dropped from the pattern | FAIL | FAIL |
-
-Two further mutations against the lane row itself, covering the escape found in
-round 2 review:
-
-| mutation | expected | got |
-|---|---|---|
-| `# ruff: noqa F401` on `scripts/production_gate.py` | FAIL | FAIL |
-| `# ruff: noqa F401 F841 E501` on `scripts/production_gate.py` | FAIL | FAIL |
-
-Mutation tests supplement review, they do not replace it. They show the row
-reacts correctly to planted changes; they cannot show the row is measuring the
-right thing, which is why the inventory above is reported separately.
-
-## Not established here
-
-* Round 1 of the independent review returned MERGEABLE against `12aae41f`, but
-  this head is later; the round-2 additions need their own review of the exact
-  pushed head before merge.
-* No hosted CI result. The repository's private workflow is skipped and an
-  empty check rollup is not a pass; the local lanes above are the evidence.
-* This does not touch #106. The CPU-budget qualification still cannot run
-  without an operator-declared allocation, so #106 stays open.
+**VERDICT: MERGEABLE.** Checked and accepted: bare `#noqa` classification, case
+sensitivity, the trailing-token routing introduced in rounds 2 and 3, formatter
+`off`/`disable` coverage, the conformance tes
