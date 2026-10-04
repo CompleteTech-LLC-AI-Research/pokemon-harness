@@ -181,8 +181,9 @@ So `noqa` followed by a space-separated token is read by Ruff as "suppress
 everything", not as a code list — the codes form needs a colon. Written as
 `# ruff: noqa F401` it looks selective and behaves as blanket. Fixed: the tail
 is now a named `trailing` group, and a directive counts as selective **only**
-when the colon form parsed and nothing followed it. Codes plus trailing junk
-is classified blanket.
+when the colon form parsed. Round 3 corrected the follow-on half of this change:
+trailing text after a *parsed* code list is still scoped in Ruff, so it is
+classified selective, not blanket.
 
 **(2) The stale-directive check is strict by design.** The reviewer worried it
 could misfire on a code suppressed independently. Measured across all 34
@@ -257,17 +258,16 @@ it tests, and stale-check strictness.
 Two candidates were raised and checked rather than taken at face value:
 
 * **"An `# isort: skip_file` directive is an undetected escape."** Not
-  applicable: `[tool.ruff]` in `pyproject.toml` selects no rules explicitly and
+  applicable. `[tool.ruff]` in `pyproject.toml` selects no rules explicitly and
   `I` is not among them, so measured against the pinned Ruff, `isort: skip_file`
   is inert (`exit=1`, F401 and F821 still reported). The reviewer flagged this
   itself as depending on the rule set being unverifiable from the diff; it is
   verifiable here, and the answer is no.
 * **"The strict stale check would misfire on a future file that has both a
-  selective directive and a `per-file-ignores` entry for the same code."** That
-  is a genuine possibility and is a deliberate policy, already documented in
-  the row: a redundant directive has to justify itself rather than inherit an
-  exemption. Unchanged from round 2, where the same point was raised and
-  accepted.
+  selective directive and a `per-file-ignores` entry for the same code."** A
+  genuine possibility, and a deliberate policy already documented in the row: a
+  redundant directive has to justify itself rather than inherit an exemption.
+  Unchanged from round 2, where the same point was raised and accepted.
 
 ## Merge verification (head `6b397075`)
 
@@ -283,10 +283,13 @@ Two candidates were raised and checked rather than taken at face value:
 | 4 pattern mutations | all caught |
 | 1 classification-branch mutation | caught, naming the spelling |
 
-## Independent review, round 4 (head `6b397075`, final)
+## Not established here
 
-Reviewer: same independent model, brief `brief8.md`, response `review6.txt`.
-
-**VERDICT: MERGEABLE.** Checked and accepted: bare `#noqa` classification, case
-sensitivity, the trailing-token routing introduced in rounds 2 and 3, formatter
-`off`/`disable` coverage, the conformance tes
+* Independent review rounds 1-4 all completed against the exact heads listed
+  above; round 4 is MERGEABLE on `6b397075`, the merge candidate. The reviewer
+  is an independent model reached over the API, not a second human, and the
+  sub-agent delivery path remains unreliable in this environment (see #489).
+* No hosted CI result. The repository's private workflow is skipped and an
+  empty check rollup is not a pass; the local lanes above are the evidence.
+* This does not touch #106. The CPU-budget qualification still cannot run
+  without an operator-declared allocation, so #106 stays open.
