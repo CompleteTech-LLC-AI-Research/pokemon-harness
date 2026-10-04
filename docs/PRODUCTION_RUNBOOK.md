@@ -865,7 +865,7 @@ sanitized facts from `qualification_runner.py --report` on this host:
 | user namespaces | `unshare --map-root-user -m` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it (see below) |
 | capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
 
-Every reservation mechanism therefore fails admission here, which is the
+Every CPU-reservation mechanism therefore fails admission here, which is the
 correct, fail-closed outcome: `cpuset-affinity` has overlapping foreign
 processes, `cgroup-quota` has no non-root cgroup and no finite quota, and
 `dedicated-host` measures competing CPU cores far above the tolerance. The
@@ -877,7 +877,7 @@ acceptance runs are **BLOCKED** and are not claimed as passing. This section is
 a provisioning status record, not release evidence, and it must not be used to
 promote any qualification result.
 
-##### Writable `/dev/shm` is obtainable, and it is not a CPU allocation
+#### 3b-0. Writable `/dev/shm` is obtainable, and it is not a CPU allocation
 
 The distinction matters because an earlier revision of this table recorded
 `unshare` as `EPERM` and therefore concluded that no writable shared-memory
@@ -893,13 +893,22 @@ unshare --map-root-user -m --propagation private \
   -> /dev/shm becomes tmpfs (rw,...)
 ```
 
-That single change removes the read-only-`shm` share of issue #253's failures
-outright (`tests/test_probe_owner_phases.py` goes green; 9 of the 17 shm-class
-failures remain only because they are deadline-bound, see that issue). It does
-**not** unblock any capacity claim: remounting `cgroup2` inside the same private
-namespace still returns `EPERM`, so `cpu.max` remains `max 100000` with no
-writable leaf and no declared allocation. Per-core and timing qualification is
-still **BLOCKED** on an operator-provisioned CPU allocation; only the
+That single change removes part of issue #253's failure set: of the 17 failures
+seen under a read-only `/dev/shm`, 9 persist with a writable one, and
+`tests/test_probe_owner_phases.py` goes fully green. **The cause of those 9 is
+not established.** All of them surface as `timed_deadline` under host load, and
+their count is not reproducible — repeated identical runs on an unchanged tree
+gave 9, then 6, then 5, with `load1` between 8.8 and 12.3 on 4 CPUs. That is
+consistent with a load-induced deadline cause, but a latent intermittent defect
+would present the same way; distinguishing the two needs a quiet host or a real
+allocation, neither of which exists here. Do not read "9 remain" as "9 are
+environmental": no deadline was enlarged, no test was skipped or xfailed, and
+none may be on the strength of this record.
+
+It does **not** unblock any capacity claim: remounting `cgroup2` inside the same
+private namespace still returns `EPERM`, so `cpu.max` remains `max 100000` with
+no writable leaf and no declared allocation. Per-core and timing qualification
+is still **BLOCKED** on an operator-provisioned CPU allocation; only the
 shared-memory prerequisite was mis-recorded, not the capacity verdict.
 
 #### 3b-1. Functional acceptance retained, capacity qualification withheld
