@@ -43,7 +43,6 @@ def _resolve_pre_link_menu(*, enabled, role, version, rom_bytes, symbol_bytes):
 
 class _PeerDriveSetupMixin:
     def setup(self) -> None:
-
         if not math.isfinite(self.args.deadline_seconds) or self.args.deadline_seconds <= 0:
             raise ValueError("deadline-seconds must be finite and positive")
         if not 0 <= self.args.serial_transcript_entries <= 4096:

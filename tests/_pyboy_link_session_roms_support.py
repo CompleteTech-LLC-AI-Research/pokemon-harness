@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Shared helpers and fixtures for the pyboy-link real-ROM tests.
 
 Split from ``tests/test_pyboy_link_session_roms.py`` (#132) with no behavior
@@ -7,6 +5,9 @@ change: the session/variant construction helpers, the module autouse runtime
 guard, the hook-counter installer, and the party/battle-fixture legality
 checks moved here verbatim so every real-ROM module shares one surface.
 """
+
+from __future__ import annotations
+
 
 import os
 import sys

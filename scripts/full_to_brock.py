@@ -408,7 +408,6 @@ def _run_session(
     sha1: str,
     outdir: Path,
 ) -> int:
-
     # Phase 1: use walkthrough.py + run_to_brock's verified phases to
     # reach Viridian and get onto Route 2.
     wt_drv = wt.WalkthroughDriver(

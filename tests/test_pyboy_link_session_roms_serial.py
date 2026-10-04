@@ -1,10 +1,11 @@
-from __future__ import annotations
-
 """Real-ROM serial smoke tests for :class:`PyBoyLinkSession`.
 
 Split from ``tests/test_pyboy_link_session_roms.py`` (#132) with no behavior
 change: the two Yellow serial-milestone tests moved here verbatim.
 """
+
+from __future__ import annotations
+
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_core import SerialCore
