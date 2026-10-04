@@ -290,7 +290,7 @@ def test_main_ruff_lane_scripts_directory_covers_every_script_file_on_disk() -> 
     assert on_disk, "no script files found on disk"
     assert scripts_root.is_dir(), "the `scripts` directory the lanes pass must exist"
 
-    covered = _ruff_lint_resolved_files("scripts")
+    covered = _ruff_lint_resolved_files(("scripts",), tree="scripts")
     uncovered = on_disk - covered
     assert uncovered == {_PRODUCER_PINNED_BY_MANIFEST}, (
         "scripts/ files are excluded from the Ruff lanes beyond the one pinned "

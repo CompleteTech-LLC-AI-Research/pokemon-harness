@@ -41,7 +41,7 @@ def _ruff_resolved_scripts() -> set[str]:
         from tests.test_local_ci_policy import _ruff_lint_resolved_files
     finally:
         sys.path.pop(0)
-    return _ruff_lint_resolved_files("scripts")
+    return _ruff_lint_resolved_files(("scripts",), tree="scripts")
 
 
 def _ruff_extend_exclude() -> tuple[str, ...]:
