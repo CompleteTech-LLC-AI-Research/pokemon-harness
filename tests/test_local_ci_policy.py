@@ -637,6 +637,60 @@ _WEAKENING_OPTIONS = (
 _WEAKENING_OPTION_PREFIXES = ("--range",)
 
 
+def _lane_covers(lane: tuple[str, ...], relative: str) -> bool:
+    """Return whether a `ruff` lane really lints `relative`, as Ruff sees it.
+
+    A literal membership test answers a narrower question than the one these
+    rows are asking. The main lanes used to name every `scripts/` path
+    individually; they now pass the `scripts` directory token, so
+    `relative in lane` is False even though the lane covers the file exactly as
+    before. Asserting the literal there would fail a correct lane and, worse,
+    invite someone to "fix" it by re-expanding the path list -- undoing the
+    change that stops a new script from shipping unlinted.
+
+    So ask Ruff instead. Each path token is handed to `ruff check` on its own
+    and the file is resolved by Ruff's own exclusion rules, which is the same
+    question the CI lane answers. A token that is a directory resolves to every
+    file beneath it; an explicit file resolves to itself; anything Ruff does
+    not resolve cannot be covering the file.
+    """
+
+    # The parsed lane starts with `python`, but a vector recorded from the
+    # executed runner starts at `-m ruff`. Locate the subcommand rather than
+    # assuming a fixed offset, so the same helper serves both shapes.
+    subcommand = next(
+        (index for index, token in enumerate(lane) if token in {"check", "format"}),
+        None,
+    )
+    assert subcommand is not None, f"{lane!r} carries no ruff subcommand"
+    paths = [token for token in lane[subcommand + 1 :] if not token.startswith("-")]
+    assert paths, f"the {lane[subcommand]} lane names no paths, so it cannot cover anything"
+    for token in paths:
+        resolved = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--no-cache",
+                "--force-exclude",
+                token,
+                "--show-files",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if relative in {
+            Path(line.strip()).relative_to(ROOT).as_posix()
+            for line in resolved.stdout.splitlines()
+            if line.strip()
+        }:
+            return True
+    return False
+
+
 def _lane_options(lane: tuple[str, ...]) -> list[str]:
     """Return the lane's Ruff options, with its path list dropped.
 
@@ -1003,8 +1057,8 @@ def test_matrix_benchmark_is_linted_by_every_main_ruff_lane() -> None:
     """
 
     for label, lane in _main_lane_sources():
-        assert _BENCHMARK in lane, (
-            f"{label} lane does not list {_BENCHMARK}; the benchmark would ship unlinted"
+        assert _lane_covers(lane, _BENCHMARK), (
+            f"{label} lane does not cover {_BENCHMARK}; the benchmark would ship unlinted"
         )
 
         options = _lane_options(lane)
@@ -1955,8 +2009,8 @@ def test_main_ruff_lanes_run_in_executable_control_flow() -> None:
             f"disabled control flow and CI would not run it"
         )
         # The main lane must actually carry the benchmark when executed.
-        assert any(_BENCHMARK in arguments for arguments in matches), (
-            f"the executed `ruff {subcommand}` lane does not include {_BENCHMARK}"
+        assert any(_lane_covers(tuple(arguments), _BENCHMARK) for arguments in matches), (
+            f"the executed `ruff {subcommand}` lane does not cover {_BENCHMARK}"
         )
 
 
@@ -1987,8 +2041,8 @@ def test_main_ruff_lanes_stop_the_local_runner_on_failure() -> None:
         "the main `ruff check` lane was never executed, so its failure could not stop the runner"
     )
     stop = failing[0]
-    assert _BENCHMARK in recorded[stop], (
-        "the failing lane executed was not the one carrying the benchmark"
+    assert _lane_covers(tuple(recorded[stop]), _BENCHMARK), (
+        "the failing lane executed was not the one covering the benchmark"
     )
 
     # Everything after the failing lane is proof the failure was swallowed.
