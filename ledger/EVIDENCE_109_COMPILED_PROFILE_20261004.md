@@ -148,3 +148,51 @@ time may be jumped and no event skipped to claim acceleration.
 Focused tests for the probe itself: `tests/test_stepping_loop_profile.py` — 26 passed.
 
 #109 stays **open**. Release status stays **PARTIAL**.
+
+---
+
+# Addendum — hoisting implementation (branch `lead/109-hoist-stepping`, base `78f02fd7`)
+
+Worktree `/workspace/poke-harness/wt-109-hoist`. Single file changed:
+`src/pokered_harness/link/_pyboy_link_session_stepping_mixin.py`, +17/-8.
+
+`mb`, `cpu` and `lcd` are resolved once before the instruction loop instead of per single-stepped
+instruction. The `getattr(..., default)` forms are retained deliberately — legacy test doubles omit
+`lcd` and/or `cpu.cycles`, and `test_interleaved_chunk_uses_cpu_cycles_for_variable_length_instructions`
+plus the `_FrameBoundaryDouble` family depend on exactly those fallbacks. The doubles keep
+`mb.lcd` as one object mutated in place, so hoisting the reference does not change observable
+behaviour.
+
+## Regression evidence — zero new failures
+
+Every run below used an interpreter bound to the tree under test; the #534 import-origin guard was
+satisfied, not bypassed.
+
+| scope | result |
+|---|---|
+| `tests/test_pyboy_link_session.py` + `tests/test_stepping_loop_profile.py` | **81 passed** |
+| selection `-k 'link or stepping or scheduler or frame or serial or chunk'` | 23 failures, **all also failing on unmodified master** |
+| timed selection under the writable-`/dev/shm` recipe | 5 failures, **identical set on unmodified master** |
+
+Baseline comparison was run, not assumed. Sorted failure sets:
+
+    comm -23 hoist-fails.txt master-fails.txt   ->  (empty)   no failure unique to the branch
+
+The 23 are two pre-existing classes: `tests/test_mcp_battle_phase_rom.py` (18, real-ROM assets
+absent — `pytest.fail("POKERED_SKIP_SHA1 must not be used for real-ROM evidence")`) and
+`tests/test_probe_owner_phases.py` (5 of 7, failing deterministically on unmodified master across
+repeated runs).
+
+The 5 timed failures are the #253 residuals:
+`test_real_partial_progress_active_interrupt_is_terminal[cancel|deadline]`,
+`test_duplicate_connection_preserves_existing_epoch_and_execution[listen|connect]`,
+`test_mcp_tools_and_resource_share_persistent_native_owner` — byte-identical set on master.
+
+## Status
+
+Branch committed, **not merged and not marked ready**. Independent review is unavailable (#489:
+`spawn_agent` bodies undelivered, `followup_task` unsupported), and the merge contract requires an
+independent review first. The 1.50x figure still needs a quiet-CPU re-measurement on this branch
+before any before/after claim is published.
+
+#109 stays **open**. Release status stays **PARTIAL**.
