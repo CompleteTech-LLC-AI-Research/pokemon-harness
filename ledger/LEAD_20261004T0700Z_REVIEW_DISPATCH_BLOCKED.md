@@ -186,3 +186,47 @@ rebase onto the post-#568 master before any of its evidence applies.
 
 Release status remains **PARTIAL**. Nothing merged by the lead this turn; no
 issue closed. Master `a413eeb5`.
+
+## Third audit, 2026-10-04: dispatch has degraded further
+
+| mechanism | result |
+|---|---|
+| `list_agents` | `unsupported call` |
+| `followup_task` (x2 targets) | `unsupported call` |
+| `spawn_agent` | `unsupported call` |
+
+`spawn_agent` **worked earlier this session** and now fails, so the tooling is
+degrading rather than being uniformly unavailable. That is a change in the
+environment, not a stable condition — worth retrying in a later turn rather than
+treating as permanent.
+
+## Progress made without a reviewer
+
+Verification and integration work do not depend on dispatch, so this turn was not
+idle:
+
+- Rebased both #567 steps onto `a413eeb5` non-destructively. Established that the
+  step-2/step-1 stacking constraint is **real**: step 2 alone leaves 39 files
+  unformatted, so #569 genuinely cannot precede #568.
+- Established that the fully stacked shape is **not green**: 2 files unformatted
+  and 163 lint errors across 63 files that the old 51-entry list never covered.
+  #569's own premise is what exposed them, which is the PR working as intended
+  and still needing a cleanup commit.
+- Net effect versus master: 41 -> 2 unformatted files, 285 -> 163 lint errors.
+
+Details in `LEAD_20261004T1700Z_569_REBASE_RESIDUE.md`, posted to #569.
+
+## Queue
+
+| PR | head | lead evidence | independent review | mergeable now |
+|---|---|---|---|---|
+| #572 | `c6fbaeea` | yes, CI green | **no** | yes, but unreviewed |
+| #569 | `25607fc` | yes, on old base | **no** | **no** — residue + conflicts |
+| #568 | `1cc86f8` | yes, on old base | **no** | rebases cleanly, but unreviewed |
+| #565 | `f35554b6` | yes | **no** | yes, but unreviewed |
+
+Two independent blockers now, not one: the dispatch tooling, **and** real
+residue that #568/#569 must clean before they can merge even once review works.
+
+Release status remains **PARTIAL**. Nothing merged by the lead. No issue closed.
+Master `a413eeb5`.
