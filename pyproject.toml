@@ -112,4 +112,34 @@ target-version = "py311"
 # PyBoy is a pinned third-party source fork. Keep product lint scoped to
 # src/, tests/, and scripts/; audit the vendored runtime separately with
 # explicit Ruff/compile/import checks rather than mass-rewriting upstream code.
-extend-exclude = ["vendor/pyboy-src"]
+#
+# `scripts/produce_battle_state_fixtures.py` recorded its capture identity by
+# SHA-1 in release-evidence/fixture-manifest.json, and
+# merge_fixture_manifest_rows.py recomputes that SHA-1 from the committed file
+# and refuses any row that no longer matches. Reformatting it would invalidate
+# the only proof that the boundary fixtures came from the tool recorded as
+# their producer, and fixing that requires re-capturing those fixtures from a
+# real ROM. It is therefore held at its committed bytes until that re-capture
+# happens. It was named by neither main lane on master, so excluding it from
+# both here is not a coverage regression.
+#
+# It goes in `extend-exclude` rather than `exclude` on purpose. `exclude` is
+# not additive: setting it replaces Ruff's built-in default exclusions, so a
+# bare `exclude` key would newly pull `.venv/` and `build/` into every lane that
+# traverses a directory. `extend-exclude` adds to the defaults.
+#
+# `force-exclude` is deliberately NOT set. It only changes behavior for paths
+# named explicitly on the command line; both main lanes pass the `scripts`
+# directory token, and an `extend-exclude` entry already applies to files
+# reached by directory traversal. Measured with the installed Ruff,
+# `ruff check scripts --show-files` resolves 113 files with this entry and the
+# producer is not among them. Setting `force-exclude` globally would also
+# silently drop any future lane that names the producer directly, which is the
+# opposite of the fail-loud behavior wanted here.
+#
+# tests/test_local_ci_policy.py pins this exclusion and fails if the file drifts
+# from the SHA-1 the manifest records.
+extend-exclude = [
+    "vendor/pyboy-src",
+    "scripts/produce_battle_state_fixtures.py",
+]

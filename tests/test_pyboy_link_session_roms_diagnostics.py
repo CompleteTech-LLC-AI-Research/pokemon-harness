@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Real-ROM diagnostic milestone tests for :class:`PyBoyLinkSession`.
 
 Split from ``tests/test_pyboy_link_session_roms.py`` (#132) with no behavior
 change: the non-acceptance trade/battle warp milestones moved here verbatim.
 """
+
+from __future__ import annotations
 
 import pytest
 

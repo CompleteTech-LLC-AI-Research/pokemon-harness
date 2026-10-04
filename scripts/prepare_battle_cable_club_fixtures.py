@@ -285,12 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root.expanduser().resolve()
-    rom_root = _root(
-        args.rom_root or os.environ.get("POKERED_ROM_ROOT", "rom"), repo_root
-    )
+    rom_root = _root(args.rom_root or os.environ.get("POKERED_ROM_ROOT", "rom"), repo_root)
     fixture_root = _root(
-        args.fixture_root
-        or os.environ.get("POKERED_FIXTURE_ROOT", "tests/fixtures/link"),
+        args.fixture_root or os.environ.get("POKERED_FIXTURE_ROOT", "tests/fixtures/link"),
         repo_root,
     )
     output_root = _root(args.output_root or fixture_root, repo_root)

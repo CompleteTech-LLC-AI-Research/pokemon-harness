@@ -45,13 +45,25 @@ def clear_battle(s: Session, max_a: int = 150) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--state", required=True)
-    p.add_argument("--goal-map", type=lambda x: int(x, 0), default=None,
-                   help="stop if map_id changes to this value (e.g. 0x32)")
-    p.add_argument("--goal-xy", type=str, default=None,
-                   help='stop at x,y within the starting map (e.g. "3,43")')
+    p.add_argument(
+        "--goal-map",
+        type=lambda x: int(x, 0),
+        default=None,
+        help="stop if map_id changes to this value (e.g. 0x32)",
+    )
+    p.add_argument(
+        "--goal-xy",
+        type=str,
+        default=None,
+        help='stop at x,y within the starting map (e.g. "3,43")',
+    )
     p.add_argument("--max-nodes", type=int, default=5000)
-    p.add_argument("--save-path-to", type=str, default=None,
-                   help="if reached, save the path directions to this file")
+    p.add_argument(
+        "--save-path-to",
+        type=str,
+        default=None,
+        help="if reached, save the path directions to this file",
+    )
     args = p.parse_args()
 
     goal_xy = None
@@ -62,14 +74,16 @@ def main() -> int:
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
     s = Session.from_files(
-        rom, sym,
+        rom,
+        sym,
         expected_rom_sha1=os.environ.get(
             "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
         ),
     )
     register_default_hooks(s)
     start_bytes = Path(args.state).read_bytes()
-    s.load_state(start_bytes); s.step(60, render=True)
+    s.load_state(start_bytes)
+    s.step(60, render=True)
     clear_battle(s)
     start_key = key_for(s)
     start_state = s.save_state()
@@ -88,8 +102,10 @@ def main() -> int:
         if nodes % 50 == 0:
             print(f"  explored {nodes} nodes, frontier={len(q)}, last={key}", flush=True)
         for char, button in DIRS:
-            s.load_state(state_bytes); s.step(24, render=True)
-            s.press(button, duration=6); s.step(24, render=True)
+            s.load_state(state_bytes)
+            s.step(24, render=True)
+            s.press(button, duration=6)
+            s.step(24, render=True)
             clear_battle(s)
             # settle
             s.step(16, render=True)
@@ -99,7 +115,10 @@ def main() -> int:
             # Map changed — potentially a goal.
             if new_key[0] != start_map:
                 new_path = path + char
-                print(f"  MAP CHANGE via {button}: now map=0x{new_key[0]:02x} path={new_path!r}", flush=True)
+                print(
+                    f"  MAP CHANGE via {button}: now map=0x{new_key[0]:02x} path={new_path!r}",
+                    flush=True,
+                )
                 if args.goal_map is not None and new_key[0] == args.goal_map:
                     found_path = new_path
                     break
@@ -127,7 +146,9 @@ def main() -> int:
     print(f"\nno path found after {nodes} nodes", flush=True)
     # Print farthest tile (by path length) as a hint
     longest = max(visited.items(), key=lambda kv: len(kv[1]))
-    print(f"farthest reached: {longest[0]} via {longest[1]!r} ({len(longest[1])} steps)", flush=True)
+    print(
+        f"farthest reached: {longest[0]} via {longest[1]!r} ({len(longest[1])} steps)", flush=True
+    )
     return 1
 
 

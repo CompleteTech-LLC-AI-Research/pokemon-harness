@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Trade-phase drivers for the pyboy-link real-ROM tests.
 
 Split from ``tests/test_pyboy_link_session_roms.py`` (#132) with no behavior
 change.
 """
+
+from __future__ import annotations
 
 from tests._pyboy_link_session_roms_support import _LINK_CHUNK_CYCLES, _install_hook_counter
 

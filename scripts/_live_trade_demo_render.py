@@ -21,10 +21,9 @@ def _find_pyboy_hwnds() -> list[int]:
         return []
     import ctypes
     from ctypes import wintypes
+
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    EnumWindowsProc = ctypes.WINFUNCTYPE(
-        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
-    )
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     found: list[int] = []
 
     def _cb(hwnd, _lparam):
@@ -59,8 +58,12 @@ def _win32_grab_window(hwnd: int, out_path: Path) -> bool:
     gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 
     class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
 
     rect = RECT()
     if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
@@ -82,13 +85,19 @@ def _win32_grab_window(hwnd: int, out_path: Path) -> bool:
 
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [
-            ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_long),
-            ("biHeight", ctypes.c_long), ("biPlanes", ctypes.c_uint16),
-            ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
-            ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_long),
-            ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", ctypes.c_uint32),
+            ("biSize", ctypes.c_uint32),
+            ("biWidth", ctypes.c_long),
+            ("biHeight", ctypes.c_long),
+            ("biPlanes", ctypes.c_uint16),
+            ("biBitCount", ctypes.c_uint16),
+            ("biCompression", ctypes.c_uint32),
+            ("biSizeImage", ctypes.c_uint32),
+            ("biXPelsPerMeter", ctypes.c_long),
+            ("biYPelsPerMeter", ctypes.c_long),
+            ("biClrUsed", ctypes.c_uint32),
             ("biClrImportant", ctypes.c_uint32),
         ]
+
     bmi = BITMAPINFOHEADER()
     bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
     bmi.biWidth = w
@@ -186,23 +195,23 @@ def _render_tilemap_from_vram(pyboy, layer: str, out_path: Path, *, color: bool 
         start_y = -wy
         start_x = -wx
     # Bank 0: tile IDs + DMG tile data.
-    tile_map = np.frombuffer(
-        _read_vram_bank(pyboy, 0, map_base, 0x400), dtype=np.uint8
-    ).reshape(32, 32)
+    tile_map = np.frombuffer(_read_vram_bank(pyboy, 0, map_base, 0x400), dtype=np.uint8).reshape(
+        32, 32
+    )
     if unsigned:
-        tile_data_b0 = np.frombuffer(
-            _read_vram_bank(pyboy, 0, 0x8000, 0x1800), dtype=np.uint8
+        tile_data_b0 = np.frombuffer(_read_vram_bank(pyboy, 0, 0x8000, 0x1800), dtype=np.uint8)
+        tile_data_b1 = (
+            np.frombuffer(_read_vram_bank(pyboy, 1, 0x8000, 0x1800), dtype=np.uint8)
+            if color
+            else None
         )
-        tile_data_b1 = np.frombuffer(
-            _read_vram_bank(pyboy, 1, 0x8000, 0x1800), dtype=np.uint8
-        ) if color else None
     else:
-        tile_data_b0 = np.frombuffer(
-            _read_vram_bank(pyboy, 0, 0x8800, 0x1000), dtype=np.uint8
+        tile_data_b0 = np.frombuffer(_read_vram_bank(pyboy, 0, 0x8800, 0x1000), dtype=np.uint8)
+        tile_data_b1 = (
+            np.frombuffer(_read_vram_bank(pyboy, 1, 0x8800, 0x1000), dtype=np.uint8)
+            if color
+            else None
         )
-        tile_data_b1 = np.frombuffer(
-            _read_vram_bank(pyboy, 1, 0x8800, 0x1000), dtype=np.uint8
-        ) if color else None
     if color:
         # Bank 1: tile attribute bytes (palette index, tile bank, flip, etc).
         tile_attrs = np.frombuffer(
@@ -210,9 +219,9 @@ def _render_tilemap_from_vram(pyboy, layer: str, out_path: Path, *, color: bool 
         ).reshape(32, 32)
         cgb_palettes = _read_cgb_bg_palettes(pyboy)
         # Flatten into a 32-entry RGB LUT: 8 palettes x 4 colors.
-        rgb_lut = np.array(
-            [c for pal in cgb_palettes for c in pal], dtype=np.uint8
-        ).reshape(8, 4, 3)
+        rgb_lut = np.array([c for pal in cgb_palettes for c in pal], dtype=np.uint8).reshape(
+            8, 4, 3
+        )
     # Build a 160x144 pixel coordinate grid.
     ys = np.arange(144)
     xs = np.arange(160)
@@ -325,9 +334,7 @@ def _force_move_pyboy_windows(positions: list[tuple[int, int]]) -> bool:
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     EnumWindows = user32.EnumWindows
-    EnumWindowsProc = ctypes.WINFUNCTYPE(
-        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
-    )
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     GetWindowTextW = user32.GetWindowTextW
     IsWindowVisible = user32.IsWindowVisible
     SetWindowPos = user32.SetWindowPos
@@ -350,12 +357,15 @@ def _force_move_pyboy_windows(positions: list[tuple[int, int]]) -> bool:
     for hwnd, (x, y) in zip(found, positions):
         # SWP_NOSIZE keeps PyBoy's current size; we only reposition.
         SetWindowPos(
-            hwnd, 0, x, y, 0, 0,
+            hwnd,
+            0,
+            x,
+            y,
+            0,
+            0,
             SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW,
         )
     return len(found) >= len(positions)
-
-
 
 
 @dataclass

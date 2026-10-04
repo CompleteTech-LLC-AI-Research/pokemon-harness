@@ -29,15 +29,19 @@ def probe(session: Session, path: list[str], outdir: Path) -> None:
         session.press(d, duration=6)
         session.step(24, render=True)
         gs = session.read_game_state()
-        print(f"  #{i:03d} {d:5s} -> map=0x{gs.overworld.map_id:02x} "
-              f"xy=({gs.overworld.x:>2},{gs.overworld.y:>2}) "
-              f"dir={gs.overworld.direction} "
-              f"batt={gs.battle.active}")
+        print(
+            f"  #{i:03d} {d:5s} -> map=0x{gs.overworld.map_id:02x} "
+            f"xy=({gs.overworld.x:>2},{gs.overworld.y:>2}) "
+            f"dir={gs.overworld.direction} "
+            f"batt={gs.battle.active}"
+        )
         # If a wild battle appears, mash A until it ends
         if gs.battle.active:
             for _ in range(80):
-                session.press("a", duration=6); session.step(24, render=True)
-                if not session.read_game_state().battle.active: break
+                session.press("a", duration=6)
+                session.step(24, render=True)
+                if not session.read_game_state().battle.active:
+                    break
             print("       (cleared battle)")
         # Save screenshot every 10 presses
         if i % 10 == 0 or i == len(path):
@@ -48,14 +52,16 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--state", required=True, help="path to a saved Session state")
     p.add_argument("--outdir", default="walkthrough_brock/probe")
-    p.add_argument("--path", default="up"*60,
-                   help="sequence of direction chars, e.g. 'uuullluuurr'")
+    p.add_argument(
+        "--path", default="up" * 60, help="sequence of direction chars, e.g. 'uuullluuurr'"
+    )
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
     session = Session.from_files(
-        rom, sym,
+        rom,
+        sym,
         expected_rom_sha1=os.environ.get(
             "POKERED_ROM_SHA1", "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
         ),
