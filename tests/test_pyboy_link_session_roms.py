@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Canonical real-ROM trade/battle acceptance matrix under :class:`PyBoyLinkSession`.
 
 This module keeps the ordered Red/Blue/Yellow acceptance entrypoints that the
@@ -20,6 +18,9 @@ Run the strict local acceptance cases with::
         tests/test_pyboy_link_session_roms.py::test_red_yellow_trade_swaps_real_party_records \\
         tests/test_pyboy_link_session_roms.py::test_red_yellow_battle_turn_is_resolved
 """
+
+from __future__ import annotations
+
 
 import pytest
 

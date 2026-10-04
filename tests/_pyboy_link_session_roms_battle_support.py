@@ -1,10 +1,11 @@
-from __future__ import annotations
-
 """Battle-phase drivers for the pyboy-link real-ROM tests.
 
 Split from ``tests/test_pyboy_link_session_roms.py`` (#132) with no behavior
 change.
 """
+
+from __future__ import annotations
+
 
 from tests._battle_turn_evidence import (
     EVIDENCE_EVENTS,
