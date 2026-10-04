@@ -16231,9 +16231,13 @@ def test_class_carrier_requires_inert_assertion_message(message, error):
     assert _is_enforced(function, target, module) is False
 
 
-@pytest.mark.skipif(sys.version_info < (3, 12), reason="class type parameters require Python 3.12")
 @pytest.mark.parametrize(("parameter", "error"), [("Meta", TypeError), ("T", AssertionError)])
 def test_class_carrier_declines_generic_metaclass_lookup_scope(parameter, error):
+    if sys.version_info < (3, 12):
+        from tests._grammar_runtime import run_grammar_case
+
+        run_grammar_case(parameter, error)
+        return
     source = (
         "def outer(x):\n    class Meta(type):\n"
         "        def __enter__(cls): return cls\n        def __exit__(cls, *exc): return False\n"
