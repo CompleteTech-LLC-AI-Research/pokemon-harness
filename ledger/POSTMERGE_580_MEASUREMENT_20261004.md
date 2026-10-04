@@ -103,3 +103,29 @@ The next step is a full profile alignment (`rearm_budget=4096`,
 window, plus a decision on whether widening these budgets is legitimate at all
 under the document's governance rule. That decision should be made before more
 budget-widening changes land.
+
+## Follow-up: the full documented profile adds nothing
+
+The REJECT finding's profile criticism suggested completing the alignment
+(`rearm_budget=4096`, `rearm_instruction_cap=1024`, `max_edge_lateness=4096`,
+i.e. `ALIGNED_DIAGNOSTIC_PROFILE`) might be the real fix. Measured, three paired
+frames per configuration, same process:
+
+| configuration | min | median | max |
+|---|---|---|---|
+| merged partial (`lateness=4096`, rearm 32/16) | 22.84s | 25.10s | 25.80s |
+| FULL documented profile | 22.77s | 25.92s | 26.07s |
+
+**Indistinguishable.** `rearm_budget` and `rearm_instruction_cap` only matter
+when a held edge delivery blocks execution (`_begin_rearm`, reachable via
+`begin_delivery_rearm`). This workload has no held delivery, so those two fields
+are inert here. Completing the profile alignment would be churn.
+
+That also settles the "third configuration" criticism in the REJECT finding: the
+other two profile fields make no difference for this workload, so #580's partial
+alignment is behaviourally equivalent to the full profile *for these tests*. The
+framing was still inaccurate and should not have claimed profile reproduction.
+
+Note both configurations are slower here than in the earlier run (25s vs 13-14s)
+because host load rose. Load shifts the absolute numbers; the 3.3x
+lateness effect measured under alternating configurations is the stable signal.
