@@ -141,12 +141,41 @@ were each checked and are reflected here:
   is FAIL.
 - **No gate is claimed as passing, no test skipped or xfailed, no deadline
   enlarged** to obtain any number above.
-- The 14 unit failures carry the same `timed_deadline` profile recorded
-  before; their cause is still not established, and the non-reproducibility
-  noted in the previous session still stands.
+- The 14 unit failures do **not** all carry a `timed_deadline` profile. Reading
+  the terminal error of each from the gate report: 8 are `TimedOwnerError:
+  request deadline expired`, 1 is `ChannelClosed: peer closed connection`, 1 is
+  `AssertionError: paired owners did not complete semantic work within 48s`,
+  1 is `AssertionError: paired public ticks deadlocked`, and 3 are other
+  assertion diffs. An earlier revision of this file claimed all 14 were
+  deadline-bound; that is false for this run and no single phenomenon may be
+  assumed. Their cause is not established, no load figure was recorded for
+  this run, and the non-reproducibility noted in the previous session stands.
 
 ## Next action
 
 Fix the §3b-0 recipe in `docs/PRODUCTION_RUNBOOK.md` to the nested-namespace
 form, then re-measure the 14 residual failures on an operator-declared
 allocation. Until that exists, #253's acceptance criterion 1 is unmet.
+
+## Addendum — facts established while landing the §3b-0 fix
+
+Three things were measured that the record above did not state, two of which
+correct it.
+
+**The failing primitive is not only the semaphore.** Against this host's
+read-only `/dev/shm`, `mp.Queue`, `mp.Lock`, and
+`multiprocessing.shared_memory.SharedMemory(create=True)` all raise
+`OSError: [Errno 30] Read-only file system`; anonymous `mmap` and
+`TMPDIR`-backed `tempfile` succeed. The claim above is right that it is not
+arena allocation, but naming only the semaphore is too narrow.
+
+**The bind target persists across runs.** The nested recipe bind-mounts a
+persistent directory, so `/dev/shm` contents carry over between invocations,
+whereas `mount -t tmpfs` gave a fresh empty one each time. Verified by writing
+a probe file in one namespace and finding it in the next; the directory also
+held ten accumulated `sem.mp-*` semaphores. Leftover POSIX semaphores are an
+unexcluded candidate for the intermittent failures and must be cleared between
+runs.
+
+**The 14 are not one failure mode**, per the "What this does not change"
+section above. Treat them as 14 separate results until a run isolates a cause.
