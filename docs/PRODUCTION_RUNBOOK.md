@@ -859,13 +859,13 @@ sanitized facts from `qualification_runner.py --report` on this host:
 | `cgroup_relative_path` | `/` | the job runs in the root cgroup, not a child allocation |
 | `cpu_quota_cores` | `null` (`cpu.max` = `max 100000`) | no finite quota to reserve |
 | `cgroup_member_pids` | 87 processes | many unrelated processes share the cgroup |
-| `affinity_cpus` | `0-11` (all 12 CPUs) | no narrower cpuset is available |
+| `affinity_cpus` | `0-3` (all 4 CPUs) | no narrower cpuset is available |
 | `cgroup_sibling_competitors` | `[]` at the root | root cgroup is the whole hierarchy |
 | `/sys/fs/cgroup` mount | `ro,nosuid,nodev,noexec` | a child quota/cpuset cannot be created |
-| user namespaces | `unshare` → `EPERM` | cannot isolate a writable cgroup namespace |
+| user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it (see below) |
 | capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
 
-Every reservation mechanism therefore fails admission here, which is the
+Every CPU-reservation mechanism therefore fails admission here, which is the
 correct, fail-closed outcome: `cpuset-affinity` has overlapping foreign
 processes, `cgroup-quota` has no non-root cgroup and no finite quota, and
 `dedicated-host` measures competing CPU cores far above the tolerance. The
@@ -876,6 +876,49 @@ no competing load). Because no such allocation exists on this host, those
 acceptance runs are **BLOCKED** and are not claimed as passing. This section is
 a provisioning status record, not release evidence, and it must not be used to
 promote any qualification result.
+
+#### 3b-0. Writable `/dev/shm` is obtainable, and it is not a CPU allocation
+
+> **Host drift note.** The `9.44`/`10.72`-busy-cores-of-`12` samples quoted in
+> §3b-1 and in the `host-wide competition` row are retained verbatim as the
+> record of *those* runs, which were taken on a 12-CPU host. The current host
+> exposes 4 CPUs (`nproc` = 4, `affinity_cpus` = `0-3`), so its load1 figures
+> are not comparable to those samples in absolute terms — only the conclusion
+> (foreign load far above tolerance) carries over. Any new capacity
+> qualification must re-sample and restate the CPU count rather than inherit
+> these numbers.
+
+The distinction matters because an earlier revision of this table recorded
+`unshare` as `EPERM` and therefore concluded that no writable shared-memory
+namespace was reachable. That is wrong on this host, and it was load-bearing:
+`scripts/production_gate.py`'s unit tier spawns `multiprocessing` workers
+whose arena allocation needs a writable `/dev/shm`, so the read-only mount
+turned environment failures into apparent product defects. Measured on
+`7d09ac7e`:
+
+```
+unshare --map-root-user -m --propagation private \
+  sh -c 'mount -t tmpfs -o size=256m tmpfs /dev/shm; <pytest>'
+  -> /dev/shm becomes tmpfs (rw,...)
+```
+
+That single change removes part of issue #253's failure set: of the 17 failures
+seen under a read-only `/dev/shm`, 9 persist with a writable one, and
+`tests/test_probe_owner_phases.py` goes fully green. **The cause of those 9 is
+not established.** All of them surface as `timed_deadline` under host load, and
+their count is not reproducible — repeated identical runs on an unchanged tree
+gave 9, then 6, then 5, with `load1` between 8.8 and 12.3 on 4 CPUs. That is
+consistent with a load-induced deadline cause, but a latent intermittent defect
+would present the same way; distinguishing the two needs a quiet host or a real
+allocation, neither of which exists here. Do not read "9 remain" as "9 are
+environmental": no deadline was enlarged, no test was skipped or xfailed, and
+none may be on the strength of this record.
+
+It does **not** unblock any capacity claim: remounting `cgroup2` inside the same
+private namespace still returns `EPERM`, so `cpu.max` remains `max 100000` with
+no writable leaf and no declared allocation. Per-core and timing qualification
+is still **BLOCKED** on an operator-provisioned CPU allocation; only the
+shared-memory prerequisite was mis-recorded, not the capacity verdict.
 
 #### 3b-1. Functional acceptance retained, capacity qualification withheld
 
@@ -956,7 +999,7 @@ assuming it. The blocking facts are observable and sanitized:
 | process identity | `uid=1000` (`agent`) | the job is not the host owner |
 | effective/bounding capabilities | `CapEff=0`, `CapBnd=0` | cannot delegate a controller or write `cgroup.procs` |
 | privilege escalation path | no `sudo`, no setuid helper | the missing privilege cannot be acquired |
-| unprivileged user namespaces | `unshare --map-root-user -m` → `EPERM` | cannot bind-mount a private `cgroup2` |
+| unprivileged user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds**; private `cgroup2` → `EPERM` | a writable `/dev/shm` is obtainable, but no writable `cgroup2` leaf with `cpu.max` is |
 | host-wide competition | `9.44`–`10.72` busy cores of `12` during the retained runs | `dedicated-host` admission fails |
 
 The comparison and the nine-orientation matrix were nonetheless executed and
