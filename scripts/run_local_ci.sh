@@ -134,7 +134,7 @@ python -m pip install -e ".[dev]"
 # Check packaging and gate lint/format
 # Boundary decision: the two main lanes below cover all of `tests/` (passed as
 # the directory itself, so a newly added test file cannot silently escape) plus
-# an explicit list of `scripts/` paths, and the `ruff format --check` lane
+# the `scripts/` directory, and the `ruff format --check` lane
 # additionally covers exactly one `src/` file -- the #242 facade entry, added so
 # that new source path is format-checked and not merely checked. The remaining
 # `src/` paths of the runtime/link block stay outside the format boundary on
@@ -149,9 +149,11 @@ python -m pip install -e ".[dev]"
 # from the `scripts` tree, declared in pyproject.toml: the fixture manifest
 # records that tool's SHA-1 as its capture identity, so reformatting it would
 # invalidate the only record of which tool captured the boundary fixtures. It is
-# pinned by `test_excluded_fixture_producer_still_matches_the_manifest_sha1`
-# and returns to the lane when those fixtures can be re-captured from a real
-# ROM. `src/` stays enumerated because that tree is not format-clean yet (19
+# pinned against drift by `test_excluded_fixture_producer_still_matches_the_manifest_sha1`,
+# and `exclude` drops it from the check lane as well as the format lane; it was
+# in neither lane on master, so that is not a coverage regression. It returns to
+# both lanes when those fixtures can be re-captured from a real ROM. `src/`
+# stays enumerated because that tree is not format-clean yet (19
 # files needing reformat), so globbing it here would fail the gate and is a
 # separate change that fixes those files first. This script stays in lockstep
 # with .github/workflows/release-hygiene.yml, and tests/test_local_ci_policy.py

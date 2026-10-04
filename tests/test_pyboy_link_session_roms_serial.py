@@ -6,7 +6,6 @@ change: the two Yellow serial-milestone tests moved here verbatim.
 
 from __future__ import annotations
 
-
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.link.serial_core import SerialCore
 from tests._pyboy_link_session_roms_support import (

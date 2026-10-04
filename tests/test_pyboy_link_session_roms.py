@@ -21,7 +21,6 @@ Run the strict local acceptance cases with::
 
 from __future__ import annotations
 
-
 import pytest
 
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession

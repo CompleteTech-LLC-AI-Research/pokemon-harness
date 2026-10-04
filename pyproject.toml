@@ -119,9 +119,12 @@ extend-exclude = ["vendor/pyboy-src"]
 # longer matches. Reformatting it would invalidate the only proof that the
 # boundary fixtures came from the tool recorded as their producer, and fixing
 # that requires re-capturing those fixtures from a real ROM. It is therefore
-# held at its committed bytes until that re-capture happens; it is still
-# lint-checked. tests/test_local_ci_policy.py pins this exclusion and fails if
-# the file drifts from the SHA-1 the manifest records.
+# held at its committed bytes until that re-capture happens. It was named by
+# neither main lane on master, so excluding it from both here is not a coverage
+# regression; `force-exclude` is what keeps that true once the lanes pass the
+# `scripts` directory, since a bare directory token would otherwise recurse
+# into it. tests/test_local_ci_policy.py pins this exclusion and fails if the
+# file drifts from the SHA-1 the manifest records.
 force-exclude = true
 exclude = [
     "scripts/produce_battle_state_fixtures.py",

@@ -6,7 +6,6 @@ change.
 
 from __future__ import annotations
 
-
 from tests._battle_turn_evidence import (
     EVIDENCE_EVENTS,
     BattleTurnObserver,

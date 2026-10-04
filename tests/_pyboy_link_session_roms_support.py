@@ -8,7 +8,6 @@ checks moved here verbatim so every real-ROM module shares one surface.
 
 from __future__ import annotations
 
-
 import os
 import sys
 from pathlib import Path

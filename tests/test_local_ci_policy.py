@@ -98,6 +98,17 @@ def _ruff_lint_resolved_files(
     including the enumerated non-`tests/` files.
     """
 
+    # A `str` here is unpacked by `*paths` into one argument per character, so
+    # Ruff resolves nothing and returns an empty set. That fails silently: the
+    # caller sees "no files are covered" rather than "you passed the wrong
+    # shape", which is how `_ruff_lint_resolved_files("scripts")` survived two
+    # review rounds while quietly measuring nothing.
+    if isinstance(paths, str):
+        raise TypeError(
+            "paths must be a tuple of path tokens, not a bare string: "
+            f"pass ({paths!r},), not {paths!r}"
+        )
+
     completed = subprocess.run(
         [
             sys.executable,
@@ -290,7 +301,7 @@ def test_main_ruff_lane_scripts_directory_covers_every_script_file_on_disk() -> 
     assert on_disk, "no script files found on disk"
     assert scripts_root.is_dir(), "the `scripts` directory the lanes pass must exist"
 
-    covered = _ruff_lint_resolved_files("scripts")
+    covered = _ruff_lint_resolved_files(("scripts",), tree="scripts")
     uncovered = on_disk - covered
     assert uncovered == {_PRODUCER_PINNED_BY_MANIFEST}, (
         "scripts/ files are excluded from the Ruff lanes beyond the one pinned "

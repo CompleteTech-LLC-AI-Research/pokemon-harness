@@ -6,7 +6,6 @@ change.
 
 from __future__ import annotations
 
-
 from tests._pyboy_link_session_roms_support import _LINK_CHUNK_CYCLES, _install_hook_counter
 
 _TRADE_DIAG_SYMBOLS = (
