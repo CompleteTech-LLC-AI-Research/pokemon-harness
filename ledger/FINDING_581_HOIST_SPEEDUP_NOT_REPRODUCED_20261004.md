@@ -130,3 +130,30 @@ quiet CPU window (`<= 4` required for timing qualification), which is why the
 real-motherboard numbers are reported as a range rather than a point estimate.
 The isolated-stub figure is load-independent in structure but was still taken on
 this host.
+
+## Addendum — focused test verification on both heads
+
+Each head in its own worktree with its own editable venv, because the repo's
+import-origin guard correctly refuses to let one checkout's interpreter describe
+another tree (it rejected `wtgate/.venv2` for `wt581` with "Every result from
+this run would describe another tree").
+
+| worktree | head | venv imports | result |
+| --- | --- | --- | --- |
+| `/home/agent/wt581` | `a9605c96` (PR #581) | `/home/agent/wt581/src` | **81 passed, 0 failed, 0 skipped** |
+| `/home/agent/wt581base` | `78f02fd7` (base) | `/home/agent/wt581base/src` | **81 passed, 0 failed, 0 skipped** |
+
+```
+tests/test_pyboy_link_session.py tests/test_stepping_loop_profile.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 -p pytest_asyncio.plugin -p tests._gate_report -rA --maxfail=0
+```
+
+Identical counts on both heads: **no behavioural regression** attributable to the
+hoist. This corroborates the differential probe and the independent review.
+
+Caveat on scope: this is the focused pair of modules that reference
+`_step_single_step_chunk`, not the full 8327-row unit tier. A full unit-tier run
+on the candidate merge tree is still required before merge, and #253's residual
+`TimedOwnerError` family is unrelated to this file.
+
+Both worktrees are scratch and should be removed once #581 lands or is abandoned.
