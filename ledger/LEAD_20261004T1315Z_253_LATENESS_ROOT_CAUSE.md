@@ -79,3 +79,29 @@ the response is monotonic across orders of magnitude. There is no threshold.
   between runs on identical code.
 - **No real ROMs.** No native or real-ROM qualification.
 - Timing tier not requalified. #253 stays open.
+
+## Update — collaboration tooling degraded further
+
+After the three misdelivered dispatches, a fourth agent
+(`/root/indep253_r3`) was dispatched with a sharper prompt and reached
+`running`, but the tooling then degraded: `list_agents`, `wait_agent`, and
+`spawn_agent` each began returning `unsupported call` on alternating calls.
+`wait_agent` intermittently accepted a timeout and timed out without a verdict.
+A status nudge to the running agent produced an empty result.
+
+Current authoritative GitHub state:
+
+- PR #580 OPEN, head `1be4cb99`, MERGEABLE, **0 reviews**
+- 1 open PR, 30 open issues
+- `origin/master` still `eb7f14d8` — nothing merged this session
+
+The review bar cannot be met while dispatch is unreliable, so #580 stays open
+and unmerged. Author self-verification is recorded above and on the PR, and is
+explicitly *not* offered as approval.
+
+## Preserved state
+
+- Protected checkout `/home/agent/poke-harness/pokemon`: `lead/259-widen-lint-lanes`
+  at `bd2c167c`, 5 dirty entries, 2 stashes — untouched.
+- Worktree `/home/agent/wt253`: tracked tree clean; evidence retained in
+  `.scratch253c.md`, `.scratch/trace2.txt`, `.scratch/{baseline,affected3}.xml`.
