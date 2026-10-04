@@ -90,6 +90,11 @@ count and the identical cycle count.
 **Speedup from hoisting the invariant lookups only: 1.495x median, 1.443x best-of-repeat.**
 Identical retired instructions and identical cycles confirm no emulated work was skipped.
 
+> **RETRACTED — see the correction below.** The 1.495x/1.443x figures in this section do **not**
+> reproduce, and the inference behind them was wrong. Retained only so the retraction has something
+> concrete to point at. The corrected measurement is at the end of this document and in
+> `ledger/FINDING_581_HOIST_SPEEDUP_NOT_REPRODUCED_20261004.md`.
+
 ## Decision
 
 **Implement, and the primitive is a hoisted Python loop — not a new Cython stepping primitive.**
@@ -102,12 +107,13 @@ is. Three findings shape the conclusion:
    already compiled — `compiled_frame_loop` retires instructions ~11.8x faster than the production
    loop on `reg-only` with 0.00009 Python calls per instruction. The gap is the Python loop
    surrounding it, not the emulation.
-2. **The realistic gain is ~1.5x, not ~10x.** That is the honest ceiling for removing Python
+2. **The realistic gain is ~1.1x, not ~10x.** That is the honest ceiling for removing Python
    per-instruction overhead while preserving the scheduler's contract. The `compiled_frame_loop`
    and `compiled_batched_loop` ratios must not be claimed as achievable gains: those paths run a
    whole emulated frame inside one Python call and therefore **do not** preserve the serial-edge,
    LCD-marker, hook, owner-cancellation and partial-progress semantics the scheduler exists to
-   maintain. They are upper bounds, not candidates.
+   maintain. They are upper bounds, not candidates. (Corrected from an original "~1.5x" estimate;
+   the measured ceiling is lower — see the retraction.)
 3. **A new compiled primitive is not justified.** #109 asks for a bounded compiled stepping
    primitive "only for a measured bottleneck". The bottleneck is 3 `getattr` calls per instruction
    in one small method. Hoisting them is a local, low-risk change that captures the majority of the
@@ -196,3 +202,37 @@ independent review first. The 1.50x figure still needs a quiet-CPU re-measuremen
 before any before/after claim is published.
 
 #109 stays **open**. Release status stays **PARTIAL**.
+
+## Correction (2026-10-04, after independent review) — the 1.495x figure is RETRACTED
+
+Independent review of PR #581 found the figure does not reproduce, and that the mechanism I
+inferred from was wrong. See `ledger/FINDING_581_HOIST_SPEEDUP_NOT_REPRODUCED_20261004.md`.
+
+**What I got wrong:** I counted `getattr` at 3.07692 calls per retired instruction and inferred a
+speedup from removing three per-instruction lookups. But `p.mb.x` is an *attribute access*, not a
+`getattr` call — hoisting `mb` removes zero `getattr` calls. Only `getattr(p.mb, "lcd", None)` was
+ever per-iteration; the two `getattr(lcd, "frame_done")` tests and the `cpu.cycles` read stayed
+per-iteration in both arms.
+
+Measured directly by shadowing `builtins.getattr` and counting calls:
+
+| arm | getattr per retired instruction |
+|---|---|
+| original | 3.0007 |
+| hoisted | 2.0010 |
+| **delta** | **exactly 1.0** |
+
+So the hoist is a ~33% `getattr` reduction, worth about **1.11x** on an isolated stub loop. Against
+a real motherboard it is **not resolvable against host noise**: 1.064x over 41 alternating trials in
+one run, and 0.959x — a slowdown — in another. The two runs disagreeing in sign is itself the
+finding, and it means the "quiet-CPU re-measurement" noted above cannot rescue the original number.
+
+Process note: my original count came from `cProfile`, which during re-verification reported **0**
+`getattr` calls in both arms. Trusting that number would have "confirmed" whatever I wanted, so the
+direct counter is what settles it.
+
+**Unchanged by this correction:** the decision to implement the hoist rather than a new compiled
+primitive; every correctness and loop-invariance conclusion; the `compiled_frame_loop` /
+`compiled_batched_loop` ratios remaining upper bounds only (they still do not preserve serial-edge,
+hook, owner-cancellation or partial-progress semantics); and the ~11.8x observation that the
+emulator core is already compiled, which is a statement about `compiled_frame_loop` itself.
