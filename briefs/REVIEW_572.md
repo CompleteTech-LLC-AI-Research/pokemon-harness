@@ -16,7 +16,9 @@ your own, trust your own.
 ## Revisions
 
 - `origin/master` = `a413eeb5ba4bc8e5407fc31cd84c31efe855f314`
-- PR #572 head = `12aae41f` (`fix/570-lane-suppression-guard`), base `master`
+- PR #572 head = `c6fbaeea` (`fix/570-lane-suppression-guard`), base `master`.
+  The head moved once during lead verification (`12aae41f` -> `c6fbaeea`),
+  which rewrote the grammar logic. Confirm the current head and review THAT.
 - Lead's merge-tree says **clean** against master. Confirm it yourself.
 
     cd /home/agent/vpkg
