@@ -48,10 +48,11 @@ Accepted outcome is `passed`; required runtimes are `source` + `cython`.
 | status `"tested"` (the internal sentinel) | `PLANNED_UNVERIFIED` | 0 |
 
 Exactly one row promotes a family, and it is the one the leaf requires: a
-terminal `passed` record for **every** declared runtime with the observed move
-effect matching the declaration. Every downgrade direction is refused. Overall
-stays `INCOMPLETE` in all rows because 67 families remain unverified, which is
-correct.
+terminal `passed` record for **every runtime the coverage scope mandates**
+(`source` and `cython`, keyed to `coverage_version` rather than read from the
+case) with the observed move effect matching the declaration. Every downgrade
+direction is refused. Overall stays `INCOMPLETE` in all rows because 67
+families remain unverified, which is correct.
 
 ## Teeth
 
@@ -67,15 +68,42 @@ FAILED test_mechanics_family_stays_unverified_with_non_terminal_evidence[failed]
 FAILED test_mechanics_family_stays_unverified_with_non_terminal_evidence[timed_out]
 FAILED test_mechanics_family_stays_unverified_with_non_terminal_evidence[not_run]
 FAILED test_mechanics_family_stays_unverified_with_mismatched_hashes
-   ... and 2 more
+FAILED test_mechanics_family_stays_unverified_with_missing_hashes
+FAILED test_complete_pairing_does_not_hide_unverified_mechanics
+FAILED test_report_states_one_turn_scope_separately_from_expanded_mechanics
 ```
 
 A second mutation — emptying the `required` runtime set, so a single runtime
-could promote — changed **no** test outcome. That is not a gap: when a required
-runtime is absent its case report is `missing`, so the `all(status == "tested")`
-conjunct still refuses. The `required` set is a redundant early exit, not the
-load-bearing gate, and the tests correctly bind to the load-bearing one. Worth
-recording so a future reader does not mistake it for an untested branch.
+could promote — changed **no** test outcome. That is not a gap, and the reason
+is worth stating precisely rather than as a general "redundant" claim, because
+the obvious explanation for it is not the true one.
+
+The obvious explanation is that the `all(status == "tested")` conjunct always
+sees a report for the absent runtime. It does not. `build_report` iterates
+`case["runtimes"]` — the runtimes the **case declares** — so a runtime that is
+required but not declared produces no report at all, and an empty report set
+would vacuously satisfy `all(...)`. The branch exists for that case.
+
+The true reason is one layer up: `validate_catalog` already refuses a catalog
+whose case or dimension omits a mandatory runtime, so `_verified_mechanics_case_ids`
+never sees such a catalog in a promoting report. Measured on the real catalog by
+deleting `cython` from the effect-0 case's `runtimes`:
+
+```
+coverage.required_cases[19].runtimes omits mandatory runtime(s)
+for coverage_version 1: cython
+```
+
+and `_dimension_status` then zeroes `verified_cases` on `catalog_valid=False`,
+so `tested=0` on both the dimension and the summary.
+
+So the branch is belt-and-braces behind a validation gate, not the load-bearing
+one, and the tests correctly bind to the conjunct. Its own docstring overstates
+its role — it claims the check exists "so a catalog edit that removes a runtime
+cannot make a family tested with partial evidence", which is really the
+validator's job. That sentence is left alone here: the audit changes no
+repository file, and rewording a load-bearing guard's docstring is a separate,
+reviewed change.
 
 ## Gates
 
@@ -88,6 +116,24 @@ pytest tests/ -k "coverage or battle_scenario or catalog"
 ```
 
 Both mutations reverted; `git status` clean against `7d7c2160`.
+
+## Independent review
+
+An independent reviewer read this document and the source with no prior
+context and returned **MERGEABLE**, confirming the four gates are on production
+paths, that exactly one input combination promotes, and that every refusal
+direction holds. It raised one substantive objection and two wording points,
+all three now corrected above:
+
+- it argued the `required` early exit is *load-bearing*, because deleting it
+  would let a case that omits a scope-mandated runtime promote on the reports
+  that are present. The mechanism is real — `build_report` iterates the
+  case's *declared* runtimes, so an omitted runtime yields no report at all.
+  But the scenario is unreachable in a promoting report because
+  `validate_catalog` refuses such a catalog first. Measured, not assumed.
+- "every declared runtime" → "every runtime the coverage scope mandates", since
+  the two can differ and the mandatory set is what the gate uses.
+- the mutation list's "and 2 more" → both tests named.
 
 ## Disposition
 
