@@ -105,3 +105,55 @@ explicitly *not* offered as approval.
   at `bd2c167c`, 5 dirty entries, 2 stashes — untouched.
 - Worktree `/home/agent/wt253`: tracked tree clean; evidence retained in
   `.scratch253c.md`, `.scratch/trace2.txt`, `.scratch/{baseline,affected3}.xml`.
+
+## Independent review obtained — APPROVE — and an overclaim it caught
+
+Independent review was finally obtained through a different path: the Claude Code
+CLI (`claude1 -p`), a separate model and harness, run non-interactively against
+the on-disk brief in read-only mode. The worktree was verified clean afterwards;
+the reviewer made no edits.
+
+Verdict **APPROVE**, with one finding.
+
+The finding matters more than the verdict. The reviewer measured
+`tests/test_mcp_timed_remote_cached_failure.py` as **11/12**, contradicting my
+earlier "12/12 green". It was right. Three repeats on this head:
+
+```
+run 1: tests=12 failures=0
+run 2: tests=12 failures=1  FAIL test_queued_cancel_preserves_active_real_epoch
+run 3: tests=12 failures=1  FAIL test_queued_cancel_preserves_active_real_epoch
+```
+
+The row is flaky on this host, not fixed. Cause: `PAIR_WORK_CAPACITY_S =
+2 * 1 * (5.0 + 1) = 12s` is derived from `BOUND = 5.0` and used as the paired
+deadline, and a paired frame costs ~14s at this load even with the fix.
+
+The error was mine: I let a deterministic mechanism measurement (round-trip
+count, non-overlapping distributions) support an environment-bound claim (a
+12s deadline holds). Those need different evidence. Corrected on the PR body, in
+a PR comment, and on the issue.
+
+What the reviewer confirmed:
+
+- Mechanism correct as described: completeness clamp `emulated_time.py:428`;
+  unit conversion `timed_link_session.py:86` and `:259`; one instruction
+  `execution_adapter.py:293`; watermark advances only on `EmissionComplete`.
+- Documented profile really says 4096:
+  `TIMED_FRAME_DEADLINE_PROTOCOL_20260921.md:286` and `ALIGNED_DIAGNOSTIC_PROFILE`.
+- Bound not weakened: `late_accounting()` still pins `max_edge_lateness=32` and
+  asserts `"edge lateness exceeds bound"`; `allowed_lateness_half_cycles == 64`
+  intact.
+- Remaining `32` sites are correct as deliberate authored edge cases, including
+  `asymmetric-L64-half` with its purpose-built ROM code under `if lateness == 32:`
+  and its explicit mismatch assertion. Must not be aligned.
+- Lint and format pass; zero source changes.
+
+## Review path that works when collaboration dispatch is degraded
+
+`spawn_agent`, `list_agents`, `wait_agent`, and `send_message` all either
+returned `unsupported call` or delivered the Codex-settings AGENTS.md
+boilerplate as the whole task. The Claude Code CLI accepted a prompt, read the
+brief from disk, ran its own verification commands, and returned a structured
+verdict. Prefer it for independent review on this host while the collaboration
+tools are degraded.
