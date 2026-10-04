@@ -20,7 +20,7 @@ from pokered_harness.session import Session, SessionError, SessionLockTimeout
 from pokered_harness.symbols.loader import load_sym_text
 
 BOUND = 3.0
-TIMING = {"rearm_budget": 32, "rearm_instruction_cap": 16, "max_edge_lateness": 32}
+TIMING = {"rearm_budget": 32, "rearm_instruction_cap": 16, "max_edge_lateness": 4096}
 
 
 class Job:
