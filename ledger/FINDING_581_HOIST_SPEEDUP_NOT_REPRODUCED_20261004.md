@@ -157,3 +157,70 @@ on the candidate merge tree is still required before merge, and #253's residual
 `TimedOwnerError` family is unrelated to this file.
 
 Both worktrees are scratch and should be removed once #581 lands or is abandoned.
+
+## Addendum 2 — corrected head `5e8c23c8` verified; finding closed
+
+The author retracted the 1.495x claim and pushed `5e8c23c8`
+("Correct the #581 docstring: 1.50x claim was wrong, the real effect is ~1.1x").
+
+### The correction is docstring-only — verified structurally, not by reading
+
+Parsing both heads and stripping every docstring, then comparing the AST dump:
+
+```
+a9605c96 (reviewed)  ast hash 42be3df2ffe8b968
+5e8c23c8 (corrected) ast hash 42be3df2ffe8b968
+AST identical ignoring docstrings: True
+```
+
+**The executable code is unchanged.** The review of `a9605c96` therefore carries
+over to `5e8c23c8` without re-deriving anything: same code, same correctness
+conclusions, same test expectations.
+
+### Verification of the corrected head
+
+| check | result |
+| --- | --- |
+| `ruff check` on the changed file | **All checks passed** |
+| `ruff format --check` | **1 file already formatted** |
+| `tests/test_pyboy_link_session.py` + `tests/test_stepping_loop_profile.py` | **81 passed, 0 failed** |
+
+81 passed / 0 failed matches the base (`78f02fd7`) and the pre-correction head
+(`a9605c96`) exactly — no drift across any of the three.
+
+Each head ran in its own worktree with its own editable venv; the import-origin
+guard rejects cross-checkout interpreters, so this is mandatory, not optional.
+
+### The author's correction is itself accurate
+
+Their comment reports the same numbers this review measured (3.0007 -> 2.0010,
+~1.11x isolated, 1.06x and 0.96x on real hardware) and adds a sharper mechanism
+than this review gave: `p.mb.x` is an *attribute access*, not a `getattr` call,
+so hoisting `mb` removes **zero** `getattr` calls. That is the precise reason the
+original inference failed, and it is correct.
+
+They also disclosed a process failure worth recording: their original count came
+from `cProfile`, and on re-run `cProfile` reported **0** `getattr` calls in both
+arms. Trusting that number would have "confirmed" any desired conclusion. The
+direct counter (shadowing `builtins.getattr`) is what settled it. This review used
+`cProfile` successfully — the discrepancy is a `cProfile` interaction with the
+stub's attribute access, not a defect in either measurement.
+
+### Disposition: cleared on correctness, blocked only by the merge contract
+
+- Correctness: **approved**, with the loop-invariance question closed empirically
+  (1 distinct identity over 5000 + 20000 ticks).
+- Performance claim: **corrected** to the measured figure and its scope.
+- Tests: **81/81** on head and base, lint and format clean.
+- Rebase: head is based on `78f02fd7`, 14 commits behind current master
+  `da9e6356`. `merge-tree` shows **0 conflicts**, but it should rebase before
+  merge so the tested tree is the merged tree.
+
+The only remaining blocker is procedural: the contract requires an *independent
+agent* review, and #489 blocks collaboration sub-agent dispatch. That does not
+block obtaining a review by other means — this finding was produced by an
+independent reviewer with no authorship interest in the change. Whether that
+satisfies the contract is a lead decision, not a technical one.
+
+**Still not done, and not claimed:** a full 8327-row unit-tier run on the
+candidate merge tree. The focused 81-row pair is not a substitute.
