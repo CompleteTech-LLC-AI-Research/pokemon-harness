@@ -862,7 +862,7 @@ sanitized facts from `qualification_runner.py --report` on this host:
 | `affinity_cpus` | `0-3` (all 4 CPUs) | no narrower cpuset is available |
 | `cgroup_sibling_competitors` | `[]` at the root | root cgroup is the whole hierarchy |
 | `/sys/fs/cgroup` mount | `ro,nosuid,nodev,noexec` | a child quota/cpuset cannot be created |
-| user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it (see below) |
+| user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it, and the run maps uid 1000 to 0 (see below) |
 | capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
 
 Every CPU-reservation mechanism therefore fails admission here, which is the
@@ -891,27 +891,85 @@ promote any qualification result.
 The distinction matters because an earlier revision of this table recorded
 `unshare` as `EPERM` and therefore concluded that no writable shared-memory
 namespace was reachable. That is wrong on this host, and it was load-bearing:
-`scripts/production_gate.py`'s unit tier spawns `multiprocessing` workers
-whose arena allocation needs a writable `/dev/shm`, so the read-only mount
-turned environment failures into apparent product defects. Measured on
-`7d09ac7e`:
+`scripts/production_gate.py`'s unit tier spawns `multiprocessing` workers whose
+POSIX semaphores are created under `/dev/shm`, so the read-only mount turned
+environment failures into apparent product defects. (The failing primitive is
+the semaphore: anonymous `mmap` and `TMPDIR`-backed `tempfile` both succeed
+against a read-only `/dev/shm`.)
+
+The obvious recipe does not work, and an intermediate revision of this section
+documented it anyway. `--map-root-user` maps the caller's uid 1000 to **0**, so
+the run executes as root, and five tests in this repo *require* a non-root uid
+because they construct an unwritable location and assert that production code
+refuses to proceed. Under root the write succeeds, the refusal never fires, and
+the test fails. Measured on `eb7f14d8`, same tree and interpreter, each test run
+twice:
+
+| condition | result |
+| --- | --- |
+| no namespace (`id -u` = 1000) | **5/5 pass** |
+| `--map-root-user` namespace (`id -u` = 0) | **5/5 fail** |
+
+The five are:
 
 ```
-unshare --map-root-user -m --propagation private \
-  sh -c 'mount -t tmpfs -o size=256m tmpfs /dev/shm; <pytest>'
-  -> /dev/shm becomes tmpfs (rw,...)
+tests/test_qualification_runner_release.py::test_unwritable_host_lock_directory_refuses_to_launch
+tests/test_qualification_runner_lockstate.py::test_immutable_asset_check_rejects_an_unlistable_directory
+tests/test_qualification_runner_lockstate.py::test_immutable_asset_check_rejects_a_symlinked_directory
+tests/test_qualification_runner_allocation.py::test_write_job_run_record_is_terminal_when_the_record_cannot_be_written
+tests/test_gate_capacity_policy.py::test_stalled_live_observer_cannot_admit_using_stale_health
 ```
 
-That single change removes part of issue #253's failure set: of the 17 failures
-seen under a read-only `/dev/shm`, 9 persist with a writable one, and
-`tests/test_probe_owner_phases.py` goes fully green. **The cause of those 9 is
-not established.** All of them surface as `timed_deadline` under host load, and
-their count is not reproducible — repeated identical runs on an unchanged tree
-gave 9, then 6, then 5, with `load1` between 8.8 and 12.3 on 4 CPUs. That is
-consistent with a load-induced deadline cause, but a latent intermittent defect
-would present the same way; distinguishing the two needs a quiet host or a real
-allocation, neither of which exists here. Do not read "9 remain" as "9 are
-environmental": no deadline was enlarged, no test was skipped or xfailed, and
+The single-uid repair also fails, because `uid_map` inside that namespace is
+the single entry `0 1000 1` and uid 1000 does not exist in it — `setpriv
+--reuid=1000` and `os.setuid(1000)` both return `EINVAL`, and rewriting
+`/proc/self/uid_map` is locked. `unshare --map-auto` needs a `/etc/subuid`
+entry that does not exist here, and `newuidmap` is not installed.
+
+The working recipe mounts in an outer namespace as root and then `exec`s into
+an inner user namespace that maps uid 1000, which inherits the outer mount
+namespace and therefore the writable `/dev/shm`:
+
+```sh
+#!/bin/sh
+set -e
+mkdir -p /tmp/pokered-shm
+mount --bind /tmp/pokered-shm /dev/shm
+exec unshare --map-user=1000 --map-group=1000 \
+  --mount --propagation private "$@"
+```
+
+invoked as `unshare --map-root-user -m --propagation private <script> <cmd>`.
+Measured inside it: `id -u` = 1000, `/dev/shm` writable, a `multiprocessing`
+fork plus `Queue` succeeds, the five non-root tests pass 5/5, and
+`tests/test_probe_owner_phases.py` is green. The bind target is disk-backed
+rather than tmpfs, which does not weaken the result — the failing primitive
+needs a *writable* `/dev/shm`, not a tmpfs-backed one.
+
+Under this corrected recipe a full source-mode gate on `eb7f14d8`
+(`--unit-only --repeat-timing 5 --timeout-seconds 1800`) reports:
+
+```
+FAIL  unit    total=8327 passed=8313 failed=14 skipped=0 xfailed=0 xpassed=0 errors=0
+FAIL  timing  total=2125 passed=2090 failed=35 skipped=0 xfailed=0 xpassed=0 errors=0
+overall: FAIL
+```
+
+The unit tier records `returncodes=[124]`, which invites the reading that the
+run was cut short. It was not: `passed + failed` equals the tier total, and
+those counts come from the `tests/_gate_report.py` checkpointing plugin rather
+than pytest's summary line, while `scripts/production_gate_runtime.py` rejects
+any report where `collected != len(records)`. *Why* teardown overran is a
+separate, open question.
+
+The 14 residual unit failures are **not** established as environmental. All
+of them surface as `timed_deadline` under host load, and their count is not
+reproducible — repeated identical runs on an unchanged tree have given 9, 6, 5,
+and now 14, with `load1` between 8.8 and 12.3 on 4 CPUs. That is consistent
+with a load-induced deadline cause, but a latent intermittent defect would
+present the same way; distinguishing the two needs a quiet host or a real
+allocation, neither of which exists here. Do not read the residual count as
+"environmental": no deadline was enlarged, no test was skipped or xfailed, and
 none may be on the strength of this record.
 
 It does **not** unblock any capacity claim: remounting `cgroup2` inside the same
@@ -999,7 +1057,7 @@ assuming it. The blocking facts are observable and sanitized:
 | process identity | `uid=1000` (`agent`) | the job is not the host owner |
 | effective/bounding capabilities | `CapEff=0`, `CapBnd=0` | cannot delegate a controller or write `cgroup.procs` |
 | privilege escalation path | no `sudo`, no setuid helper | the missing privilege cannot be acquired |
-| unprivileged user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds**; private `cgroup2` → `EPERM` | a writable `/dev/shm` is obtainable, but no writable `cgroup2` leaf with `cpu.max` is |
+| unprivileged user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds**; private `cgroup2` → `EPERM` | a writable `/dev/shm` is obtainable only by also running as uid 0 unless a nested namespace is used (§3b-0); no writable `cgroup2` leaf with `cpu.max` is |
 | host-wide competition | `9.44`–`10.72` busy cores of `12` during the retained runs | `dedicated-host` admission fails |
 
 The comparison and the nine-orientation matrix were nonetheless executed and
