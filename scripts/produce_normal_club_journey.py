@@ -278,7 +278,10 @@ class ClubJourney(NormalJourney):
                 )
                 continue
             mem = self.session._pyboy.memory
-            read = lambda name, memory=mem: self.session.symbols.read_u8(memory, name)
+
+            def read(name, memory=mem):
+                return self.session.symbols.read_u8(memory, name)
+
             width, height, tileset = (
                 read("wCurMapWidth"),
                 read("wCurMapHeight"),
@@ -559,9 +562,12 @@ def run_club_route(journey):
     journey.driver.idle(60, render=True)
     journey.navigate((13, 8), 61)
     mem, symbols = journey.session._pyboy.memory, journey.session.symbols
-    event = lambda number: bool(
-        read_wram_u8(mem, symbols.addr_of("wEventFlags") + number // 8) & (1 << (number % 8))
-    )
+
+    def event(number):
+        return bool(
+            read_wram_u8(mem, symbols.addr_of("wEventFlags") + number // 8) & (1 << (number % 8))
+        )
+
     for _ in range(120):
         if event(0x579):
             break

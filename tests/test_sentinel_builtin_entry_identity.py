@@ -302,9 +302,12 @@ def test_builtin_alias_entry_matches_executed_binding(label, source, invocation,
         elif invocation == "global-boundary":
             call = namespace["top"](contextlib.nullcontext)
         elif invocation == "opaque-prefix":
-            call = lambda x: namespace["outer"](
-                x, lambda: setattr(builtins, "list", contextlib.nullcontext)
-            )
+
+            def call(x):
+                return namespace["outer"](
+                    x, lambda: setattr(builtins, "list", contextlib.nullcontext)
+                )
+
         else:
             if invocation == "patch-first":
                 namespace["patch"]()

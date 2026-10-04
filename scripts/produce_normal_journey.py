@@ -308,7 +308,10 @@ class NormalJourney:
                 )
                 continue
             mem = self.session._pyboy.memory
-            read = lambda name, memory=mem: self.session.symbols.read_u8(memory, name)
+
+            def read(name, memory=mem):
+                return self.session.symbols.read_u8(memory, name)
+
             width, height, tileset = (
                 read("wCurMapWidth"),
                 read("wCurMapHeight"),
@@ -407,7 +410,10 @@ class NormalJourney:
             if state.overworld.map_id != 12:
                 raise foundation.CaptureRefused("training requires Route1")
             mem = self.session._pyboy.memory
-            read = lambda name, memory=mem: self.session.symbols.read_u8(memory, name)
+
+            def read(name, memory=mem):
+                return self.session.symbols.read_u8(memory, name)
+
             width, height, ts = (
                 read("wCurMapWidth"),
                 read("wCurMapHeight"),

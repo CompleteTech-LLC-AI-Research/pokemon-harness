@@ -424,8 +424,13 @@ def test_native_active_claim_rejects_pre_and_post_callback_replacement(
     pyboy = PyBoy(str(rom), window="null", sound_emulated=False)
     try:
         serial = pyboy.mb.serial
-        original_pre = lambda _item: None
-        original_post = lambda _item: None
+
+        def original_pre(_item):
+            return None
+
+        def original_post(_item):
+            return None
+
         serial.set_owner_boundary_callbacks(original_pre, original_post)
         claim = serial.claim_owner_pump(lambda _event: None)
         try:

@@ -21,7 +21,10 @@ def test_asset_resolution_uses_external_roots_and_canonical_pins(monkeypatch, tm
     monkeypatch.setenv("POKERED_ROM_ROOT", str(rom_root))
     monkeypatch.setenv("POKERED_FIXTURE_ROOT", str(fixture_root))
     state, rom, symbols = b"synthetic-state", b"synthetic-rom", b"synthetic-symbols"
-    sha1 = lambda data: hashlib.sha1(data).hexdigest()
+
+    def sha1(data):
+        return hashlib.sha1(data).hexdigest()
+
     row = {
         "version": family,
         "kind": "ordinary",
@@ -85,7 +88,9 @@ def test_asset_resolution_admits_the_six_slot_fixture_kind(monkeypatch, tmp_path
     monkeypatch.setenv("POKERED_ROM_ROOT", str(rom_root))
     monkeypatch.setenv("POKERED_FIXTURE_ROOT", str(fixture_root))
     state, rom, symbols = b"slots-state", b"synthetic-rom", b"synthetic-symbols"
-    sha1 = lambda data: hashlib.sha1(data).hexdigest()  # test helper
+
+    def sha1(data):  # test helper
+        return hashlib.sha1(data).hexdigest()
 
     def row_for(basename):
         return {

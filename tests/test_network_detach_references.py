@@ -56,8 +56,13 @@ class _CompletingCore:
 def test_detach_local_core_clears_all_emulator_owned_references() -> None:
     backend, peer = NetworkBackend.pair()
     core = _BlockingCore()
-    callback = lambda core=core: core
-    provider = lambda core=core: {"pc": id(core)}
+
+    def callback(core=core):
+        return core
+
+    def provider(core=core):
+        return {"pc": id(core)}
+
     core_ref = weakref.ref(core)
     backend.set_serial_transcript_context_provider(provider)
     backend.start_receiver(local_core=core, irq_callback=callback)
@@ -308,10 +313,19 @@ def test_detach_can_rebind_live_receiver_without_reconnecting() -> None:
     backend, peer = NetworkBackend.pair()
     first_core = _BlockingCore()
     second_core = _CompletingCore()
-    first_callback = lambda: None
-    second_callback = lambda: None
-    first_provider = lambda: {"endpoint": "first"}
-    second_provider = lambda: {"endpoint": "second"}
+
+    def first_callback():
+        return None
+
+    def second_callback():
+        return None
+
+    def first_provider():
+        return {"endpoint": "first"}
+
+    def second_provider():
+        return {"endpoint": "second"}
+
     backend.set_serial_transcript_context_provider(first_provider)
     backend.start_receiver(local_core=first_core, irq_callback=first_callback)
 
@@ -337,7 +351,9 @@ def test_failed_rebind_cleanup_drops_staged_provider_reference() -> None:
     backend.start_receiver(local_core=first_core, dispatch_to_owner=False)
     second_core = _CompletingCore()
     second_ref = weakref.ref(second_core)
-    second_provider = lambda core=second_core: {"endpoint": id(core)}
+
+    def second_provider(core=second_core):
+        return {"endpoint": id(core)}
 
     try:
         assert backend.detach_local_core(timeout_s=0.2) is True

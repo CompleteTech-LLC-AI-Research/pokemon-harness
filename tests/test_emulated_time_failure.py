@@ -60,11 +60,17 @@ def test_failure_exact_64_half_cycle_bound_and_one_half_excess(phase, lateness):
     if phase == "commit":
         permit = c.reserve(100)
         assert c.receive_edge(**edge)
-        operation = lambda: c.commit(permit, raw_cpu_clock=1003 + lateness, instructions=0)
+
+        def operation():
+            return c.commit(permit, raw_cpu_clock=1003 + lateness, instructions=0)
+
         reason = "edge lateness exceeds bound; actual elapsed recorded"
     else:
         advance(c, 1000, 3 + lateness)
-        operation = lambda: c.receive_edge(**edge)
+
+        def operation():
+            return c.receive_edge(**edge)
+
         reason = "edge lateness exceeds bound"
     if lateness == 64:
         operation()

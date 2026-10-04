@@ -32,7 +32,10 @@ def _known_starred_binding_blocks_query(function, query, owning):
                 continue
             if not _starred_binding_reaches_header(statement, header, function):
                 continue
-            position = lambda node: (node.lineno, node.col_offset)
+
+            def position(node):
+                return (node.lineno, node.col_offset)
+
             if any(
                 other is not statement and position(statement) < position(other) < position(header)
                 for other, _, _ in bindings.get(name, ())
@@ -76,7 +79,9 @@ def _starred_completed_loop_has_element(loop):
 
 
 def _starred_header_interval_is_inert(statement, header, function, owning):
-    position = lambda node: (node.lineno, node.col_offset)
+    def position(node):
+        return (node.lineno, node.col_offset)
+
     nodes = [
         node
         for node in ast.walk(function)

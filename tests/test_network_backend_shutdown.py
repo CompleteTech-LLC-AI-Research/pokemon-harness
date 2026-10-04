@@ -72,8 +72,13 @@ def test_stop_is_bounded_idempotent_and_terminal() -> None:
 def test_successful_detach_releases_only_emulator_owned_references() -> None:
     backend, peer = NetworkBackend.pair()
     core = _Core()
-    callback = lambda core=core: core
-    provider = lambda core=core: {"core": id(core)}
+
+    def callback(core=core):
+        return core
+
+    def provider(core=core):
+        return {"core": id(core)}
+
     core_ref = weakref.ref(core)
     backend.enable_serial_transcript(max_entries=8)
     backend.set_serial_transcript_context_provider(provider)
