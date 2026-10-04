@@ -150,8 +150,9 @@ python -m pip install -e ".[dev]"
 # records that tool's SHA-1 as its capture identity, so reformatting it would
 # invalidate the only record of which tool captured the boundary fixtures. It is
 # pinned against drift by `test_excluded_fixture_producer_still_matches_the_manifest_sha1`,
-# and `exclude` drops it from the check lane as well as the format lane; it was
-# in neither lane on master, so that is not a coverage regression. It returns to
+# and `extend-exclude` drops it from the check lane as well as the format
+# lane; it was in neither lane on master, so that is not a coverage regression.
+# It returns to
 # both lanes when those fixtures can be re-captured from a real ROM. `src/`
 # stays enumerated because that tree is not format-clean yet (19
 # files needing reformat), so globbing it here would fail the gate and is a

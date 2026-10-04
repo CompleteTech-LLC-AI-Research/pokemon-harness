@@ -98,8 +98,8 @@ jobs:
           # identity, so reformatting it would invalidate the only record of
           # which tool captured the boundary fixtures. It is pinned by
           # `test_excluded_fixture_producer_still_matches_the_manifest_sha1`
-          # against drift, and `exclude` drops it from the check lane as well
-          # as the format lane; it was in neither lane on master, so that is
+          # against drift, and `extend-exclude` drops it from the check lane as
+          # well as the format lane; it was in neither lane on master, so that is
           # not a coverage regression. It returns to both lanes when the
           # fixtures can be re-captured from a real ROM. `src/` stays
           # enumerated because that tree is not
