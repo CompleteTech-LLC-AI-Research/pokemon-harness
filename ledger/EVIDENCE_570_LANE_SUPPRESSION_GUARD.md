@@ -202,6 +202,49 @@ part of this work, which contributed to the apparent hangs. This task's scratch
 moved to `/workspace/poke-harness/.scratch/scratch570/`; no other session's files
 were deleted.
 
+## Independent review, round 3 (head `459ac3b7`)
+
+Reviewer: same independent model, brief `brief6.md`, response `review5.txt`.
+
+**VERDICT: CHANGES REQUESTED** — one change, and it was correct.
+
+The `codes and trailing -> blanket` branch added in round 2 was reasoned about
+rather than asserted. Measuring it against the installed Ruff showed the branch
+was **over-strict**: a parsed code list followed by trailing text is still
+scoped in Ruff, not blanket.
+
+| spelling | Ruff | round-2 guard said |
+|---|---|---|
+| `# ruff: noqa: F401  # why` | scoped (F401 suppressed, F821 reported) | blanket |
+| `# ruff: noqa: F401 E501` | scoped (F401 suppressed, F821 reported) | blanket |
+| `# ruff: noqa: F401;` | inert (F401 still reported) | blanket |
+
+No current lane file uses that spelling, so nothing was failing today — the
+branch was latent. It would have refused a legitimately scoped directive.
+Removed, and both spellings are now in the conformance table so the branch is
+asserted rather than assumed. Re-introducing the branch makes the conformance
+test fail with
+`selective_then_comment: the guard reads the named codes as (), not ('F401',)`.
+
+The reviewer also confirmed the conformance test asserts the *guard's* patterns
+against measured Ruff rather than only measuring Ruff, and that
+`_TOLERATED_OVER_MATCHES` is bounded and cannot hide an under-match. It found
+no further undetected escape.
+
+### Review outcome
+
+Three rounds, three substantive findings, each verified by measurement rather
+than accepted or dismissed on the reviewer's word:
+
+| round | verdict | finding | outcome |
+|---|---|---|---|
+| 1 | MERGEABLE | regex conformance unprovable from prose | conformance test added |
+| 2 | CHANGES REQUESTED | `noqa F401` silences the file, pattern missed it | fixed, mutation-tested |
+| 3 | CHANGES REQUESTED | codes+trailing misclassified as blanket | branch removed, now asserted |
+
+One reviewer claim was checked and found wrong (round 1 on `#--ruff: noqa` and
+case sensitivity); two claims were correct and found real defects.
+
 ## Commands and terminal results
 
 Measured on this branch head, in `.venv-570` (Python 3.11.2, pytest 9.1.1):

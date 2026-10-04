@@ -1330,18 +1330,22 @@ def _lane_file_level_directives(source: str) -> list[tuple[int, str, tuple[str, 
             # stray trailing token as codes would hand out the one thing this
             # row exists to refuse, so the codes count only when the colon
             # form actually parsed.
+            #
+            # Trailing text *after* a parsed code list is not blanket, and is
+            # not treated as one: measured, `noqa: F401  # why` and
+            # `noqa: F401 E501` both still suppress F401 and still report an
+            # unrelated F821. Round-3 review flagged this branch, and an
+            # earlier version wrongly reclassified codes-plus-trailing as
+            # blanket. It is scoped in Ruff, so it is scoped here; no current
+            # lane file uses that spelling, so nothing depends on it today,
+            # but over-refusing a legitimately scoped directive would block a
+            # valid file.
             parsed = lint.group("codes") or ""
             codes = (
                 tuple(code.strip().upper() for code in parsed.split(",") if code.strip())
                 if parsed
                 else ()
             )
-            if codes and lint.group("trailing"):
-                # Codes parsed, then junk followed them on the same comment.
-                # Ruff honours the codes regardless, but the spelling is not
-                # one this guard certifies as scoped, so it is treated as the
-                # blanket opt-out it is allowed to be.
-                codes = ()
             found.append((token.start[0], token.string, codes))
         elif _FILE_LEVEL_FORMAT_DIRECTIVE.match(text):
             found.append((token.start[0], token.string, ()))
@@ -1442,6 +1446,22 @@ _SELECTIVE_SPELLINGS: tuple[tuple[str, str, str, frozenset[str]], ...] = (
         "# ruff: noqa: F401, F841",
         "import os\nfrom sys import path as _p\n\n\ndef _probe():\n    return _undefined_zzz\n",
         frozenset({"F401", "F841"}),
+    ),
+    # A parsed code list followed by trailing text. Measured: these still
+    # suppress the code they name and still report an unrelated F821, so they
+    # are scoped, not blanket. This is the branch round-3 review asked to have
+    # asserted rather than reasoned about.
+    (
+        "selective_then_comment",
+        "# ruff: noqa: F401  # why",
+        _PROBE_UNDEFINED_AND_UNUSED,
+        frozenset({"F401"}),
+    ),
+    (
+        "selective_then_code",
+        "# ruff: noqa: F401 E501",
+        _PROBE_UNDEFINED_AND_UNUSED,
+        frozenset({"F401"}),
     ),
 )
 
