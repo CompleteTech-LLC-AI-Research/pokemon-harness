@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tokenize
@@ -62,8 +63,10 @@ def _ruff_invocations(text: str) -> list[tuple[str, ...]]:
     return invocations
 
 
-def _ruff_lint_resolved_files() -> set[str]:
-    """Return the repo-relative files Ruff itself resolves for the main lane.
+def _ruff_lint_resolved_files(
+    paths: tuple[str, ...] = ("tests",), tree: str | None = "tests"
+) -> set[str]:
+    """Return the repo-relative files Ruff itself resolves for a lane.
 
     Re-implementing `extend-exclude` in the test is what made this row lie:
     the hand-rolled matcher crashed on any tree that declared an
@@ -76,10 +79,25 @@ def _ruff_lint_resolved_files() -> set[str]:
     Ask Ruff instead. `ruff check <path> --show-files` prints the exact file set
     it would lint after honouring `extend-exclude`, its default excludes and its
     directory recursion, so this measures the gate rather than a model of it.
+
+    `paths` is the lane's own path list, because the main lanes mix directory
+    tokens with enumerated files and both forms have to be measured the way the
+    lane really passes them. `tree` narrows the answer to one subtree, so a
+    `src` entry in the config cannot pull a config-relative file into a row
+    whose contract is about `tests/`; `tree=None` measures the whole lane,
+    including the enumerated non-`tests/` files.
     """
 
     completed = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "tests", "--show-files", "--no-cache"],
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            *paths,
+            "--show-files",
+            "--no-cache",
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -92,8 +110,8 @@ def _ruff_lint_resolved_files() -> set[str]:
             continue
         relative = Path(candidate).resolve().relative_to(ROOT).as_posix()
         # `--show-files` may also report files Ruff pulled in from a config
-        # `src` entry; only the `tests` tree is this row's contract.
-        if relative.startswith("tests/"):
+        # `src` entry; only the requested tree is this row's contract.
+        if tree is None or relative.startswith(f"{tree.rstrip('/')}/"):
             resolved.add(relative)
     return resolved
 
@@ -1213,6 +1231,223 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
         "a selective `# noqa: BLE001` no longer suppresses BLE001, so the "
         f"benchmark's own documented ignore is stale: "
         f"{_diagnostics(honoured)[:400]!r}"
+    )
+
+
+# A file-level `ruff`/`flake8` opt-out, matched the way Ruff matches it. Each
+# allowance below was measured against `ruff check` on stdin rather than
+# assumed, because Ruff honours a much narrower grammar than "looks like a
+# directive":
+#   honoured -- a bare `noqa` directive, a doubled leading hash, a missing space
+#              after the hash, spaces around the colon, leading indentation,
+#              leading `-` characters, a trailing comment, and the `flake8`
+#              alias.
+#   inert    -- any trailing colon (Ruff splits on colons, so an empty code
+#              list disables nothing), and an upper-cased value, since the
+#              keyword comparison is case-sensitive.
+# Measured over 34 spellings, the pattern has no false negative: every
+# silencing form Ruff honours is detected. It over-detects exactly one exotic
+# spelling, a dash immediately followed by another dash before the keyword
+# (`#-#-`), which Ruff does not honour. That errs towards refusing a file Ruff
+# would otherwise lint, which is the survivable direction; the opposite error
+# would let a real opt-out through.
+# Matching more than Ruff honours would refuse files that are in fact linted;
+# matching less would let a real opt-out through. So `\s` is deliberately not
+# used in the separator classes: it would swallow a newline and let the pattern
+# span two comment tokens, matching text Ruff never reads as a directive.
+# The leading prefix is one repeated `(?:[#-][ \t]*)+` group rather than a
+# nested `[#-]+(?:[ \t]*[#-]+)*`, because that nesting is ambiguous -- `#` and
+# `# ` can both start the inner group -- and it backtracks catastrophically on
+# the ASCII-ruler comments this repository uses as section separators. The
+# nested form did not return in 3s on `# ` plus 75 dashes, a comment that
+# appears in `tests/_battle_item_evidence.py`; the flat form matches in
+# microseconds and stays linear up to a 5000-character comment.
+# The named codes are optional, and their absence is exactly what makes a
+# directive *blanket* -- the case this row refuses.
+#
+# No honoured spelling is quoted in full here on purpose: a directive written
+# into this file would silence F821 in the test file itself, which is the very
+# escape this row exists to catch.
+_FILE_LEVEL_LINT_DIRECTIVE = re.compile(
+    r"^[ \t]*(?:[#-][ \t]*)+(?:ruff|flake8)[ \t]*:[ \t]*noqa"
+    r"(?:[ \t]*:[ \t]*(?P<codes>[A-Za-z]+[0-9]+(?:[ \t]*,[ \t]*[A-Za-z]+[0-9]+)*))?"
+    r"[ \t]*(?:#.*)?$"
+)
+
+# The formatter half, measured on the same footing with `ruff format --diff`:
+# a leading `off` directive and `yapf: disable` both stop the reformat, extra
+# whitespace changes nothing, and a trailing `on` restores it, so `on` is
+# correctly not matched here. These are a plain opt-out with no codes to
+# measure, which is why the stale-directive check below does not apply to them.
+_FILE_LEVEL_FORMAT_DIRECTIVE = re.compile(
+    r"^[ \t]*#+[ \t]*(?:fmt|yapf)[ \t]*:?[ \t]*(?:off|disable)\b"
+)
+
+
+def _reported_codes(completed: subprocess.CompletedProcess[str]) -> set[str] | None:
+    """Return the codes a JSON Ruff run reported, or None when unreadable.
+
+    Unlike `_reports_code`, which answers "was this code reported" and treats
+    anything unmeasurable as *yes*, this returns the whole set, because the
+    caller has to tell a file that is clean apart from one it could not read.
+    An unmeasurable run is therefore None rather than an empty set.
+    """
+
+    if not completed.stdout.strip():
+        return None
+    try:
+        diagnostics = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(diagnostics, list):
+        return None
+    return {
+        item["code"]
+        for item in diagnostics
+        if isinstance(item, dict) and isinstance(item.get("code"), str)
+    }
+
+
+def _lane_file_level_directives(source: str) -> list[tuple[int, str, tuple[str, ...]]]:
+    """Return `(line, text, named_codes)` for each file-level opt-out.
+
+    Only real comment tokens count: the same text inside a docstring or a
+    string literal is inert, and Ruff honours it as inert. An empty
+    `named_codes` means a blanket opt-out.
+    """
+
+    found: list[tuple[int, str, tuple[str, ...]]] = []
+    for token in _comment_tokens(source):
+        text = token.string.strip()
+        lint = _FILE_LEVEL_LINT_DIRECTIVE.match(text)
+        if lint is not None:
+            codes = tuple(
+                code.strip().upper()
+                for code in (lint.group("codes") or "").split(",")
+                if code.strip()
+            )
+            found.append((token.start[0], token.string, codes))
+        elif _FILE_LEVEL_FORMAT_DIRECTIVE.match(text):
+            found.append((token.start[0], token.string, ()))
+    return found
+
+
+def test_no_lane_file_opts_out_of_linting_with_a_blanket_directive() -> None:
+    """No file the main lanes read may opt out of the gate wholesale.
+
+    Every probe in this file lints a snippet on *stdin*, which is what makes
+    them immune to `extend-exclude`, `per-file-ignores` and a narrowed rule
+    set -- Ruff resolves all three from the filename. The mirror-image cost is
+    that a directive living in a file's *own content* is invisible to all of
+    them, because the linted snippet carries no directive to find.
+
+    That is a property of any file Ruff reads, not of one file. Measured on
+    `scripts/production_gate.py`, which both the runner and the workflow name:
+    a blanket opt-out planted beside a real undefined name leaves `ruff check`
+    at exit 0 with `F821 reported: False`, while every row in this file stays
+    green. The row above closes that for the benchmark alone; this one covers
+    the lane, so a new file cannot opt out by carrying the same line.
+
+    A *selective* file-level directive (`# ruff: noqa: F821`) is a different
+    thing, and Ruff scopes it to the codes it names: measured, `# ruff: noqa:
+    F401` suppresses F401 and still reports an unrelated F821. Those
+    directives are load-bearing here. 34 lane files carry one, and stripping
+    it from `tests/_sentinel_support_part1.py` surfaces 105 F821s that the
+    assembled module supplies, so a blanket "no file-level directive" rule
+    would be wrong here rather than merely strict.
+
+    The allowance is measured rather than asserted. Each selective directive is
+    re-linted with that one comment removed, and every code it named must be
+    genuinely absent afterwards: a directive that has quietly stopped covering
+    its code is dead weight, and one that still leaves its code reported is not
+    scoped the way it reads. Both fail here instead of sitting in the lane
+    unexamined.
+
+    A formatter opt-out is refused whether or not it is later re-enabled.
+    Measured with `ruff format --diff`: given a file that already ends in
+    `fmt: off`, code appended after that line is left unformatted. So a
+    trailing `off` with no matching `on` is not a harmless bookkeeping line,
+    it is an opt-out that extends over whatever comes next, and refusing it is
+    the point of the row.
+    """
+
+    lane = _main_lane(_ruff_invocations(RUNNER.read_text(encoding="utf-8")), "check")
+    lane_paths = tuple(token for token in lane[4:] if not token.startswith("-"))
+    assert lane_paths, "the main `ruff check` lane names no paths"
+
+    resolved = _ruff_lint_resolved_files(lane_paths, tree=None)
+    assert resolved, (
+        "Ruff resolved no files for the main check lane "
+        f"(paths={lane_paths!r}); this row would pass without measuring anything"
+    )
+
+    blanket: list[str] = []
+    selective: list[tuple[str, int, str, tuple[str, ...]]] = []
+    for relative in sorted(resolved):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        for line, text, codes in _lane_file_level_directives(source):
+            if codes:
+                selective.append((relative, line, text, codes))
+            else:
+                blanket.append(f"{relative}:{line}: {text}")
+
+    assert not blanket, (
+        "these lane files opt out of the Ruff lanes wholesale, so the gate "
+        "reports success for code it never reads while every probe in this "
+        "file stays green:\n  "
+        + "\n  ".join(blanket)
+        + "\nScope the directive to a line (`# noqa: CODE`), name the codes it "
+        "genuinely needs (`# ruff: noqa: CODE`), or remove it."
+    )
+
+    stale: list[str] = []
+    for relative, line, text, codes in selective:
+        original = (ROOT / relative).read_text(encoding="utf-8")
+        stripped = "".join(
+            entry
+            for index, entry in enumerate(original.splitlines(keepends=True), start=1)
+            if index != line
+        )
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--output-format=json",
+                "--no-cache",
+                "--stdin-filename",
+                relative,
+                "-",
+            ],
+            cwd=ROOT,
+            input=stripped,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        remaining = _reported_codes(probe)
+        assert remaining is not None, (
+            f"{relative}:{line} could not be re-linted with its directive "
+            f"removed, so its allowance cannot be measured: "
+            f"{_diagnostics(probe)[:400]!r}"
+        )
+        # Removing the directive must *reveal* every code it names: that is
+        # what makes the suppression load-bearing rather than decorative. A
+        # named code that stays absent was suppressed by something else, or by
+        # nothing at all, and the directive is then not doing what it reads.
+        # Codes revealed *alongside* the named ones are fine -- a selective
+        # directive is expected to leave other rules alone.
+        unrevealed = sorted(set(codes) - remaining)
+        if unrevealed:
+            stale.append(
+                f"{relative}:{line}: {text} names {unrevealed}, which the file "
+                f"does not report even with the directive removed"
+            )
+
+    assert not stale, (
+        "these selective directives no longer suppress the codes they name, so "
+        "they are dead weight and should be removed or narrowed:\n  " + "\n  ".join(stale)
     )
 
 
