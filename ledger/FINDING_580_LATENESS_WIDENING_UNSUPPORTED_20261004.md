@@ -2,7 +2,14 @@
 
 Date: 2026-10-04
 Reviewed head: `e8dfc8ac` (measured head `0eebedee`, unchanged test content)
-Verdict: **do not merge as written.** Comment posted to the PR.
+Verdict at review time: **do not merge as written.** Comment posted to the PR.
+
+> **Partly retracted — see "RETRACTED" at the end.** The outcome findings
+> (#253's gate is not cleared, tests still fail) stand and were conceded by the
+> author. The *mechanism* claim in this file was **wrong**: `max_edge_lateness`
+> does reach the failure, and PR #580's throughput analysis is correct. PR #580
+> was merged as `f52b995c`. That correction is recorded here rather than
+> quietly edited away.
 
 ## What the PR does
 
@@ -111,6 +118,64 @@ allow more cycles per permit. Under a quiet host, or on a workload that is
 genuinely round-trip-bound, this change could be a real improvement. What is
 established is narrower: on this host it moves no named test, and every test
 named in the PR still fails — two of them identically on both heads.
+
+## RETRACTED: the mechanism claim in this finding was wrong
+
+The sections above assert that `max_edge_lateness` "does not reach" the
+request-deadline failure, and predict a null result from that. **That reasoning
+was wrong, and the prediction was wrong with it.** PR #580's mechanism is
+correct: the request deadline is wall-clock, the work needed to meet it is the
+number of peer round trips, and the edge window sets how many cycles each
+permit carries — so it does determine the round-trip count.
+
+The error: I read `max_edge_lateness` as bounding only the *arrival* of an edge
+and concluded it could not affect wall-clock work. It bounds the size of each
+in-flight permit (`emulated_time.py:428`), which is the multiplier on round
+trips. I never tested that claim directly; I inferred it from the source and
+then treated my own null measurement as confirmation of it. Both the inference
+and the confirmation were wrong.
+
+### Direct A/B, one process, alternating, work held constant
+
+Driving the repo's own paired authored workload (`authored_session`,
+`start_endpoint`, `session.step`), alternating `max_edge_lateness` within a
+single process so host-load drift hits both arms equally, and recording
+`retired_instructions` so the work is provably the same in both arms:
+
+| configuration | wall min | wall median | retired instructions |
+| --- | --- | --- | --- |
+| `lateness=32` | 130.51 s | 191.17 s | 90304, 90304 |
+| `lateness=4096` | 72.88 s | 83.30 s | 90304, 90304 |
+
+**Identical retired instructions in both arms** — the emulated work does not
+change. Only the wall time does, by ~2.3x. That is round-trips and nothing
+else, which is exactly the claim PR #580 made and I said could not be true.
+
+### What this does and does not change
+
+It does not rescue the *outcome* findings, which were measured independently
+and still stand: the gate is not cleared, the 48 s paired capacity test still
+fails on the merged tree, and #253 remains open. `POSTMERGE_580_MEASUREMENT_20261004.md`
+already concedes all three.
+
+It does mean the following claims in this file are withdrawn:
+
+- that `max_edge_lateness` "cannot extend a request deadline";
+- that the null result on `test_queued_cancel_preserves_active_real_epoch`
+  (12.40 s vs 12.58 s) demonstrates the mechanism does not reach the failure;
+- that the "third configuration" criticism implies the profile choice is wrong
+  for this workload.
+
+The 12.40 s / 12.58 s null measurement was real, but I drew the wrong
+conclusion from it. That test's paired deadline is 12 s and **both** arms exceed
+it at this load, so a null there is a floor effect, not evidence about the
+mechanism. I should have escalated to a controlled A/B before concluding, and
+the author did exactly that after I did not.
+
+The profile-framing criticism (only one of three fields changed) remains valid
+as a documentation-accuracy point; `POSTMERGE_580_MEASUREMENT_20261004.md`
+concedes it, while also showing `rearm_budget`/`rearm_instruction_cap` are
+inert for this workload.
 
 ## Not claimed
 
