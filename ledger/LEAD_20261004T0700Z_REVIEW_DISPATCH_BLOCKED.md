@@ -139,3 +139,50 @@ Independent of the dispatch problem, real work continued this pass:
   a candidate replacement for #566's rejected head.
 
 Merging still requires the independent verdict the tooling cannot deliver.
+
+## Second blocked audit, 2026-10-04: still blocked, one new item verified
+
+Dispatch retried after the goal was resumed and the environment refreshed.
+
+| mechanism | target | result |
+|---|---|---|
+| `followup_task` | `indep569_scripts_lane` | `unsupported call` |
+| `followup_task` | `indep571_review` | `unsupported call` |
+| `followup_task` | `indep561` | `unsupported call` |
+| `followup_task` | `indep571_review` (retry, #572) | `unsupported call` |
+
+Six attempts across the session, both before and after resume. The brief files
+remain readable and committed, so this is not permissions or file state.
+
+## Progress made without a reviewer
+
+Verification work does not require the dispatch tooling, so this turn was not
+idle:
+
+- **#572 appeared** (`fix/570-lane-suppression-guard`, head `c6fbaeea`) — the
+  #570 work that was previously only a lead-measured finding. Verified on its
+  own merits: inventory exact (53 tokens / 386 whole-lane / 334 tests-only /
+  52 outside / 0 blanket / 34 selective = 31xF821 + 3xF401), all seven planted
+  blanket directives refused including `#  ruff: noqa`, `#<TAB>ruff: noqa` and
+  `##ruff: noqa`, the 105-F821 load-bearing claim confirmed on
+  `tests/_sentinel_support_part1.py`, and a deliberately stale directive turned
+  the row red. 47 tests pass, lint and format clean, CI run `37174136785`
+  successful on `c6fbaeea`, merges cleanly against master.
+- #572's head moved once mid-verification (`12aae41f` -> `c6fbaeea`), rewriting
+  the grammar logic. The earlier evidence was discarded and re-measured rather
+  than carried over.
+
+## Current queue
+
+| PR | head | lead evidence | independent review | mergeable |
+|---|---|---|---|---|
+| #572 | `c6fbaeea` | yes, CI green | **no** | clean vs master |
+| #569 | `25607fc` | yes, on old base | **no** | **conflicts** with master |
+| #568 | `1cc86f8` | yes, on old base | **no** | clean vs master |
+| #565 | `f35554b6` | yes | **no** | clean vs master |
+
+Four PRs, none independently reviewed, none mergeable. #569 additionally needs a
+rebase onto the post-#568 master before any of its evidence applies.
+
+Release status remains **PARTIAL**. Nothing merged by the lead this turn; no
+issue closed. Master `a413eeb5`.
