@@ -158,13 +158,57 @@ dash is inert and the keyword comparison is case-sensitive, so the shipped
 pattern is right on both counts. Round 2 added the conformance test, which
 re-measures exactly these points on every run.
 
+## Independent review, round 2 (head `c6fbaeea`)
+
+Reviewer: same independent model, brief `/tmp/rev570/brief4.md`, response
+`review4.txt`.
+
+**VERDICT: CHANGES REQUESTED**, with two required changes. Both were real.
+
+**(1) A live escape hatch the guard missed.** The reviewer pointed at the
+`(?:#.*)?$` tail as untested. Measuring it found something worse than a missing
+test — a spelling that fully silences the file *and* evades the pattern:
+
+| spelling | Ruff | guard matched (before) |
+|---|---|---|
+| `# ruff: noqa F401` | **silences everything**, exit 0 | no |
+| `# ruff: noqa F401 F841 E501` | **silences everything**, exit 0 | no |
+| `# ruff: noqa  trailing` | **silences everything**, exit 0 | no |
+| `# ruff: noqa, F401` | inert | no |
+| `# ruff: noqa :` | inert | no |
+
+So `noqa` followed by a space-separated token is read by Ruff as "suppress
+everything", not as a code list — the codes form needs a colon. Written as
+`# ruff: noqa F401` it looks selective and behaves as blanket. Fixed: the tail
+is now a named `trailing` group, and a directive counts as selective **only**
+when the colon form parsed and nothing followed it. Codes plus trailing junk
+is classified blanket.
+
+**(2) The stale-directive check is strict by design.** The reviewer worried it
+could misfire on a code suppressed independently. Measured across all 34
+current allowances: none trip it today, and the strictness is deliberate — a
+redundant directive should justify itself rather than inherit an exemption.
+Recorded in the row's docstring rather than loosened.
+
+The round-2 brief also asked whether `_TOLERATED_OVER_MATCHES` is an escape
+hatch. It is narrow by construction — one documented label — but it does let a
+future change silence a genuine miss by editing that set, so it is named,
+frozen, and justified at its own entry.
+
+## Host note
+
+`/tmp` is a 512M tmpfs shared by every session on this host and was at 100% for
+part of this work, which contributed to the apparent hangs. This task's scratch
+moved to `/workspace/poke-harness/.scratch/scratch570/`; no other session's files
+were deleted.
+
 ## Commands and terminal results
 
 Measured on this branch head, in `.venv-570` (Python 3.11.2, pytest 9.1.1):
 
 | command | result |
 |---|---|
-| `pytest tests/test_local_ci_policy.py tests/test_matrix_concurrency_policy.py -q` | exit 0, 126 tests, 45 s |
+| `pytest tests/test_local_ci_policy.py tests/test_matrix_concurrency_policy.py -q` | exit 0, 126 tests, 87 s |
 | `pytest tests/test_matrix_concurrency_policy.py -q` | exit 0, 105 tests, 24 s |
 | main `ruff check` lane, exactly as `scripts/run_local_ci.sh` defines it (53 tokens) | exit 0, `All checks passed!` |
 | main `ruff format --check` lane | exit 0, `387 files already formatted` |
@@ -209,6 +253,15 @@ Three further mutations of the conformance test itself, all caught:
 | flat prefix group replaced by `#+` | FAIL | FAIL |
 | `noqa` alternative made unmatchable | FAIL | FAIL |
 | `re.IGNORECASE` re-added | FAIL | FAIL |
+| `trailing` group dropped from the pattern | FAIL | FAIL |
+
+Two further mutations against the lane row itself, covering the escape found in
+round 2 review:
+
+| mutation | expected | got |
+|---|---|---|
+| `# ruff: noqa F401` on `scripts/production_gate.py` | FAIL | FAIL |
+| `# ruff: noqa F401 F841 E501` on `scripts/production_gate.py` | FAIL | FAIL |
 
 Mutation tests supplement review, they do not replace it. They show the row
 reacts correctly to planted changes; they cannot show the row is measuring the

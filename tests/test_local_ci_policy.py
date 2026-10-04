@@ -1272,7 +1272,7 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
 _FILE_LEVEL_LINT_DIRECTIVE = re.compile(
     r"^[ \t]*(?:[#-][ \t]*)+(?:ruff|flake8)[ \t]*:[ \t]*noqa"
     r"(?:[ \t]*:[ \t]*(?P<codes>[A-Za-z]+[0-9]+(?:[ \t]*,[ \t]*[A-Za-z]+[0-9]+)*))?"
-    r"[ \t]*(?:#.*)?$"
+    r"[ \t]*(?P<trailing>#+.*|[^:#,][^:]*)?[ \t]*$"
 )
 
 # The formatter half, measured on the same footing with `ruff format --diff`:
@@ -1322,11 +1322,26 @@ def _lane_file_level_directives(source: str) -> list[tuple[int, str, tuple[str, 
         text = token.string.strip()
         lint = _FILE_LEVEL_LINT_DIRECTIVE.match(text)
         if lint is not None:
-            codes = tuple(
-                code.strip().upper()
-                for code in (lint.group("codes") or "").split(",")
-                if code.strip()
+            # A `noqa` followed by anything other than a colon-separated code
+            # list is a *blanket* opt-out, not a selective one. Measured:
+            # `noqa F401`, `noqa whatever` and `noqa F401 F841 E501` each
+            # silence the entire file including an unrelated F821, while
+            # `noqa :`, `noqa, F401` and `noqa:` disable nothing. Treating a
+            # stray trailing token as codes would hand out the one thing this
+            # row exists to refuse, so the codes count only when the colon
+            # form actually parsed.
+            parsed = lint.group("codes") or ""
+            codes = (
+                tuple(code.strip().upper() for code in parsed.split(",") if code.strip())
+                if parsed
+                else ()
             )
+            if codes and lint.group("trailing"):
+                # Codes parsed, then junk followed them on the same comment.
+                # Ruff honours the codes regardless, but the spelling is not
+                # one this guard certifies as scoped, so it is treated as the
+                # blanket opt-out it is allowed to be.
+                codes = ()
             found.append((token.start[0], token.string, codes))
         elif _FILE_LEVEL_FORMAT_DIRECTIVE.match(text):
             found.append((token.start[0], token.string, ()))
@@ -1361,6 +1376,13 @@ _DIRECTIVE_SPELLINGS: tuple[tuple[str, str, bool], ...] = (
     ("flake8_alias", "# flake8: noqa", True),
     ("trailing_comment", "# ruff: noqa  # whole file", True),
     ("irregular_spacing", "#  ruff  :  noqa  ", True),
+    # A `noqa` followed by a space-separated token rather than a colon is a
+    # blanket opt-out: measured, it silences unrelated codes too, so Ruff is
+    # reading it as "suppress everything", not as a code list.
+    ("trailing_space_token", "# ruff: noqa F401", True),
+    ("trailing_space_word", "# ruff: noqa  trailing", True),
+    ("trailing_space_codes", "# ruff: noqa F401 F841 E501", True),
+    ("trailing_space_semicolon", "# ruff: noqa F401;", True),
     # Inert: a trailing colon makes Ruff split on it and read an empty code
     # list, which disables nothing.
     ("trailing_colon", "# ruff: noqa:", False),
@@ -1371,6 +1393,9 @@ _DIRECTIVE_SPELLINGS: tuple[tuple[str, str, bool], ...] = (
     ("no_space_colon_inert", "# noqa: ruff", False),
     ("word_before_keyword", "# something ruff: noqa", False),
     ("word_after_hash", "## something: noqa", False),
+    ("colon_then_space", "# ruff: noqa :", False),
+    ("comma_space_code", "# ruff: noqa, F401", False),
+    ("colon_eol", "# ruff: noqa:", False),
     # Inert: Ruff strips leading `#` and whitespace but stops at a `-`, so the
     # keyword after a doubled dash is not the start of the directive.
     #
@@ -1573,6 +1598,13 @@ def test_no_lane_file_opts_out_of_linting_with_a_blanket_directive() -> None:
     its code is dead weight, and one that still leaves its code reported is not
     scoped the way it reads. Both fail here instead of sitting in the lane
     unexamined.
+
+    That strictness is deliberate and it does bite: a code suppressed
+    independently, say by a line-level `noqa` on the offending line, would stay
+    absent with the file-level directive removed and be reported as stale. All
+    34 current allowances satisfy the strict form (measured), so nothing trips
+    today, and a future file that leans on a redundant directive should be made
+    to justify itself rather than inherit the exemption.
 
     A formatter opt-out is refused whether or not it is later re-enabled.
     Measured with `ruff format --diff`: given a file that already ends in
