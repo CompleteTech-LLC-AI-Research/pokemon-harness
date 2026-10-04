@@ -552,6 +552,20 @@ def _validate_move_effects(catalog: dict[str, Any]) -> None:
                 raise CoverageError(f"unused effect {effect_id} must be deliberately_excluded")
         elif effect_id in _PINNED_UNUSED_EFFECT_IDS:
             raise CoverageError(f"unused effect {effect_id} must not declare moves")
+        elif family.get("scope") == "deliberately_excluded":
+            # #89.  The two checks above bound `deliberately_excluded` from
+            # below (an unused effect must be excluded) but never from above,
+            # so a family that really does own moves could be re-scoped to
+            # `deliberately_excluded` and still validate -- as long as the
+            # declared counts were moved with it.  That silently shrinks the
+            # outstanding-mechanics set, which is the damaging direction:
+            # unverified mechanics would read as "deliberately not in scope"
+            # instead of "not yet qualified".  `deliberately_excluded` is
+            # therefore exactly the pinned unused set, never a free choice.
+            raise CoverageError(
+                f"effect {effect_id} owns moves in the pinned table, so it must not be "
+                "deliberately_excluded"
+            )
 
     if move_effects.get("planned_unverified_count") != planned:
         raise CoverageError("planned_unverified_count does not match the family list")
