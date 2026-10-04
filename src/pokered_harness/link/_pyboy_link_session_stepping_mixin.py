@@ -272,13 +272,23 @@ class _PyBoyLinkSteppingMixin:
         false, a local LCD frame notification is consumed and stepping
         continues toward the caller's shared cycle horizon.
 
-        ``mb``, ``cpu`` and ``lcd`` are resolved once instead of per
-        instruction. Profiling the production loop showed ``getattr`` at
-        3.08 calls per retired instruction, dominated by re-reading these
-        three loop-invariant attributes on every single-stepped instruction;
-        hoisting them is a 1.50x median speedup over byte-identical emulated
-        work. The ``getattr`` defaults are retained because legacy test
-        doubles may omit ``lcd`` or ``cpu.cycles``.
+        ``mb``, ``cpu`` and ``lcd`` are resolved once instead of re-reading
+        them per instruction. The production loop calls ``getattr`` 3.0007
+        times per retired instruction; hoisting removes exactly one of those
+        (the in-loop ``lcd`` lookup), leaving 2.0010. The remaining calls are
+        the ``getattr(lcd, "frame_done")`` tests and the ``cpu.cycles`` read,
+        which stay per-iteration. Note ``p.mb.x`` is an attribute access, not
+        a ``getattr`` call, so hoisting ``mb`` removes no ``getattr``.
+
+        Measured effect is a small single-digit-to-low-double-digit
+        percentage, not a multiple: an isolated stub loop measures about
+        1.11x, while runs against a real motherboard have measured both
+        1.06x and 0.96x on a contended host, i.e. the effect is not reliably
+        resolvable against host noise there. See
+        ``ledger/FINDING_581_HOIST_SPEEDUP_NOT_REPRODUCED_20261004.md``.
+
+        The ``getattr`` defaults are retained because legacy test doubles may
+        omit ``lcd`` or ``cpu.cycles``.
         """
         mb = p.mb
         cpu = getattr(mb, "cpu", None)
