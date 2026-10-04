@@ -859,10 +859,10 @@ sanitized facts from `qualification_runner.py --report` on this host:
 | `cgroup_relative_path` | `/` | the job runs in the root cgroup, not a child allocation |
 | `cpu_quota_cores` | `null` (`cpu.max` = `max 100000`) | no finite quota to reserve |
 | `cgroup_member_pids` | 87 processes | many unrelated processes share the cgroup |
-| `affinity_cpus` | `0-11` (all 12 CPUs) | no narrower cpuset is available |
+| `affinity_cpus` | `0-3` (all 4 CPUs) | no narrower cpuset is available |
 | `cgroup_sibling_competitors` | `[]` at the root | root cgroup is the whole hierarchy |
 | `/sys/fs/cgroup` mount | `ro,nosuid,nodev,noexec` | a child quota/cpuset cannot be created |
-| user namespaces | `unshare --map-root-user -m` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it (see below) |
+| user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it (see below) |
 | capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
 
 Every CPU-reservation mechanism therefore fails admission here, which is the
@@ -878,6 +878,15 @@ a provisioning status record, not release evidence, and it must not be used to
 promote any qualification result.
 
 #### 3b-0. Writable `/dev/shm` is obtainable, and it is not a CPU allocation
+
+> **Host drift note.** The `9.44`/`10.72`-busy-cores-of-`12` samples quoted in
+> §3b-1 and in the `host-wide competition` row are retained verbatim as the
+> record of *those* runs, which were taken on a 12-CPU host. The current host
+> exposes 4 CPUs (`nproc` = 4, `affinity_cpus` = `0-3`), so its load1 figures
+> are not comparable to those samples in absolute terms — only the conclusion
+> (foreign load far above tolerance) carries over. Any new capacity
+> qualification must re-sample and restate the CPU count rather than inherit
+> these numbers.
 
 The distinction matters because an earlier revision of this table recorded
 `unshare` as `EPERM` and therefore concluded that no writable shared-memory
@@ -990,7 +999,7 @@ assuming it. The blocking facts are observable and sanitized:
 | process identity | `uid=1000` (`agent`) | the job is not the host owner |
 | effective/bounding capabilities | `CapEff=0`, `CapBnd=0` | cannot delegate a controller or write `cgroup.procs` |
 | privilege escalation path | no `sudo`, no setuid helper | the missing privilege cannot be acquired |
-| unprivileged user namespaces | `unshare --map-root-user -m` → **succeeds**; private `cgroup2` → `EPERM` | a writable `/dev/shm` is obtainable, but no writable `cgroup2` leaf with `cpu.max` is |
+| unprivileged user namespaces | `unshare --map-root-user -m --propagation private` → **succeeds**; private `cgroup2` → `EPERM` | a writable `/dev/shm` is obtainable, but no writable `cgroup2` leaf with `cpu.max` is |
 | host-wide competition | `9.44`–`10.72` busy cores of `12` during the retained runs | `dedicated-host` admission fails |
 
 The comparison and the nine-orientation matrix were nonetheless executed and
