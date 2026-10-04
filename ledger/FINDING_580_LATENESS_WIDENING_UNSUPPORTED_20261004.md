@@ -72,6 +72,46 @@ alignment argument does not hold because the profile is not matched.
 - `ledger/LEAD_20261004T1315Z_253_LATENESS_ROOT_CAUSE.md` asserts 12/12 and a
   2.6x median this host does not reproduce. That should not land.
 
+## Update after head `ef8b3797`
+
+The author obtained review through the Claude Code CLI, and **corrected the
+`12/12` overclaim** — their own reviewer measured 11/12, and they accepted it.
+That correction is honest and is recorded here as such. Their own repeats on
+that head: 12/0, 12/1, 12/1.
+
+The test files are byte-identical between `0eebedee` and `ef8b3797`
+(`git diff 0eebedee..ef8b3797 -- tests/` is empty), so the earlier
+measurements carry over. One further test measured, the one that exercises
+the changed `TIMING` dict on the `TimedLinkSession` path:
+
+`test_paired_authored_full_frame_calls_preserve_count_render_buttons_and_events`,
+2 runs per head:
+
+| head | run 1 | run 2 |
+| --- | --- | --- |
+| master `dce56a2c` | F, 48.54 s | F, 48.28 s |
+| PR #580 `ef8b3797` | F, 48.72 s | F, 48.72 s |
+
+Identical terminal error on both heads:
+`AssertionError: paired owners did not complete semantic work within 48s capacity`
+(preceded by `_queue.Empty`).
+
+This is the load-independence claim made concrete. The PR argues the gain is a
+round-trip count and therefore contention-independent. If that were the binding
+constraint here, this test — the paired end-to-end path through the changed
+constant — would be materially faster on #580. It is 0.2–0.4 s **slower**, well
+inside noise.
+
+## Scope of this finding
+
+The mechanism analysis has **not** been shown wrong. The clamp at
+`emulated_time.py:428` and the unit conversion at
+`timed_link_session.py:86`/`:259` behave as described, and a wider window does
+allow more cycles per permit. Under a quiet host, or on a workload that is
+genuinely round-trip-bound, this change could be a real improvement. What is
+established is narrower: on this host it moves no named test, and every test
+named in the PR still fails — two of them identically on both heads.
+
 ## Not claimed
 
 This is **not** a claim that the underlying #253 failures are environmental.
