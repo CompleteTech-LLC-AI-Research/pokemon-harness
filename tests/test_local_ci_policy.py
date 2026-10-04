@@ -1245,23 +1245,24 @@ def test_benchmark_cannot_opt_out_of_linting_with_in_file_suppression() -> None:
 #   inert    -- any trailing colon (Ruff splits on colons, so an empty code
 #              list disables nothing), and an upper-cased value, since the
 #              keyword comparison is case-sensitive.
-# Measured over 34 spellings, the pattern has no false negative: every
-# silencing form Ruff honours is detected. It over-detects exactly one exotic
-# spelling, a dash immediately followed by another dash before the keyword
-# (`#-#-`), which Ruff does not honour. That errs towards refusing a file Ruff
-# would otherwise lint, which is the survivable direction; the opposite error
-# would let a real opt-out through.
+# Measured over every spelling in `_DIRECTIVE_SPELLINGS`, which is asserted
+# against the installed Ruff below, the pattern has no false negative.
 # Matching more than Ruff honours would refuse files that are in fact linted;
 # matching less would let a real opt-out through. So `\s` is deliberately not
 # used in the separator classes: it would swallow a newline and let the pattern
 # span two comment tokens, matching text Ruff never reads as a directive.
-# The leading prefix is one repeated `(?:[#-][ \t]*)+` group rather than a
-# nested `[#-]+(?:[ \t]*[#-]+)*`, because that nesting is ambiguous -- `#` and
-# `# ` can both start the inner group -- and it backtracks catastrophically on
-# the ASCII-ruler comments this repository uses as section separators. The
-# nested form did not return in 3s on `# ` plus 75 dashes, a comment that
-# appears in `tests/_battle_item_evidence.py`; the flat form matches in
-# microseconds and stays linear up to a 5000-character comment.
+# The leading prefix is one repeated `#+` rather than a nested
+# `#+` over an overlapping character class, for two independently measured
+# reasons. A nested quantifier like `[#-]+(?:[ \t]*[#-]+)*` backtracks
+# catastrophically on the ASCII-ruler comments this repository uses as section
+# separators: it did not return in 3s on `# ` plus 75 dashes, a comment that
+# appears in `tests/_battle_item_evidence.py`. And the dashes are unnecessary --
+# Ruff strips leading `#` and whitespace but stops at a `-`, so `#--ruff: noqa`
+# is inert even though the nested form matched it. One flat repeated group is
+# both linear and accurate, and `test_directive_patterns_track_the_installed_ruff`
+# is what keeps it accurate: tightening the prefix to `#+` alone looked tidier
+# and silently stopped matching a doubled hash separated by whitespace, which
+# does silence the file.
 # The named codes are optional, and their absence is exactly what makes a
 # directive *blanket* -- the case this row refuses.
 #
@@ -1330,6 +1331,216 @@ def _lane_file_level_directives(source: str) -> list[tuple[int, str, tuple[str, 
         elif _FILE_LEVEL_FORMAT_DIRECTIVE.match(text):
             found.append((token.start[0], token.string, ()))
     return found
+
+
+# Every spelling below was classified by running the *installed* Ruff, not by
+# reading Ruff's source or assuming a grammar. `honoured` means a planted
+# undefined name plus the directive leaves `ruff check` at exit 0; `inert`
+# means Ruff still reports it. This table is the evidence that the patterns
+# above track the real linter rather than a guess at it.
+#
+# A reviewer cannot confirm that claim from the prose, and it is the one
+# load-bearing assumption in the row below, so it is asserted here: if a Ruff
+# upgrade changes which spellings silence a file, this fails and names the
+# spelling, instead of the guard quietly ceasing to detect an opt-out.
+_PROBE_UNDEFINED_AND_UNUSED = "import os\n\n\ndef _probe():\n    return _undefined_zzz\n"
+
+_DIRECTIVE_SPELLINGS: tuple[tuple[str, str, bool], ...] = (
+    ("bare", "# ruff: noqa", True),
+    ("doubled_hash", "## ruff: noqa", True),
+    ("no_space_after_hash", "#ruff: noqa", True),
+    ("spaces_around_colon", "# ruff : noqa", True),
+    ("no_space_at_all", "#ruff:noqa", True),
+    ("tab_separator", "#\truff:noqa", True),
+    ("indented", "    # ruff: noqa", True),
+    ("deeply_indented", "        # ruff: noqa", True),
+    ("hash_space_hash", "# # ruff: noqa", True),
+    ("hash_spaces_hash", "#   # ruff: noqa", True),
+    ("doubled_hash_space_hash", "## # ruff: noqa", True),
+    ("hash_dash_space_hash", "#- # ruff: noqa", True),
+    ("flake8_alias", "# flake8: noqa", True),
+    ("trailing_comment", "# ruff: noqa  # whole file", True),
+    ("irregular_spacing", "#  ruff  :  noqa  ", True),
+    # Inert: a trailing colon makes Ruff split on it and read an empty code
+    # list, which disables nothing.
+    ("trailing_colon", "# ruff: noqa:", False),
+    ("trailing_colon_irregular", "##   ruff:   noqa:   ", False),
+    # Inert: the keyword comparison is case-sensitive.
+    ("upper_cased", "# RUFF: NOQA", False),
+    ("mixed_cased", "# Ruff: NoQA", False),
+    ("no_space_colon_inert", "# noqa: ruff", False),
+    ("word_before_keyword", "# something ruff: noqa", False),
+    ("word_after_hash", "## something: noqa", False),
+    # Inert: Ruff strips leading `#` and whitespace but stops at a `-`, so the
+    # keyword after a doubled dash is not the start of the directive.
+    #
+    # The guard deliberately still matches this one. Ruff's own stripping
+    # accepts a single leading dash, but a *second* dash makes the directive
+    # inert, and narrowing the prefix far enough to exclude it would also stop
+    # matching a doubled hash separated by whitespace, which does silence the
+    # file. Over-matching one
+    # inert spelling refuses a file Ruff would have linted; under-matching any
+    # honoured one lets a lane file opt out silently. The asymmetry decides it.
+    ("leading_dashes", "#--ruff: noqa", False),
+    # A bare line-level `noqa` comment, not a file-level directive. Spelled with
+    # a space so this comment does not read as a real directive to Ruff, which
+    # would otherwise warn about an invalid code list on this very line.
+    ("line_level_noqa", "#noqa", False),
+    ("empty", "", False),
+)
+
+# A pattern that over-matches an inert spelling is tolerated, and only for the
+# spellings named here. Each is a deliberate fail-closed choice, documented at
+# its entry in `_DIRECTIVE_SPELLINGS`; anything else over-matching is a defect.
+_TOLERATED_OVER_MATCHES: frozenset[str] = frozenset({"leading_dashes"})
+
+
+# Selective directives name codes, so whether they scope the file as intended
+# depends on those codes actually firing alongside an unnamed one. Each body
+# below raises the named codes plus one the directive does not name; the test
+# then requires the named ones to disappear and the unnamed one to survive.
+_SELECTIVE_SPELLINGS: tuple[tuple[str, str, str, frozenset[str]], ...] = (
+    (
+        "selective_one_code",
+        "# ruff: noqa: F401",
+        _PROBE_UNDEFINED_AND_UNUSED,
+        frozenset({"F401"}),
+    ),
+    (
+        "selective_irregular",
+        "##   ruff:   noqa:   F401   ",
+        _PROBE_UNDEFINED_AND_UNUSED,
+        frozenset({"F401"}),
+    ),
+    (
+        "selective_two_codes",
+        "# ruff: noqa: F401, F841",
+        "import os\nfrom sys import path as _p\n\n\ndef _probe():\n    return _undefined_zzz\n",
+        frozenset({"F401", "F841"}),
+    ),
+)
+
+
+def test_directive_patterns_track_the_installed_ruff() -> None:
+    """The suppression patterns must match what Ruff actually honours.
+
+    A guard that stops detecting a real opt-out fails silently: the row below
+    would keep passing while a lane file silenced itself. So the correspondence
+    is asserted against the installed Ruff on every run rather than recorded as
+    a one-off measurement.
+
+    Blanket spellings are measured as "does this silence the whole file", which
+    is exactly the condition the row refuses. Selective spellings are measured
+    differently on purpose: a selective directive is *supposed* to silence the
+    codes it names, so "the file went quiet" says nothing about whether it was
+    recognised. For those the question is whether it is scoped -- the named
+    codes disappear and an unnamed one survives -- which is also what makes the
+    allowance measured rather than blanket. A selective directive that silenced
+    everything would be a blanket opt-out wearing a code list, and this asserts
+    it does not.
+
+    The probe is deliberately minimal -- an unused import, a used-looking
+    re-export, and an undefined name -- because the question is only how the
+    *directive* scopes the file, not whether the file is otherwise clean.
+    """
+
+    missed: list[str] = []
+    spurious: list[str] = []
+    blanket_cases: tuple[tuple[str, str, bool], ...] = tuple(
+        (label, directive, honoured)
+        for label, directive, honoured in _DIRECTIVE_SPELLINGS
+        if directive
+    )
+    for label, directive, honoured in blanket_cases:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--output-format=json",
+                "--no-cache",
+                "--stdin-filename",
+                "scripts/_directive_grammar_probe.py",
+                "-",
+            ],
+            cwd=ROOT,
+            input=_PROBE_UNDEFINED_AND_UNUSED + directive + "\n",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        silenced = completed.returncode == 0
+        detected = bool(_lane_file_level_directives(directive))
+        if honoured and not detected:
+            missed.append(f"{label}: {directive!r} silences Ruff but the guard does not match it")
+        if detected and not honoured and label not in _TOLERATED_OVER_MATCHES:
+            spurious.append(
+                f"{label}: {directive!r} does not silence Ruff but the "
+                f"guard matches it, and it is not a documented exception"
+            )
+        if honoured and not silenced:
+            missed.append(
+                f"{label}: {directive!r} is classified as silencing but the "
+                f"installed Ruff still reports it, so the table is stale"
+            )
+        if silenced and not honoured:
+            spurious.append(
+                f"{label}: {directive!r} is classified as inert but the "
+                f"installed Ruff silences it, so the table is stale"
+            )
+
+    for label, directive, body, named in _SELECTIVE_SPELLINGS:
+        detected = _lane_file_level_directives(directive)
+        if not detected:
+            missed.append(f"{label}: {directive!r} is not detected by the guard at all")
+            continue
+        if detected[0][2] != tuple(sorted(named)):
+            spurious.append(
+                f"{label}: the guard reads the named codes as "
+                f"{detected[0][2]}, not {tuple(sorted(named))}"
+            )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--output-format=json",
+                "--no-cache",
+                "--stdin-filename",
+                "scripts/_directive_grammar_probe.py",
+                "-",
+            ],
+            cwd=ROOT,
+            input=body + directive + "\n",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        remaining = _reported_codes(completed)
+        assert remaining is not None, f"{label}: could not read Ruff's diagnostics"
+        if remaining & named:
+            missed.append(
+                f"{label}: {directive!r} is recognised but did not suppress "
+                f"{sorted(remaining & named)}, so the probe body does not "
+                f"exercise the codes it names"
+            )
+        if not remaining - named:
+            spurious.append(
+                f"{label}: {directive!r} suppressed every code in the file, so "
+                f"it is a blanket opt-out rather than a selective one"
+            )
+
+    assert not missed, (
+        "these spellings silence a file in the installed Ruff but the guard "
+        "does not detect them, so a lane file could opt out unnoticed:\n  " + "\n  ".join(missed)
+    )
+    assert not spurious, (
+        "these spellings do not silence a file in the installed Ruff but the "
+        "guard flags them, which would refuse files that are actually linted:\n  "
+        + "\n  ".join(spurious)
+    )
 
 
 def test_no_lane_file_opts_out_of_linting_with_a_blanket_directive() -> None:

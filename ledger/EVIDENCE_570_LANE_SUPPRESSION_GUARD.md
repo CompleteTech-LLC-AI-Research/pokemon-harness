@@ -85,13 +85,26 @@ not.
 Final pattern characteristics, over 34 spellings:
 
 * **false negatives: 0** — every silencing form Ruff honours is detected.
-* **false positives: 1** — `#-#- ruff: noqa`, which Ruff does not honour.
-  This errs towards refusing a file Ruff would otherwise lint, which is the
-  survivable direction; the opposite error would let a real opt-out through.
+* **false positives: 1** — `#--ruff: noqa`, which Ruff does not honour, since
+  its stripping accepts a single leading dash but a second dash stops it. This
+  is a deliberate fail-closed choice: narrowing the prefix far enough to
+  exclude it also stops matching `# # ruff: noqa`, which *does* silence the
+  file. Over-matching refuses a file Ruff would have linted; under-matching lets
+  a lane file opt out silently.
 * A formatter opt-out is refused **whether or not it is later re-enabled**.
   Measured: given a file already ending in `fmt: off`, code appended after that
   line is left unformatted. A trailing `off` with no matching `on` is not
   bookkeeping, it is an opt-out extending over whatever comes next.
+
+That correspondence is not left as prose. `test_directive_patterns_track_the_installed_ruff`
+asserts it against the installed Ruff on every run, and asserts that the guard's
+own patterns match each spelling. That last part is what gives it teeth:
+tightening the prefix to a plain `#+` looked tidier and silently stopped matching
+four honoured spellings, which the assertion caught immediately. Blanket
+spellings are measured as "does this silence the whole file"; selective ones are
+measured as "are the named codes suppressed while an unnamed one survives",
+because a selective directive silencing everything would be a blanket opt-out
+wearing a code list.
 
 ## Correctness fix found by mutation testing
 
@@ -120,15 +133,39 @@ Effect: the full 386-file scan went from *not terminating* to **14.25 s**, and
 `tests/test_local_ci_policy.py` went from a >50 min hang to **70 s** for all 20
 tests.
 
+## Independent review, round 1
+
+Reviewer: independent model via `api.cheaperinference.com`, `deepseek-v4.1-flash`,
+brief `/tmp/rev570/brief2.md` (diff inlined; the model has no tool access),
+response `/tmp/rev570/review3.txt`. Head reviewed: `12aae41f`.
+
+**VERDICT: MERGEABLE.** Nothing blocking. Three observations acted on:
+
+1. The reviewer could not verify the load-bearing claim — that the regex tracks
+   the real linter — "from text alone", and asked for CI-visible confirmation
+   rather than a prose claim. That is now
+   `test_directive_patterns_track_the_installed_ruff`, added in round 2.
+2. `Path(candidate).resolve().relative_to(ROOT)` can raise `ValueError` if Ruff
+   ever reports a path outside `ROOT` (a symlink pointing out, an absolute
+   config `src`). Reviewed as fail-loud rather than fail-open, so not blocking.
+3. Cost (~386 files scanned, 34 subprocess spawns) accepted, with the note that
+   spawn cost dominates if selective directives grow into the hundreds.
+
+The reviewer's regex analysis was also partly wrong and was checked rather than
+accepted: it reported `#--ruff: noqa` as honoured and warned that removing
+`re.IGNORECASE` might be wrong. Measured against the installed Ruff, a doubled
+dash is inert and the keyword comparison is case-sensitive, so the shipped
+pattern is right on both counts. Round 2 added the conformance test, which
+re-measures exactly these points on every run.
+
 ## Commands and terminal results
 
 Measured on this branch head, in `.venv-570` (Python 3.11.2, pytest 9.1.1):
 
 | command | result |
 |---|---|
-| `pytest tests/test_local_ci_policy.py -q` | exit 0, 20 tests, 70 s |
+| `pytest tests/test_local_ci_policy.py tests/test_matrix_concurrency_policy.py -q` | exit 0, 126 tests, 45 s |
 | `pytest tests/test_matrix_concurrency_policy.py -q` | exit 0, 105 tests, 24 s |
-| `pytest tests/test_local_ci_policy.py tests/test_matrix_concurrency_policy.py -q` | exit 0, 125 tests |
 | main `ruff check` lane, exactly as `scripts/run_local_ci.sh` defines it (53 tokens) | exit 0, `All checks passed!` |
 | main `ruff format --check` lane | exit 0, `387 files already formatted` |
 | `ruff check tests/test_local_ci_policy.py` | exit 0 |
@@ -165,16 +202,23 @@ exempts later code, so refusing the pair is correct and i4's "exp=PASS" was an
 error in writing the case. The row's behaviour is unchanged; only my
 expectation was corrected, and the reasoning is recorded in the row's docstring.
 
+Three further mutations of the conformance test itself, all caught:
+
+| mutation | expected | got |
+|---|---|---|
+| flat prefix group replaced by `#+` | FAIL | FAIL |
+| `noqa` alternative made unmatchable | FAIL | FAIL |
+| `re.IGNORECASE` re-added | FAIL | FAIL |
+
 Mutation tests supplement review, they do not replace it. They show the row
 reacts correctly to planted changes; they cannot show the row is measuring the
 right thing, which is why the inventory above is reported separately.
 
 ## Not established here
 
-* No independent review of this head. `ledger/REVIEW_564_MATRIX_CONCURRENCY_09C84F1.md`
-  records that sub-agent task delivery is unreliable in this environment (see
-  #489). A fresh independent review of the exact pushed head is still required
-  before merge.
+* Round 1 of the independent review returned MERGEABLE against `12aae41f`, but
+  this head is later; the round-2 additions need their own review of the exact
+  pushed head before merge.
 * No hosted CI result. The repository's private workflow is skipped and an
   empty check rollup is not a pass; the local lanes above are the evidence.
 * This does not touch #106. The CPU-budget qualification still cannot run
