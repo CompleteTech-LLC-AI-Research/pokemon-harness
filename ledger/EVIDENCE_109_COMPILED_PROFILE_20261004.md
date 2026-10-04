@@ -198,8 +198,9 @@ The 5 timed failures are the #253 residuals:
 
 Branch committed, **not merged and not marked ready**. Independent review is unavailable (#489:
 `spawn_agent` bodies undelivered, `followup_task` unsupported), and the merge contract requires an
-independent review first. The 1.50x figure still needs a quiet-CPU re-measurement on this branch
-before any before/after claim is published.
+independent review first. ~~The 1.50x figure still needs a quiet-CPU re-measurement on this branch
+before any before/after claim is published.~~ **Withdrawn** — the figure is known to be wrong
+(see Correction below), so re-measuring it is not worth doing.
 
 #109 stays **open**. Release status stays **PARTIAL**.
 
