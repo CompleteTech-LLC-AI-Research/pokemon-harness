@@ -23,6 +23,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          # Unit provenance guards verify a retained ancestor commit and tree.
+          fetch-depth: 0
 
       - name: Reject tracked ROM-derived artifacts
         shell: bash
