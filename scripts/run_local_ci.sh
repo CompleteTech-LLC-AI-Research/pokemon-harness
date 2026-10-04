@@ -88,7 +88,7 @@ if (( dry_run )); then
     exit 0
 fi
 
-export POKERED_GRAMMAR_EVIDENCE_DIR="$RUNNER_TEMP/pokered-unit-evidence/grammar"
+export POKERED_GRAMMAR_EVIDENCE_DIR="$RUNNER_TEMP/pokered-grammar-evidence"
 
 # Reject tracked ROM-derived artifacts
 set -euo pipefail

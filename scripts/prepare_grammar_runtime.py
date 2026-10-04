@@ -26,7 +26,7 @@ def prepare(python: Path, output: Path) -> Path:
         raise ValueError("the auxiliary interpreter does not exist")
     output.mkdir(parents=True, exist_ok=False)
     environment = os.environ.copy()
-    for name in ("PYTHONPATH", "PYTHONHOME", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONOPTIMIZE", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         environment.pop(name, None)
     environment.update(PYTHONNOUSERSITE="1", PYBOY_NO_CYTHON="1")
 

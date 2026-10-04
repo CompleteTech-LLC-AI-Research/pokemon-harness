@@ -183,7 +183,7 @@ jobs:
       - name: Run ROM-free production gate
         env:
           POKERED_GRAMMAR_TEST_PYTHON: ${{ steps.grammar-environment.outputs.python }}
-          POKERED_GRAMMAR_EVIDENCE_DIR: ${{ runner.temp }}/pokered-unit-evidence/grammar
+          POKERED_GRAMMAR_EVIDENCE_DIR: ${{ runner.temp }}/pokered-grammar-evidence
         run: >-
           python scripts/production_gate.py --runtime-mode source --unit-only --repeat-timing 5
           --evidence-dir "$RUNNER_TEMP/pokered-unit-evidence"
@@ -293,10 +293,12 @@ jobs:
           print(pyboy.__file__)
           PY
 
-      - name: Upload sanitized production-gate evidence
+      - name: Upload production-gate and authored-grammar evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pokered-unit-gate-evidence-${{ matrix.python-version }}
-          path: ${{ runner.temp }}/pokered-unit-evidence
+          path: |
+            ${{ runner.temp }}/pokered-unit-evidence
+            ${{ runner.temp }}/pokered-grammar-evidence
           if-no-files-found: ignore

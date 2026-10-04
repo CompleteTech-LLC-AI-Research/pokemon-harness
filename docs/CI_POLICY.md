@@ -44,7 +44,9 @@ runtime and the supported Python >=3.11 floor remain unchanged. Each child
 must collect exactly its original case and pass setup, call, and teardown;
 missing prerequisites, foreign imports, skips, or failures fail the primary
 case. The complete child terminal output and pytest receipt are retained
-with gate evidence. Python >=3.12 executes the original bodies directly.
+beside the gate bundle, whose manifest remains closed to extra files.
+Optimized Python execution fails explicitly in the delegating parent and
+child. Python >=3.12 executes the original bodies directly.
 
 Before a Python 3.11 local run, prepare the auxiliary environment outside the
 checkout with a real Python >=3.12 executable, then export its venv entrypoint:
@@ -61,6 +63,9 @@ created `venv/Scripts/python.exe` entrypoint. Both hosted matrix jobs prepare
 the same auxiliary environment explicitly before running the unchanged
 strict production gate. The primary interpreter stays at the matrix version;
 the Python 3.12 job executes these cases directly.
+The hosted artifact contains `pokered-unit-evidence/` for the sanitized gate
+bundle and `pokered-grammar-evidence/` for these two source-only cases' child
+logs and receipts. Both are retained on failure.
 
 The local runner executes the workflow's shell checks: tracked-asset policy,
 development installation, lint/format, fixture schema, declared matrix,

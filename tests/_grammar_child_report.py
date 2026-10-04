@@ -20,12 +20,15 @@ def pytest_configure(config: pytest.Config) -> None:
         expected_nodeid=os.environ["POKERED_GRAMMAR_CHILD_NODEID"],
         root=str(root.resolve()),
         python_version=list(sys.version_info[:3]),
+        optimize=sys.flags.optimize,
         interpreter=sys.executable,
         prefix=sys.prefix,
         base_prefix=sys.base_prefix,
     )
     if sys.version_info < (3, 12):
         raise pytest.UsageError("authored grammar child requires real Python >=3.12")
+    if sys.flags.optimize:
+        raise pytest.UsageError("authored grammar child requires unoptimized assertions")
     if str(root.resolve()) != expected_root:
         raise pytest.UsageError("grammar child plugin belongs to another checkout")
 

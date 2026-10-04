@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -34,6 +35,7 @@ def _validate_child_report(report: object, expected: str) -> None:
     assert isinstance(version, list) and len(version) == 3, "grammar child version missing"
     assert all(type(part) is int for part in version), "grammar child version is malformed"
     assert tuple(version) >= (3, 12, 0), "grammar child requires real Python >=3.12"
+    assert report.get("optimize") == 0, "grammar child assertions were optimized"
     assert report.get("root") == str(ROOT.resolve()), "grammar child uses another checkout"
     assert _owned_path(report.get("function_source"), ROOT / "tests"), "foreign test function"
     assert report.get("support_source") == str(
@@ -57,6 +59,8 @@ def _validate_child_report(report: object, expected: str) -> None:
 
 def run_grammar_case(parameter: str, error: type[Exception]) -> None:
     """Require the same real authored case; a missing prerequisite fails closed."""
+    if sys.flags.optimize:
+        raise AssertionError("grammar parent requires Python assertions without optimization")
     expected_suffix = {"Meta": "TypeError", "T": "AssertionError"}
     assert expected_suffix.get(parameter) == error.__name__, "unknown grammar case"
     executable = os.environ.get("POKERED_GRAMMAR_TEST_PYTHON")
@@ -79,7 +83,7 @@ def run_grammar_case(parameter: str, error: type[Exception]) -> None:
     report_path = evidence / f"{stem}.json"
     log_path = evidence / f"{stem}.log"
     environment = os.environ.copy()
-    for name in ("PYTHONPATH", "PYTHONHOME", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONOPTIMIZE", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         environment.pop(name, None)
     environment.update(
         PYTHONNOUSERSITE="1",
