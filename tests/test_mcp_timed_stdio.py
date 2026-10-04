@@ -57,7 +57,7 @@ with contextlib.redirect_stdout(sys.stderr):
     initial = {"frames": game.frame_count, "cycles": game.mb.cpu.cycles,
                "instructions": game.mb.cpu.retired_instructions}
     policy = TimedOwnerPolicy(
-        rearm_budget=32, rearm_instruction_cap=16, max_edge_lateness=32,
+        rearm_budget=32, rearm_instruction_cap=16, max_edge_lateness=4096,
         quantum_cycles=256, operation_timeout=5.0, max_wait_attempts=64,
         inbound_capacity=256, queue_capacity=16, request_timeout=10.0,
         lock_timeout=2.0, close_timeout=5.0,

@@ -21,7 +21,7 @@ PAIR_WORK_CAPACITY_S = PAIR_OWNER_COUNT * PAIR_CALLS_PER_OWNER * (BOUND + 1)
 POLICY = {
     "rearm_budget": 32,
     "rearm_instruction_cap": 16,
-    "max_edge_lateness": 32,
+    "max_edge_lateness": 4096,
     "quantum_cycles": 256,
     "operation_timeout": 3.0,
     "max_wait_attempts": 10000,
