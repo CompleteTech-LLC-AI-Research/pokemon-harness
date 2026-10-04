@@ -88,6 +88,8 @@ if (( dry_run )); then
     exit 0
 fi
 
+export POKERED_GRAMMAR_EVIDENCE_DIR="$RUNNER_TEMP/pokered-unit-evidence/grammar"
+
 # Reject tracked ROM-derived artifacts
 set -euo pipefail
 python - <<'PY'
@@ -213,6 +215,10 @@ python scripts/tcp_link_matrix.py --format text
 python scripts/network_concurrency_probe.py
 
 # Run ROM-free production gate
+if [[ "$python_version" == "3.11" && -z "${POKERED_GRAMMAR_TEST_PYTHON:-}" ]]; then
+    printf 'Python 3.11 requires an isolated Python >=3.12 grammar-test environment; see docs/CI_POLICY.md\n' >&2
+    exit 2
+fi
 python scripts/production_gate.py --runtime-mode source --unit-only --repeat-timing 5 \
     --evidence-dir "$RUNNER_TEMP/pokered-unit-evidence"
 

@@ -69,6 +69,12 @@ jobs:
           print(f"tracked artifact policy verified: {len(tracked)} paths inspected")
           PY
 
+      - name: Set up authored-grammar interpreter
+        id: grammar-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -77,6 +83,16 @@ jobs:
 
       - name: Install development dependencies
         run: python -m pip install -e ".[dev]"
+
+      - name: Prepare isolated authored-grammar environment
+        id: grammar-environment
+        env:
+          POKERED_GRAMMAR_BASE_PYTHON: ${{ steps.grammar-python.outputs.python-path }}
+        run: >-
+          python scripts/prepare_grammar_runtime.py
+          --python "$POKERED_GRAMMAR_BASE_PYTHON"
+          --output "$RUNNER_TEMP/pokered-grammar-runtime"
+          --github-output "$GITHUB_OUTPUT"
 
       - name: Check packaging and gate lint/format
         run: |
@@ -165,6 +181,9 @@ jobs:
         run: python scripts/network_concurrency_probe.py
 
       - name: Run ROM-free production gate
+        env:
+          POKERED_GRAMMAR_TEST_PYTHON: ${{ steps.grammar-environment.outputs.python }}
+          POKERED_GRAMMAR_EVIDENCE_DIR: ${{ runner.temp }}/pokered-unit-evidence/grammar
         run: >-
           python scripts/production_gate.py --runtime-mode source --unit-only --repeat-timing 5
           --evidence-dir "$RUNNER_TEMP/pokered-unit-evidence"

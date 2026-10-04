@@ -37,6 +37,31 @@ On Windows Git Bash, activate `.venv-ci/Scripts/activate` instead. Run the
 same command in separate environments for both supported Python versions
 when qualifying the complete matrix.
 
+Two authored analyzer cases contain Python 3.12 generic-class syntax. On
+Python 3.11, those same pytest cases run in an explicitly configured, isolated
+Python >=3.12 environment installed from the same checkout. The primary
+runtime and the supported Python >=3.11 floor remain unchanged. Each child
+must collect exactly its original case and pass setup, call, and teardown;
+missing prerequisites, foreign imports, skips, or failures fail the primary
+case. The complete child terminal output and pytest receipt are retained
+with gate evidence. Python >=3.12 executes the original bodies directly.
+
+Before a Python 3.11 local run, prepare the auxiliary environment outside the
+checkout with a real Python >=3.12 executable, then export its venv entrypoint:
+
+```bash
+python scripts/prepare_grammar_runtime.py \
+  --python /absolute/path/to/python3.12 --output /tmp/pokered-grammar-runtime
+export POKERED_GRAMMAR_TEST_PYTHON=/tmp/pokered-grammar-runtime/venv/bin/python
+bash scripts/run_local_ci.sh
+```
+
+Use a fresh output directory for each preparation. On Windows, use the
+created `venv/Scripts/python.exe` entrypoint. Both hosted matrix jobs prepare
+the same auxiliary environment explicitly before running the unchanged
+strict production gate. The primary interpreter stays at the matrix version;
+the Python 3.12 job executes these cases directly.
+
 The local runner executes the workflow's shell checks: tracked-asset policy,
 development installation, lint/format, fixture schema, declared matrix,
 network concurrency probe, ROM-free production gate with five timing
