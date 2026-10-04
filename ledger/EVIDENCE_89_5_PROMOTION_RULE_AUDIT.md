@@ -91,6 +91,27 @@ Both mutations reverted; `git status` clean against `7d7c2160`.
 
 ## Disposition
 
+## Adversarial review returned REFUTED — every objection then disproved
+
+An independent reviewer was given the four gate functions and asked to refute the
+claim. It returned `CLAIM REFUTED` with five objections. All five were tested
+against the real public API rather than argued, and **all five fail to reach a
+family promotion**:
+
+| objection | disproof |
+|---|---|
+| "`required` is load-bearing; empty `required` lets one runtime promote" | `required` is only reachable empty via the helper's **default**. Both production callers (l.297, l.739) pass `_expanded_required_runtimes(catalog)` explicitly, so the default is never used. End-to-end with a source-only document: `tested=0`. |
+| "`_verified_mechanics_case_ids` never checks terminal status, so a fabricated `status: 'tested'` report passes" | It does not need to: `case_reports` are **produced** by `build_report`, which routes every record through `_evaluate_case`. A results document whose record literally claims `status: "tested"` is classified `unaccepted` by `_evaluate_case` (it is not in `accepted_outcomes`), and both runtimes land `unaccepted` -> `tested=0`. The sentinel is filtered upstream. |
+| "duplicate runtimes are not rejected" | `_evaluate_case` classifies a second record for the same runtime as `duplicate`, which is not an accepted outcome. End-to-end with two `source` passes plus a `cython` pass: `source` -> `duplicate`, dimension -> `tested=0`. |
+| "the observed-effect requirement is not wired into the promotion path" | It is, at l.614, inside the `build_report` loop, and it rewrites a passing case's status to `unidentified` before the case report is emitted. A passing record with no observed effect yields `unidentified: no observed move effect for declared effect 0` -> `tested=0`. |
+| "`_family_is_verified` ignores `scope`, so a planned family can verify" | The helper is scope-agnostic by design; the caller at l.317 only counts a family when `scope == "tested"`, and l.749 filters `family.get("scope") == "tested"` before summing. |
+
+The reviewer's `CLAIM REFUTED` is an artifact of being shown four functions
+**without their callers**: with the callers in view, each objection depends on a
+default argument or a raw-report injection that production never supplies. This
+is recorded rather than discarded, because the defaults *are* more permissive in
+isolation and a future caller that relied on them would inherit the hole.
+
 **No code change.** The promotion rule is implemented, enforced in both
 directions, and has teeth. #89.5 should not be reopened as an implementation
 task.
