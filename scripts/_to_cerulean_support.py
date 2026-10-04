@@ -5,6 +5,7 @@ pathfinding wrappers, milestone/save helpers, and the Mt. Moon
 trainer-event / warp-hop tables shared by ``_to_cerulean_route3`` and the
 ``to_cerulean`` entry point.
 """
+
 from __future__ import annotations
 
 import os
@@ -44,8 +45,7 @@ def _sight_cone_blockers(map_name: str) -> str | None:
 # they don't engage on sight-line, eliminating sight-cone blockers
 # entirely. Walk freedom > fight-every-trainer since we just want
 # to cross. Trainers: 1 Hiker + 4 Youngsters/Cooltrainers/Supernerd.
-_MT_MOON_1F_TRAINER_EVENTS = [0x571, 0x572, 0x573, 0x574,
-                               0x575, 0x576, 0x577]
+_MT_MOON_1F_TRAINER_EVENTS = [0x571, 0x572, 0x573, 0x574, 0x575, 0x576, 0x577]
 # Mt. Moon B2F: Super Nerd (exit), Jessie&James, 3 Rocket trainers.
 # Events $579-$57D (byte 175, bits 1-5). Pre-solve to avoid all
 # engagements on the B2F traversal.
@@ -56,12 +56,18 @@ _MT_MOON_B2F_TRAINER_EVENTS = [0x579, 0x57A, 0x57B, 0x57C, 0x57D]
 # constants below — see "Mt. Moon warp-hop routing" section.
 
 
-def _try_warp_hop(drv: rtb.Driver, session: Session, outdir: Path,
-                  rom: str, sym: str, sha1: str,
-                  warps: list[tuple[int, int]], label: str,
-                  stop_map_ids: tuple[int, ...],
-                  tried_edges: set[tuple[int, int, int, int, int]]
-                  ) -> str:
+def _try_warp_hop(
+    drv: rtb.Driver,
+    session: Session,
+    outdir: Path,
+    rom: str,
+    sym: str,
+    sha1: str,
+    warps: list[tuple[int, int]],
+    label: str,
+    stop_map_ids: tuple[int, ...],
+    tried_edges: set[tuple[int, int, int, int, int]],
+) -> str:
     """Try each warp in order; walk to the first one A* can reach
     AND we haven't taken from the current position before. Tracks
     edges as (cur_map, cur_x, cur_y, warp_x, warp_y) — this is the
@@ -80,7 +86,7 @@ def _try_warp_hop(drv: rtb.Driver, session: Session, outdir: Path,
     gs = drv.gs()
     cur_map = gs.overworld.map_id
     cur_x, cur_y = gs.overworld.x, gs.overworld.y
-    for (wx, wy) in warps:
+    for wx, wy in warps:
         edge = (cur_map, cur_x, cur_y, wx, wy)
         if edge in tried_edges:
             continue
@@ -88,28 +94,38 @@ def _try_warp_hop(drv: rtb.Driver, session: Session, outdir: Path,
         try:
             seed = outdir / f"_{label}_seed.state"
             seed.write_bytes(session.save_state())
-            path = _run_pathfinder_ex(seed, f"{wx},{wy}",
-                                       outdir / f"_{label}.txt",
-                                       rom, sym, sha1, None)
+            path = _run_pathfinder_ex(
+                seed, f"{wx},{wy}", outdir / f"_{label}.txt", rom, sym, sha1, None
+            )
         except RuntimeError:
             continue
         if not path:
             continue
-        print(f"  [{label}] ({cur_x},{cur_y}) -> warp ({wx},{wy}) "
-              f"A* {len(path)} steps (step-by-step walk)", flush=True)
+        print(
+            f"  [{label}] ({cur_x},{cur_y}) -> warp ({wx},{wy}) "
+            f"A* {len(path)} steps (step-by-step walk)",
+            flush=True,
+        )
         tried_edges.add(edge)
         # Step-by-step walk: re-plans per press so Jessie/James
         # movements + brief wild-battle interruptions don't break
         # the plan. Target map is the DESTINATION floor of the warp
         # (which we don't know without decoding warp_event data),
         # so we watch for any map change as "warp fired" signal.
-        return _step_by_step_walk(drv, session, outdir,
-                                   f"{wx},{wy}", label,
-                                   rom, sym, sha1,
-                                   target_map_id=None,  # any map change
-                                   max_presses=150,
-                                   extra_blockers=None,
-                                   stop_map_ids=stop_map_ids)
+        return _step_by_step_walk(
+            drv,
+            session,
+            outdir,
+            f"{wx},{wy}",
+            label,
+            rom,
+            sym,
+            sha1,
+            target_map_id=None,  # any map change
+            max_presses=150,
+            extra_blockers=None,
+            stop_map_ids=stop_map_ids,
+        )
     return "no_warp"
 
 
@@ -141,8 +157,9 @@ def _b2f_fossil_sprites_present(session: Session) -> bool:
     return True
 
 
-def _clear_b2f_fossils(drv: rtb.Driver, session: Session, outdir: Path,
-                       rom: str, sym: str, sha1: str) -> bool:
+def _clear_b2f_fossils(
+    drv: rtb.Driver, session: Session, outdir: Path, rom: str, sym: str, sha1: str
+) -> bool:
     """Pick up DOME_FOSSIL on B2F to unlock the path to (5, 7).
 
     Mt Moon B2F's fossil platform ((12-13, 6)) is a 2-cell sprite wall
@@ -170,8 +187,7 @@ def _clear_b2f_fossils(drv: rtb.Driver, session: Session, outdir: Path,
     """
     gs = drv.gs()
     if gs.overworld.map_id != M_MT_MOON_B2F:
-        print(f"  b2f_fossils: not on B2F (map=0x{gs.overworld.map_id:02x})",
-              flush=True)
+        print(f"  b2f_fossils: not on B2F (map=0x{gs.overworld.map_id:02x})", flush=True)
         return False
     if not _b2f_fossil_sprites_present(session):
         print("  b2f_fossils: sprites already absent, skipping", flush=True)
@@ -197,46 +213,57 @@ def _clear_b2f_fossils(drv: rtb.Driver, session: Session, outdir: Path,
             drv.press(d)
             after = (drv.gs().overworld.x, drv.gs().overworld.y)
             if after != before and after not in warp_cells:
-                print(f"  b2f_fossils: stepped off arrival warp to "
-                      f"{after} via {d}", flush=True)
+                print(f"  b2f_fossils: stepped off arrival warp to {after} via {d}", flush=True)
                 break
         else:
-            print("  b2f_fossils: could not step off arrival warp",
-                  flush=True)
+            print("  b2f_fossils: could not step off arrival warp", flush=True)
             return False
     b2f_warp_blockers = ";".join(f"{x},{y}" for x, y in warp_cells)
-    res = _step_by_step_walk(drv, session, outdir, "12,7",
-                              "b2f_to_fossil",
-                              rom, sym, sha1,
-                              target_map_id=None,
-                              max_presses=200,
-                              extra_blockers=b2f_warp_blockers,
-                              stop_map_ids=())
-    print(f"  b2f_fossils: walk to (12,7): {res} -> {_gs_summary(session)}",
-          flush=True)
+    res = _step_by_step_walk(
+        drv,
+        session,
+        outdir,
+        "12,7",
+        "b2f_to_fossil",
+        rom,
+        sym,
+        sha1,
+        target_map_id=None,
+        max_presses=200,
+        extra_blockers=b2f_warp_blockers,
+        stop_map_ids=(),
+    )
+    print(f"  b2f_fossils: walk to (12,7): {res} -> {_gs_summary(session)}", flush=True)
     cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
     if drv.gs().overworld.map_id != M_MT_MOON_B2F:
-        print(f"  b2f_fossils: left B2F (now on 0x{drv.gs().overworld.map_id:02x}"
-              f" at {cur_xy}); bailing so outer loop re-warps", flush=True)
+        print(
+            f"  b2f_fossils: left B2F (now on 0x{drv.gs().overworld.map_id:02x}"
+            f" at {cur_xy}); bailing so outer loop re-warps",
+            flush=True,
+        )
         return False
     if cur_xy != (12, 7):
-        print("  b2f_fossils: not at (12,7); trying (13,7) as fallback",
-              flush=True)
-        res = _step_by_step_walk(drv, session, outdir, "13,7",
-                                  "b2f_to_fossil2",
-                                  rom, sym, sha1,
-                                  target_map_id=None,
-                                  max_presses=150,
-                                  extra_blockers=b2f_warp_blockers,
-                                  stop_map_ids=())
+        print("  b2f_fossils: not at (12,7); trying (13,7) as fallback", flush=True)
+        res = _step_by_step_walk(
+            drv,
+            session,
+            outdir,
+            "13,7",
+            "b2f_to_fossil2",
+            rom,
+            sym,
+            sha1,
+            target_map_id=None,
+            max_presses=150,
+            extra_blockers=b2f_warp_blockers,
+            stop_map_ids=(),
+        )
         cur_xy = (drv.gs().overworld.x, drv.gs().overworld.y)
         if drv.gs().overworld.map_id != M_MT_MOON_B2F:
-            print("  b2f_fossils: left B2F on fallback; bailing",
-                  flush=True)
+            print("  b2f_fossils: left B2F on fallback; bailing", flush=True)
             return False
         if cur_xy not in {(12, 7), (13, 7)}:
-            print(f"  b2f_fossils: could not reach fossil approach "
-                  f"cell (at {cur_xy})", flush=True)
+            print(f"  b2f_fossils: could not reach fossil approach cell (at {cur_xy})", flush=True)
             return False
     # Face UP (press up — collision with fossil keeps us in place but
     # rotates facing).
@@ -263,13 +290,13 @@ def _clear_b2f_fossils(drv: rtb.Driver, session: Session, outdir: Path,
             break
     session.step(180, render=True)
     ok = not _b2f_fossil_sprites_present(session)
-    print(f"  b2f_fossils: cleared={ok} -> {_gs_summary(session)}",
-          flush=True)
+    print(f"  b2f_fossils: cleared={ok} -> {_gs_summary(session)}", flush=True)
     return ok
 
 
-def _mark_trainers_defeated(session: Session, event_nums: list[int],
-                             label: str = "trainers") -> None:
+def _mark_trainers_defeated(
+    session: Session, event_nums: list[int], label: str = "trainers"
+) -> None:
     """Set the given wEventFlags bits so each trainer reads as
     already-defeated. Prevents sight-line engagement on maps where
     we just want to cross."""
@@ -283,15 +310,14 @@ def _mark_trainers_defeated(session: Session, event_nums: list[int],
     for bo, mask in sorted(by_byte.items()):
         cur = mem[base + bo]
         mem[base + bo] = cur | mask
-        print(f"  [{label}] wEventFlags[{bo}] 0x{cur:02x} -> "
-              f"0x{mem[base+bo]:02x}", flush=True)
+        print(f"  [{label}] wEventFlags[{bo}] 0x{cur:02x} -> 0x{mem[base + bo]:02x}", flush=True)
 
 
 # Map IDs (Yellow / Red / Blue all share these — pokered constants).
 M_PEWTER_CITY = 0x02
 M_CERULEAN_CITY = 0x03
-M_ROUTE_3 = 0x0e
-M_ROUTE_4 = 0x0f
+M_ROUTE_3 = 0x0E
+M_ROUTE_4 = 0x0F
 M_PEWTER_GYM = 0x36
 M_PEWTER_POKECENTER = 0x3A
 M_CERULEAN_POKECENTER = 0x40
@@ -326,20 +352,20 @@ _ROUTE3_EXIT_MAPS = (M_ROUTE_4, M_MT_MOON_1F)
 # [R3 dead end]. Omitted from priority lists.
 _MT_MOON_WARPS_BY_FLOOR = {
     M_MT_MOON_1F: [
-        (5, 5),    # -> B1F comp3 (contains the (21, 17) warp to R2)
+        (5, 5),  # -> B1F comp3 (contains the (21, 17) warp to R2)
         (17, 11),  # -> B1F comp2 (contains (25, 9) warp to R1, dead-end
-                   #   under pair-collisions — kept only as a fallback)
+        #   under pair-collisions — kept only as a fallback)
     ],
     M_MT_MOON_B1F: [
-        (27, 3),    # Route 4 exit (only reachable from comp4)
-        (23, 3),    # comp4 also
-        (21, 17),   # -> B2F R2 (contains fossils + (5, 7) exit warp)
-        (17, 11),   # -> B2F R1 (fallback, dead-end in R1)
+        (27, 3),  # Route 4 exit (only reachable from comp4)
+        (23, 3),  # comp4 also
+        (21, 17),  # -> B2F R2 (contains fossils + (5, 7) exit warp)
+        (17, 11),  # -> B2F R1 (fallback, dead-end in R1)
     ],
     M_MT_MOON_B2F: [
-        (5, 7),     # exit to B1F comp4 upper strip
-        (21, 17),   # back to B1F comp3 (inter-region in compB main)
-        (25, 9),    # back to B1F comp2 (R1 only)
+        (5, 7),  # exit to B1F comp4 upper strip
+        (21, 17),  # back to B1F comp3 (inter-region in compB main)
+        (25, 9),  # back to B1F comp2 (R1 only)
     ],
 }
 
@@ -365,13 +391,20 @@ def _gs_summary(session: Session) -> str:
     return " ".join(parts)
 
 
-def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
-                        goal_xy: str, label: str,
-                        rom: str, sym: str, sha1: str,
-                        target_map_id: int | None,
-                        max_presses: int = 200,
-                        extra_blockers: str | None = None,
-                        stop_map_ids: tuple[int, ...] = ()) -> str:
+def _step_by_step_walk(
+    drv: rtb.Driver,
+    session: Session,
+    outdir: Path,
+    goal_xy: str,
+    label: str,
+    rom: str,
+    sym: str,
+    sha1: str,
+    target_map_id: int | None,
+    max_presses: int = 200,
+    extra_blockers: str | None = None,
+    stop_map_ids: tuple[int, ...] = (),
+) -> str:
     """Walk toward ``goal_xy`` one press at a time, re-A*-planning
     from the current position + current NPC sprite layout after
     every single step. This is slow (each step is ~1 s of pathfinder
@@ -436,10 +469,16 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
         seed = outdir / f"_{label}_step.state"
         seed.write_bytes(session.save_state())
         try:
-            path = _run_pathfinder_ex(seed, goal_xy,
-                                       outdir / f"_{label}_step.txt",
-                                       rom, sym, sha1, extra_blockers,
-                                       expand_npc_neighbors=False)
+            path = _run_pathfinder_ex(
+                seed,
+                goal_xy,
+                outdir / f"_{label}_step.txt",
+                rom,
+                sym,
+                sha1,
+                extra_blockers,
+                expand_npc_neighbors=False,
+            )
         except RuntimeError:
             # No path — blind nudge every direction, retry.
             for d in ("up", "left", "down", "right"):
@@ -478,12 +517,19 @@ def _step_by_step_walk(drv: rtb.Driver, session: Session, outdir: Path,
     return "stuck"
 
 
-def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
-                   goal_xy: str, label: str,
-                   rom: str, sym: str, sha1: str,
-                   stop_map_ids=(),
-                   extra_blockers: str | None = None,
-                   stall_window: int = 12) -> str:
+def _pathfind_walk(
+    drv: rtb.Driver,
+    session: Session,
+    outdir: Path,
+    goal_xy: str,
+    label: str,
+    rom: str,
+    sym: str,
+    sha1: str,
+    stop_map_ids=(),
+    extra_blockers: str | None = None,
+    stall_window: int = 12,
+) -> str:
     """Save state, run A* to ``goal_xy``, walk the path. Returns the
     walk_path result code (``done``/``stop``/``stalled``/etc.).
 
@@ -495,24 +541,30 @@ def _pathfind_walk(drv: rtb.Driver, session: Session, outdir: Path,
     seed.write_bytes(session.save_state())
     out_txt = outdir / f"_{label}.txt"
     try:
-        path = _run_pathfinder_ex(seed, goal_xy, out_txt,
-                                  rom, sym, sha1, extra_blockers)
+        path = _run_pathfinder_ex(seed, goal_xy, out_txt, rom, sym, sha1, extra_blockers)
     except RuntimeError as e:
         print(f"  [{label}] pathfind failed: {e}", flush=True)
         return "pathfail"
     print(f"  [{label}] A* {len(path)} steps -> walking", flush=True)
-    return ftb.walk_path(drv, path, label=label,
-                         stop_map_ids=stop_map_ids,
-                         stall_window=stall_window)
+    return ftb.walk_path(
+        drv, path, label=label, stop_map_ids=stop_map_ids, stall_window=stall_window
+    )
 
 
-def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
-                        rom: str, sym: str, sha1: str,
-                        extra_blockers: str | None,
-                        expand_npc_neighbors: bool = False) -> str:
+def _run_pathfinder_ex(
+    state_path: Path,
+    goal: str,
+    out_path: Path,
+    rom: str,
+    sym: str,
+    sha1: str,
+    extra_blockers: str | None,
+    expand_npc_neighbors: bool = False,
+) -> str:
     """Wraps ftb.run_pathfinder with optional --extra-blockers and
     --expand-npc-neighbors args."""
     import subprocess
+
     script = Path(__file__).resolve().parent / "path_from_tiles.py"
     env = dict(os.environ)
     env.update(
@@ -523,16 +575,18 @@ def _run_pathfinder_ex(state_path: Path, goal: str, out_path: Path,
     )
     if sha1:
         env["POKERED_ROM_SHA1"] = sha1
-    kw = ["--state", str(state_path), "--save-path-to", str(out_path),
-          "--goal-xy", goal]
+    kw = ["--state", str(state_path), "--save-path-to", str(out_path), "--goal-xy", goal]
     if extra_blockers:
         kw += ["--extra-blockers", extra_blockers]
     if expand_npc_neighbors:
         kw += ["--expand-npc-neighbors"]
-    r = subprocess.run([sys.executable, "-u", str(script), *kw],
-                       env=env, capture_output=True, text=True, check=False)
+    r = subprocess.run(
+        [sys.executable, "-u", str(script), *kw],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if r.returncode != 0:
         raise RuntimeError(f"pathfinder failed: {r.stderr}")
     return out_path.read_text().strip()
-
-

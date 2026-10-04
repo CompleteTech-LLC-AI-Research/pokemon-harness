@@ -150,8 +150,7 @@ def _default_sym(version: str, variant: str) -> Path:
 
 def _default_out(version: str, variant: str) -> Path:
     return (
-        _REPO / "tests" / "fixtures" / "link" / version
-        / _VERSIONS[(version, variant)]["out_name"]
+        _REPO / "tests" / "fixtures" / "link" / version / _VERSIONS[(version, variant)]["out_name"]
     )
 
 
@@ -275,13 +274,11 @@ def produce(
             gs = session.read_game_state()
             if gs.overworld.map_id != 0x40:
                 raise RuntimeError(
-                    "expected map 0x40 (Cerulean Pokecenter), got "
-                    f"0x{gs.overworld.map_id:02x}"
+                    f"expected map 0x40 (Cerulean Pokecenter), got 0x{gs.overworld.map_id:02x}"
                 )
             if (gs.overworld.x, gs.overworld.y) != (11, 3):
                 raise RuntimeError(
-                    "expected final position (11, 3), got "
-                    f"({gs.overworld.x}, {gs.overworld.y})"
+                    f"expected final position (11, 3), got ({gs.overworld.x}, {gs.overworld.y})"
                 )
 
             payload = session.save_state()
@@ -300,11 +297,15 @@ def produce(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--version", choices=_KNOWN_VERSIONS, required=True,
+        "--version",
+        choices=_KNOWN_VERSIONS,
+        required=True,
         help="ROM version (red / blue / yellow)",
     )
     ap.add_argument(
-        "--variant", choices=("color", "vanilla", "cgb"), default=None,
+        "--variant",
+        choices=("color", "vanilla", "cgb"),
+        default=None,
         help=(
             "ROM variant. Defaults to the per-version canonical "
             "variant (color for R/B, cgb for Y). Pass ``vanilla`` on "
@@ -328,8 +329,7 @@ def main() -> None:
         type=int,
         default=_DEFAULT_MAX_MOVEMENT_STEPS,
         help=(
-            "maximum directional inputs before failing (default: "
-            f"{_DEFAULT_MAX_MOVEMENT_STEPS})"
+            f"maximum directional inputs before failing (default: {_DEFAULT_MAX_MOVEMENT_STEPS})"
         ),
     )
     args = ap.parse_args()

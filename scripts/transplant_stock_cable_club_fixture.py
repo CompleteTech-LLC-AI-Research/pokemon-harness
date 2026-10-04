@@ -56,9 +56,7 @@ def _validated_pins(
     if expected_symbol_sha1 is None:
         raise ValueError(f"{label} symbol file is not pinned in VERSIONS.md: {sym}")
     if supplied_sha1 is not None and supplied_sha1.lower() != expected_rom_sha1:
-        raise ValueError(
-            f"provided {label} ROM SHA-1 does not match its VERSIONS.md pin"
-        )
+        raise ValueError(f"provided {label} ROM SHA-1 does not match its VERSIONS.md pin")
     return pins, expected_rom_sha1, expected_symbol_sha1
 
 

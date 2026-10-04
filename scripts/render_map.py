@@ -20,6 +20,7 @@ starts a BFS from that step cell and marks every reachable cell with
 ``+``; unreachable cells show as ``#`` (blocked) or ``.`` (walkable
 but unvisited).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -130,10 +131,7 @@ def load_map(pret: Path, map_name: str) -> tuple[list[list[int]], int, int]:
     blk = (pret / "maps" / f"{map_name}.blk").read_bytes()
     if len(blk) != w * h:
         raise RuntimeError(f"{map_name}.blk size {len(blk)} != {w}*{h}")
-    blocks = [
-        [blk[y * w + x] for x in range(w)]
-        for y in range(h)
-    ]
+    blocks = [[blk[y * w + x] for x in range(w)] for y in range(h)]
     return blocks, w, h
 
 
@@ -141,12 +139,10 @@ def load_blockset(pret: Path, fname: str) -> list[bytes]:
     data = (pret / "gfx" / "blocksets" / fname).read_bytes()
     if len(data) % 16:
         raise RuntimeError(f"blockset {fname} length not /16")
-    return [data[i:i + 16] for i in range(0, len(data), 16)]
+    return [data[i : i + 16] for i in range(0, len(data), 16)]
 
 
-def expand_tiles(
-    blocks: list[list[int]], blockset: list[bytes]
-) -> list[list[int]]:
+def expand_tiles(blocks: list[list[int]], blockset: list[bytes]) -> list[list[int]]:
     h = len(blocks)
     w = len(blocks[0]) if h else 0
     tiles = [[0] * (w * 4) for _ in range(h * 4)]
@@ -163,8 +159,7 @@ def expand_tiles(
     return tiles
 
 
-def step_passable(tiles: list[list[int]], sx: int, sy: int,
-                   passable_ids: set[int]) -> bool:
+def step_passable(tiles: list[list[int]], sx: int, sy: int, passable_ids: set[int]) -> bool:
     """Bottom-left single-tile model: step cell (sx, sy) is walkable iff
     the tile at (sx*2, sy*2+1) is in the passable list."""
     h = len(tiles)
@@ -196,11 +191,12 @@ _CAVERN_PAIRS: set[frozenset[int]] = {
 }
 
 
-def bfs_flood(passable: list[list[bool]],
-              start: tuple[int, int],
-              tiles: list[list[int]] | None = None,
-              pair_collisions: set[frozenset[int]] | None = None
-              ) -> set[tuple[int, int]]:
+def bfs_flood(
+    passable: list[list[bool]],
+    start: tuple[int, int],
+    tiles: list[list[int]] | None = None,
+    pair_collisions: set[frozenset[int]] | None = None,
+) -> set[tuple[int, int]]:
     h = len(passable)
     w = len(passable[0]) if h else 0
     sx, sy = start
@@ -220,9 +216,11 @@ def bfs_flood(passable: list[list[bool]],
                 if pair_collisions and tiles is not None:
                     cur_feet = feet_tile(tiles, x, y)
                     nb_feet = feet_tile(tiles, nx, ny)
-                    if (cur_feet is not None and nb_feet is not None
-                            and frozenset({cur_feet, nb_feet})
-                                in pair_collisions):
+                    if (
+                        cur_feet is not None
+                        and nb_feet is not None
+                        and frozenset({cur_feet, nb_feet}) in pair_collisions
+                    ):
                         continue
                 if (nx, ny) not in seen:
                     seen.add((nx, ny))
@@ -230,10 +228,12 @@ def bfs_flood(passable: list[list[bool]],
     return seen
 
 
-def render(passable: list[list[bool]],
-           labels: dict[tuple[int, int], str],
-           reachable: set[tuple[int, int]] | None,
-           show_x_ruler: bool = True) -> str:
+def render(
+    passable: list[list[bool]],
+    labels: dict[tuple[int, int], str],
+    reachable: set[tuple[int, int]] | None,
+    show_x_ruler: bool = True,
+) -> str:
     h = len(passable)
     w = len(passable[0]) if h else 0
     lines: list[str] = []
@@ -274,34 +274,45 @@ def parse_warps(entries: list[str]) -> dict[tuple[int, int], str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--map", required=True,
-                    help="Map name (CamelCase, matches .blk filename), "
-                         "e.g. MtMoonB2F")
-    ap.add_argument("--tileset", default=None,
-                    help="Tileset name (from map_headers.asm). "
-                         "Autodetected from data/maps/headers/<map>.asm "
-                         "if omitted.")
-    ap.add_argument("--warps", nargs="*", default=[],
-                    help='"x,y=L" entries to label on the grid')
-    ap.add_argument("--flood", default=None,
-                    help='"x,y" start cell; flood-fills reachable cells')
-    ap.add_argument("--pret", default=None,
-                    help="Path to pret/pokeyellow clone")
-    ap.add_argument("--dump-tiles", default=None,
-                    help='"x1,y1-x2,y2" step-cell rect; prints feet-tile '
-                         "IDs at each step cell. Useful for debugging "
-                         "collision-model gaps.")
-    ap.add_argument("--blockers", default="",
-                    help='"x,y;x,y;..." step cells treated as blocked '
-                         "(e.g. static NPC sprites).")
-    ap.add_argument("--auto-sprite-blockers", action="store_true",
-                    help="Parse data/maps/objects/<map>.asm and auto-add "
-                         "all object_event step cells as blockers. Useful "
-                         "for modelling NPC/item/fossil obstacles.")
-    ap.add_argument("--pair-collisions", action="store_true",
-                    help="Apply CAVERN pair-collision rules during flood "
-                         "($20<->$05, $41<->$05, $2A<->$05, $05<->$21). "
-                         "Only affects CAVERN tileset maps.")
+    ap.add_argument(
+        "--map", required=True, help="Map name (CamelCase, matches .blk filename), e.g. MtMoonB2F"
+    )
+    ap.add_argument(
+        "--tileset",
+        default=None,
+        help="Tileset name (from map_headers.asm). "
+        "Autodetected from data/maps/headers/<map>.asm "
+        "if omitted.",
+    )
+    ap.add_argument("--warps", nargs="*", default=[], help='"x,y=L" entries to label on the grid')
+    ap.add_argument("--flood", default=None, help='"x,y" start cell; flood-fills reachable cells')
+    ap.add_argument("--pret", default=None, help="Path to pret/pokeyellow clone")
+    ap.add_argument(
+        "--dump-tiles",
+        default=None,
+        help='"x1,y1-x2,y2" step-cell rect; prints feet-tile '
+        "IDs at each step cell. Useful for debugging "
+        "collision-model gaps.",
+    )
+    ap.add_argument(
+        "--blockers",
+        default="",
+        help='"x,y;x,y;..." step cells treated as blocked (e.g. static NPC sprites).',
+    )
+    ap.add_argument(
+        "--auto-sprite-blockers",
+        action="store_true",
+        help="Parse data/maps/objects/<map>.asm and auto-add "
+        "all object_event step cells as blockers. Useful "
+        "for modelling NPC/item/fossil obstacles.",
+    )
+    ap.add_argument(
+        "--pair-collisions",
+        action="store_true",
+        help="Apply CAVERN pair-collision rules during flood "
+        "($20<->$05, $41<->$05, $2A<->$05, $05<->$21). "
+        "Only affects CAVERN tileset maps.",
+    )
     args = ap.parse_args()
 
     pret_candidates = [args.pret, os.environ.get("POKERED_PRET_ROOT")]
@@ -317,10 +328,8 @@ def main() -> int:
 
     tileset = args.tileset
     if tileset is None:
-        hdr = (pret / "data" / "maps" / "headers" / f"{args.map}.asm"
-               ).read_text()
-        m = re.search(rf"map_header\s+{args.map}\s*,\s*\w+\s*,\s*(\w+)\s*,",
-                       hdr)
+        hdr = (pret / "data" / "maps" / "headers" / f"{args.map}.asm").read_text()
+        m = re.search(rf"map_header\s+{args.map}\s*,\s*\w+\s*,\s*(\w+)\s*,", hdr)
         if not m:
             raise RuntimeError(f"can't parse tileset from {args.map}.asm")
         tileset = m.group(1).upper()
@@ -329,13 +338,19 @@ def main() -> int:
     bst_fname, coll_label = TILESETS[tileset]
     blockset = load_blockset(pret, bst_fname)
     passable_ids = load_collision_list(pret, coll_label)
-    print(f"passable tile ids ({coll_label}): "
-          + " ".join(f"0x{v:02x}" for v in sorted(passable_ids)), flush=True)
+    print(
+        f"passable tile ids ({coll_label}): "
+        + " ".join(f"0x{v:02x}" for v in sorted(passable_ids)),
+        flush=True,
+    )
 
     blocks, w_blk, h_blk = load_map(pret, args.map)
-    print(f"map: {w_blk}x{h_blk} blocks "
-          f"-> {w_blk*4}x{h_blk*4} tiles "
-          f"-> {w_blk*2}x{h_blk*2} step cells", flush=True)
+    print(
+        f"map: {w_blk}x{h_blk} blocks "
+        f"-> {w_blk * 4}x{h_blk * 4} tiles "
+        f"-> {w_blk * 2}x{h_blk * 2} step cells",
+        flush=True,
+    )
     tiles = expand_tiles(blocks, blockset)
 
     w_step = w_blk * 2
@@ -359,9 +374,7 @@ def main() -> int:
         print(f"auto-sprite blockers: {sorted(blockers)}", flush=True)
 
     passable = [
-        [step_passable(tiles, x, y, passable_ids)
-         and (x, y) not in blockers
-         for x in range(w_step)]
+        [step_passable(tiles, x, y, passable_ids) and (x, y) not in blockers for x in range(w_step)]
         for y in range(h_step)
     ]
 
@@ -373,10 +386,8 @@ def main() -> int:
         print(f"pair-collisions active: {len(pair)} rules", flush=True)
     if args.flood:
         fx, fy = [int(v) for v in args.flood.split(",")]
-        reachable = bfs_flood(passable, (fx, fy),
-                               tiles=tiles, pair_collisions=pair)
-        print(f"flood-fill from ({fx},{fy}): {len(reachable)} reachable "
-              f"step cells", flush=True)
+        reachable = bfs_flood(passable, (fx, fy), tiles=tiles, pair_collisions=pair)
+        print(f"flood-fill from ({fx},{fy}): {len(reachable)} reachable step cells", flush=True)
 
     print()
     print(render(passable, labels, reachable))
@@ -393,9 +404,12 @@ def main() -> int:
         x1y1, x2y2 = args.dump_tiles.split("-")
         x1, y1 = [int(v) for v in x1y1.split(",")]
         x2, y2 = [int(v) for v in x2y2.split(",")]
-        print(f"\nfeet-tile IDs for step cells "
-              f"({x1},{y1})..({x2},{y2}) (4 tiles per cell: "
-              f"TL TR / BL BR):", flush=True)
+        print(
+            f"\nfeet-tile IDs for step cells "
+            f"({x1},{y1})..({x2},{y2}) (4 tiles per cell: "
+            f"TL TR / BL BR):",
+            flush=True,
+        )
         header = "     " + " ".join(f"x={x:2d}  " for x in range(x1, x2 + 1))
         print(header, flush=True)
         for y in range(y1, y2 + 1):

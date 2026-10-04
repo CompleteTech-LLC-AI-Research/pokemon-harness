@@ -33,16 +33,16 @@ from pokered_harness.mcp_server import register_default_hooks
 from pokered_harness.session import Session
 
 
-def run_pathfinder(state_path: Path, goal: str, out_path: Path,
-                   rom: str, sym: str, sha1: str) -> str:
+def run_pathfinder(
+    state_path: Path, goal: str, out_path: Path, rom: str, sym: str, sha1: str
+) -> str:
     """Invoke path_from_tiles.py and return the computed path string."""
     script = Path(__file__).parent / "path_from_tiles.py"
     env = dict(os.environ)
     src_path = str(Path(__file__).parent.parent / "src")
     existing_pythonpath = env.get("PYTHONPATH")
     pythonpath = (
-        src_path if not existing_pythonpath
-        else src_path + os.pathsep + existing_pythonpath
+        src_path if not existing_pythonpath else src_path + os.pathsep + existing_pythonpath
     )
     env.update(
         POKERED_ROM_PATH=rom,
@@ -58,7 +58,9 @@ def run_pathfinder(state_path: Path, goal: str, out_path: Path,
         kw += ["--goal-xy", goal]
     r = subprocess.run(
         [sys.executable, "-u", str(script), *kw],
-        env=env, capture_output=True, text=True,
+        env=env,
+        capture_output=True,
+        text=True,
         check=False,
     )
     if r.returncode != 0:
@@ -69,9 +71,15 @@ def run_pathfinder(state_path: Path, goal: str, out_path: Path,
 DIR_CHAR = {"u": "up", "d": "down", "l": "left", "r": "right"}
 
 
-def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
-              blackout_map_ids=(0x25, 0x26),
-              stall_window: int = 12) -> str:
+def walk_path(
+    drv,
+    path: str,
+    *,
+    label: str,
+    stop_map_ids=(),
+    blackout_map_ids=(0x25, 0x26),
+    stall_window: int = 12,
+) -> str:
     """Execute a direction-string path. Auto-resolves battles; aborts if
     we blackout (map warps to player's house). Returns reason: ``stop``,
     ``blackout``, ``fainted``, ``stalled``, or ``done``.
@@ -96,24 +104,20 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
     for i, c in enumerate(path, 1):
         gs = drv.gs()
         if gs.overworld.map_id in stop_map_ids:
-            print(f"[{label}] step {i}: reached target map "
-                  f"0x{gs.overworld.map_id:02x}", flush=True)
+            print(f"[{label}] step {i}: reached target map 0x{gs.overworld.map_id:02x}", flush=True)
             return "stop"
-        if (gs.overworld.map_id in blackout_map_ids
-                and gs.overworld.map_id != start_map):
+        if gs.overworld.map_id in blackout_map_ids and gs.overworld.map_id != start_map:
             print(f"[{label}] blackout detected at step {i}", flush=True)
             return "blackout"
         if gs.battle.active:
             drv.resolve_battle()
             if drv.gs().overworld.map_id in blackout_map_ids:
-                print(f"[{label}] blackout after battle at step {i}",
-                      flush=True)
+                print(f"[{label}] blackout after battle at step {i}", flush=True)
                 return "blackout"
         if drv.gs().party.mons and drv.gs().party.mons[0].hp == 0:
             print(f"[{label}] FAINTED at step {i}", flush=True)
             return "fainted"
-        before = (drv.gs().overworld.x, drv.gs().overworld.y,
-                  drv.gs().overworld.map_id)
+        before = (drv.gs().overworld.x, drv.gs().overworld.y, drv.gs().overworld.map_id)
         # Trainer sight-line approach locks joypad while the trainer
         # sprite walks toward us. Pressing directions during that
         # window is wasted; idle the emulator so the approach can
@@ -122,8 +126,7 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
             drv.idle(120)
             continue
         drv.press(DIR_CHAR[c])
-        after = (drv.gs().overworld.x, drv.gs().overworld.y,
-                 drv.gs().overworld.map_id)
+        after = (drv.gs().overworld.x, drv.gs().overworld.y, drv.gs().overworld.map_id)
         if after == before and not drv.gs().battle.active:
             # Stalled. Most likely a trainer pre-battle dialog — those
             # absorb directional input silently. Mash A until either a
@@ -137,16 +140,14 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
                 if drv.joy_locked():
                     drv.idle(120)
                     break
-                nxt = (drv.gs().overworld.x, drv.gs().overworld.y,
-                       drv.gs().overworld.map_id)
+                nxt = (drv.gs().overworld.x, drv.gs().overworld.y, drv.gs().overworld.map_id)
                 if nxt != before:
                     break
         # Track xy history; if the player has been pinned within a
         # 1-tile radius for the last ``stall_window`` steps, the
         # pre-planned path has desynced and we should let the caller
         # re-A*.
-        cur = (drv.gs().overworld.x, drv.gs().overworld.y,
-               drv.gs().overworld.map_id)
+        cur = (drv.gs().overworld.x, drv.gs().overworld.y, drv.gs().overworld.map_id)
         pos_history.append(cur)
         if len(pos_history) > stall_window:
             pos_history.pop(0)
@@ -154,13 +155,14 @@ def walk_path(drv, path: str, *, label: str, stop_map_ids=(),
             xs = {p[0] for p in pos_history}
             ys = {p[1] for p in pos_history}
             maps = {p[2] for p in pos_history}
-            if (len(maps) == 1
-                    and max(xs) - min(xs) <= 1
-                    and max(ys) - min(ys) <= 1):
-                print(f"[{label}] step {i}: stuck within "
-                      f"({min(xs)}-{max(xs)},{min(ys)}-{max(ys)}) for "
-                      f"{stall_window} steps — bailing for caller "
-                      f"re-plan", flush=True)
+            if len(maps) == 1 and max(xs) - min(xs) <= 1 and max(ys) - min(ys) <= 1:
+                print(
+                    f"[{label}] step {i}: stuck within "
+                    f"({min(xs)}-{max(xs)},{min(ys)}-{max(ys)}) for "
+                    f"{stall_window} steps — bailing for caller "
+                    f"re-plan",
+                    flush=True,
+                )
                 return "stalled"
     return "done"
 
@@ -180,12 +182,13 @@ def _option_b_topup(session) -> None:
         _OFFSET_MOVES,
         _OFFSET_PP,
     )
+
     mem = session._pyboy.memory  # type: ignore[attr-defined]
     base = session.symbols.addr_of("wPartyMons")
 
     def put_be16(off: int, val: int) -> None:
-        mem[base + off] = (val >> 8) & 0xff
-        mem[base + off + 1] = val & 0xff
+        mem[base + off] = (val >> 8) & 0xFF
+        mem[base + off + 1] = val & 0xFF
 
     # Over-boost stats to ensure Vine Whip 1-shots Brock's Onix even
     # if special computation takes a random hit or Vine Whip burns PP
@@ -223,12 +226,14 @@ def _option_b_topup(session) -> None:
     # battle XP gain (~100-300 from Brock's team) doesn't cross L51
     # threshold and retrigger a stat recalc mid-battle.
     xp = 150000
-    mem[base + 14] = (xp >> 16) & 0xff
-    mem[base + 15] = (xp >> 8) & 0xff
-    mem[base + 16] = xp & 0xff
+    mem[base + 14] = (xp >> 16) & 0xFF
+    mem[base + 15] = (xp >> 8) & 0xFF
+    mem[base + 16] = xp & 0xFF
     m = session.read_game_state().party.mons[0]
-    print(f"  [option-b] topped up to L{m.level} HP{m.hp}/{m.max_hp} "
-          f"moves={list(m.moves)}", flush=True)
+    print(
+        f"  [option-b] topped up to L{m.level} HP{m.hp}/{m.max_hp} moves={list(m.moves)}",
+        flush=True,
+    )
 
 
 def _activate_repel(drv, steps: int = 255) -> None:
@@ -240,15 +245,15 @@ def _activate_repel(drv, steps: int = 255) -> None:
     Bulbasaur up before Viridian Pokécenter exists as a heal option."""
     try:
         base = drv.sym.addr_of("wRepelRemainingSteps")
-        drv.mem[base] = steps & 0xff
+        drv.mem[base] = steps & 0xFF
         print(f"  [repel] wRepelRemainingSteps = {steps}", flush=True)
     except (AttributeError, LookupError, TypeError) as e:
         print(f"  [repel] failed to set: {e}", flush=True)
 
 
-def _pathfind_and_walk(drv, session, outdir, goal_xy: str, label: str,
-                       rom: str, sym: str, sha1: str,
-                       stop_map_ids=()) -> None:
+def _pathfind_and_walk(
+    drv, session, outdir, goal_xy: str, label: str, rom: str, sym: str, sha1: str, stop_map_ids=()
+) -> None:
     """Save state → run A* pathfinder → walk the returned direction string,
     resolving battles as they fire. Used by the viridian navigator's
     Route 1 fallback when the hand-coded zig-zag paths get desynced by
@@ -262,10 +267,15 @@ def _pathfind_and_walk(drv, session, outdir, goal_xy: str, label: str,
     walk_path(drv, path, label=label, stop_map_ids=stop_map_ids)
 
 
-def navigate_to_viridian_with_retry(drv: rtb.Driver, outdir: Path,
-                                    rom: str, sym: str, sha1: str,
-                                    session: Session,
-                                    max_attempts: int = 20) -> bool:
+def navigate_to_viridian_with_retry(
+    drv: rtb.Driver,
+    outdir: Path,
+    rom: str,
+    sym: str,
+    sha1: str,
+    session: Session,
+    max_attempts: int = 20,
+) -> bool:
     """Drive from wherever we are (lab exit, Pallet, Route 1, or post-
     blackout Red's House) to Viridian City, retrying after blackouts.
 
@@ -274,15 +284,18 @@ def navigate_to_viridian_with_retry(drv: rtb.Driver, outdir: Path,
     eventually one threads the needle through Route 1 without KOing
     Bulbasaur.
     """
-    M_PALLET, M_VIRIDIAN, M_ROUTE_1 = 0x00, 0x01, 0x0c
+    M_PALLET, M_VIRIDIAN, M_ROUTE_1 = 0x00, 0x01, 0x0C
     M_REDS_1F, M_REDS_2F = 0x25, 0x26
     M_OAKS_LAB = 0x28
 
     for attempt in range(max_attempts):
         gs = drv.gs()
-        print(f"  [viridian attempt {attempt+1}/{max_attempts}] "
-              f"map=0x{gs.overworld.map_id:02x} "
-              f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+        print(
+            f"  [viridian attempt {attempt + 1}/{max_attempts}] "
+            f"map=0x{gs.overworld.map_id:02x} "
+            f"xy=({gs.overworld.x},{gs.overworld.y})",
+            flush=True,
+        )
 
         if gs.overworld.map_id == M_VIRIDIAN:
             return True
@@ -320,9 +333,14 @@ def navigate_to_viridian_with_retry(drv: rtb.Driver, outdir: Path,
             if map_id == M_ROUTE_1:
                 # Walk the Route 1 map to its north warp into Viridian.
                 _pathfind_and_walk(
-                    drv, session, outdir,
-                    goal_xy="10,0", label=f"route1_a_star_{attempt}",
-                    rom=rom, sym=sym, sha1=sha1,
+                    drv,
+                    session,
+                    outdir,
+                    goal_xy="10,0",
+                    label=f"route1_a_star_{attempt}",
+                    rom=rom,
+                    sym=sym,
+                    sha1=sha1,
                     stop_map_ids=(M_VIRIDIAN,),
                 )
                 # A* goal at (10, 0) lands ON the northern edge but the
@@ -340,9 +358,14 @@ def navigate_to_viridian_with_retry(drv: rtb.Driver, outdir: Path,
                 if (px, py) == (12, 11):
                     drv.press("down")
                 _pathfind_and_walk(
-                    drv, session, outdir,
-                    goal_xy="10,0", label=f"pallet_a_star_{attempt}",
-                    rom=rom, sym=sym, sha1=sha1,
+                    drv,
+                    session,
+                    outdir,
+                    goal_xy="10,0",
+                    label=f"pallet_a_star_{attempt}",
+                    rom=rom,
+                    sym=sym,
+                    sha1=sha1,
                     stop_map_ids=(M_ROUTE_1,),
                 )
                 for _ in range(4):
@@ -359,9 +382,12 @@ def navigate_to_viridian_with_retry(drv: rtb.Driver, outdir: Path,
         if gs.overworld.map_id == M_VIRIDIAN:
             return True
 
-    print("  FAILED: could not reach Viridian after "
-          f"{max_attempts} attempts; last map="
-          f"0x{drv.gs().overworld.map_id:02x}", flush=True)
+    print(
+        "  FAILED: could not reach Viridian after "
+        f"{max_attempts} attempts; last map="
+        f"0x{drv.gs().overworld.map_id:02x}",
+        flush=True,
+    )
     return False
 
 
@@ -382,11 +408,11 @@ def _run_session(
     sha1: str,
     outdir: Path,
 ) -> int:
-
     # Phase 1: use walkthrough.py + run_to_brock's verified phases to
     # reach Viridian and get onto Route 2.
     wt_drv = wt.WalkthroughDriver(
-        session=session, outdir=outdir / "walkthrough_frames",
+        session=session,
+        outdir=outdir / "walkthrough_frames",
     )
     drv = rtb.Driver(session)
 
@@ -403,9 +429,10 @@ def _run_session(
             # Route 1 because RNG-dictated wild encounters grind Bulbasaur
             # down. The smart AI + blackout retry below survives either
             # ROM.
-            ("pallet_to_viridian",
-             lambda: navigate_to_viridian_with_retry(
-                 drv, outdir, rom, sym, sha1, session)),
+            (
+                "pallet_to_viridian",
+                lambda: navigate_to_viridian_with_retry(drv, outdir, rom, sym, sha1, session),
+            ),
             ("viridian_to_route2", drv.run_viridian_to_route2),
         ]:
             print(f"\n=== phase: {name} ===", flush=True)
@@ -422,9 +449,9 @@ def _run_session(
             class _SkippedResult:
                 final_level = 0
                 learned_target_move = False
+
             result = _SkippedResult()
-            print("  [grind] skipped (--skip-grind); relying on Option-B",
-                  flush=True)
+            print("  [grind] skipped (--skip-grind); relying on Option-B", flush=True)
             # Step the emulator a few frames so we're not mid-anything
             # when Option-B pokes the party struct.
             session.step(120, render=True)
@@ -434,7 +461,9 @@ def _run_session(
             result = grind.grind_to(
                 session,
                 outdir=outdir,
-                rom=rom, sym=sym, sha1=sha1,
+                rom=rom,
+                sym=sym,
+                sha1=sha1,
                 target_level=13,
                 target_move_id=grind.MOVE_VINE_WHIP,
                 max_battles=80,
@@ -447,12 +476,10 @@ def _run_session(
         # fallback pattern as blue_forest_to_brock.py.
         need_topup = True
         if not args.skip_grind and not args.legacy_grind:
-            need_topup = (not result.learned_target_move
-                          or result.final_level < 13)
+            need_topup = not result.learned_target_move or result.final_level < 13
         if need_topup:
             if not args.skip_grind:
-                print("  [grind] applying Option-B top-up to "
-                      "L13 + Vine Whip", flush=True)
+                print("  [grind] applying Option-B top-up to L13 + Vine Whip", flush=True)
             # Make sure we're out of any lingering battle before RAM-
             # poking the party struct. If the grinder bailed with
             # heal_failed the engine can still be sitting on a
@@ -463,11 +490,14 @@ def _run_session(
                 gs = session.read_game_state()
                 if not gs.battle.active:
                     break
-                session.press("b"); session.step(30, render=True)
+                session.press("b")
+                session.step(30, render=True)
                 if not session.read_game_state().battle.active:
                     break
-                session.press("down"); session.step(20, render=True)
-                session.press("a"); session.step(30, render=True)
+                session.press("down")
+                session.step(20, render=True)
+                session.press("a")
+                session.step(30, render=True)
             _option_b_topup(session)
         save_milestone(session, outdir, "grind_complete")
         if args.stop_after == "grind_complete":
@@ -477,8 +507,11 @@ def _run_session(
     if args.skip_to in ("start", "viridian", "grind", "forest"):
         print("\n=== phase: route2_to_forest ===", flush=True)
         gs0 = drv.gs()
-        print(f"  r2 entry: map=0x{gs0.overworld.map_id:02x} "
-              f"xy=({gs0.overworld.x},{gs0.overworld.y})", flush=True)
+        print(
+            f"  r2 entry: map=0x{gs0.overworld.map_id:02x} "
+            f"xy=({gs0.overworld.x},{gs0.overworld.y})",
+            flush=True,
+        )
         # rtb's hand-coded ROUTE2_TO_FOREST_GATE_PATH starts from (8, 71)
         # and desyncs on any other tile — plus the reposition-to-(8,71)
         # A* itself intermittently hangs on problem Route 2 tiles (e.g.
@@ -506,23 +539,21 @@ def _run_session(
                 drv.press(d)
                 after = (drv.gs().overworld.x, drv.gs().overworld.y)
                 if after != before:
-                    print(f"  [r2→gate] nudged from {start} -> {after}",
-                          flush=True)
+                    print(f"  [r2→gate] nudged from {start} -> {after}", flush=True)
                     break
             else:
-                print(f"  [r2→gate] nudge could not move from {start}; "
-                      f"map=0x{drv.gs().overworld.map_id:02x}",
-                      flush=True)
+                print(
+                    f"  [r2→gate] nudge could not move from {start}; "
+                    f"map=0x{drv.gs().overworld.map_id:02x}",
+                    flush=True,
+                )
         seed = outdir / "_r2_to_gate.state"
         seed.parent.mkdir(parents=True, exist_ok=True)
         seed.write_bytes(session.save_state())
         try:
-            r2_path = run_pathfinder(seed, "3,44",
-                                      outdir / "_r2_to_gate.txt",
-                                      rom, sym, sha1)
+            r2_path = run_pathfinder(seed, "3,44", outdir / "_r2_to_gate.txt", rom, sym, sha1)
             print(f"  route2→(3,44) A*: {len(r2_path)} steps", flush=True)
-            walk_path(drv, r2_path, label="route2_to_gate",
-                       stop_map_ids=(0x32, 0x33))
+            walk_path(drv, r2_path, label="route2_to_gate", stop_map_ids=(0x32, 0x33))
         except RuntimeError as e:
             print(f"  route2 A* failed ({e})", flush=True)
         # One UP step to trigger the south-gate warp.
@@ -544,12 +575,9 @@ def _run_session(
             gate_seed = outdir / "_gate_cross.state"
             gate_seed.write_bytes(session.save_state())
             try:
-                gpath = run_pathfinder(gate_seed, "5,0",
-                                        outdir / "_gate_cross.txt",
-                                        rom, sym, sha1)
+                gpath = run_pathfinder(gate_seed, "5,0", outdir / "_gate_cross.txt", rom, sym, sha1)
                 print(f"  south_gate A*: {len(gpath)} steps", flush=True)
-                walk_path(drv, gpath, label="south_gate",
-                           stop_map_ids=(0x33,))
+                walk_path(drv, gpath, label="south_gate", stop_map_ids=(0x33,))
             except RuntimeError as e:
                 print(f"  south_gate pathfind failed: {e}", flush=True)
             for _ in range(6):
@@ -599,8 +627,7 @@ def _run_session(
                         break
                 attempts += 1
                 continue
-            walk_path(drv, path, label=f"forest{attempts}",
-                       stop_map_ids=(0x2F,))
+            walk_path(drv, path, label=f"forest{attempts}", stop_map_ids=(0x2F,))
             gs = drv.gs()
             if gs.overworld.map_id == 0x33 and gs.overworld.y == 0:
                 for _ in range(3):
@@ -622,31 +649,24 @@ def _run_session(
             ngate_seed = outdir / "_ngate.state"
             ngate_seed.write_bytes(session.save_state())
             try:
-                npath = run_pathfinder(ngate_seed, "5,0",
-                                        outdir / "_ngate.txt",
-                                        rom, sym, sha1)
+                npath = run_pathfinder(ngate_seed, "5,0", outdir / "_ngate.txt", rom, sym, sha1)
                 print(f"  north_gate A*: {len(npath)} steps", flush=True)
-                walk_path(drv, npath, label="north_gate",
-                           stop_map_ids=(0x0d,))
+                walk_path(drv, npath, label="north_gate", stop_map_ids=(0x0D,))
             except RuntimeError as e:
                 print(f"  north_gate pathfind failed: {e}", flush=True)
             for _ in range(6):
-                if drv.gs().overworld.map_id == 0x0d:
+                if drv.gs().overworld.map_id == 0x0D:
                     break
                 drv.press("up")
         session.step(60, render=True)
         # Route 2 north → Pewter border (10, 0).
-        if drv.gs().overworld.map_id == 0x0d:
+        if drv.gs().overworld.map_id == 0x0D:
             seed = outdir / "_r2n.state"
             seed.write_bytes(session.save_state())
             try:
-                rpath = run_pathfinder(seed, "10,0",
-                                        outdir / "_r2n.txt",
-                                        rom, sym, sha1)
-                print(f"  route2n→pewter A*: {len(rpath)} steps",
-                      flush=True)
-                walk_path(drv, rpath, label="r2n",
-                           stop_map_ids=(0x02,))
+                rpath = run_pathfinder(seed, "10,0", outdir / "_r2n.txt", rom, sym, sha1)
+                print(f"  route2n→pewter A*: {len(rpath)} steps", flush=True)
+                walk_path(drv, rpath, label="r2n", stop_map_ids=(0x02,))
             except RuntimeError as e:
                 print(f"  pewter pathfind failed: {e}", flush=True)
             for _ in range(4):
@@ -662,12 +682,9 @@ def _run_session(
             seed = outdir / "_pewter_to_gym.state"
             seed.write_bytes(session.save_state())
             try:
-                path = run_pathfinder(seed, "16,18",
-                                       outdir / "_pewter_to_gym.txt",
-                                       rom, sym, sha1)
+                path = run_pathfinder(seed, "16,18", outdir / "_pewter_to_gym.txt", rom, sym, sha1)
                 print(f"  pewter→gym A*: {len(path)} steps", flush=True)
-                walk_path(drv, path, label="pgym",
-                           stop_map_ids=(0x36,))
+                walk_path(drv, path, label="pgym", stop_map_ids=(0x36,))
                 for _ in range(4):
                     if drv.gs().overworld.map_id == 0x36:
                         break
@@ -684,10 +701,12 @@ def _run_session(
 
     gs = session.read_game_state()
     print("\n=== FINAL ===", flush=True)
-    print(f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"badges=0x{gs.progress.badges_raw:02x} "
-          f"party[0]=L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
-          flush=True)
+    print(
+        f"map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"badges=0x{gs.progress.badges_raw:02x} "
+        f"party[0]=L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp}",
+        flush=True,
+    )
 
     if got_badge:
         print("\nBOULDER BADGE OBTAINED!", flush=True)
@@ -723,39 +742,59 @@ def _close_session(
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", default="walkthrough_badge")
-    p.add_argument("--skip-to", choices=[
-        "start", "viridian", "grind", "forest", "pewter", "brock"
-    ], default="start", help="resume from a specific phase")
+    p.add_argument(
+        "--skip-to",
+        choices=["start", "viridian", "grind", "forest", "pewter", "brock"],
+        default="start",
+        help="resume from a specific phase",
+    )
     p.add_argument(
         "--start-state",
         default=None,
         help="optional .state snapshot to load before the selected phase",
     )
-    p.add_argument("--stop-after", choices=[
-        "intro", "exit_house", "oak_intercept", "pick_starter",
-        "rival_battle", "pallet_to_viridian", "viridian_to_route2",
-        "grind_complete", "route2_to_forest", "forest_entry",
-        "forest_exit", "pewter_entry", "after_brock",
-    ], default=None, help="stop after saving the named milestone")
     p.add_argument(
-        "--legacy-grind", action="store_true",
-        help="Use the old level_up.py grinder instead of the heal-loop "
-             "grinder in grind.py (diagnostic fallback).",
+        "--stop-after",
+        choices=[
+            "intro",
+            "exit_house",
+            "oak_intercept",
+            "pick_starter",
+            "rival_battle",
+            "pallet_to_viridian",
+            "viridian_to_route2",
+            "grind_complete",
+            "route2_to_forest",
+            "forest_entry",
+            "forest_exit",
+            "pewter_entry",
+            "after_brock",
+        ],
+        default=None,
+        help="stop after saving the named milestone",
     )
     p.add_argument(
-        "--skip-grind", action="store_true",
+        "--legacy-grind",
+        action="store_true",
+        help="Use the old level_up.py grinder instead of the heal-loop "
+        "grinder in grind.py (diagnostic fallback).",
+    )
+    p.add_argument(
+        "--skip-grind",
+        action="store_true",
         help="Skip Route 2 grind and jump straight to Option-B top-up "
-             "(L13 Bulba + Vine Whip via RAM poke). Lets forest/Pewter/"
-             "Brock phases be validated without paying the 17-minute "
-             "grind cost when the grind is known-blocked (e.g. on Blue "
-             "where heal desyncs at (5, 48)).",
+        "(L13 Bulba + Vine Whip via RAM poke). Lets forest/Pewter/"
+        "Brock phases be validated without paying the 17-minute "
+        "grind cost when the grind is known-blocked (e.g. on Blue "
+        "where heal desyncs at (5, 48)).",
     )
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
     sha1 = os.environ.get(
-        "POKERED_ROM_SHA1", "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "POKERED_ROM_SHA1",
+        "e1deed63080bc24cad5fba18ecb3184f905d16d4",
     )
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)

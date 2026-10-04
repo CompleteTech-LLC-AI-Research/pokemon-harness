@@ -31,6 +31,7 @@ def _pathfind(state_bytes: bytes, goal_xy: tuple[int, int]) -> str | None:
     as bytes, writes to a temp file, invokes the pathfinder, returns the
     path string or None if no path found."""
     import tempfile
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".state") as tf:
         tf.write(state_bytes)
         tf_path = tf.name
@@ -38,12 +39,21 @@ def _pathfind(state_bytes: bytes, goal_xy: tuple[int, int]) -> str | None:
     try:
         env = dict(os.environ)
         r = subprocess.run(
-            [sys.executable, "-u",
-             str(Path(__file__).parent / "path_from_tiles.py"),
-             "--state", tf_path,
-             "--goal-xy", f"{goal_xy[0]},{goal_xy[1]}",
-             "--save-path-to", out_path],
-            env=env, capture_output=True, text=True, timeout=30,
+            [
+                sys.executable,
+                "-u",
+                str(Path(__file__).parent / "path_from_tiles.py"),
+                "--state",
+                tf_path,
+                "--goal-xy",
+                f"{goal_xy[0]},{goal_xy[1]}",
+                "--save-path-to",
+                out_path,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
             check=False,
         )
         if r.returncode != 0:
@@ -149,8 +159,9 @@ def nav_to_route2_grass(drv, max_steps: int = 100) -> bool:
             continue
         if gs.overworld.map_id == M_PALLET:
             # Blackout went to Pallet — no blackout-dest yet. Bail.
-            print("    ERROR: blackout went to Pallet, not Viridian PC",
-                  file=sys.stderr, flush=True)
+            print(
+                "    ERROR: blackout went to Pallet, not Viridian PC", file=sys.stderr, flush=True
+            )
             return False
         if gs.overworld.map_id == M_VIRIDIAN:
             # Use the pathfinder to get from current position to the
@@ -158,8 +169,7 @@ def nav_to_route2_grass(drv, max_steps: int = 100) -> bool:
             # the map-edge transition to Route 2.
             path = _pathfind(drv.s.save_state(), (18, 0))
             if path is None:
-                print(f"    pathfinder failed from ({gs.overworld.x},{gs.overworld.y})",
-                      flush=True)
+                print(f"    pathfinder failed from ({gs.overworld.x},{gs.overworld.y})", flush=True)
                 return False
             dir_map = {"u": "up", "d": "down", "l": "left", "r": "right"}
             for c in path:
@@ -180,18 +190,30 @@ def nav_to_route2_grass(drv, max_steps: int = 100) -> bool:
             if gs.overworld.y > 52 or gs.overworld.x > 5:
                 # Use the first portion of ROUTE2_TO_FOREST_GATE_PATH
                 # (up×9, left, up×5, left×2, up, left, up×5) lands at (4, 51)
-                short_path = ["up"]*9 + ["left"] + ["up"]*5 + ["left"]*2 + ["up"] + ["left"] + ["up"]*5
+                short_path = (
+                    ["up"] * 9
+                    + ["left"]
+                    + ["up"] * 5
+                    + ["left"] * 2
+                    + ["up"]
+                    + ["left"]
+                    + ["up"] * 5
+                )
                 for d in short_path:
                     gs = drv.gs()
-                    if gs.battle.active: drv.resolve_battle(); break
-                    if gs.overworld.y <= 52 and gs.overworld.x <= 5: break
+                    if gs.battle.active:
+                        drv.resolve_battle()
+                        break
+                    if gs.overworld.y <= 52 and gs.overworld.x <= 5:
+                        break
                     drv.press(d)
                 continue
             # In grass area
             return True
         # Unknown map
-        print(f"    unknown map 0x{gs.overworld.map_id:02x}, pressing A",
-              file=sys.stderr, flush=True)
+        print(
+            f"    unknown map 0x{gs.overworld.map_id:02x}, pressing A", file=sys.stderr, flush=True
+        )
         drv.press("a")
     return False
 
@@ -217,7 +239,10 @@ def grind(drv, target_level: int = 13, max_blackouts: int = 20) -> int:
             return 0
         if mon.level >= target_level:
             return mon.level
-        print(f"  L{mon.level} HP{mon.hp}/{mon.max_hp} battles={battles} blackouts={blackouts}", flush=True)
+        print(
+            f"  L{mon.level} HP{mon.hp}/{mon.max_hp} battles={battles} blackouts={blackouts}",
+            flush=True,
+        )
         if not nav_to_route2_grass(drv):
             print("  failed to reach grass", flush=True)
             return drv.gs().party.mons[0].level
@@ -255,7 +280,8 @@ def main() -> int:
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
     sha1 = os.environ.get(
-        "POKERED_ROM_SHA1", "e1deed63080bc24cad5fba18ecb3184f905d16d4",
+        "POKERED_ROM_SHA1",
+        "e1deed63080bc24cad5fba18ecb3184f905d16d4",
     )
     s = Session.from_files(rom, sym, expected_rom_sha1=sha1)
     register_default_hooks(s)
@@ -263,12 +289,18 @@ def main() -> int:
     s.step(60, render=True)
     drv = rtb.Driver(s)
     gs = drv.gs()
-    print(f"start: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"L{gs.party.mons[0].level}", flush=True)
+    print(
+        f"start: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"L{gs.party.mons[0].level}",
+        flush=True,
+    )
     final_level = grind(drv, args.target_level, args.max_blackouts)
     gs = drv.gs()
-    print(f"\nFINAL: L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp} "
-          f"moves={list(gs.party.mons[0].moves)} pp={list(gs.party.mons[0].pp)}", flush=True)
+    print(
+        f"\nFINAL: L{gs.party.mons[0].level} HP{gs.party.mons[0].hp}/{gs.party.mons[0].max_hp} "
+        f"moves={list(gs.party.mons[0].moves)} pp={list(gs.party.mons[0].pp)}",
+        flush=True,
+    )
     if args.save_to:
         Path(args.save_to).write_bytes(s.save_state())
         print(f"saved {args.save_to}", flush=True)

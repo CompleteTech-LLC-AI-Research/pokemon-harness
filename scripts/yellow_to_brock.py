@@ -47,18 +47,19 @@ from pokered_harness.state.party import (
 M_PALLET = 0x00
 M_VIRIDIAN = 0x01
 M_PEWTER = 0x02
-M_ROUTE_1 = 0x0c
-M_ROUTE_2 = 0x0d
+M_ROUTE_1 = 0x0C
+M_ROUTE_2 = 0x0D
 M_REDS_1F = 0x25
 M_REDS_2F = 0x26
 M_OAKS_LAB = 0x28
 M_VIRIDIAN_FOREST_SOUTH_GATE = 0x32
 M_VIRIDIAN_FOREST = 0x33
-M_VIRIDIAN_FOREST_NORTH_GATE = 0x2f
+M_VIRIDIAN_FOREST_NORTH_GATE = 0x2F
 M_PEWTER_GYM = 0x36
 
 
 # --- Phase: intro ---------------------------------------------------------
+
 
 def run_intro_to_bedroom(session: Session) -> None:
     """Boot → title screen → NEW GAME → Oak's intro → default name for
@@ -101,12 +102,13 @@ def run_intro_to_bedroom(session: Session) -> None:
         # wMaxMenuItem==3 as the "menu is freshly open" signal.
         cmi = mem[cmi_addr]
         if mmi == 3 and cmi == 0 and not menu_picked and presets_picked < 2:
-            session.press("down", duration=6); session.step(30, render=True)
-            session.press("a", duration=6); session.step(60, render=True)
+            session.press("down", duration=6)
+            session.step(30, render=True)
+            session.press("a", duration=6)
+            session.step(60, render=True)
             presets_picked += 1
             menu_picked = True
-            print(f"  intro: picked preset #{presets_picked} at A-press {i}",
-                  flush=True)
+            print(f"  intro: picked preset #{presets_picked} at A-press {i}", flush=True)
             continue
         # Re-arm pick detection once the menu is no longer showing its
         # first-open state (cursor moved off top by us, or menu closed
@@ -116,7 +118,8 @@ def run_intro_to_bedroom(session: Session) -> None:
         # Text advances slowly — step 60+ ticks per A-press so each
         # press actually completes a line rather than being eaten as
         # fast-forward.
-        session.press("a", duration=6); session.step(60, render=True)
+        session.press("a", duration=6)
+        session.step(60, render=True)
         # After both presets, a spawn animation lands Red at (3, 6)
         # facing UP. The tile directly north is the SNES (hidden event
         # at (3, 5)), so *any* A-press re-triggers the "YELLOW is
@@ -129,16 +132,19 @@ def run_intro_to_bedroom(session: Session) -> None:
         gs = session.read_game_state()
         if gs.overworld.map_id == M_REDS_2F:
             before = (gs.overworld.x, gs.overworld.y)
-            session.press("up", duration=6); session.step(30, render=True)
+            session.press("up", duration=6)
+            session.step(30, render=True)
             g2 = session.read_game_state()
-            if (g2.overworld.x, g2.overworld.y) != before \
-                    and g2.overworld.map_id == M_REDS_2F:
-                session.press("down", duration=6); session.step(30, render=True)
+            if (g2.overworld.x, g2.overworld.y) != before and g2.overworld.map_id == M_REDS_2F:
+                session.press("down", duration=6)
+                session.step(30, render=True)
                 gs = session.read_game_state()
-                print(f"  intro: control confirmed at "
-                      f"({gs.overworld.x},{gs.overworld.y})", flush=True)
+                print(
+                    f"  intro: control confirmed at ({gs.overworld.x},{gs.overworld.y})", flush=True
+                )
                 return
-        session.press("a", duration=6); session.step(30, render=True)
+        session.press("a", duration=6)
+        session.step(30, render=True)
     # Post-speech: use B to close the final dialog (spawn-in text like
     # "YELLOW is playing the SNES!") without re-triggering it on the
     # next press. Mash B until motion probing succeeds.
@@ -146,24 +152,27 @@ def run_intro_to_bedroom(session: Session) -> None:
         gs = session.read_game_state()
         if gs.overworld.map_id == M_REDS_2F:
             before = (gs.overworld.x, gs.overworld.y)
-            session.press("down", duration=6); session.step(60, render=True)
+            session.press("down", duration=6)
+            session.step(60, render=True)
             g2 = session.read_game_state()
-            if (g2.overworld.x, g2.overworld.y) != before \
-                    and g2.overworld.map_id == M_REDS_2F:
-                session.press("up", duration=6); session.step(60, render=True)
+            if (g2.overworld.x, g2.overworld.y) != before and g2.overworld.map_id == M_REDS_2F:
+                session.press("up", duration=6)
+                session.step(60, render=True)
                 gs = session.read_game_state()
-                print(f"  intro: control at "
-                      f"({gs.overworld.x},{gs.overworld.y})", flush=True)
+                print(f"  intro: control at ({gs.overworld.x},{gs.overworld.y})", flush=True)
                 return
-        session.press("b", duration=6); session.step(60, render=True)
+        session.press("b", duration=6)
+        session.step(60, render=True)
     session._pyboy.screen.image.save("walkthrough_yellow/_intro_fail.png")  # type: ignore[attr-defined]
     gs = session.read_game_state()
     raise RuntimeError(
         f"intro: no control after B-mash close "
-        f"(map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}))")
+        f"(map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y}))"
+    )
 
 
 # --- Phase: exit house ---------------------------------------------------
+
 
 def run_exit_house(session: Session) -> None:
     """From bedroom (we're ~ (3, 7) after the control probe) → stairs →
@@ -211,11 +220,14 @@ def run_exit_house(session: Session) -> None:
             break
         session.step(30, render=True)
     gs = session.read_game_state()
-    print(f"  exit_house: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    print(
+        f"  exit_house: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})",
+        flush=True,
+    )
 
 
 # --- Phase: Oak intercept ------------------------------------------------
+
 
 def run_oak_intercept(session: Session) -> None:
     """From Pallet (5, 6) outside Red's front door, walk to the Route 1
@@ -258,11 +270,14 @@ def run_oak_intercept(session: Session) -> None:
         session.press("a", duration=6)
         session.step(90, render=True)
     gs = session.read_game_state()
-    print(f"  oak_intercept: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    print(
+        f"  oak_intercept: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})",
+        flush=True,
+    )
 
 
 # --- Phase: receive Pikachu ----------------------------------------------
+
 
 def run_receive_pikachu(session: Session) -> None:
     """Oak's lab intro → receive Pikachu.
@@ -290,14 +305,17 @@ def run_receive_pikachu(session: Session) -> None:
     for _ in range(150):
         if mem[script_addr] >= 6:
             break
-        session.press("a", duration=6); session.step(120, render=True)
+        session.press("a", duration=6)
+        session.step(120, render=True)
 
     # Walk to (7, 4) below the Eevee Pokeball, face UP, press A. Going
     # RIGHT directly from (5, 3) is blocked by Oak's counter — have to
     # drop DOWN to y=4 first.
     for d in ["down", "right", "right", "up"]:
-        session.press(d, duration=6); session.step(60, render=True)
-    session.press("a", duration=6); session.step(90, render=True)
+        session.press(d, duration=6)
+        session.step(60, render=True)
+    session.press("a", duration=6)
+    session.step(90, render=True)
 
     # Mash A through rival-shoves-us, rival-takes-Eevee, auto-walk-to-
     # Oak, Pikachu dialog. After party.count == 1, still press A a few
@@ -307,17 +325,20 @@ def run_receive_pikachu(session: Session) -> None:
         if gs.party.count > 0 and gs.party.mons[0].species != 0:
             m = gs.party.mons[0]
             if m.level > 0 and m.max_hp > 0:
-                print(f"  receive_pikachu: L{m.level} species=0x{m.species:02x} "
-                      f"HP{m.hp}/{m.max_hp} moves={list(m.moves)} "
-                      f"after {i} A-presses (script={mem[script_addr]})",
-                      flush=True)
+                print(
+                    f"  receive_pikachu: L{m.level} species=0x{m.species:02x} "
+                    f"HP{m.hp}/{m.max_hp} moves={list(m.moves)} "
+                    f"after {i} A-presses (script={mem[script_addr]})",
+                    flush=True,
+                )
                 return
-        session.press("a", duration=6); session.step(90, render=True)
-    raise RuntimeError("receive_pikachu: party still empty/invalid after "
-                       "300 A-presses")
+        session.press("a", duration=6)
+        session.step(90, render=True)
+    raise RuntimeError("receive_pikachu: party still empty/invalid after 300 A-presses")
 
 
 # --- Phase: rival battle -------------------------------------------------
+
 
 def run_rival_battle(session: Session) -> None:
     """From post-Pikachu state (script=12 RIVAL_CHALLENGES_PLAYER), walk
@@ -354,32 +375,42 @@ def run_rival_battle(session: Session) -> None:
         drv.press("a")
     gs = drv.gs()
     m = gs.party.mons[0] if gs.party.mons else None
-    print(f"  rival_battle: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})"
-          + (f" L={m.level} HP={m.hp}/{m.max_hp}" if m else ""),
-          flush=True)
+    print(
+        f"  rival_battle: map=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y})"
+        + (f" L={m.level} HP={m.hp}/{m.max_hp}" if m else ""),
+        flush=True,
+    )
 
 
 # --- Shared: A* pathfinder via subprocess -------------------------------
+
 
 def run_pathfinder(state_path, goal, out_path, rom, sym, sha1):
     script = Path(__file__).parent / "path_from_tiles.py"
     env = dict(os.environ)
     env.update(
-        POKERED_ROM_PATH=rom, POKERED_SYM_PATH=sym, POKERED_ROM_SHA1=sha1,
+        POKERED_ROM_PATH=rom,
+        POKERED_SYM_PATH=sym,
+        POKERED_ROM_SHA1=sha1,
         PYTHONPATH=str(Path(__file__).parent.parent / "src"),
         PYTHONIOENCODING="utf-8",
     )
-    kw = ["--state", str(state_path), "--save-path-to", str(out_path),
-          "--goal-xy", goal]
-    r = subprocess.run([sys.executable, "-u", str(script), *kw],
-                       env=env, capture_output=True, text=True, check=False)
+    kw = ["--state", str(state_path), "--save-path-to", str(out_path), "--goal-xy", goal]
+    r = subprocess.run(
+        [sys.executable, "-u", str(script), *kw],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if r.returncode != 0:
         raise RuntimeError(f"pathfinder failed: {r.stderr}")
     return out_path.read_text().strip()
 
 
 # --- Option B: RAM-boost Pikachu so Brock is winnable -------------------
+
 
 def boost_pikachu(session: Session) -> None:
     """Force lead slot to a comfortably-over-Brock L50 Pikachu. Same
@@ -391,8 +422,8 @@ def boost_pikachu(session: Session) -> None:
     base = session.symbols.addr_of("wPartyMons")
 
     def put_be16(off: int, val: int) -> None:
-        mem[base + off] = (val >> 8) & 0xff
-        mem[base + off + 1] = val & 0xff
+        mem[base + off] = (val >> 8) & 0xFF
+        mem[base + off + 1] = val & 0xFF
 
     mem[base + _OFFSET_LEVEL] = 50
     put_be16(_OFFSET_HP, 200)
@@ -411,9 +442,9 @@ def boost_pikachu(session: Session) -> None:
     for i, pp in enumerate((15, 40, 30, 30)):
         mem[base + _OFFSET_PP + i] = pp
     xp = 150000
-    mem[base + 14] = (xp >> 16) & 0xff
-    mem[base + 15] = (xp >> 8) & 0xff
-    mem[base + 16] = xp & 0xff
+    mem[base + 14] = (xp >> 16) & 0xFF
+    mem[base + 15] = (xp >> 8) & 0xFF
+    mem[base + 16] = xp & 0xFF
 
     gs = session.read_game_state()
     m = gs.party.mons[0]
@@ -425,8 +456,8 @@ def boost_pikachu(session: Session) -> None:
 
 # --- Phase: exit lab → Viridian -----------------------------------------
 
-def run_pallet_to_viridian(session: Session, outdir: Path,
-                            rom: str, sym: str, sha1: str) -> None:
+
+def run_pallet_to_viridian(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     """Exit Oak's lab, cross Pallet, traverse Route 1 to Viridian City.
 
     Reuses the Blue harness's ``navigate_to_viridian_with_retry`` —
@@ -441,21 +472,29 @@ def run_pallet_to_viridian(session: Session, outdir: Path,
         if gs.overworld.map_id != M_OAKS_LAB:
             break
         if drv.joy_locked():
-            drv.press("a"); continue
+            drv.press("a")
+            continue
         drv.press("down")
     # Lab dumps us at PALLET (5, 12). Nudge up so navigate_to_viridian_
     # with_retry's "step off lab door threshold" heuristic applies.
     session.step(60, render=True)
     gs = drv.gs()
-    print(f"  lab_exit: map=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
+    print(
+        f"  lab_exit: map=0x{gs.overworld.map_id:02x} xy=({gs.overworld.x},{gs.overworld.y})",
+        flush=True,
+    )
     ok = ftb.navigate_to_viridian_with_retry(
-        drv, outdir, rom, sym, sha1, session, max_attempts=20,
+        drv,
+        outdir,
+        rom,
+        sym,
+        sha1,
+        session,
+        max_attempts=20,
     )
     if not ok:
         gs = drv.gs()
-        raise RuntimeError(
-            f"pallet_to_viridian: failed (map=0x{gs.overworld.map_id:02x})")
+        raise RuntimeError(f"pallet_to_viridian: failed (map=0x{gs.overworld.map_id:02x})")
 
 
 # --- Phase: Viridian → Route 2 → Forest → Pewter → Brock ---------------
@@ -463,8 +502,8 @@ def run_pallet_to_viridian(session: Session, outdir: Path,
 # boost values and no changes to the navigation — the Kanto map layout
 # is shared across all three mainline Gen 1 titles.
 
-def run_viridian_to_route2(session: Session, outdir: Path,
-                           rom: str, sym: str, sha1: str) -> None:
+
+def run_viridian_to_route2(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     drv = rtb.Driver(session)
     # Yellow's Viridian has a "sleeping old man" blocking (19, 9) until
     # the catch-training sequence completes. The rtb helper's RAM-poke
@@ -475,8 +514,7 @@ def run_viridian_to_route2(session: Session, outdir: Path,
     if "wViridianCityCurScript" in session.symbols:
         vs_addr = session.symbols.addr_of("wViridianCityCurScript")
         session._pyboy.memory[vs_addr] = 2  # type: ignore[attr-defined]
-        print("  viridian: wViridianCityCurScript = 2 (skip old man block)",
-              flush=True)
+        print("  viridian: wViridianCityCurScript = 2 (skip old man block)", flush=True)
     drv.run_viridian_to_route2()
     session.step(60, render=True)
     if drv.gs().overworld.map_id != M_ROUTE_2:
@@ -484,12 +522,9 @@ def run_viridian_to_route2(session: Session, outdir: Path,
         seed = outdir / "_viridian_to_r2.state"
         seed.write_bytes(session.save_state())
         try:
-            path = run_pathfinder(seed, "17,0",
-                                  outdir / "_viridian_to_r2.txt",
-                                  rom, sym, sha1)
+            path = run_pathfinder(seed, "17,0", outdir / "_viridian_to_r2.txt", rom, sym, sha1)
             print(f"  viridian→r2 A*: {len(path)} steps", flush=True)
-            ftb.walk_path(drv, path, label="vi2r2",
-                          stop_map_ids=(M_ROUTE_2,))
+            ftb.walk_path(drv, path, label="vi2r2", stop_map_ids=(M_ROUTE_2,))
             for _ in range(4):
                 if drv.gs().overworld.map_id == M_ROUTE_2:
                     break
@@ -499,13 +534,11 @@ def run_viridian_to_route2(session: Session, outdir: Path,
 
 
 def run_option_b_boost(session: Session) -> None:
-    print("\n=== RAM boost Pikachu -> L50 + Thunderbolt + Double Kick ===",
-          flush=True)
+    print("\n=== RAM boost Pikachu -> L50 + Thunderbolt + Double Kick ===", flush=True)
     boost_pikachu(session)
 
 
-def run_route2_grind(session: Session, outdir: Path,
-                     rom: str, sym: str, sha1: str) -> None:
+def run_route2_grind(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     """Honest Pikachu grind on Route 2 to L15 (Brock-viable level), with
     Option-B top-up fallback if the grinder bails short.
 
@@ -523,7 +556,9 @@ def run_route2_grind(session: Session, outdir: Path,
     result = grind.grind_to(
         session,
         outdir=outdir,
-        rom=rom, sym=sym, sha1=sha1,
+        rom=rom,
+        sym=sym,
+        sha1=sha1,
         target_level=15,
         target_move_id=None,
         max_battles=120,
@@ -560,27 +595,33 @@ def run_route2_grind(session: Session, outdir: Path,
                 _OFFSET_MOVES,
                 _OFFSET_PP,
             )
+
             mem = session._pyboy.memory  # type: ignore[attr-defined]
             base = session.symbols.addr_of("wPartyMons")
-            mem[base + _OFFSET_MOVES + 0] = 24   # Double Kick (vs Brock)
-            mem[base + _OFFSET_MOVES + 1] = 84   # ThunderShock (vs forest)
-            mem[base + _OFFSET_MOVES + 2] = 39   # Tail Whip
-            mem[base + _OFFSET_MOVES + 3] = 86   # Thunder Wave
+            mem[base + _OFFSET_MOVES + 0] = 24  # Double Kick (vs Brock)
+            mem[base + _OFFSET_MOVES + 1] = 84  # ThunderShock (vs forest)
+            mem[base + _OFFSET_MOVES + 2] = 39  # Tail Whip
+            mem[base + _OFFSET_MOVES + 3] = 86  # Thunder Wave
             mem[base + _OFFSET_PP + 0] = 30
             mem[base + _OFFSET_PP + 1] = 30
             mem[base + _OFFSET_PP + 2] = 30
             mem[base + _OFFSET_PP + 3] = 30
             m = session.read_game_state().party.mons[0]
-            print(f"  [grind] grafted Double Kick + restored moves: "
-                  f"L{m.level} moves={list(m.moves)} pp={list(m.pp)}",
-                  flush=True)
+            print(
+                f"  [grind] grafted Double Kick + restored moves: "
+                f"L{m.level} moves={list(m.moves)} pp={list(m.pp)}",
+                flush=True,
+            )
         except Exception as e:  # noqa: BLE001 - optional RAM graft is best effort
             print(f"  [grind] move-restore failed: {e}", flush=True)
     # Option-B top-up if we didn't reach L15 — same pattern as Red/Blue.
     need_topup = getattr(result, "final_level", 0) < 15
     if need_topup:
-        print(f"  [grind] ended at L{getattr(result, 'final_level', '?')}"
-              f" < 15; applying Option-B top-up", flush=True)
+        print(
+            f"  [grind] ended at L{getattr(result, 'final_level', '?')}"
+            f" < 15; applying Option-B top-up",
+            flush=True,
+        )
         # The grinder bails on heal_failed at a transient mid-engine
         # state (often mid-battle-menu, mid-screen-transition). Pressing
         # B/down/A to clean the menu doesn't restore tileset-collision
@@ -593,34 +634,31 @@ def run_route2_grind(session: Session, outdir: Path,
         # Option-B boost on top of that.
         milestone = outdir / "milestones" / "viridian_to_route2.state"
         if milestone.exists():
-            print(f"  [grind] reloading clean {milestone.name} before boost",
-                  flush=True)
+            print(f"  [grind] reloading clean {milestone.name} before boost", flush=True)
             session.load_state(milestone.read_bytes())
             session.step(60, render=True)
         else:
-            print(f"  [grind] WARN milestone {milestone} missing; "
-                  "boost will run on dirty state", flush=True)
+            print(
+                f"  [grind] WARN milestone {milestone} missing; boost will run on dirty state",
+                flush=True,
+            )
         boost_pikachu(session)
 
 
-def run_route2_to_forest(session: Session, outdir: Path,
-                         rom: str, sym: str, sha1: str) -> None:
+def run_route2_to_forest(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     drv = rtb.Driver(session)
     ftb._activate_repel(drv)
     seed = outdir / "_r2_to_gate.state"
     seed.write_bytes(session.save_state())
     try:
-        path = run_pathfinder(seed, "3,44", outdir / "_r2_to_gate.txt",
-                              rom, sym, sha1)
+        path = run_pathfinder(seed, "3,44", outdir / "_r2_to_gate.txt", rom, sym, sha1)
         print(f"  route2 A*: {len(path)} steps", flush=True)
-        ftb.walk_path(drv, path, label="route2",
-                      stop_map_ids=(0x32, 0x33))
+        ftb.walk_path(drv, path, label="route2", stop_map_ids=(0x32, 0x33))
     except RuntimeError as e:
         # A* can return NO PATH if the player is in a ledge-trapped
         # pocket the model doesn't understand. Blind-nudge south (the
         # gate direction) — ledges let us drop through.
-        print(f"  route2 pathfind failed: {e}; blind-nudging south",
-              flush=True)
+        print(f"  route2 pathfind failed: {e}; blind-nudging south", flush=True)
         _blind_unstick(drv, prefer="down", tries=20, idle_ticks=60)
     for _ in range(4):
         if drv.gs().overworld.map_id == 0x32:
@@ -630,12 +668,9 @@ def run_route2_to_forest(session: Session, outdir: Path,
         gate_seed = outdir / "_gate_cross.state"
         gate_seed.write_bytes(session.save_state())
         try:
-            path = run_pathfinder(gate_seed, "5,0",
-                                  outdir / "_gate_cross.txt",
-                                  rom, sym, sha1)
+            path = run_pathfinder(gate_seed, "5,0", outdir / "_gate_cross.txt", rom, sym, sha1)
             print(f"  gate A*: {len(path)} steps", flush=True)
-            ftb.walk_path(drv, path, label="gate",
-                          stop_map_ids=(0x33,))
+            ftb.walk_path(drv, path, label="gate", stop_map_ids=(0x33,))
         except RuntimeError as e:
             print(f"  gate pathfind failed: {e}", flush=True)
         for _ in range(6):
@@ -644,8 +679,7 @@ def run_route2_to_forest(session: Session, outdir: Path,
             drv.press("up")
 
 
-def _blind_unstick(drv, prefer: str = "up", tries: int = 12,
-                   idle_ticks: int = 120) -> bool:
+def _blind_unstick(drv, prefer: str = "up", tries: int = 12, idle_ticks: int = 120) -> bool:
     """Nudge the player when A* can't find a path.
 
     Two separate failure modes:
@@ -688,8 +722,7 @@ def _blind_unstick(drv, prefer: str = "up", tries: int = 12,
     return (drv.gs().overworld.x, drv.gs().overworld.y) != start
 
 
-def run_forest_traversal(session: Session, outdir: Path,
-                         rom: str, sym: str, sha1: str) -> None:
+def run_forest_traversal(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     drv = rtb.Driver(session)
     # Post-warp xy-staleness — idle before reading.
     session.step(60, render=True)
@@ -723,13 +756,11 @@ def run_forest_traversal(session: Session, outdir: Path,
             seed.write_bytes(session.save_state())
             path_file = outdir / f"_forest_leg_{attempt}_r{retry}.txt"
             try:
-                path = run_pathfinder(seed, "1,0", path_file,
-                                      rom, sym, sha1)
+                path = run_pathfinder(seed, "1,0", path_file, rom, sym, sha1)
                 break
             except RuntimeError as e:
                 last_err = e
-                print(f"  forest pathfind retry {retry+1} fail: {e}",
-                      flush=True)
+                print(f"  forest pathfind retry {retry + 1} fail: {e}", flush=True)
         if path is None:
             # A* model says NO PATH (or subprocess crashed). The model's
             # passable-tile list is stricter than the game's actual
@@ -738,12 +769,12 @@ def run_forest_traversal(session: Session, outdir: Path,
             # though the player can walk UP. Blind nudge: press the
             # goal-direction (UP toward (1,0)) and rotate L/R/D as
             # escape attempts. If anything moves us, retry the A*.
-            print(f"  forest pathfind gave up after 3 retries: "
-                  f"{last_err}; blind-nudging", flush=True)
+            print(
+                f"  forest pathfind gave up after 3 retries: {last_err}; blind-nudging", flush=True
+            )
             blind_moved = _blind_unstick(drv, prefer="up")
             if not blind_moved:
-                print("  forest blind-nudge made no progress; bailing",
-                      flush=True)
+                print("  forest blind-nudge made no progress; bailing", flush=True)
                 break
             continue
         print(f"  forest leg {attempt}: {len(path)} steps", flush=True)
@@ -753,16 +784,17 @@ def run_forest_traversal(session: Session, outdir: Path,
                 if drv.gs().overworld.map_id == 0x2F:
                     break
             continue
-        result = ftb.walk_path(drv, path, label=f"forest{attempt}",
-                               stop_map_ids=(0x2F,))
+        result = ftb.walk_path(drv, path, label=f"forest{attempt}", stop_map_ids=(0x2F,))
         gs = drv.gs()
         if result == "stalled":
             # walk_path detected a desync; loop back to re-A* from
             # the new (stuck) position. If A* fails again we'll hit
             # the blind-nudge fallback above.
-            print(f"  forest leg {attempt} stalled at "
-                  f"({gs.overworld.x},{gs.overworld.y}); re-planning",
-                  flush=True)
+            print(
+                f"  forest leg {attempt} stalled at "
+                f"({gs.overworld.x},{gs.overworld.y}); re-planning",
+                flush=True,
+            )
             continue
         if gs.overworld.map_id == 0x33 and gs.overworld.y == 0:
             for _ in range(3):
@@ -771,8 +803,7 @@ def run_forest_traversal(session: Session, outdir: Path,
                     break
 
 
-def run_pewter_approach(session: Session, outdir: Path,
-                        rom: str, sym: str, sha1: str) -> None:
+def run_pewter_approach(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     drv = rtb.Driver(session)
     ftb._activate_repel(drv)
     # Cross the north forest gate the same way as south — target (5, 0).
@@ -780,28 +811,24 @@ def run_pewter_approach(session: Session, outdir: Path,
         seed = outdir / "_ngate.state"
         seed.write_bytes(session.save_state())
         try:
-            path = run_pathfinder(seed, "5,0",
-                                  outdir / "_ngate.txt",
-                                  rom, sym, sha1)
+            path = run_pathfinder(seed, "5,0", outdir / "_ngate.txt", rom, sym, sha1)
             print(f"  north gate A*: {len(path)} steps", flush=True)
-            ftb.walk_path(drv, path, label="ngate", stop_map_ids=(0x0d,))
+            ftb.walk_path(drv, path, label="ngate", stop_map_ids=(0x0D,))
         except RuntimeError as e:
             print(f"  north gate pathfind failed: {e}", flush=True)
         for _ in range(6):
-            if drv.gs().overworld.map_id == 0x0d:
+            if drv.gs().overworld.map_id == 0x0D:
                 break
             drv.press("up")
     session.step(60, render=True)
     # Route 2 north → Pewter border (10, 0).
-    if drv.gs().overworld.map_id == 0x0d:
+    if drv.gs().overworld.map_id == 0x0D:
         gs = drv.gs()
-        print(f"  at route2 north: xy=({gs.overworld.x},{gs.overworld.y})",
-              flush=True)
+        print(f"  at route2 north: xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
         seed = outdir / "_r2n.state"
         seed.write_bytes(session.save_state())
         try:
-            path = run_pathfinder(seed, "10,0", outdir / "_r2n.txt",
-                                  rom, sym, sha1)
+            path = run_pathfinder(seed, "10,0", outdir / "_r2n.txt", rom, sym, sha1)
             print(f"  route2 north A*: {len(path)} steps", flush=True)
             ftb.walk_path(drv, path, label="r2n", stop_map_ids=(0x02,))
         except RuntimeError as e:
@@ -812,23 +839,18 @@ def run_pewter_approach(session: Session, outdir: Path,
             drv.press("up")
 
 
-def run_pewter_to_gym(session: Session, outdir: Path,
-                      rom: str, sym: str, sha1: str) -> None:
+def run_pewter_to_gym(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     drv = rtb.Driver(session)
     if drv.gs().overworld.map_id == 0x02:
         session.step(60, render=True)
         gs = drv.gs()
-        print(f"  at pewter: xy=({gs.overworld.x},{gs.overworld.y})",
-              flush=True)
+        print(f"  at pewter: xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
         seed = outdir / "_pewter_to_gym.state"
         seed.write_bytes(session.save_state())
         try:
-            path = run_pathfinder(seed, "16,18",
-                                  outdir / "_pewter_to_gym.txt",
-                                  rom, sym, sha1)
+            path = run_pathfinder(seed, "16,18", outdir / "_pewter_to_gym.txt", rom, sym, sha1)
             print(f"  pewter→gym A*: {len(path)} steps", flush=True)
-            ftb.walk_path(drv, path, label="pgym",
-                          stop_map_ids=(0x36,))
+            ftb.walk_path(drv, path, label="pgym", stop_map_ids=(0x36,))
             for _ in range(4):
                 if drv.gs().overworld.map_id == 0x36:
                     break
@@ -837,20 +859,16 @@ def run_pewter_to_gym(session: Session, outdir: Path,
             print(f"  pewter→gym pathfind failed: {e}", flush=True)
 
 
-def run_gym_interior(session: Session, outdir: Path,
-                     rom: str, sym: str, sha1: str) -> None:
+def run_gym_interior(session: Session, outdir: Path, rom: str, sym: str, sha1: str) -> None:
     drv = rtb.Driver(session)
     if drv.gs().overworld.map_id == 0x36:
         session.step(60, render=True)
         gs = drv.gs()
-        print(f"  in gym: xy=({gs.overworld.x},{gs.overworld.y})",
-              flush=True)
+        print(f"  in gym: xy=({gs.overworld.x},{gs.overworld.y})", flush=True)
         seed = outdir / "_gym_interior.state"
         seed.write_bytes(session.save_state())
         try:
-            path = run_pathfinder(seed, "4,2",
-                                  outdir / "_gym_interior.txt",
-                                  rom, sym, sha1)
+            path = run_pathfinder(seed, "4,2", outdir / "_gym_interior.txt", rom, sym, sha1)
             print(f"  gym A*: {len(path)} steps", flush=True)
             ftb.walk_path(drv, path, label="gym")
         except RuntimeError as e:
@@ -873,6 +891,7 @@ def run_brock_badge(session: Session) -> bool:
 
 # --- Main ----------------------------------------------------------------
 
+
 def save_state(session: Session, outdir: Path, name: str) -> Path:
     p = outdir / "milestones" / f"{name}.state"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -886,25 +905,41 @@ def save_state(session: Session, outdir: Path, name: str) -> Path:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", default="walkthrough_yellow")
-    p.add_argument("--stop-after", default="brock_badge",
-                   choices=["intro", "exit_house", "oak_intercept",
-                            "receive_pikachu", "rival_battle",
-                            "pallet_to_viridian", "viridian_to_route2",
-                            "grind", "option_b_boost", "route2_to_forest",
-                            "forest_traversal", "pewter_approach",
-                            "pewter_to_gym", "gym_interior", "brock_badge"])
     p.add_argument(
-        "--option-b", action="store_true",
+        "--stop-after",
+        default="brock_badge",
+        choices=[
+            "intro",
+            "exit_house",
+            "oak_intercept",
+            "receive_pikachu",
+            "rival_battle",
+            "pallet_to_viridian",
+            "viridian_to_route2",
+            "grind",
+            "option_b_boost",
+            "route2_to_forest",
+            "forest_traversal",
+            "pewter_approach",
+            "pewter_to_gym",
+            "gym_interior",
+            "brock_badge",
+        ],
+    )
+    p.add_argument(
+        "--option-b",
+        action="store_true",
         help="RAM-boost Pikachu to L50 instead of grinding Route 2. "
-             "Diagnostic fallback for when the heal-loop grinder is "
-             "broken or too slow.",
+        "Diagnostic fallback for when the heal-loop grinder is "
+        "broken or too slow.",
     )
     args = p.parse_args()
 
     rom = os.environ["POKERED_ROM_PATH"]
     sym = os.environ["POKERED_SYM_PATH"]
     sha1 = os.environ.get(
-        "POKERED_ROM_SHA1", "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
+        "POKERED_ROM_SHA1",
+        "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",
     )
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -918,26 +953,24 @@ def main() -> int:
         ("oak_intercept", lambda: run_oak_intercept(session)),
         ("receive_pikachu", lambda: run_receive_pikachu(session)),
         ("rival_battle", lambda: run_rival_battle(session)),
-        ("pallet_to_viridian",
-         lambda: run_pallet_to_viridian(session, outdir, rom, sym, sha1)),
-        ("viridian_to_route2",
-         lambda: run_viridian_to_route2(session, outdir, rom, sym, sha1)),
+        ("pallet_to_viridian", lambda: run_pallet_to_viridian(session, outdir, rom, sym, sha1)),
+        ("viridian_to_route2", lambda: run_viridian_to_route2(session, outdir, rom, sym, sha1)),
         # Either honest grind (default) or RAM-boost diagnostic. We keep
         # both phase names in the stop-after choices for backward compat
         # and let the CLI flag pick which body runs.
-        ("grind" if not args.option_b else "option_b_boost",
-         lambda: (run_option_b_boost(session) if args.option_b
-                  else run_route2_grind(session, outdir, rom, sym, sha1))),
-        ("route2_to_forest",
-         lambda: run_route2_to_forest(session, outdir, rom, sym, sha1)),
-        ("forest_traversal",
-         lambda: run_forest_traversal(session, outdir, rom, sym, sha1)),
-        ("pewter_approach",
-         lambda: run_pewter_approach(session, outdir, rom, sym, sha1)),
-        ("pewter_to_gym",
-         lambda: run_pewter_to_gym(session, outdir, rom, sym, sha1)),
-        ("gym_interior",
-         lambda: run_gym_interior(session, outdir, rom, sym, sha1)),
+        (
+            "grind" if not args.option_b else "option_b_boost",
+            lambda: (
+                run_option_b_boost(session)
+                if args.option_b
+                else run_route2_grind(session, outdir, rom, sym, sha1)
+            ),
+        ),
+        ("route2_to_forest", lambda: run_route2_to_forest(session, outdir, rom, sym, sha1)),
+        ("forest_traversal", lambda: run_forest_traversal(session, outdir, rom, sym, sha1)),
+        ("pewter_approach", lambda: run_pewter_approach(session, outdir, rom, sym, sha1)),
+        ("pewter_to_gym", lambda: run_pewter_to_gym(session, outdir, rom, sym, sha1)),
+        ("gym_interior", lambda: run_gym_interior(session, outdir, rom, sym, sha1)),
         ("brock_badge", lambda: run_brock_badge(session)),
     ]
     for name, fn in phases:
@@ -949,11 +982,12 @@ def main() -> int:
 
     gs = session.read_game_state()
     m = gs.party.mons[0] if gs.party.mons else None
-    print(f"\n=== end ===\nmap=0x{gs.overworld.map_id:02x} "
-          f"xy=({gs.overworld.x},{gs.overworld.y}) "
-          f"party={gs.party.count}"
-          + (f" lead=L{m.level} species=0x{m.species:02x}" if m else ""),
-          flush=True)
+    print(
+        f"\n=== end ===\nmap=0x{gs.overworld.map_id:02x} "
+        f"xy=({gs.overworld.x},{gs.overworld.y}) "
+        f"party={gs.party.count}" + (f" lead=L{m.level} species=0x{m.species:02x}" if m else ""),
+        flush=True,
+    )
     return 0
 
 
