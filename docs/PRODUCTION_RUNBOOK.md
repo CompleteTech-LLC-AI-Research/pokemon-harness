@@ -862,7 +862,7 @@ sanitized facts from `qualification_runner.py --report` on this host:
 | `affinity_cpus` | `0-11` (all 12 CPUs) | no narrower cpuset is available |
 | `cgroup_sibling_competitors` | `[]` at the root | root cgroup is the whole hierarchy |
 | `/sys/fs/cgroup` mount | `ro,nosuid,nodev,noexec` | a child quota/cpuset cannot be created |
-| user namespaces | `unshare` → `EPERM` | cannot isolate a writable cgroup namespace |
+| user namespaces | `unshare --map-root-user -m` → **succeeds** | a private mount namespace exists, but `cgroup2` still cannot be remounted inside it (see below) |
 | capabilities | `CapEff=0` | cannot delegate a controller or write `cgroup.procs` |
 
 Every reservation mechanism therefore fails admission here, which is the
@@ -876,6 +876,31 @@ no competing load). Because no such allocation exists on this host, those
 acceptance runs are **BLOCKED** and are not claimed as passing. This section is
 a provisioning status record, not release evidence, and it must not be used to
 promote any qualification result.
+
+##### Writable `/dev/shm` is obtainable, and it is not a CPU allocation
+
+The distinction matters because an earlier revision of this table recorded
+`unshare` as `EPERM` and therefore concluded that no writable shared-memory
+namespace was reachable. That is wrong on this host, and it was load-bearing:
+`scripts/production_gate.py`'s unit tier spawns `multiprocessing` workers
+whose arena allocation needs a writable `/dev/shm`, so the read-only mount
+turned environment failures into apparent product defects. Measured on
+`7d09ac7e`:
+
+```
+unshare --map-root-user -m --propagation private \
+  sh -c 'mount -t tmpfs -o size=256m tmpfs /dev/shm; <pytest>'
+  -> /dev/shm becomes tmpfs (rw,...)
+```
+
+That single change removes the read-only-`shm` share of issue #253's failures
+outright (`tests/test_probe_owner_phases.py` goes green; 9 of the 17 shm-class
+failures remain only because they are deadline-bound, see that issue). It does
+**not** unblock any capacity claim: remounting `cgroup2` inside the same private
+namespace still returns `EPERM`, so `cpu.max` remains `max 100000` with no
+writable leaf and no declared allocation. Per-core and timing qualification is
+still **BLOCKED** on an operator-provisioned CPU allocation; only the
+shared-memory prerequisite was mis-recorded, not the capacity verdict.
 
 #### 3b-1. Functional acceptance retained, capacity qualification withheld
 
@@ -956,7 +981,7 @@ assuming it. The blocking facts are observable and sanitized:
 | process identity | `uid=1000` (`agent`) | the job is not the host owner |
 | effective/bounding capabilities | `CapEff=0`, `CapBnd=0` | cannot delegate a controller or write `cgroup.procs` |
 | privilege escalation path | no `sudo`, no setuid helper | the missing privilege cannot be acquired |
-| unprivileged user namespaces | `unshare --map-root-user -m` → `EPERM` | cannot bind-mount a private `cgroup2` |
+| unprivileged user namespaces | `unshare --map-root-user -m` → **succeeds**; private `cgroup2` → `EPERM` | a writable `/dev/shm` is obtainable, but no writable `cgroup2` leaf with `cpu.max` is |
 | host-wide competition | `9.44`–`10.72` busy cores of `12` during the retained runs | `dedicated-host` admission fails |
 
 The comparison and the nine-orientation matrix were nonetheless executed and
