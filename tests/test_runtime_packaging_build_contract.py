@@ -801,3 +801,173 @@ def test_native_staging_failure_prevents_install_and_reports_error(tmp_path, mon
     assert bootstrap.main(["--mode", "cython"]) == 1
     assert len(calls) == 2
     assert "no regeneration source" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param("duplicate-owned", id="duplicate-owned"),
+        pytest.param("relative-owned-alias", id="relative-owned-alias"),
+        pytest.param(
+            "empty-package-and-package-spec-mismatch", id="empty-package-and-package-spec-mismatch"
+        ),
+        pytest.param("empty-spec", id="empty-spec"),
+        pytest.param("foreign-before-root", id="foreign-before-root"),
+        pytest.param("foreign-after-root", id="foreign-after-root"),
+    ],
+)
+def test_bootstrap_namespace_search_path_contract(tmp_path: Path, scenario: str) -> None:
+    script = ROOT / "scripts" / "bootstrap_pyboy.py"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    probe = r"""
+import importlib
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import sys
+import types
+
+script = pathlib.Path(sys.argv[1]).resolve()
+work = pathlib.Path(sys.argv[2]).resolve()
+scenario = sys.argv[3]
+scripts_root = script.parent
+project_root = scripts_root.parent
+
+def inside_project_root(entry):
+    resolved = pathlib.Path(entry or os.getcwd()).resolve()
+    return resolved == project_root or project_root in resolved.parents
+
+base_path = [entry for entry in sys.path if not inside_project_root(entry)]
+
+def synthetic_namespace(package_paths, spec_paths):
+    namespace = types.ModuleType("scripts")
+    namespace.__file__ = None
+    namespace.__loader__ = None
+    namespace.__package__ = "scripts"
+    namespace.__path__ = list(package_paths)
+    spec = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+    spec.submodule_search_locations = list(spec_paths)
+    namespace.__spec__ = spec
+    sys.modules["scripts"] = namespace
+    return namespace
+
+def try_bootstrap(namespace, accepted, alias_name):
+    before_dict = namespace.__dict__.copy()
+    before_path = tuple(namespace.__path__)
+    before_spec = namespace.__spec__
+    before_spec_paths = tuple(before_spec.submodule_search_locations or ())
+    before_children = {
+        name: child for name, child in sys.modules.items() if name.startswith("scripts.")
+    }
+    alias_spec = importlib.util.spec_from_file_location(alias_name, script)
+    assert alias_spec is not None and alias_spec.loader is not None
+    module = importlib.util.module_from_spec(alias_spec)
+    sys.modules[alias_name] = module
+    if accepted:
+        alias_spec.loader.exec_module(module)
+        for helper in (
+            "_bootstrap_runtime_contract",
+            "_bootstrap_runtime_probes",
+            "check_import_origins",
+            "_import_origin_resolution",
+            "_import_origin_paths",
+            "_import_origin_finders",
+            "_import_origin_attestations",
+            "_import_origin_selected_owners",
+        ):
+            child = sys.modules[f"scripts.{helper}"]
+            assert pathlib.Path(child.__file__).resolve() == scripts_root / f"{helper}.py"
+        return
+    try:
+        alias_spec.loader.exec_module(module)
+    except ImportError as exc:
+        assert str(exc) == "bootstrap scripts namespace belongs to another source tree"
+    else:
+        raise AssertionError("malformed or foreign scripts namespace was accepted")
+    assert sys.modules["scripts"] is namespace
+    assert namespace.__dict__ == before_dict
+    assert tuple(namespace.__path__) == before_path
+    assert namespace.__spec__ is before_spec
+    assert tuple(namespace.__spec__.submodule_search_locations or ()) == before_spec_paths
+    after_children = {
+        name: child for name, child in sys.modules.items() if name.startswith("scripts.")
+    }
+    assert after_children == before_children
+
+if scenario == "duplicate-owned":
+    sys.path[:] = [str(project_root), str(project_root), *base_path]
+    namespace = importlib.import_module("scripts")
+    expected = (scripts_root, scripts_root)
+    assert isinstance(namespace.__loader__, importlib.machinery.NamespaceLoader)
+    assert tuple(pathlib.Path(item).resolve() for item in namespace.__path__) == expected
+    assert tuple(
+        pathlib.Path(item).resolve()
+        for item in namespace.__spec__.submodule_search_locations
+    ) == expected
+    try_bootstrap(namespace, True, "bootstrap_duplicate_owned_alias")
+elif scenario == "relative-owned-alias":
+    os.chdir(project_root)
+    sys.path[:] = [".", *[entry for entry in base_path if not inside_project_root(entry)]]
+    namespace = importlib.import_module("scripts")
+    expected = (scripts_root,)
+    assert isinstance(namespace.__loader__, importlib.machinery.NamespaceLoader)
+    assert tuple(pathlib.Path(item).resolve() for item in namespace.__path__) == expected
+    assert tuple(
+        pathlib.Path(item).resolve()
+        for item in namespace.__spec__.submodule_search_locations
+    ) == expected
+    try_bootstrap(namespace, True, "bootstrap_relative_owned_alias")
+elif scenario == "empty-package-and-package-spec-mismatch":
+    root = str(scripts_root)
+    for suffix, package_paths, spec_paths in (
+        ("package-empty", [], [root]),
+        ("both-empty", [], []),
+        ("path-mismatch", [root, root], [root]),
+    ):
+        namespace = synthetic_namespace(package_paths, spec_paths)
+        try_bootstrap(namespace, False, f"bootstrap_{suffix}_alias")
+elif scenario == "empty-spec":
+    namespace = synthetic_namespace([str(scripts_root)], [])
+    try_bootstrap(namespace, False, "bootstrap_empty_spec_alias")
+else:
+    foreign_root = work / "foreign-root"
+    (foreign_root / "scripts").mkdir(parents=True, exist_ok=True)
+    entries = [str(foreign_root), str(project_root)]
+    if scenario == "foreign-after-root":
+        entries.reverse()
+    sys.path[:] = [*entries, *base_path]
+    namespace = importlib.import_module("scripts")
+    expected = (
+        (foreign_root / "scripts", scripts_root)
+        if scenario == "foreign-before-root"
+        else (scripts_root, foreign_root / "scripts")
+    )
+    assert isinstance(namespace.__loader__, importlib.machinery.NamespaceLoader)
+    assert tuple(pathlib.Path(item).resolve() for item in namespace.__path__) == expected
+    assert tuple(
+        pathlib.Path(item).resolve()
+        for item in namespace.__spec__.submodule_search_locations
+    ) == expected
+    try_bootstrap(namespace, False, f"bootstrap_{scenario}_alias")
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            probe,
+            str(script),
+            str(tmp_path),
+            scenario,
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

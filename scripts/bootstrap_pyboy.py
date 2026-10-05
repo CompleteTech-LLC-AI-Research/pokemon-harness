@@ -84,8 +84,11 @@ else:
             _scripts_spec.loader is not None
             and not isinstance(_scripts_spec.loader, importlib.machinery.NamespaceLoader)
         )
-        or _scripts_paths != (_scripts_root,)
-        or _spec_paths != (_scripts_root,)
+        or not _scripts_paths
+        or not _spec_paths
+        or _scripts_paths != _spec_paths
+        or any(path != _scripts_root for path in _scripts_paths)
+        or any(path != _scripts_root for path in _spec_paths)
     ):
         raise ImportError("bootstrap scripts namespace belongs to another source tree")
     for _helper_name in (
