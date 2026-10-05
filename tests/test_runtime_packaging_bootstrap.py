@@ -21,6 +21,7 @@ from tests._runtime_packaging_support import (
     EXPECTED_PYBOY_REVISION,
     ROOT,
     _load_bootstrap,
+    _load_bootstrap_with_owned_src_metadata_last,
 )
 
 
@@ -823,7 +824,7 @@ def test_bootstrap_reports_an_incompatible_serial_constructor(monkeypatch) -> No
     from pyboy.core import serial
 
     selected_mode = "source" if serial.__file__.endswith(".py") else "cython"
-    module = _load_bootstrap()
+    module = _load_bootstrap_with_owned_src_metadata_last(monkeypatch)
 
     class BrokenSerial:
         def __init__(self, *_args) -> None:
