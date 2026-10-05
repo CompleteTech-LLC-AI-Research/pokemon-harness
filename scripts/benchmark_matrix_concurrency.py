@@ -28,175 +28,116 @@ are never merged into one synthetic clean gate.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib
-import importlib.util
 import json
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-REPORT_SCHEMA_VERSION = 1
-DEFAULT_WORKER_COUNTS = (1, 2, 4)
-RUNTIMES = ("source", "native")
-# A worker policy governs the declared trade/battle matrix as a whole.  A run
-# that measured only one of them has no evidence about the other, so it may
-# report measurements but must not select a policy.
-REQUIRED_SELECTION_TIERS = ("battle", "trade")
-# The slowest legitimate arm must not be killed by this harness.  At workers=1
-# the gate may spend every declared row's full per-row budget before any
-# failure, so an arm bound below that would interrupt a valid slow baseline and
-# report an unsupported "unselected".  The bound is derived from the two
-# sources the gate itself uses -- the declared matrix rows and the per-tier row
-# timeouts -- rather than hardcoded, so it tracks the live matrix.
-#
-# This is a ceiling on our own child process.  It relaxes no per-row deadline
-# the gate enforces.
-DEFAULT_ARM_TIMEOUT_SECONDS_FLOOR = 108000.0
-# Headroom above the derived worst case so process start-up, report writing and
-# the final aggregate flush cannot consume the margin and report a legitimate
-# arm as interrupted.
-ARM_TIMEOUT_MARGIN = 1.25
+_temporary_import_context = __name__ == "__main__" or not bool(__package__)
+if _temporary_import_context:
+    import hashlib as _hashlib
+    import importlib.machinery as _machinery
+    import sys as _sys
+    from pathlib import Path as _Path
+    from types import ModuleType as _ModuleType
 
+    _scripts_path = str(_Path(__file__).resolve().parent)
+    _namespace_name = "_matrix_" + _hashlib.sha256(_scripts_path.encode()).hexdigest()
+    _candidate = _ModuleType(_namespace_name)
+    _candidate.__package__ = _namespace_name
+    _candidate.__matrix_root__ = _scripts_path
+    _candidate.__path__ = [_scripts_path]
+    _candidate.__spec__ = _machinery.ModuleSpec(_namespace_name, None, is_package=True)
+    _candidate.__spec__.submodule_search_locations = _candidate.__path__
+    _namespace = _sys.modules.setdefault(_namespace_name, _candidate)
+    _namespace_spec = getattr(_namespace, "__spec__", None)
+    if (
+        not isinstance(_namespace, _ModuleType)
+        or getattr(_namespace, "__name__", None) != _namespace_name
+        or getattr(_namespace, "__package__", None) != _namespace_name
+        or getattr(_namespace, "__matrix_root__", None) != _scripts_path
+        or list(getattr(_namespace, "__path__", ())) != [_scripts_path]
+        or getattr(_namespace, "__file__", None) is not None
+        or getattr(_namespace, "__loader__", None) is not None
+        or _namespace_spec is None
+        or getattr(_namespace_spec, "name", None) != _namespace_name
+        or getattr(_namespace_spec, "loader", None) is not None
+        or getattr(_namespace_spec, "origin", None) is not None
+        or getattr(_namespace_spec, "parent", None) != _namespace_name
+        or getattr(_namespace_spec, "submodule_search_locations", None) != [_scripts_path]
+    ):
+        raise ImportError("matrix helper namespace is not owned by this source root")
+    _original_package = __package__
+    _original_spec = __spec__
+    __package__ = _namespace_name
+    __spec__ = _namespace_spec
 
-def default_arm_timeout_seconds(project_root: Path) -> float:
-    """Return an arm bound that cannot kill a legitimate workers=1 baseline.
+try:
+    if _temporary_import_context:
+        _bootstrap_key = f"{_namespace_name}._matrix_concurrency_import_bootstrap"
+        _cached_bootstrap = _sys.modules.get(_bootstrap_key)
+        _expected_bootstrap = _Path(
+            _scripts_path, "_matrix_concurrency_import_bootstrap.py"
+        ).resolve()
+        _bootstrap_spec = getattr(_cached_bootstrap, "__spec__", None)
+        if _cached_bootstrap is not None and (
+            not isinstance(_cached_bootstrap, _ModuleType)
+            or _Path(getattr(_cached_bootstrap, "__file__", "")).resolve() != _expected_bootstrap
+            or _bootstrap_spec is None
+            or _bootstrap_spec.name != _bootstrap_key
+            or _Path(_bootstrap_spec.origin or "").resolve() != _expected_bootstrap
+        ):
+            raise ImportError("matrix import bootstrap is not owned by this source root")
+        from ._matrix_concurrency_import_bootstrap import _validate_modules
 
-    The gate may spend each declared row's full per-row budget before any
-    failure, so the bound is derived from the same two authoritative sources
-    the gate itself reads: the declared matrix rows in ``tests/_tier_config``
-    and the per-tier row timeouts in ``scripts.production_gate_model``.  A
-    floor is applied so the bound stays conservative if either source cannot
-    be read.
-    """
+        _validate_modules(_namespace_name, _scripts_path, require_all=False)
+    from ._matrix_concurrency_accounting import (
+        _accumulate_case,  # noqa: F401
+        case_durations,
+        declared_tier_rows,
+        effective_workers,
+        report_pressure,
+        tier_counts,
+        tier_effective_workers,
+        tier_row_counts,
+        tier_row_identity,
+    )
+    from ._matrix_concurrency_cli import _parse_counts
+    from ._matrix_concurrency_constants import (
+        ARM_TIMEOUT_MARGIN,  # noqa: F401
+        DEFAULT_ARM_TIMEOUT_SECONDS_FLOOR,  # noqa: F401
+        DEFAULT_WORKER_COUNTS,
+        GATE_RUNTIME_MODES,
+        REPORT_SCHEMA_VERSION,
+        REQUIRED_SELECTION_TIERS,
+        RUNTIMES,
+        SECONDS_PER_HOUR,
+    )
+    from ._matrix_concurrency_model_values import (
+        _as_int,  # noqa: F401
+        _hash_text,
+        percentile,
+    )
+    from ._matrix_concurrency_process import _process_cpu_seconds
+    from ._matrix_concurrency_reporting import _read_head, render_text
+    from ._matrix_concurrency_source_paths import (
+        _declared_matrix_worst_case_seconds,  # noqa: F401
+        _load_module_from_root,  # noqa: F401
+        default_arm_timeout_seconds,
+    )
 
-    total = DEFAULT_ARM_TIMEOUT_SECONDS_FLOOR
-    worst = _declared_matrix_worst_case_seconds(project_root)
-    if worst > 0:
-        # The floor is a floor, not a cap: a grown matrix must raise the bound
-        # rather than quietly fall back to a value too small for it.
-        total = max(total, worst * ARM_TIMEOUT_MARGIN)
-    return total
-
-
-def _declared_matrix_worst_case_seconds(project_root: Path) -> float:
-    """Return the seconds a serial (workers=1) arm could legitimately spend.
-
-    ``0.0`` means "the declared matrix could not be read", which leaves the
-    caller's conservative floor in place.  Each row is charged its full
-    per-row budget because the gate may spend that much on one row before it
-    finally reports the failure, making this a true upper bound rather than an
-    estimate.
-
-    Both sources are loaded by file path under ``project_root`` rather than by
-    module name.  An ``import_module("tests._tier_config")`` would return
-    whichever copy was already imported -- the benchmark's own checkout, or a
-    previously imported one -- regardless of the root it was asked about, so a
-    benchmark pointed at a different tree would silently budget against another
-    tree's matrix.  Reading the exact files keeps the bound tied to the tree
-    whose rows the child gate will actually run.
-    """
-
-    root = Path(project_root)
-    tier_config = _load_module_from_root(root, Path("tests") / "_tier_config.py")
-    gate_model = _load_module_from_root(root, Path("scripts") / "production_gate_model.py")
-    if tier_config is None or gate_model is None:
-        return 0.0
-    manifest = getattr(tier_config, "TIER_REQUIRED_NODEIDS", None)
-    timeouts = getattr(gate_model, "MATRIX_CASE_TIMEOUT_SECONDS", None)
-    if not isinstance(manifest, dict) or not isinstance(timeouts, dict):
-        return 0.0
-    worst = 0.0
-    for tier in REQUIRED_SELECTION_TIERS:
-        nodeids = manifest.get(tier)
-        per_row = timeouts.get(tier)
-        if not isinstance(nodeids, (set, frozenset, list, tuple)):
-            return 0.0
-        if isinstance(per_row, bool) or not isinstance(per_row, (int, float)):
-            return 0.0
-        worst += len(nodeids) * float(per_row)
-    return worst
-
-
-def _load_module_from_root(project_root: Path, relative_path: Path):
-    """Load one source file from ``project_root`` without touching ``sys.path``.
-
-    Returns ``None`` for any file that is absent, unreadable, or fails to
-    execute.  A caller must treat that as "unknown" and fall back to its
-    conservative default; it must never substitute a module imported from
-    somewhere else.
-    """
-
-    path = project_root / relative_path
-    name = f"_benchmark_matrix_{relative_path.stem}"
-    previous = sys.modules.get(name)
-    try:
-        if not path.is_file():
-            return None
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        # ``dataclass`` resolves string annotations through
-        # ``sys.modules[cls.__module__]``, so the module must be registered
-        # while it executes.  The name is private and removed again below, so
-        # this never shadows the real ``tests`` or ``scripts`` packages.
-        sys.modules[name] = module
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            if previous is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous
-    except Exception:  # noqa: BLE001 - an unreadable source is not evidence
-        if previous is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = previous
-        return None
-    return module
-
-
-# ``production_gate.py`` spells the compiled runtime ``cython`` (see
-# ``production_gate_model.RUNTIME_MODES``).  This benchmark reports it as
-# ``native`` because that is the name used throughout the issue and the
-# release documentation, so the label is translated at the process boundary
-# instead of being passed through as an invalid runtime mode.
-GATE_RUNTIME_MODES = {"source": "source", "native": "cython"}
-SECONDS_PER_HOUR = 3600.0
-
-
-def _hash_text(text: str) -> str:
-    """Return a stable digest of ``text`` for evidence identity."""
-
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _as_int(value: Any) -> int:
-    """Return ``value`` as a non-negative int, treating anything else as zero."""
-
-    return value if type(value) is int and value >= 0 else 0
-
-
-def percentile(values: Sequence[float], fraction: float) -> float | None:
-    """Return a nearest-rank percentile, or ``None`` for an empty sample.
-
-    Nearest-rank is deliberate: the reported p95 is always an observed
-    measurement, never a synthetic value interpolated between two samples.
-    """
-
-    if not values:
-        return None
-    ordered = sorted(values)
-    rank = max(1, min(len(ordered), -(-int(fraction * len(ordered) * 1000) // 1000)))
-    return ordered[rank - 1]
+    if _temporary_import_context:
+        _validate_modules(_namespace_name, _scripts_path, require_all=True)
+finally:
+    if _temporary_import_context:
+        __package__ = _original_package
+        __spec__ = _original_spec
 
 
 @dataclass(frozen=True)
@@ -351,314 +292,6 @@ class ArmResult:
         }
 
 
-def tier_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, int]:
-    """Sum declared tier counts, preserving every non-passing row.
-
-    Anything the gate could not classify counts as incomplete rather than being
-    dropped, so an unparseable report degrades to "not comparable" instead of
-    "fast".
-
-    Matrix tiers carry their rows in ``case_results``.  Those rows are read
-    directly because a ``NOT_STARTED`` or ``INTERRUPTED`` row contributes
-    nothing to the aggregate ``counts``; reading only the aggregates would let
-    an unrun row disappear from the denominator entirely.
-    """
-
-    wanted = set(tiers)
-    totals = {
-        "completed_passing": 0,
-        "failed": 0,
-        "incomplete": 0,
-        "interrupted": 0,
-        "not_started": 0,
-    }
-    payload = report.get("tiers")
-    if not isinstance(payload, list):
-        totals["incomplete"] += 1
-        return totals
-    seen: set[str] = set()
-    for tier in payload:
-        if not isinstance(tier, dict):
-            totals["incomplete"] += 1
-            continue
-        name = tier.get("name")
-        if name not in wanted:
-            continue
-        seen.add(name)
-        counts = tier.get("counts")
-        if not isinstance(counts, dict):
-            totals["incomplete"] += 1
-            continue
-        case_results = tier.get("case_results")
-        if isinstance(case_results, list) and case_results:
-            for case in case_results:
-                _accumulate_case(totals, case)
-        elif tier.get("status") == "BLOCKED":
-            # A tier the gate blocked before dispatch declares its rows in
-            # ``selected_nodeids`` and produces no ``case_results`` at all.
-            # Reading only the aggregates returns zero for it, which erases
-            # every row it was required to run and makes the arm's denominator
-            # describe work the gate never even attempted.  Each of those rows
-            # had no admission decision and no lifecycle state, so it is
-            # unattempted work, not a row that produced an outcome.
-            declared = tier.get("selected_nodeids")
-            if isinstance(declared, list) and declared:
-                totals["not_started"] += len(declared)
-            else:
-                totals["incomplete"] += 1
-        else:
-            totals["completed_passing"] += _as_int(counts.get("passed"))
-            totals["failed"] += _as_int(counts.get("failed")) + _as_int(counts.get("errors"))
-            totals["not_started"] += _as_int(counts.get("skipped")) + _as_int(counts.get("xfailed"))
-        if tier.get("status") not in ("PASS", "FAIL", "BLOCKED"):
-            totals["incomplete"] += 1
-    for missing in sorted(wanted - seen):
-        # A declared tier the report never mentions is not a pass.
-        totals["incomplete"] += 1
-    return totals
-
-
-def _accumulate_case(totals: dict[str, int], case: Any) -> None:
-    """Fold one matrix row into the arm totals without dropping it."""
-
-    if not isinstance(case, dict):
-        totals["incomplete"] += 1
-        return
-    status = case.get("status")
-    if status == "NOT_STARTED":
-        totals["not_started"] += 1
-        return
-    if status == "INTERRUPTED":
-        totals["interrupted"] += 1
-        return
-    if status == "TIMEOUT":
-        # A row the gate killed at its per-row deadline is attempted work that
-        # produced no passing outcome.  Reading only the pytest counts below
-        # drops it from the denominator entirely: the gate records the
-        # timeout with zero counts, so the arm would report one fewer required
-        # row and could even read as complete and clean while the gate failed.
-        totals["failed"] += 1
-        return
-    if status not in ("PASS", "FAIL"):
-        # Any status this reader does not model is unclassified work, not a
-        # passing row.
-        totals["incomplete"] += 1
-        return
-    counts = case.get("counts")
-    if not isinstance(counts, dict):
-        totals["incomplete"] += 1
-        return
-    totals["completed_passing"] += _as_int(counts.get("passed"))
-    totals["failed"] += _as_int(counts.get("failed")) + _as_int(counts.get("errors"))
-    totals["not_started"] += _as_int(counts.get("skipped")) + _as_int(counts.get("xfailed"))
-
-
-def tier_row_counts(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, int | None]:
-    """Return how many declared rows each requested tier actually ran.
-
-    The gate schedules at most one worker per row of a tier
-    (``max_workers = min(matrix_workers, len(nodeids))``), so a tier's row
-    count is the ceiling on that tier's concurrency.  The count comes from the
-    report itself -- ``case_results`` for a tier that ran, otherwise the
-    declared ``selected_nodeids`` -- so it tracks the real matrix instead of a
-    hardcoded row total.  ``None`` means the tier's row count could not be
-    determined, which is not evidence of any worker count.
-    """
-
-    wanted = set(tiers)
-    counts: dict[str, int | None] = {tier: None for tier in wanted}
-    payload = report.get("tiers")
-    if not isinstance(payload, list):
-        return counts
-    for tier in payload:
-        if not isinstance(tier, dict) or tier.get("name") not in wanted:
-            continue
-        name = tier["name"]
-        case_results = tier.get("case_results")
-        if isinstance(case_results, list) and case_results:
-            counts[name] = len(case_results)
-            continue
-        selected = tier.get("selected_nodeids")
-        if isinstance(selected, list) and selected:
-            counts[name] = len(selected)
-    return counts
-
-
-def effective_workers(report: dict[str, Any], requested: int, tiers: Iterable[str]) -> int | None:
-    """Return the concurrency that governs this arm's whole matrix.
-
-    The gate caps each tier independently at ``min(matrix_workers, rows,
-    capacity ceiling)``, so a single arm genuinely uses different concurrency
-    per tier when its tiers declare different row counts.  This returns the
-    smallest of those per-tier values: the concurrency that governs the arm as
-    a whole.
-
-    That is deliberately the *smallest*.  A worker policy governs the matrix as
-    one unit, so a count is only selectable when it is honoured everywhere.  A
-    request of 44 against a 43-row trade tier and a 19-row battle tier is not a
-    44-worker arm -- the gate cannot run 44 battle rows at once -- and reporting
-    44 would claim a concurrency the matrix never reached.  The per-tier values
-    are recorded separately in ``tier_effective_workers`` so the report does
-    not present this governing value as if it were uniform.
-
-    ``None`` returns when the capacity policy admitted no ceiling or when a
-    tier's row count is unreadable.  An unknown effective count is never
-    reported as a match for the requested count, because that would let an
-    unsupported worker count look measured.
-    """
-
-    capacity = report.get("capacity")
-    admission = capacity.get("admission") if isinstance(capacity, dict) else None
-    if not isinstance(admission, dict):
-        return None
-    admitted = admission.get("max_concurrent_pairs")
-    if type(admitted) is not int or admitted <= 0:
-        return None
-    ceiling = min(requested, admitted)
-    row_counts = tier_row_counts(report, tiers)
-    for tier in tiers:
-        rows = row_counts.get(tier)
-        if not isinstance(rows, int) or rows <= 0:
-            return None
-        ceiling = min(ceiling, rows)
-    return max(1, ceiling)
-
-
-def declared_tier_rows(project_root: Path, tiers: Iterable[str]) -> dict[str, int]:
-    """Return the declared row count of each tier in ``project_root``.
-
-    Read from the same manifest the gate selects its rows from, so a run that
-    died before writing a report is still charged the matrix it was asked to
-    run.  A tier that is not declared yields no entry rather than a guess.
-    """
-
-    wanted = tuple(tiers)
-    tier_config = _load_module_from_root(project_root, Path("tests") / "_tier_config.py")
-    if tier_config is None:
-        return {}
-    manifest = getattr(tier_config, "TIER_REQUIRED_NODEIDS", None)
-    if not isinstance(manifest, dict):
-        return {}
-    rows: dict[str, int] = {}
-    for tier in wanted:
-        nodeids = manifest.get(tier)
-        if isinstance(nodeids, (set, frozenset, list, tuple)) and nodeids:
-            rows[tier] = len(nodeids)
-    return rows
-
-
-def tier_row_identity(report: dict[str, Any], tiers: Iterable[str]) -> dict[str, frozenset[str]]:
-    """Return the exact declared row ids each requested tier carried.
-
-    Counts alone cannot prove two arms ran the same work: if the manifest swaps
-    one 43-row trade node id for another between two sequential arms, every
-    count still reads 43/19 while a different set of tests was timed.  The gate
-    reports the exact ids in ``selected_nodeids``, so that is what identity is
-    built from.  A tier whose ids are unreadable maps to an empty set, which is
-    not equal to any populated set and therefore blocks comparability.
-    """
-
-    wanted = set(tiers)
-    identity: dict[str, frozenset[str]] = {tier: frozenset() for tier in wanted}
-    payload = report.get("tiers")
-    if not isinstance(payload, list):
-        return identity
-    for tier in payload:
-        if not isinstance(tier, dict) or tier.get("name") not in wanted:
-            continue
-        selected = tier.get("selected_nodeids")
-        if isinstance(selected, list):
-            identity[tier["name"]] = frozenset(str(nodeid) for nodeid in selected)
-    return identity
-
-
-def tier_effective_workers(
-    report: dict[str, Any], requested: int, tiers: Iterable[str]
-) -> dict[str, int] | None:
-    """Return the per-tier concurrency the gate actually used for this arm.
-
-    Mirrors ``production_gate_matrix._run_matrix_tier``, which caps each tier
-    at ``min(matrix_workers, len(nodeids))`` and then at the admitted pair
-    ceiling.  Returning ``None`` means at least one declared tier's row count
-    could not be read, so no per-tier value is asserted.
-    """
-
-    capacity = report.get("capacity")
-    admission = capacity.get("admission") if isinstance(capacity, dict) else None
-    if not isinstance(admission, dict):
-        return None
-    admitted = admission.get("max_concurrent_pairs")
-    if type(admitted) is not int or admitted <= 0:
-        return None
-    row_counts = tier_row_counts(report, tiers)
-    result: dict[str, int] = {}
-    for tier in tiers:
-        rows = row_counts.get(tier)
-        if not isinstance(rows, int) or rows <= 0:
-            return None
-        result[tier] = max(1, min(requested, admitted, rows))
-    return result
-
-
-def case_durations(
-    report: dict[str, Any], tiers: Iterable[str]
-) -> tuple[list[float], float | None]:
-    """Return observed per-row durations and the worst per-row deadline margin.
-
-    Only matrix ``case_results`` rows are per-case samples.  A tier's aggregate
-    ``duration_seconds`` is the sum of a whole tier's rows and is never a
-    per-case latency, so it is not used here.
-
-    Headroom is computed per row as ``deadline_seconds - duration_seconds`` and
-    the minimum is reported.  Comparing one row's duration against a different
-    row's deadline would report a false overrun: a 1000 s battle row under a
-    1200 s deadline and a 100 s trade row under a 900 s deadline both pass,
-    while min-deadline minus max-duration reports -100 s.
-    """
-
-    wanted = set(tiers)
-    durations: list[float] = []
-    margins: list[float] = []
-    payload = report.get("tiers")
-    if not isinstance(payload, list):
-        return durations, None
-    for tier in payload:
-        if not isinstance(tier, dict) or tier.get("name") not in wanted:
-            continue
-        case_results = tier.get("case_results")
-        if not isinstance(case_results, list):
-            continue
-        for case in case_results:
-            if not isinstance(case, dict):
-                continue
-            value = case.get("duration_seconds")
-            if isinstance(value, (int, float)) and value > 0:
-                durations.append(float(value))
-            deadline = case.get("deadline_seconds")
-            if isinstance(deadline, (int, float)) and deadline > 0:
-                margins.append(
-                    float(deadline) - float(value if isinstance(value, (int, float)) else 0.0)
-                )
-    return durations, (min(margins) if margins else None)
-
-
-def report_pressure(report: dict[str, Any]) -> float | None:
-    """Return the recorded CPU pressure figure, if the gate captured one."""
-
-    capacity = report.get("capacity")
-    samples = capacity.get("samples") if isinstance(capacity, dict) else None
-    if not isinstance(samples, list) or not samples:
-        return None
-    values: list[float] = []
-    for entry in samples:
-        if isinstance(entry, dict):
-            for key in ("psi_cpu_some_avg300", "cgroup_cpu_some_avg300"):
-                value = entry.get(key)
-                if isinstance(value, (int, float)):
-                    values.append(float(value))
-    return max(values) if values else None
-
-
 def build_arm_command(
     plan: ExperimentPlan,
     *,
@@ -712,18 +345,6 @@ def build_arm_command(
     if capacity_policy is not None:
         command.extend(("--capacity-policy", str(capacity_policy)))
     return command
-
-
-def _process_cpu_seconds() -> float:
-    """Return reaped child CPU seconds, or 0.0 when unavailable."""
-
-    try:
-        import resource
-
-        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    except (ImportError, OSError, ValueError):
-        return 0.0
-    return float(usage.ru_utime + usage.ru_stime)
 
 
 def run_arm(
@@ -1164,22 +785,6 @@ def select_policy(
     }
 
 
-def _read_head(project_root: Path) -> str:
-    """Return the tested commit identity, or ``unavailable``."""
-
-    try:
-        completed = subprocess.run(
-            ("git", "-C", str(project_root), "rev-parse", "HEAD"),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unavailable"
-    return completed.stdout.strip() or "unavailable"
-
-
 def build_report(
     *,
     project_root: Path,
@@ -1223,53 +828,6 @@ def build_report(
             "non-passing rows are retained in every denominator."
         ),
     }
-
-
-def render_text(report: dict[str, Any]) -> str:
-    """Render the benchmark report for a terminal transcript."""
-
-    identity = report.get("identity", {})
-    lines = [
-        "matrix-concurrency benchmark",
-        f"  head: {identity.get('head')}",
-        f"  report-sha256: {identity.get('sha256')}",
-    ]
-    for arm in report.get("arms", []):
-        rows = arm.get("rows", {})
-        lines.append(
-            f"  [{arm.get('arm')}] effective_workers={arm.get('effective_workers')} "
-            f"passing={rows.get('completed_passing')} failed={rows.get('failed')} "
-            f"not_started={rows.get('not_started')} wall={arm.get('wall_seconds')}s "
-            f"required-rows/hour={arm.get('required_rows_per_hour')}"
-        )
-    selection = report.get("selection", {})
-    lines.append(f"  selection: {selection.get('outcome')}")
-    for reason in selection.get("reasons", []):
-        lines.append(f"    reason: {reason}")
-    policy = selection.get("policy")
-    if isinstance(policy, dict):
-        lines.append(f"    matrix_workers: {policy.get('matrix_workers')}")
-    return "\n".join(lines)
-
-
-def _parse_counts(raw: str) -> list[int]:
-    """Return positive worker counts from a comma-separated argument."""
-
-    counts: list[int] = []
-    for piece in raw.split(","):
-        piece = piece.strip()
-        if not piece:
-            continue
-        try:
-            value = int(piece)
-        except ValueError as exc:
-            raise ValueError(f"worker count {piece!r} is not an integer") from exc
-        if value <= 0:
-            raise ValueError("worker counts must be positive")
-        counts.append(value)
-    if not counts:
-        raise ValueError("at least one worker count is required")
-    return list(dict.fromkeys(counts))
 
 
 def build_parser() -> argparse.ArgumentParser:
