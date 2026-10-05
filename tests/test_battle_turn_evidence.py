@@ -71,6 +71,80 @@ def _row(*, reverse: bool = False) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "case",
+    (
+        pytest.param("negative-hp", id="negative-hp"),
+        pytest.param("boolean-hp", id="boolean-hp"),
+        pytest.param("above-max-hp", id="above-max-hp"),
+        pytest.param("zero-max-hp", id="zero-max-hp"),
+        pytest.param("invalid-species", id="invalid-species"),
+        pytest.param("status-above-max", id="status-above-max"),
+        pytest.param("absent-empty", id="absent-empty"),
+        pytest.param("absent-single", id="absent-single"),
+        pytest.param("absent-unproven-pair", id="absent-unproven-pair"),
+        pytest.param("absent-nonmapping", id="absent-nonmapping"),
+        pytest.param("hook-and-screenshot-only", id="hook-and-screenshot-only"),
+    ),
+)
+def test_verifier_rejects_invalid_or_unproven_evidence(case: str) -> None:
+    expected: str
+    if case.startswith("absent-") or case == "hook-and-screenshot-only":
+        if case == "absent-empty":
+            rows, expected = [], "exactly two battle peer rows are required"
+        elif case == "absent-single":
+            rows, expected = [_row()], "exactly two battle peer rows are required"
+        elif case == "absent-nonmapping":
+            rows, expected = [None, None], "settled snapshot is missing"
+        elif case == "hook-and-screenshot-only":
+            diagnostic = {"hook_counts": {"LinkBattleExchangeData": 1}, "_shots": ["battle"]}
+            rows, expected = [diagnostic, deepcopy(diagnostic)], "settled snapshot is missing"
+        else:
+            rows, expected = [{}, {}], "settled snapshot is missing"
+    else:
+        rows = [_row(), _row(reverse=True)]
+        mon = rows[0]["baseline"]["local"]
+        if case == "negative-hp":
+            mon["hp"], expected = -1, "invalid active HP"
+        elif case == "boolean-hp":
+            mon["hp"], expected = True, "invalid active HP"
+        elif case == "above-max-hp":
+            mon["hp"], expected = mon["max_hp"] + 1, "active HP exceeds max HP"
+        elif case == "zero-max-hp":
+            mon["max_hp"], expected = 0, "invalid active max HP"
+        elif case == "invalid-species":
+            mon["species"], expected = 0, "invalid active species"
+        else:
+            mon["status"], expected = 256, "invalid active status"
+
+    before = deepcopy(rows)
+    errors = verify_battle_turns(rows)
+    assert errors and expected in errors[0]
+    assert rows == before
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        pytest.param("species", id="species"),
+        pytest.param("max_hp", id="max-hp"),
+        pytest.param("status", id="status"),
+    ),
+)
+def test_peer_snapshot_mismatch_rejects_supported_turn(field: str) -> None:
+    rows = [_row(), _row(reverse=True)]
+    peer_mon = rows[1]["baseline"]["local"]
+    peer_turn_mon = rows[1]["turn"]["local"]
+    replacement = {"species": 73, "max_hp": 36, "status": 1}[field]
+    peer_mon[field] = replacement
+    peer_turn_mon[field] = replacement
+
+    before = deepcopy(rows)
+    errors = verify_battle_turns(rows)
+    assert errors == ["battle peers disagree on settled baseline combatant state"]
+    assert rows == before
+
+
 def _paralysis_rows(*, attacker: str, status_on_attacker: bool = False) -> list[dict]:
     rows = [_row(), _row(reverse=True)]
     opposite = "enemy" if attacker == "local" else "local"
@@ -290,12 +364,16 @@ def test_missing_exchange_ordinal_fails_closed() -> None:
 
 
 def test_schema_one_evidence_fails_closed() -> None:
-    full_row = _row()
-    full_row["schema_version"] = 1
-    nested_row = {"battle_turn": _row()}
-    nested_row["battle_turn"]["schema_version"] = 1
-    for rows in ([full_row, _row(reverse=True)], [nested_row, {"battle_turn": _row(reverse=True)}]):
-        assert verify_battle_turns(rows) == ["invalid battle evidence schema"]
+    for invalid_version in (1, True):
+        full_row = _row()
+        full_row["schema_version"] = invalid_version
+        nested_row = {"battle_turn": _row()}
+        nested_row["battle_turn"]["schema_version"] = invalid_version
+        for rows in (
+            [full_row, _row(reverse=True)],
+            [nested_row, {"battle_turn": _row(reverse=True)}],
+        ):
+            assert verify_battle_turns(rows) == ["invalid battle evidence schema"]
 
 
 @pytest.mark.parametrize(
@@ -412,3 +490,315 @@ def test_postsettlement_entry_preserves_frozen_turn(monkeypatch) -> None:
     }
     assert observer.counts["LinkBattleExchangeData"] == 2
     assert observer.snapshot()["settled"] is True
+
+    observed = observer.snapshot()
+    peer = _row(reverse=True)
+    peer["terminal"] = {
+        "seq": observer.terminal["seq"],
+        "result": 1,
+        "send": 0,
+        "receive": 0,
+        "boundary": "EndOfBattle",
+    }
+    peer["cleanup"] = {
+        "seq": observer.cleanup["seq"],
+        "map": 0xF0,
+        "link_state": 1,
+        "is_in_battle": 0,
+    }
+    rows = [observed, peer]
+    before = deepcopy(rows)
+    assert verify_battle_turns(rows) == []
+    assert rows == before
+    missing_cleanup = deepcopy(observed)
+    missing_cleanup["cleanup"] = None
+    assert verify_battle_turns([missing_cleanup, peer]) == ["battle cleanup is incomplete"]
+
+
+def _observed_faint_row(monkeypatch, side: str, actor_hp: int, result: int) -> dict:
+    from tests import _battle_turn_evidence as evidence
+
+    base = _row(reverse=side == "enemy")
+    observer, memory = _observer(monkeypatch)
+    observer.baseline = deepcopy(base["baseline"])
+    final = deepcopy(base["turn"])
+    for combatant in ("local", "enemy"):
+        final[combatant]["hp"] = base["baseline"][combatant]["hp"]
+    final["local"]["pp"] = list(base["baseline"]["local"]["pp"])
+    final[side]["hp"] = actor_hp
+    other = "enemy" if side == "local" else "local"
+    before_hp = base["baseline"][side]["hp"]
+    observer.actions[other] = _action(before_hp, actor_hp)
+    if other == "local":
+        final["local"]["pp"][0] -= 1
+        observer.pp_entries = 1
+    monkeypatch.setattr(
+        evidence,
+        "_combatants",
+        lambda _session: {name: deepcopy(final[name]) for name in ("local", "enemy")},
+    )
+    memory.update(
+        wSerialExchangeNybbleSendData=0,
+        wSerialExchangeNybbleReceiveData=0,
+        wBattleResult=result,
+        wCurMap=0xF0,
+        wLinkState=1,
+        wIsInBattle=0,
+    )
+    observer.observe("LinkBattleExchangeData")
+    observer.observe("post_exchange")
+    observer.observe("HandlePlayerMonFainted" if side == "local" else "HandleEnemyMonFainted")
+    observer.observe("MainInBattleLoop")
+    if actor_hp == 0:
+        observer.observe("EndOfBattle")
+        observer.observe("ReturnToCableClubRoom")
+    return observer.snapshot()
+
+
+def _observed_faint_pair(monkeypatch, first_side: str, *, valid: bool) -> list[dict]:
+    actor_hp = 0 if valid else 39
+    return [
+        _observed_faint_row(monkeypatch, first_side, actor_hp, 0),
+        _observed_faint_row(
+            monkeypatch,
+            "enemy" if first_side == "local" else "local",
+            actor_hp,
+            1,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        pytest.param("local-valid-zero", id="local-valid-zero"),
+        pytest.param("local-positive-actor", id="local-positive-actor"),
+        pytest.param("local-opposite-zero", id="local-opposite-zero"),
+        pytest.param("enemy-valid-zero", id="enemy-valid-zero"),
+        pytest.param("enemy-positive-actor", id="enemy-positive-actor"),
+        pytest.param("enemy-opposite-zero", id="enemy-opposite-zero"),
+    ),
+)
+def test_observed_faint_skip_requires_actor_hp_zero(monkeypatch, scenario: str) -> None:
+    first_side = "local" if scenario.startswith("local-") else "enemy"
+    if scenario.endswith("opposite-zero"):
+        rows = _observed_faint_pair(monkeypatch, first_side, valid=True)
+        target_row = rows[0]
+        target_side = "enemy" if first_side == "local" else "local"
+        target_row["turn"][target_side]["hp"] = 0
+        before = deepcopy(rows)
+        assert verify_battle_turns(rows) == ["faint skip target is the wrong combatant"]
+        assert rows == before
+        return
+
+    valid = scenario.endswith("valid-zero")
+    rows = _observed_faint_pair(monkeypatch, first_side, valid=valid)
+    before = deepcopy(rows)
+    if valid:
+        assert all(row["unsupported_reason"] is None for row in rows)
+        assert all(
+            row["turn"][
+                first_side if index == 0 else ("enemy" if first_side == "local" else "local")
+            ]["hp"]
+            == 0
+            for index, row in enumerate(rows)
+        )
+        assert verify_battle_turns(rows) == []
+    else:
+        assert all(
+            row["unsupported_reason"] is not None
+            and "faint skip actor is not fainted" in row["unsupported_reason"]
+            for row in rows
+        )
+        assert all(row["settled"] is False for row in rows)
+        assert verify_battle_turns(rows)
+    assert rows == before
+
+
+def _terminal_pair(results: tuple[object, object] = (0, 1)) -> list[dict]:
+    rows = [_row(), _row(reverse=True)]
+    for row, result in zip(rows, results, strict=True):
+        row["terminal"] = {
+            "seq": 6,
+            "result": result,
+            "send": 0,
+            "receive": 0,
+            "boundary": "EndOfBattle",
+        }
+        row["cleanup"] = {"seq": 7, "map": 0xF0, "link_state": 1, "is_in_battle": 0}
+    return rows
+
+
+def _ko_pair_without_terminal() -> list[dict]:
+    left, right = _row(), _row(reverse=True)
+    left["turn"]["enemy"]["hp"] = 0
+    left["turn"]["actions"]["local"] = _action(35, 0)
+    right["turn"]["local"]["hp"] = 0
+    right["turn"]["actions"]["enemy"] = _action(35, 0)
+    return [left, right]
+
+
+@pytest.mark.parametrize(
+    "results",
+    (
+        pytest.param((0, 1), id="result-0-peer-1"),
+        pytest.param((1, 0), id="result-1-peer-0"),
+        pytest.param((2, 2), id="legacy-draw-2-2"),
+    ),
+)
+def test_terminal_result_pairs_accept_supported_contract(results) -> None:
+    rows = _terminal_pair(results)
+    before = deepcopy(rows)
+    assert verify_battle_turns(rows) == []
+    assert rows == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        pytest.param(((0, 0), "battle terminal results are not complementary"), id="both-win-0-0"),
+        pytest.param(((1, 1), "battle terminal results are not complementary"), id="both-loss-1-1"),
+        pytest.param(
+            ((255, 255), "battle terminal results are not complementary"),
+            id="equal-unsupported-255",
+        ),
+        pytest.param(
+            ((2, 3), "battle terminal results are not complementary"), id="unsupported-2-3"
+        ),
+        pytest.param(
+            ((0, 2), "battle terminal results are not complementary"), id="unsupported-0-2"
+        ),
+        pytest.param(((True, 1), "invalid battle result"), id="boolean-result"),
+        pytest.param((("0", 1), "invalid battle result"), id="string-result"),
+        pytest.param((None, "battle terminal evidence is asymmetric"), id="peer-terminal-missing"),
+    ),
+)
+def test_terminal_result_pairs_reject_invalid_contract(case) -> None:
+    results, expected = case
+    rows = _terminal_pair((0, 1) if results is None else results)
+    if results is None:
+        rows[1]["terminal"] = None
+    before = deepcopy(rows)
+    errors = verify_battle_turns(rows)
+    assert errors and expected in errors[0]
+    assert rows == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        pytest.param(
+            ("missing-terminal-after-ko", "KO outcome lacks EndOfBattle evidence"),
+            id="missing-terminal-after-ko",
+        ),
+        pytest.param(("missing-boundary", "terminal boundary is invalid"), id="missing-boundary"),
+        pytest.param(("wrong-boundary", "terminal boundary is invalid"), id="wrong-boundary"),
+        pytest.param(
+            ("terminal-at-settled-seq", "invalid terminal sequence"), id="terminal-at-settled-seq"
+        ),
+        pytest.param(
+            ("terminal-before-settled", "invalid terminal sequence"), id="terminal-before-settled"
+        ),
+        pytest.param(
+            ("boolean-terminal-seq", "invalid terminal sequence"), id="boolean-terminal-seq"
+        ),
+        pytest.param(
+            ("terminal-seq-above-max", "invalid terminal sequence"), id="terminal-seq-above-max"
+        ),
+    ),
+)
+def test_terminal_boundary_and_sequence_fail_closed(case) -> None:
+    scenario, expected = case
+    rows = (
+        _ko_pair_without_terminal() if scenario == "missing-terminal-after-ko" else _terminal_pair()
+    )
+    if scenario != "missing-terminal-after-ko":
+        terminal = rows[0]["terminal"]
+        if scenario == "missing-boundary":
+            del terminal["boundary"]
+        elif scenario == "wrong-boundary":
+            terminal["boundary"] = "battle-complete"
+        elif scenario == "terminal-at-settled-seq":
+            terminal["seq"] = rows[0]["settled_seq"]
+        elif scenario == "terminal-before-settled":
+            terminal["seq"] = rows[0]["settled_seq"] - 1
+        elif scenario == "boolean-terminal-seq":
+            terminal["seq"] = True
+        else:
+            terminal["seq"] = MAX_SEQUENCE + 1
+    before = deepcopy(rows)
+    errors = verify_battle_turns(rows)
+    assert errors and expected in errors[0]
+    assert rows == before
+    if scenario == "wrong-boundary":
+        rows[0]["terminal"]["boundary"] = []
+        assert verify_battle_turns(rows) == ["terminal boundary is invalid"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        pytest.param(
+            ("missing-bilateral-cleanup", "battle cleanup is incomplete"),
+            id="missing-bilateral-cleanup",
+        ),
+        pytest.param(
+            ("one-peer-cleanup-missing", "battle cleanup is incomplete"),
+            id="one-peer-cleanup-missing",
+        ),
+        pytest.param(("still-in-battle", "battle cleanup is incomplete"), id="still-in-battle"),
+        pytest.param(("wrong-map", "unexpected state"), id="wrong-map"),
+        pytest.param(("wrong-link-state", "unexpected state"), id="wrong-link-state"),
+        pytest.param(
+            ("cleanup-seq-equal-terminal", "invalid cleanup sequence"),
+            id="cleanup-seq-equal-terminal",
+        ),
+        pytest.param(
+            ("cleanup-seq-before-terminal", "invalid cleanup sequence"),
+            id="cleanup-seq-before-terminal",
+        ),
+        pytest.param(
+            ("cleanup-seq-above-max", "invalid cleanup sequence"), id="cleanup-seq-above-max"
+        ),
+    ),
+)
+def test_terminal_requires_complete_ordered_cleanup_by_default(case) -> None:
+    scenario, expected = case
+    rows = _terminal_pair()
+    if scenario == "missing-bilateral-cleanup":
+        rows[0]["cleanup"] = rows[1]["cleanup"] = None
+    elif scenario == "one-peer-cleanup-missing":
+        rows[1]["cleanup"] = None
+    elif scenario == "still-in-battle":
+        rows[0]["cleanup"]["is_in_battle"] = 1
+    elif scenario == "wrong-map":
+        rows[0]["cleanup"]["map"] = 0xF1
+    elif scenario == "wrong-link-state":
+        rows[0]["cleanup"]["link_state"] = 0
+    elif scenario == "cleanup-seq-equal-terminal":
+        rows[0]["cleanup"]["seq"] = rows[0]["terminal"]["seq"]
+    elif scenario == "cleanup-seq-before-terminal":
+        rows[0]["cleanup"]["seq"] = rows[0]["terminal"]["seq"] - 1
+    else:
+        rows[0]["cleanup"]["seq"] = MAX_SEQUENCE + 1
+    before = deepcopy(rows)
+    errors = verify_battle_turns(rows)
+    assert errors and expected in errors[0]
+    assert rows == before
+    if scenario == "cleanup-seq-above-max":
+        float_control = deepcopy(_terminal_pair())
+        float_control[0]["cleanup"]["seq"] = 7.0
+        float_control[1]["cleanup"]["seq"] = 7.0
+        assert verify_battle_turns(float_control) == ["invalid cleanup sequence: 7.0"]
+
+
+def test_terminal_hp_divergence_fails_after_valid_cleanup() -> None:
+    rows = _terminal_pair()
+    local_attack = rows[0]["turn"]["actions"]["local"]
+    sample = local_attack["damage_samples"][0]
+    rows[0]["turn"]["enemy"]["hp"] = 33
+    sample.update(after_hp=33, damage=2)
+
+    before = deepcopy(rows)
+    assert verify_battle_turns(rows) == ["battle peers disagree on settled turn combatant state"]
+    assert rows == before

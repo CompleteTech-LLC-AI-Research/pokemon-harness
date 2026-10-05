@@ -379,6 +379,7 @@ class FailureDetail:
     truncated: bool
     nodeid_original_chars: int
     nodeid_omitted_chars: int
+    when: str = ""
 
 
 @dataclass

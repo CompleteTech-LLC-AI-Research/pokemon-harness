@@ -555,6 +555,66 @@ def test_network_owner_pump_fail_closed_on_nonempty_service_error() -> None:
     assert backend.service_calls == 1
     assert backend.closed_errors == [error]
 
+    import socket
+    import time
+
+    from pokered_harness.link import network_backend as network_module
+    from pokered_harness.link.network_backend import NetworkBackendError
+    from pokered_harness.link.serial_coordinator import SerialOperationGate
+
+    backend_sock, peer_sock = socket.socketpair()
+    backend = NetworkBackend(backend_sock, local_rom_version="red")
+    peer_sock.settimeout(1.0)
+
+    class FailingCore:
+        transfer_enabled = 1
+        internal_clock = 0
+        SB = 0
+        SC = 0x80
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def peek_out_bit(self) -> int:
+            return 0
+
+        def apply_external_edge(self, _bit: int) -> bool:
+            self.calls += 1
+            raise error
+
+    core = FailingCore()
+    try:
+        assert peer_sock.recv(2)[0] == network_module._OP_HELLO
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_HELLO, 0x22))
+        backend.start_receiver(
+            local_core=core,
+            serial_gate=SerialOperationGate(),
+            dispatch_to_owner=True,
+        )
+        assert backend._hello_received.wait(timeout=1.0)
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_EDGE_REQ, 1))
+        deadline = time.monotonic() + 1.0
+        while backend._edge_queue.empty():
+            assert time.monotonic() < deadline, "owner pump request was not queued"
+            time.sleep(0.001)
+
+        pump = PyBoyLinkSession._make_network_owner_pump(backend)
+        pump()
+        failure = backend._reader_exc
+        assert isinstance(failure, NetworkBackendError)
+        assert "owner failed to apply incoming EDGE_REQ" in str(failure)
+        assert failure.__cause__ is error
+        assert core.calls == 1
+        assert backend.debug_snapshot()["owner_edge_errors"] == 1
+        assert backend.debug_snapshot()["owner_edge_applied"] == 0
+        assert backend._completed_edge_queue.empty()
+        assert peer_sock.recv(1) == b""
+    finally:
+        try:
+            assert backend.stop(timeout_s=1.0) is True
+        finally:
+            peer_sock.close()
+
 
 def test_network_owner_pump_without_queue_uses_legacy_service_fallback() -> None:
     """Backends without the private queue attribute retain old behavior."""
@@ -578,3 +638,46 @@ def test_network_owner_pump_empty_probe_error_fails_closed() -> None:
     assert backend.service_calls == 0
     assert backend.closed_errors == [error]
     assert backend._closed is True
+
+
+def test_network_owner_pump_reentrant_dispatch_preserves_default_stream(monkeypatch) -> None:
+    """Nested empty owner polling leaves the native default byte path intact."""
+    edge_queue: queue.Queue[str] = queue.Queue()
+    edge_queue.put_nowait("inbound-edge")
+    serial = Serial(False)
+    serial.set_SB(0x3C)
+    serial.set_SC(0x80)
+
+    class ReentrantBackend:
+        def __init__(self) -> None:
+            self._edge_queue = edge_queue
+            self.service_calls = 0
+            self.serviced: list[str] = []
+            self.closed_errors: list[BaseException] = []
+
+        def service_pending_edges(self) -> int:
+            self.service_calls += 1
+            self.serviced.append(self._edge_queue.get_nowait())
+            serial.dispatch_owner()
+            return 1
+
+        def _mark_closed(self, error: BaseException) -> None:
+            self.closed_errors.append(error)
+
+    backend = ReentrantBackend()
+    serial.owner_dispatch_callback = PyBoyLinkSession._make_network_owner_pump(backend)
+    serial.owner_dispatch_enabled = True
+    serial.dispatch_owner()
+    assert backend.service_calls == 1
+    assert backend.serviced == ["inbound-edge"]
+    assert edge_queue.empty()
+    assert backend.closed_errors == []
+
+    serial.set_SB(0x3C)
+    serial.set_SC(0x81)
+    assert serial.tick(serial.clock_target * 8) is True
+    completed_byte = serial.SB
+    assert serial.tick(serial.last_cycles + serial.clock_target * 8) is False
+    assert serial.SB == completed_byte
+    assert backend.service_calls == 1
+    assert backend.closed_errors == []

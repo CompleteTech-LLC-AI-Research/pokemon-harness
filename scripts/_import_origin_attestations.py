@@ -153,6 +153,53 @@ def _record_attestations(
     return digests
 
 
+def _record_claim_rows(root: Path, *, api: OriginApi) -> dict[str, list[dict[str, str | None]]]:
+    """Return raw RECORD rows keyed by their resolved installed path.
+
+    Unlike ``_record_attestations``, this admission-only view deliberately
+    keeps rows with empty, malformed, or unsupported digest fields.  Such a
+    row is a claim that must fail closed; dropping it could let the selected
+    module fall through to a weaker editable-path explanation.
+    """
+
+    claims: dict[str, list[dict[str, str | None]]] = {}
+    records = sorted(root.glob("*.dist-info/RECORD"))
+
+    for record in records:
+        owner = record.parent.name.removesuffix(".dist-info")
+        try:
+            metadata = (record.parent / "METADATA").read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            metadata = ""
+        owner = next(
+            (
+                line.partition(":")[2].strip()
+                for line in metadata.splitlines()
+                if line.lower().startswith("name:")
+            ),
+            owner,
+        )
+        with record.open(encoding="utf-8", errors="replace", newline="") as stream:
+            rows = csv.reader(stream)
+            for row_number, row in enumerate(rows, start=1):
+                if not row or not row[0]:
+                    continue
+                candidate = api["_safe_resolve"](root / row[0])
+                if candidate is None:
+                    continue
+                digest_field = row[1] if len(row) > 1 else ""
+                algorithm, separator, digest = digest_field.partition("=")
+                claim = {
+                    "owner": owner,
+                    "record": str(record),
+                    "row": str(row_number),
+                    "algorithm": algorithm.lower() if separator and algorithm else None,
+                    "digest": digest if separator and digest else None,
+                }
+                claims.setdefault(str(candidate), []).append(claim)
+    return claims
+
+
 def _record_digests(root: Path, *, api: OriginApi) -> dict[str, set[tuple[str, str]]]:
     """Return every ``RECORD`` claim about every file, ignoring which owner made it.
 

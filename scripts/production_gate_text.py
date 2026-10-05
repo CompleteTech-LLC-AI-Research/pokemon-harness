@@ -49,6 +49,15 @@ def _failure_excerpt(safe: str, limit: int) -> tuple[str, int]:
     return safe[:head] + marker + safe[-tail:], len(safe) - available
 
 
+def _failure_phase(value: object) -> str:
+    """Keep phase metadata within its finite, non-sensitive vocabulary."""
+    return (
+        value
+        if type(value) is str and value in ("", "setup", "call", "teardown", "collection")
+        else ""
+    )
+
+
 def _retain_failure_detail(
     details: list[FailureDetail],
     record: dict[str, str],
@@ -70,11 +79,13 @@ def _retain_failure_detail(
     # Runtime outcomes are validated vocabulary; serializers may receive a
     # directly constructed record, which still needs redaction and budgeting.
     outcome = _safe_text(record["outcome"], limit=sys.maxsize)
-    if remaining_chars - len(nodeid) - len(outcome) < 128:
+    when = _failure_phase(record.get("when", ""))
+    metadata_chars = len(nodeid) + len(outcome) + len(when)
+    if remaining_chars - metadata_chars < 128:
         return remaining_chars, 1
     safe = _safe_text(record["reason"], limit=sys.maxsize)
     original_chars = len(safe)
-    limit = min(MAX_FAILURE_DETAIL_CHARS, remaining_chars - len(nodeid) - len(outcome))
+    limit = min(MAX_FAILURE_DETAIL_CHARS, remaining_chars - metadata_chars)
     reason, omitted = _failure_excerpt(safe, limit)
     details.append(
         FailureDetail(
@@ -87,9 +98,10 @@ def _retain_failure_detail(
             truncated=bool(omitted or nodeid_omitted),
             nodeid_original_chars=nodeid_original_chars,
             nodeid_omitted_chars=nodeid_omitted,
+            when=when,
         )
     )
-    return remaining_chars - len(nodeid) - len(outcome) - len(reason), 0
+    return remaining_chars - metadata_chars - len(reason), 0
 
 
 def _failure_detail_lines(details: Iterable[dict[str, Any]], omitted: int) -> Iterable[str]:
@@ -97,6 +109,7 @@ def _failure_detail_lines(details: Iterable[dict[str, Any]], omitted: int) -> It
         yield (
             f"    failure-detail: iteration {detail['iteration']}: "
             f"{detail['nodeid']}: {detail['outcome']} "
+            f"when={_failure_phase(detail.get('when', ''))} "
             f"original_chars={detail['original_chars']} "
             f"omitted_chars={detail['omitted_chars']} "
             f"truncated={detail['truncated']} "

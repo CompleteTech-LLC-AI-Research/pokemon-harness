@@ -286,6 +286,10 @@ def test_subprocess_pair_completes_trade_over_tcp(listener_version: str, connect
     assert record_a is not None and record_b is not None, (
         f"trade fixtures must contain lead records; A={before_a} B={before_b}"
     )
+    if (listener_version, connector_version) == ("red_color", "blue_color"):
+        assert record_a != record_b, (
+            "red_color listener and blue_color connector must start with distinct lead records"
+        )
     assert after_a.get("count") == before_a.get("count"), (
         f"listener party count changed unexpectedly; before={before_a} after={after_a}"
     )

@@ -24,7 +24,9 @@ import hashlib
 import importlib
 import importlib.machinery
 import importlib.metadata
+import io  # noqa: F401 - shared with the static probe-helper facade
 import json
+import math
 import os
 import shutil
 import signal
@@ -32,10 +34,79 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading  # noqa: F401 - shared with the static probe-helper facade
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
+
+if __package__:
+    from . import _bootstrap_runtime_contract, _bootstrap_runtime_probes
+    from . import check_import_origins as _origin_guard
+elif __name__ == "__main__":
+    import _bootstrap_runtime_contract
+    import _bootstrap_runtime_probes
+    import check_import_origins as _origin_guard
+else:
+    _scripts_root = Path(__file__).resolve().parent
+    _scripts_package = sys.modules.get("scripts")
+    if _scripts_package is None:
+        _scripts_package = ModuleType("scripts")
+        _scripts_spec = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+        _scripts_spec.submodule_search_locations = [str(_scripts_root)]
+        _scripts_package.__file__ = None
+        _scripts_package.__loader__ = None
+        _scripts_package.__package__ = "scripts"
+        _scripts_package.__path__ = [str(_scripts_root)]
+        _scripts_package.__spec__ = _scripts_spec
+        _scripts_package = sys.modules.setdefault("scripts", _scripts_package)
+    if type(_scripts_package) is not ModuleType:
+        raise ImportError("bootstrap scripts namespace is owned by another module")
+    _scripts_spec = _scripts_package.__spec__
+    if type(_scripts_spec) is not importlib.machinery.ModuleSpec:
+        raise ImportError("bootstrap scripts namespace has an invalid import spec")
+    try:
+        _scripts_paths = tuple(Path(item).resolve() for item in _scripts_package.__path__)
+        _spec_paths = tuple(
+            Path(item).resolve() for item in _scripts_spec.submodule_search_locations or ()
+        )
+    except (AttributeError, OSError, TypeError) as exc:
+        raise ImportError("bootstrap scripts namespace has invalid search paths") from exc
+    if (
+        _scripts_package.__file__ is not None
+        or _scripts_package.__package__ != "scripts"
+        or _scripts_package.__loader__ is not _scripts_spec.loader
+        or _scripts_spec.name != "scripts"
+        or _scripts_spec.parent != "scripts"
+        or _scripts_spec.origin is not None
+        or (
+            _scripts_spec.loader is not None
+            and not isinstance(_scripts_spec.loader, importlib.machinery.NamespaceLoader)
+        )
+        or _scripts_paths != (_scripts_root,)
+        or _spec_paths != (_scripts_root,)
+    ):
+        raise ImportError("bootstrap scripts namespace belongs to another source tree")
+    for _helper_name in (
+        "_bootstrap_runtime_contract",
+        "_bootstrap_runtime_probes",
+        "check_import_origins",
+        "_import_origin_resolution",
+        "_import_origin_paths",
+        "_import_origin_finders",
+        "_import_origin_attestations",
+        "_import_origin_selected_owners",
+    ):
+        _cached_helper = sys.modules.get(f"scripts.{_helper_name}")
+        if _cached_helper is not None and (
+            type(_cached_helper) is not ModuleType
+            or getattr(_cached_helper, "__file__", None) is None
+            or Path(_cached_helper.__file__).resolve() != _scripts_root / f"{_helper_name}.py"
+        ):
+            raise ImportError(f"bootstrap helper {_helper_name} belongs to another source tree")
+    from scripts import _bootstrap_runtime_contract, _bootstrap_runtime_probes
+    from scripts import check_import_origins as _origin_guard  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 PYBOY_SOURCE = ROOT / "vendor" / "pyboy-src"
@@ -64,6 +135,7 @@ BUILD_REQUIREMENTS = (
 PROJECT_DISTRIBUTION = "pokered-harness"
 PIP_PROBE_TIMEOUT_SECONDS = 60
 INSTALL_TIMEOUT_SECONDS = 1800
+CHECK_TIMEOUT_SECONDS = 30
 PROCESS_TERMINATION_GRACE_SECONDS = 5
 ISOLATION_ENVIRONMENT_KEYS = (
     "PYTHONHOME",
@@ -86,7 +158,17 @@ RUNTIME_MODULES = (
 # not require it to be an extension module.
 CYTHON_MODULES = tuple(name for name in RUNTIME_MODULES if name not in {"pyboy", "pyboy.link"})
 NATIVE_INPUT_SUFFIXES = frozenset(
-    {".py", ".pyx", ".pxd", ".pxi", ".txt", ".bin", ".md", ".in", ".toml"}
+    {
+        ".py",
+        ".pyx",
+        ".pxd",
+        ".pxi",
+        ".txt",
+        ".bin",
+        ".md",
+        ".in",
+        ".toml",
+    }
 )
 BUILD_EVIDENCE_VERSION = 2
 
@@ -314,9 +396,9 @@ def _native_build_source(digest_sink: list[str] | None = None) -> Iterator[Path]
 
     Cython extension types share method tables across modules. Reusing old
     generated C or objects after a declaration change can produce a mixed
-    runtime even when every import succeeds. The vendored package contains
-    Python/Cython sources and resources; its C, headers, and binaries are all
-    generated output, so they must never enter this fresh build directory.
+    runtime even when every import succeeds. The allowlist stages Python/Cython
+    sources and resources; generated C, headers, and binaries are inspected for
+    orphaned outputs but never enter this fresh build directory.
 
     ``digest_sink``, when supplied, receives the staged-inputs digest. The
     caller uses it to bind retained build evidence to the exact bytes that
@@ -338,13 +420,40 @@ def _native_build_source(digest_sink: list[str] | None = None) -> Iterator[Path]
             )
             for name in children:
                 if (Path(directory) / name).is_symlink():
-                    raise SystemExit("native build inputs must not contain symlinked directories")
+                    raise ValueError("native build inputs must not contain symlinked directories")
             for name in sorted(filenames):
                 source = Path(directory) / name
+                if source.is_symlink():
+                    raise ValueError("native build inputs must not contain symlinked files")
+                if source.suffix.lower() in {".c", ".cpp", ".h", ".hpp"}:
+                    try:
+                        with source.open("rb") as stream:
+                            generated = (
+                                stream.read(128).lstrip().startswith(b"/* Generated by Cython ")
+                            )
+                    except OSError as exc:
+                        raise ValueError(
+                            f"cannot inspect native build input {source}: {exc}"
+                        ) from exc
+                    if generated:
+                        stems = [source.stem]
+                        if source.suffix.lower() in {".h", ".hpp"} and source.stem.endswith("_api"):
+                            stems.append(source.stem[:-4])
+                        regeneration_sources = [
+                            source.with_name(stem + suffix)
+                            for stem in stems
+                            for suffix in (".py", ".pyx")
+                        ]
+                        if not any(
+                            candidate.is_file() and not candidate.is_symlink()
+                            for candidate in regeneration_sources
+                        ):
+                            raise ValueError(
+                                f"generated Cython output has no regeneration source: {source}"
+                            )
+                        continue
                 if source.suffix not in NATIVE_INPUT_SUFFIXES and source != REVISION_FILE:
                     continue
-                if source.is_symlink():
-                    raise SystemExit("native build inputs must not contain symlinked files")
                 relative = source.relative_to(PYBOY_SOURCE)
                 target = destination / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -418,6 +527,22 @@ def _new_serial_instance() -> object:
     from pyboy.core.serial import Serial
 
     return Serial(False)
+
+
+def _verify_serial_features(mode: str, serial_module: object) -> None:
+    return _bootstrap_runtime_probes._verify_serial_features(mode, serial_module, api=globals())
+
+
+def _verify_owner_clock_features(mode: str, pyboy_module: object, serial_module: object) -> None:
+    return _bootstrap_runtime_probes._verify_owner_clock_features(
+        mode, pyboy_module, serial_module, api=globals()
+    )
+
+
+def _verify_owner_poll_features(mode: str, pyboy_module: object, serial_module: object) -> None:
+    return _bootstrap_runtime_probes._verify_owner_poll_features(
+        mode, pyboy_module, serial_module, api=globals()
+    )
 
 
 def _runtime_identity() -> dict[str, object]:
@@ -644,82 +769,30 @@ def _verify_runtime(mode: str) -> None:
             "PyBoy runtime cannot be imported after bootstrap; install the "
             f"harness dependencies first or inspect the build output: {type(exc).__name__}: {exc}"
         ) from exc
-
-    expected_modules = (
-        {name: "cython" for name in CYTHON_MODULES}
-        if mode == "cython"
-        else {name: "source" for name in RUNTIME_MODULES}
+    harness_module = sys.modules.get("pokered_harness")
+    if harness_module is None:
+        try:
+            harness_module = importlib.import_module("pokered_harness")
+        except Exception:  # noqa: BLE001 - missing witness is a contract refusal below
+            harness_module = None
+    problems = _bootstrap_runtime_contract.verify_preconstruction_contract(
+        mode, modules, pyboy, utils, harness_module, api=globals()
     )
-    problems: list[str] = []
-    if getattr(pyboy, "__version__", None) != EXPECTED_PYBOY_VERSION:
-        problems.append(
-            f"version={getattr(pyboy, '__version__', None)!r}, expected {EXPECTED_PYBOY_VERSION!r}"
-        )
-    if getattr(pyboy, "__pokered_harness_revision__", None) != EXPECTED_REVISION:
-        problems.append(
-            "revision="
-            f"{getattr(pyboy, '__pokered_harness_revision__', None)!r}, expected {EXPECTED_REVISION!r}"
-        )
-    if not callable(getattr(getattr(pyboy, "PyBoy", None), "_tick", None)):
-        problems.append("PyBoy._tick frame ownership is unavailable; rebuild the bundled runtime")
-
-    for name, expected_kind in expected_modules.items():
-        actual_kind = _module_kind(modules[name])
-        if actual_kind != expected_kind:
-            problems.append(f"{name} is {actual_kind}, expected {expected_kind}")
-
-    allowed_roots = _runtime_roots()
-    for name, module in modules.items():
-        filename = str(getattr(module, "__file__", "") or "")
-        module_path = Path(filename).resolve() if filename else None
-        if module_path is None or not any(
-            _path_is_within(module_path, root) for root in allowed_roots
-        ):
-            problems.append(
-                f"{name} loaded outside the pinned runtime roots: {filename or '<none>'}"
-            )
-
-    owners = _package_distributions("pyboy")
-    if PROJECT_DISTRIBUTION not in owners:
-        problems.append("pyboy is not provided by the installed pokered-harness distribution")
-    if mode == "source":
-        unexpected = owners - {PROJECT_DISTRIBUTION}
-        if unexpected:
-            problems.append(
-                "pyboy has competing installed owners: " + ", ".join(sorted(unexpected))
-            )
-    else:
-        # Cython mode intentionally installs the checked-in PyBoy project as
-        # an extension-backed distribution. Its revision marker remains
-        # authoritative, so an unmodified stock package cannot pass below.
-        unexpected = owners - {PROJECT_DISTRIBUTION, "pyboy"}
-        if unexpected:
-            problems.append("pyboy has foreign installed owners: " + ", ".join(sorted(unexpected)))
-
-    if bool(getattr(utils, "cython_compiled", False)) != (mode == "cython"):
-        problems.append(
-            f"cython_compiled={getattr(utils, 'cython_compiled', None)!r}, "
-            f"expected {mode == 'cython'!r}"
-        )
-
-    try:
-        serial = _new_serial_instance()
-    except Exception as exc:  # noqa: BLE001 - an incompatible ABI must fail closed
-        # A separately installed stock PyBoy may import successfully while
-        # exposing an incompatible constructor or ABI. Report it alongside
-        # the ownership/module-kind violations instead of leaking a traceback.
-        problems.append(f"serial contract could not be constructed: {type(exc).__name__}: {exc}")
-    else:
-        missing = [
-            name
-            for name in ("backend", "apply_external_edge", "peek_out_bit")
-            if not hasattr(serial, name)
-        ]
-        if missing:
-            problems.append(f"serial contract missing {', '.join(missing)}")
-
     if problems:
         raise SystemExit(f"PyBoy runtime contract failed for --mode {mode}: " + "; ".join(problems))
+    try:
+        serial = _new_serial_instance()
+    except Exception as exc:
+        raise SystemExit(
+            "PyBoy runtime contract failed for --mode "
+            f"{mode}: serial contract could not be constructed: {type(exc).__name__}: {exc}"
+        ) from exc
+    problems = _bootstrap_runtime_contract.verify_serial_instance(serial)
+    if problems:
+        raise SystemExit(f"PyBoy runtime contract failed for --mode {mode}: " + "; ".join(problems))
+    _bootstrap_runtime_contract.verify_behavior(
+        mode, pyboy, modules["pyboy.core.serial"], api=globals()
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -736,6 +809,19 @@ def main(argv: list[str] | None = None) -> int:
         help="verify the active PyBoy runtime without reinstalling it",
     )
     parser.add_argument(
+        "--install-timeout",
+        type=float,
+        default=INSTALL_TIMEOUT_SECONDS,
+        help=f"maximum seconds per install/build child (default: {INSTALL_TIMEOUT_SECONDS:g})",
+    )
+    parser.add_argument(
+        "--check-timeout",
+        type=float,
+        default=CHECK_TIMEOUT_SECONDS,
+        help=f"maximum seconds per check child (default: {CHECK_TIMEOUT_SECONDS:g})",
+    )
+    parser.add_argument("--_runtime-probe", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
         "--build-evidence",
         metavar="PATH",
         help=(
@@ -744,13 +830,40 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    if not math.isfinite(args.install_timeout) or args.install_timeout <= 0:
+        parser.error("--install-timeout must be finite and positive")
+    if not math.isfinite(args.check_timeout) or args.check_timeout <= 0:
+        parser.error("--check-timeout must be finite and positive")
 
     _validate_source()
     if args.check and args.build_evidence:
         raise SystemExit("--build-evidence cannot be combined with --check")
-    if args.check:
+    if args._runtime_probe:
         _verify_runtime(args.mode)
         return 0
+    if args.check:
+        env = _isolated_environment()
+        if args.mode == "source":
+            env["PYBOY_NO_CYTHON"] = "1"
+        else:
+            env.pop("PYBOY_NO_CYTHON", None)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--mode",
+            args.mode,
+            "--check-timeout",
+            f"{args.check_timeout:g}",
+            "--_runtime-probe",
+        ]
+        try:
+            return _run_bounded(command, cwd=ROOT, env=env, timeout=args.check_timeout).returncode
+        except subprocess.TimeoutExpired as exc:
+            print(
+                f"bootstrap command timed out after {exc.timeout} seconds: {exc.cmd}",
+                file=sys.stderr,
+            )
+            return 124
 
     metadata_was_present = _metadata_was_present()
 
@@ -771,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
             ],
             cwd=ROOT,
             env=env,
-            timeout=INSTALL_TIMEOUT_SECONDS,
+            timeout=args.install_timeout,
         )
         if build_result.returncode:
             return build_result.returncode
@@ -794,30 +907,34 @@ def main(argv: list[str] | None = None) -> int:
                 project_command,
                 cwd=ROOT,
                 env=env,
-                timeout=INSTALL_TIMEOUT_SECONDS,
+                timeout=args.install_timeout,
             )
             if project_result.returncode:
                 return project_result.returncode
 
         staged_inputs: list[str] = []
-        source_context = (
-            nullcontext(ROOT) if args.mode == "source" else _native_build_source(staged_inputs)
-        )
-        with source_context as install_target:
-            command = [
-                *pip_install,
-                "--force-reinstall",
-                "--no-deps",
-                "--no-build-isolation",
-                CYTHON_REQUIREMENT,
-                str(install_target),
-            ]
-            result = _run_bounded(
-                command,
-                cwd=ROOT,
-                env=env,
-                timeout=INSTALL_TIMEOUT_SECONDS,
+        try:
+            source_context = (
+                nullcontext(ROOT) if args.mode == "source" else _native_build_source(staged_inputs)
             )
+            with source_context as install_target:
+                command = [
+                    *pip_install,
+                    "--force-reinstall",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    CYTHON_REQUIREMENT,
+                    str(install_target),
+                ]
+                result = _run_bounded(
+                    command,
+                    cwd=ROOT,
+                    env=env,
+                    timeout=args.install_timeout,
+                )
+        except (OSError, ValueError) as exc:
+            print(f"PyBoy native source staging failed: {exc}", file=sys.stderr)
+            return 1
         if result.returncode:
             if args.mode == "cython":
                 print(
@@ -826,7 +943,31 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
             return result.returncode
-        _verify_runtime(args.mode)
+        if args.mode == "cython":
+            dependency_check = _run_bounded(
+                [sys.executable, "-m", "pip", "check"],
+                cwd=ROOT,
+                env=env,
+                timeout=args.check_timeout,
+            )
+            if dependency_check.returncode:
+                return dependency_check.returncode
+        runtime_probe = _run_bounded(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--mode",
+                args.mode,
+                "--check-timeout",
+                f"{args.check_timeout:g}",
+                "--_runtime-probe",
+            ],
+            cwd=ROOT,
+            env=env,
+            timeout=args.check_timeout,
+        )
+        if runtime_probe.returncode:
+            return runtime_probe.returncode
         if args.build_evidence:
             _write_build_evidence(
                 Path(args.build_evidence),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -609,3 +610,88 @@ def test_deadline_is_checked_between_one_frame_owner_chunks():
     with pytest.raises(diagnose.DeadlineExceeded, match="wall deadline"):
         proxy.step_interleaved(3)
     assert len(target.calls) == 1
+
+
+def test_metadata_fingerprints_split_source_components(tmp_path, monkeypatch):
+    original = {
+        "scripts/diagnose_pair_trade.py",
+        "tests/test_pyboy_link_session_roms.py",
+        "tests/_pair_checkpoints.py",
+        "src/pokered_harness/config.py",
+        "src/pokered_harness/session.py",
+        "src/pokered_harness/ownership.py",
+        "src/pokered_harness/link/pyboy_link_session.py",
+        "src/pokered_harness/link/_pyboy_link_session_network_mixin.py",
+        "src/pokered_harness/link/_pyboy_link_session_lifecycle_mixin.py",
+        "src/pokered_harness/link/_pyboy_link_session_stepping_mixin.py",
+        "src/pokered_harness/link/_pyboy_link_session_support.py",
+        "src/pokered_harness/link/serial_coordinator.py",
+    }
+    additions = {
+        "scripts/_diagnose_pair_trade_support.py",
+        "src/pokered_harness/_session_support.py",
+        "src/pokered_harness/_session_mixins.py",
+        "src/pokered_harness/_session_observation.py",
+        "tests/_pyboy_link_session_roms_support.py",
+        "tests/_pyboy_link_session_roms_trade_support.py",
+        "tests/_pyboy_link_session_roms_battle_support.py",
+        "tests/test_pyboy_link_session_roms_serial.py",
+        "tests/test_pyboy_link_session_roms_diagnostics.py",
+        "tests/_battle_turn_evidence.py",
+    }
+    for name in original | additions:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+    missing = {
+        f"assets/{version}.{kind}"
+        for version in ("red", "yellow")
+        for kind in ("gb", "sym", "state")
+    }
+    helper = SimpleNamespace(
+        _ROM_PATHS={
+            version: (tmp_path / f"assets/{version}.gb", tmp_path / f"assets/{version}.sym")
+            for version in ("red", "yellow")
+        },
+        _state_path=lambda version: tmp_path / f"assets/{version}.state",
+    )
+    versions = SimpleNamespace(
+        pyboy_version="test", sha1_for_path=lambda _: None, symbol_sha1_for_path=lambda _: None
+    )
+    modules = {"pokered_harness.config": SimpleNamespace(load_versions=lambda _: versions)}
+    for name in ("pyboy.pyboy", "pyboy.core.serial", "pyboy.core.mb"):
+        path = tmp_path / (name + ".py")
+        path.write_bytes(name.encode())
+        modules[name] = SimpleNamespace(__file__=str(path))
+
+    def import_module(name):
+        assert name in modules, f"unexpected metadata import: {name}"
+        return modules[name]
+
+    monkeypatch.setattr(diagnose, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(diagnose, "__file__", str(tmp_path / "scripts/diagnose_pair_trade.py"))
+    monkeypatch.setattr(diagnose, "_safe_import_real_helpers", lambda: helper)
+    monkeypatch.setattr(diagnose.importlib, "import_module", import_module)
+    first = diagnose._version_and_asset_metadata()["source"]
+    assert set(first["files"]) - original - missing == additions
+    assert set(first["files"]) == original | additions | missing
+    for name in original | additions:
+        data = (tmp_path / name).read_bytes()
+        row = first["files"][name]
+        assert row["sha1"] == hashlib.sha1(data).hexdigest()
+        assert row["sha256"] == hashlib.sha256(data).hexdigest()
+        assert row["bytes"] == len(data)
+    for name in missing:
+        assert first["files"][name]["exists"] is False
+        assert first["files"][name]["sha256"] is None
+    changed = "scripts/_diagnose_pair_trade_support.py"
+    (tmp_path / changed).write_bytes(b"changed helper")
+    second = diagnose._version_and_asset_metadata()["source"]
+    assert second["files"][changed]["sha256"] != first["files"][changed]["sha256"]
+    assert second["combined_sha256"] != first["combined_sha256"]
+    (tmp_path / "unrelated.py").write_bytes(b"unrelated")
+    assert diagnose._version_and_asset_metadata()["source"] == second
+    (tmp_path / changed).unlink()
+    third = diagnose._version_and_asset_metadata()["source"]
+    assert third["files"][changed]["sha256"] is None
+    assert third["combined_sha256"] != second["combined_sha256"]

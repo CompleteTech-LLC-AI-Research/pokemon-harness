@@ -573,6 +573,77 @@ def test_versioned_duplicate_edge_request_replays_without_core_application():
             peer_sock.close()
 
 
+def test_duplicate_pending_identified_edge_request_fails_closed_before_owner_mutation(
+    monkeypatch,
+):
+    """A second in-flight ID closes transport before owner queue service."""
+    import time
+
+    backend_sock, peer_sock = _socket.socketpair()
+    backend = NetworkBackend(backend_sock, local_rom_version="red")
+    peer_sock.settimeout(1.0)
+
+    class CountingCore(_CompletingSlaveCore):
+        def __init__(self):
+            super().__init__()
+            self.applications = 0
+
+        def apply_external_edge(self, peer_bit: int) -> bool:
+            self.applications += 1
+            return super().apply_external_edge(peer_bit)
+
+    core = CountingCore()
+    gate = SerialOperationGate()
+    try:
+        assert peer_sock.recv(2)[0] == network_module._OP_HELLO
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_HELLO, 0x22))
+        backend.start_receiver(
+            local_core=core,
+            serial_gate=gate,
+            dispatch_to_owner=True,
+        )
+        assert backend.wait_for_hello(timeout=1.0) == "blue"
+
+        request = network_module._EDGE_ID_FRAME.pack(
+            network_module._OP_EDGE_REQ_ID,
+            1,
+            7,
+        )
+        peer_sock.sendall(request)
+        deadline = time.monotonic() + 1.0
+        while backend._edge_queue.qsize() != 1:
+            assert time.monotonic() < deadline, "first identified request was not admitted"
+            time.sleep(0.001)
+        admitted = backend.debug_snapshot()
+        assert admitted["pending_edge_requests"] == 1
+        assert backend._inbound_edge_ids_pending == {7}
+        peer_sock.sendall(request)
+
+        deadline = time.monotonic() + 1.0
+        while not backend._closed:
+            assert time.monotonic() < deadline, "pending duplicate was not rejected"
+            time.sleep(0.001)
+        error = backend._reader_exc
+        assert isinstance(error, NetworkBackendError)
+        assert "duplicate pending EDGE_REQ id 7" in str(error)
+        assert backend._pre_close_snapshot["pending_edge_requests"] == 1
+        assert backend._pre_close_snapshot["reader_error"] == {
+            "type": "NetworkBackendError",
+            "message": "duplicate pending EDGE_REQ id 7",
+        }
+        assert backend.debug_snapshot()["owner_edge_applied"] == 0
+        assert backend.debug_snapshot()["edge_id_req_received"] == 1
+        assert backend._edge_queue.qsize() == 1
+        assert core.applications == 0
+        assert core.SB == 0
+        assert peer_sock.recv(1) == b""
+    finally:
+        try:
+            assert backend.stop(timeout_s=1.0) is True
+        finally:
+            peer_sock.close()
+
+
 def test_versioned_late_response_id_fails_closed(monkeypatch):
     """A response for an earlier identified edge cannot satisfy this edge."""
     backend_sock, peer_sock = _socket.socketpair()
