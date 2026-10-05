@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 import pytest
 
-from tests._battle_turn_evidence import verify_battle_turns
+from tests._battle_turn_evidence import MAX_SEQUENCE, verify_battle_turns
 
 
 def _mon(*, hp: int, slot: int = 0) -> dict:
@@ -44,12 +45,13 @@ def _row(*, reverse: bool = False) -> dict:
     enemy_action = _action(local_before["hp"], local_after["hp"])
     local_after["pp"][0] = 9
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "settled": True,
         "exchange_seq": 2,
         "settled_seq": 4,
         "baseline": {"local": local_before, "enemy": enemy_before},
         "turn": {
+            "exchange_ordinal": 1,
             "exchange_seq": 2,
             "settled_seq": 4,
             "send": 0,
@@ -120,12 +122,22 @@ def test_paralysis_requires_completed_supported_and_agreed_application(attacker,
 
 
 def test_matching_applied_turns_pass() -> None:
-    assert verify_battle_turns([_row(), _row(reverse=True)]) == []
+    left, right = _row(), _row(reverse=True)
+    left.update(exchange_seq=1, settled_seq=3)
+    right.update(exchange_seq=5, settled_seq=9)
+    left["turn"].update(exchange_ordinal=MAX_SEQUENCE, exchange_seq=1, settled_seq=3)
+    right["turn"].update(exchange_ordinal=MAX_SEQUENCE, exchange_seq=5, settled_seq=9)
+    left["hook_counts"] = {"LinkBattleExchangeData": 1, "post_exchange": 1}
+    right["hook_counts"] = {"LinkBattleExchangeData": 7, "post_exchange": 4}
+    assert left["hook_counts"] != right["hook_counts"]
+    assert verify_battle_turns([left, right]) == []
 
 
 def test_tcp_diagnostic_wrapper_keeps_complete_settlement_envelope() -> None:
     """The TCP peer nests a complete observer snapshot beside its counters."""
-    assert verify_battle_turns([{"battle_turn": _row()}, {"battle_turn": _row(reverse=True)}]) == []
+    rows = [{"battle_turn": _row()}, {"battle_turn": _row(reverse=True)}]
+    decoded = json.loads(json.dumps(rows))
+    assert verify_battle_turns(decoded) == []
 
 
 def test_hook_only_or_missing_settlement_fails_closed() -> None:
@@ -192,12 +204,14 @@ def test_exchange_entry_does_not_read_stale_wire_slots(monkeypatch) -> None:
     observer.observe("post_exchange")
     assert observer.error is None
     assert observer.exchange["exchange_seq"] == 2
+    assert observer.exchange["exchange_ordinal"] == 1
     assert observer.exchange["enemy_move_id"] == 1
 
 
 def test_invalid_wire_slot_after_exchange_still_fails_closed(monkeypatch) -> None:
     observer, memory = _observer(monkeypatch)
     memory["wSerialExchangeNybbleSendData"] = 0
+    observer.observe("LinkBattleExchangeData")
     observer.observe("post_exchange")
     assert "invalid receive slot: 4" in observer.error
     assert observer.exchange is None
@@ -208,6 +222,7 @@ def test_missing_selected_local_move_after_exchange_fails_closed(monkeypatch) ->
     memory.update(
         wSerialExchangeNybbleSendData=0, wSerialExchangeNybbleReceiveData=0, wPlayerSelectedMove=0
     )
+    observer.observe("LinkBattleExchangeData")
     observer.observe("post_exchange")
     assert "invalid local move ID: 0" in observer.error
     assert observer.exchange is None
@@ -237,3 +252,163 @@ def test_move_choice_rejects_unsupported_or_depleted_moves(monkeypatch) -> None:
     monkeypatch.setattr(evidence, "_move_data", lambda session, move: [move, 39, 120, 0, 0, 0])
     with pytest.raises(ValueError, match="no legal supported existing move with PP"):
         evidence.choose_supported_battle_move(None, [(76, 10), (22, 64), (68, 20), (0, 0)])
+
+
+def test_different_exchange_ordinal_fails_even_when_otherwise_coherent() -> None:
+    left, right = _row(), _row(reverse=True)
+    left["turn"]["exchange_ordinal"] = 1
+    right["turn"]["exchange_ordinal"] = 2
+    errors = verify_battle_turns([left, right])
+    assert errors == ["battle peers disagree on move exchange ordinal"]
+
+
+@pytest.mark.parametrize(
+    "ordinal",
+    (
+        pytest.param(None, id="none"),
+        pytest.param(0, id="zero"),
+        pytest.param(True, id="bool"),
+        pytest.param(1.0, id="float"),
+        pytest.param("1", id="string"),
+        pytest.param(MAX_SEQUENCE + 1, id="above-max"),
+    ),
+)
+def test_invalid_exchange_ordinal_fails_closed(ordinal) -> None:
+    values = (0, -1) if type(ordinal) is int and ordinal == 0 else (ordinal,)
+    for value in values:
+        row = _row()
+        row["turn"]["exchange_ordinal"] = value
+        errors = verify_battle_turns([row, _row(reverse=True)])
+        assert errors and errors[0].startswith("invalid exchange ordinal:")
+
+
+def test_missing_exchange_ordinal_fails_closed() -> None:
+    row = _row()
+    del row["turn"]["exchange_ordinal"]
+    errors = verify_battle_turns([row, _row(reverse=True)])
+    assert errors and errors[0].startswith("invalid exchange ordinal:")
+
+
+def test_schema_one_evidence_fails_closed() -> None:
+    full_row = _row()
+    full_row["schema_version"] = 1
+    nested_row = {"battle_turn": _row()}
+    nested_row["battle_turn"]["schema_version"] = 1
+    for rows in ([full_row, _row(reverse=True)], [nested_row, {"battle_turn": _row(reverse=True)}]):
+        assert verify_battle_turns(rows) == ["invalid battle evidence schema"]
+
+
+@pytest.mark.parametrize(
+    "stage",
+    (
+        pytest.param("before-first-continuation", id="before-first-continuation"),
+        pytest.param("after-first-capture", id="after-first-capture"),
+    ),
+)
+def test_duplicate_exchange_entry_before_settlement_fails_closed(monkeypatch, stage) -> None:
+    observer, memory = _observer(monkeypatch)
+    observer.observe("LinkBattleExchangeData")
+    first_ordinal = observer.pending_exchange_ordinal
+    first_exchange = None
+    if stage == "after-first-capture":
+        memory["wSerialExchangeNybbleSendData"] = 0
+        memory["wSerialExchangeNybbleReceiveData"] = 0
+        observer.observe("post_exchange")
+        first_exchange = deepcopy(observer.exchange)
+    observer.observe("LinkBattleExchangeData")
+    assert observer.error is not None
+    assert "duplicate move exchange entry before settlement" in observer.error
+    assert observer.turn is None
+    if stage == "before-first-continuation":
+        assert observer.exchange is None
+        assert observer.pending_exchange_ordinal == first_ordinal == 1
+    else:
+        assert observer.exchange == first_exchange
+        assert observer.exchange["exchange_ordinal"] == 1
+    observer.observe("post_exchange")
+    assert observer.turn is None
+    assert observer.exchange == first_exchange
+
+
+def test_post_exchange_without_entry_fails_closed(monkeypatch) -> None:
+    observer, memory = _observer(monkeypatch)
+    memory["wSerialExchangeNybbleSendData"] = 0
+    memory["wSerialExchangeNybbleReceiveData"] = 0
+    observer.observe("post_exchange")
+    assert "without an unconsumed move exchange entry" in observer.error
+    assert observer.exchange is None
+    assert observer.turn is None
+    assert observer.snapshot()["settled"] is False
+
+    observer, memory = _observer(monkeypatch)
+    memory["wSerialExchangeNybbleSendData"] = 0
+    memory["wSerialExchangeNybbleReceiveData"] = 0
+    observer.observe("LinkBattleExchangeData")
+    observer.observe("post_exchange")
+    first_exchange = deepcopy(observer.exchange)
+    assert first_exchange["exchange_ordinal"] == 1
+    assert observer.pending_exchange_ordinal is None
+    observer.observe("post_exchange")
+    assert "without an unconsumed move exchange entry" in observer.error
+    assert observer.exchange == first_exchange
+    assert observer.turn is None
+    assert observer.snapshot()["settled"] is False
+
+
+def test_exchange_ordinal_counter_overflow_fails_closed(monkeypatch) -> None:
+    observer, _memory = _observer(monkeypatch)
+    observer._exchange_ordinal_counter = MAX_SEQUENCE
+    observer.observe("LinkBattleExchangeData")
+    assert "move exchange ordinal exhausted" in observer.error
+    assert observer._exchange_ordinal_counter == MAX_SEQUENCE
+    assert observer.pending_exchange_ordinal is None
+    assert observer.exchange is None
+    assert observer.turn is None
+    assert observer.snapshot()["settled"] is False
+
+
+def test_postsettlement_entry_preserves_frozen_turn(monkeypatch) -> None:
+    from tests import _battle_turn_evidence as evidence
+
+    row = _row()
+    observer, memory = _observer(monkeypatch)
+    memory.update(
+        wSerialExchangeNybbleSendData=0,
+        wSerialExchangeNybbleReceiveData=0,
+        wBattleResult=0,
+        wCurMap=0xF0,
+        wLinkState=1,
+        wIsInBattle=0,
+    )
+    observer.observe("LinkBattleExchangeData")
+    observer.observe("post_exchange")
+    monkeypatch.setattr(
+        evidence,
+        "_combatants",
+        lambda session: deepcopy({side: row["turn"][side] for side in ("local", "enemy")}),
+    )
+    observer.actions = deepcopy(row["turn"]["actions"])
+    observer.pp_entries = 1
+    observer.sequence = 4
+    observer.observe("MainInBattleLoop")
+    assert observer.error is None
+    assert observer.turn is not None
+    frozen_turn = deepcopy(observer.turn)
+    assert frozen_turn is not None
+
+    observer.observe("LinkBattleExchangeData")
+    observer.observe("MainInBattleLoop")
+    observer.observe("EndOfBattle")
+    observer.observe("ReturnToCableClubRoom")
+    assert observer.error is None
+    assert observer.turn == frozen_turn
+    assert observer.turn["exchange_ordinal"] == 1
+    assert observer.terminal["boundary"] == "EndOfBattle"
+    assert observer.cleanup == {
+        "seq": observer.sequence,
+        "map": 0xF0,
+        "link_state": 1,
+        "is_in_battle": 0,
+    }
+    assert observer.counts["LinkBattleExchangeData"] == 2
+    assert observer.snapshot()["settled"] is True

@@ -25,7 +25,7 @@ from scripts._timed_battle_probe import (
     UNSUPPORTED_MOVES,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_SEQUENCE = 2**63 - 1
 PARTY_MON_SIZE = 44
 COLOSSEUM_MAP_ID = 0xF0
@@ -245,6 +245,7 @@ def validate_turn(baseline: dict[str, Any], turn: dict[str, Any]) -> None:
     """Validate one owner's observed application path, without repairing it."""
     if not isinstance(baseline, dict) or not isinstance(turn, dict):
         raise TypeError("baseline/turn evidence is not an object")
+    _integer(turn.get("exchange_ordinal"), 1, MAX_SEQUENCE, "exchange ordinal")
     send = _integer(turn.get("send"), 0, 3, "send slot")
     receive = _integer(turn.get("receive"), 0, 3, "receive slot")
     for side, opposite, slot, move_key in (
@@ -389,6 +390,8 @@ def verify_battle_turns(
                         raise ValueError(
                             f"battle peers disagree on settled {phase} combatant state"
                         )
+        if left["turn"]["exchange_ordinal"] != right["turn"]["exchange_ordinal"]:
+            raise ValueError("battle peers disagree on move exchange ordinal")
         if (
             left["turn"]["send"] != right["turn"]["receive"]
             or left["turn"]["receive"] != right["turn"]["send"]
@@ -450,6 +453,8 @@ class BattleTurnObserver:
         self.session = session
         self.role, self.version = role, version
         self.sequence = 0
+        self._exchange_ordinal_counter = 0
+        self.pending_exchange_ordinal: int | None = None
         self.counts = {name: 0 for name in EVIDENCE_EVENTS}
         self.baseline: dict[str, Any] | None = None
         self.exchange: dict[str, Any] | None = None
@@ -482,9 +487,9 @@ class BattleTurnObserver:
     def _validate_initial_party(self) -> None:
         _validate_party(self.before_party)
 
-    def _capture_exchange(self) -> None:
+    def _capture_exchange(self, *, exchange_ordinal: int) -> None:
         if self.exchange is not None:
-            return
+            raise ValueError("move exchange was already captured before settlement")
         if self.baseline is None:
             raise ValueError("move exchange observed before battle baseline")
         send = _integer(_read(self.session, "wSerialExchangeNybbleSendData"), 0, 3, "send slot")
@@ -512,6 +517,7 @@ class BattleTurnObserver:
             effects[side] = row[1]
             data[side] = list(row)
         self.exchange = {
+            "exchange_ordinal": _integer(exchange_ordinal, 1, MAX_SEQUENCE, "exchange ordinal"),
             "exchange_seq": self.sequence,
             "send": send,
             "receive": receive,
@@ -576,9 +582,26 @@ class BattleTurnObserver:
         if name == "LinkBattleExchangeData":
             # Entry precedes initialization and exchange of both wire slots.
             # Count it, but only the verified return continuation owns evidence.
+            if self.turn is not None:
+                return
+            if self.pending_exchange_ordinal is not None or self.exchange is not None:
+                raise ValueError("duplicate move exchange entry before settlement")
+            if self._exchange_ordinal_counter >= MAX_SEQUENCE:
+                raise ValueError("move exchange ordinal exhausted")
+            self._exchange_ordinal_counter += 1
+            self.pending_exchange_ordinal = self._exchange_ordinal_counter
             return
         if name == "post_exchange":
-            self._capture_exchange()
+            if self.turn is not None:
+                return
+            ordinal = self.pending_exchange_ordinal
+            if ordinal is None:
+                raise ValueError("post_exchange without an unconsumed move exchange entry")
+            ordinal = _integer(ordinal, 1, MAX_SEQUENCE, "exchange ordinal")
+            if self.exchange is not None:
+                raise ValueError("post_exchange after an exchange was captured before settlement")
+            self.pending_exchange_ordinal = None
+            self._capture_exchange(exchange_ordinal=ordinal)
             return
         if self.exchange is None or self.turn is not None:
             if name == "EndOfBattle":
