@@ -13,6 +13,16 @@ Hosted checks run only for public repositories on standard free runners.
 Private copies run the same checks locally; the workflow remains available
 for reuse. See [CI policy and local commands](docs/CI_POLICY.md).
 
+**Who it is for:** people who drive Pokémon Red, Blue, or Yellow from code or
+from an MCP client and can supply their own legally obtained ROM and symbol
+file. The repository is named `pokemon-harness`; the Python package and
+command are `pokered-harness`.
+
+**To try it:** follow [Requirements and clean install](#requirements-and-clean-install),
+then [BYO-ROM and symbols](#byo-rom-and-symbols) and
+[Run one MCP server](#run-one-mcp-server). An asset-free smoke check that
+needs no ROM is under [Development test command](#development-test-command).
+
 ## Release status
 
 **Status: `PARTIAL` — the current candidate is not production-ready.**
