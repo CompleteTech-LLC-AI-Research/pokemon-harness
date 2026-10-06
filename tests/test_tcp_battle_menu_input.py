@@ -33,9 +33,9 @@ class _Memory(dict):
 
 
 class _Session:
-    def __init__(self, owner, *, cursor: int | None = 0):
+    def __init__(self, owner, *, cursor: int | None = 0, max_item: int = 1):
         self.owner = owner
-        memory = {_MAX_ITEM: 1, _WATCHED_KEYS: 1, _SERIAL_STATUS: 2}
+        memory = {_MAX_ITEM: max_item, _WATCHED_KEYS: 1, _SERIAL_STATUS: 2}
         if cursor is not None:
             memory[_CURSOR] = cursor
         self._pyboy = SimpleNamespace(memory=_Memory(memory))
@@ -70,6 +70,7 @@ class _Session:
 
     def step(self, frames: int) -> None:
         self.steps.append(frames)
+        self.owner.events.append(("step", frames))
         self.tick += frames
         if frames == 40 and self.owner.cursor_after_settle is not None:
             self._pyboy.memory.cursor_reads = [1, self.owner.cursor_after_settle]
@@ -140,6 +141,7 @@ class _BattleHarness(_PeerDriveBattleMixin, _PeerDriveSupportMixin):
         self,
         *,
         cursor: int | None = 0,
+        link_menu_max: int = 1,
         cursor_after_settle: int | None = None,
         settle_after_step: bool = False,
         peer_marker: bool = False,
@@ -148,7 +150,7 @@ class _BattleHarness(_PeerDriveBattleMixin, _PeerDriveSupportMixin):
     ):
         self.args = SimpleNamespace(role="local")
         self.deadline = time.monotonic() + 5.0
-        self.link_menu_max = 1
+        self.link_menu_max = link_menu_max
         self.counters = defaultdict(lambda: [0])
         for name in _TRADE_DIAG_SYMBOLS:
             self.counters[name]
@@ -163,7 +165,7 @@ class _BattleHarness(_PeerDriveBattleMixin, _PeerDriveSupportMixin):
             "MoveSelectionMenu.menuset",
         ):
             self.counters[name][0] = 1
-        self.session = _Session(self, cursor=cursor)
+        self.session = _Session(self, cursor=cursor, max_item=link_menu_max)
         self.backend = _Backend(self)
         self.link = SimpleNamespace(
             _network_backend=self.backend,
@@ -229,8 +231,8 @@ def test_peer_battle_menu_waits_for_rom_input_readiness(case: str) -> None:
         harness.wait_for_menu_ready(
             label="test menu",
             min_item=0,
-            max_item=1,
-            expected_max=1,
+            max_item=harness.link_menu_max,
+            expected_max=harness.link_menu_max,
             required_keys=1,
             timeout=0.002,
         )
@@ -264,6 +266,7 @@ def test_peer_battle_menu_navigation_rechecks_rom_cursor_before_commit(
     after_settle = {"stale-cursor": 0, "changed-cursor": 2}.get(case)
     harness = _BattleHarness(
         cursor=cursor,
+        link_menu_max=2 if case == "changed-cursor" else 1,
         cursor_after_settle=after_settle,
         stop_at_selection=case == "already-target",
     )
@@ -275,10 +278,45 @@ def test_peer_battle_menu_navigation_rechecks_rom_cursor_before_commit(
             "time",
             SimpleNamespace(monotonic=lambda: next(ticks)),
         )
-        with pytest.raises(RuntimeError, match="battle LinkMenu did not become input-ready"):
-            harness._battle()
-        assert harness.session.presses == []
-        assert 117 not in harness.syncs
+        for max_item in (2, 3):
+            valid_harness = _BattleHarness(
+                cursor=2,
+                link_menu_max=max_item,
+                stop_at_selection=True,
+            )
+            assert valid_harness.link_menu_max == max_item
+            assert valid_harness.session._pyboy.memory[_MAX_ITEM] == max_item
+            with pytest.raises(_StopAtSelection):
+                valid_harness._battle()
+            assert valid_harness.session.presses == [("up", 12), ("a", 4)]
+            assert valid_harness.session.steps == [60, 40]
+            assert valid_harness.events == [
+                ("sync", 11),
+                ("step", 60),
+                ("press", "up", 12),
+                ("step", 40),
+                ("sync", 117),
+                ("press", "a", 4),
+            ]
+        for max_item in (2, 3):
+            for invalid_cursor in (None, 255):
+                invalid_harness = _BattleHarness(
+                    cursor=invalid_cursor,
+                    link_menu_max=max_item,
+                )
+                assert invalid_harness.link_menu_max == max_item
+                assert invalid_harness.session._pyboy.memory[_MAX_ITEM] == max_item
+                with pytest.raises(
+                    RuntimeError, match="battle LinkMenu did not become input-ready"
+                ):
+                    invalid_harness._battle()
+                assert invalid_harness.session.presses == []
+                assert invalid_harness.syncs == [11]
+                assert 117 not in invalid_harness.backend.announced
+                assert all(
+                    event[0] != "press" or event[1] not in {"up", "down", "a"}
+                    for event in invalid_harness.events
+                )
         return
 
     if case == "already-target":
@@ -294,6 +332,11 @@ def test_peer_battle_menu_navigation_rechecks_rom_cursor_before_commit(
     assert 117 not in harness.syncs
     assert 117 not in harness.backend.announced
     assert all(button != "a" for button, _duration in harness.session.presses)
+    press_index = harness.events.index(("press", "down", 12))
+    assert harness.events[press_index:] == [
+        ("press", "down", 12),
+        ("step", 40),
+    ]
 
 
 @pytest.mark.parametrize("case", ("damage-only", "peer-marker-only"))
@@ -325,21 +368,114 @@ def test_peer_battle_driver_waits_for_settled_peer_sync(monkeypatch) -> None:
 
 def test_importing_battle_driver_with_asset_paths_does_not_construct_pyboy() -> None:
     script = """
+import builtins
 import importlib
+import importlib.util
+import io
+import os
+from pathlib import Path
+import sys
 import pyboy
+from tests import _rom_assets
+
+project_root = Path.cwd().resolve()
+asset_paths = {
+    _rom_assets.rom_path("yellow"),
+    _rom_assets.sym_path("yellow"),
+    _rom_assets.fixture_path("yellow"),
+}
+asset_keys = {
+    os.path.normcase(os.path.abspath(os.fsdecode(os.fspath(path))))
+    for path in asset_paths
+}
+asset_checks = set()
+asset_reads = []
+
+def path_key(path):
+    try:
+        value = os.fspath(path)
+    except TypeError:
+        return None
+    return os.path.normcase(os.path.abspath(os.fsdecode(value)))
+
+original_is_file = Path.is_file
+def asset_ready_is_file(path):
+    key = path_key(path)
+    if key in asset_keys:
+        asset_checks.add(key)
+        return True
+    return original_is_file(path)
+
+Path.is_file = asset_ready_is_file
+
+def reject_asset_content(path):
+    key = path_key(path)
+    if key in asset_keys:
+        asset_reads.append(key)
+        raise AssertionError("configured ROM/SYM/state content read: " + key)
+
+original_builtin_open = builtins.open
+def guarded_builtin_open(path, *args, **kwargs):
+    reject_asset_content(path)
+    return original_builtin_open(path, *args, **kwargs)
+
+original_io_open = io.open
+def guarded_io_open(path, *args, **kwargs):
+    reject_asset_content(path)
+    return original_io_open(path, *args, **kwargs)
+
+original_os_open = os.open
+def guarded_os_open(path, *args, **kwargs):
+    reject_asset_content(path)
+    return original_os_open(path, *args, **kwargs)
+
+builtins.open = guarded_builtin_open
+io.open = guarded_io_open
+os.open = guarded_os_open
+descriptor = os.open(os.devnull, os.O_RDONLY)
+with builtins.open(descriptor, "rb", closefd=True) as descriptor_stream:
+    descriptor_stream.read(0)
 
 def forbidden_constructor(*args, **kwargs):
     raise AssertionError("import attempted to construct PyBoy")
 
 pyboy.PyBoy = forbidden_constructor
-importlib.import_module("tests._tcp_trade_peer_drive")
+rom_support = importlib.import_module("tests._pyboy_link_session_roms_support")
+assert rom_support._fixtures_ready is True
+
+rom_tests_path = project_root / "tests" / "test_pyboy_link_session_roms.py"
+spec = importlib.util.spec_from_file_location(
+    "tests._asset_ready_real_rom_probe", rom_tests_path
+)
+assert spec is not None and spec.loader is not None
+rom_tests = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = rom_tests
+spec.loader.exec_module(rom_tests)
+assert rom_tests._fixtures_available("yellow") is True
+assert Path(rom_tests.__file__).resolve() == rom_tests_path
+
+driver = importlib.import_module("tests._tcp_trade_peer_drive")
+driver_modules = [
+    driver,
+    importlib.import_module("tests._tcp_trade_peer_drive_battle"),
+    importlib.import_module("tests._tcp_trade_peer_drive_support"),
+]
+assert all(
+    Path(module.__file__).resolve().is_relative_to(project_root)
+    for module in driver_modules
+)
+assert asset_checks == asset_keys
+assert asset_reads == []
 """
     env = os.environ.copy()
+    asset_probe_root = Path(__file__).resolve().parents[1] / ".asset-ready-import-probe"
     env.update(
         POKERED_ROM_PATH="/missing/red.gb",
         POKERED_SYM_PATH="/missing/red.sym",
         POKERED_PEER_ROM_PATH="/missing/blue.gb",
         POKERED_PEER_SYM_PATH="/missing/blue.sym",
+        POKERED_ROM_ROOT=str(asset_probe_root / "rom"),
+        POKERED_FIXTURE_ROOT=str(asset_probe_root / "fixtures"),
     )
     result = subprocess.run(
         [sys.executable, "-c", script],

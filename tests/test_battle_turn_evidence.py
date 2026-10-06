@@ -144,6 +144,32 @@ def test_peer_snapshot_mismatch_rejects_supported_turn(field: str) -> None:
     assert errors == ["battle peers disagree on settled baseline combatant state"]
     assert rows == before
 
+    if field in ("species", "max_hp"):
+        turn_only_rows = [_row(), _row(reverse=True)]
+        original_baseline = deepcopy(turn_only_rows[1]["baseline"]["local"])
+        turn_mon = turn_only_rows[1]["turn"]["local"]
+        turn_mon[field] = {"species": 73, "max_hp": 36}[field]
+        assert turn_mon["hp"] <= turn_mon["max_hp"]
+        assert turn_only_rows[1]["baseline"]["local"] == original_baseline
+
+        turn_only_before = deepcopy(turn_only_rows)
+        assert verify_battle_turns(turn_only_rows) == [
+            "active combatant identity changed during turn"
+        ]
+        assert turn_only_rows == turn_only_before
+        return
+
+    turn_only_rows = _paralysis_rows(attacker="local")
+    turn_only_rows[1]["turn"]["local"]["status"] = turn_only_rows[1]["baseline"]["local"]["status"]
+    assert turn_only_rows[0]["turn"]["enemy"]["status"] == 64
+    assert turn_only_rows[1]["turn"]["local"]["status"] == 0
+
+    turn_only_before = deepcopy(turn_only_rows)
+    assert verify_battle_turns(turn_only_rows) == [
+        "battle peers disagree on settled turn combatant state"
+    ]
+    assert turn_only_rows == turn_only_before
+
 
 def _paralysis_rows(*, attacker: str, status_on_attacker: bool = False) -> list[dict]:
     rows = [_row(), _row(reverse=True)]

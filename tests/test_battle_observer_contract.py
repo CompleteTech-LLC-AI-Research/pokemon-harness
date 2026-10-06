@@ -140,10 +140,25 @@ def test_observer_rejects_partial_hook_sequences(case: str, monkeypatch) -> None
     memory.update(wSerialExchangeNybbleSendData=0, wSerialExchangeNybbleReceiveData=0)
     if case == "execution-before-baseline":
         observer.baseline = None
+        observer.observe("PlayerCanExecuteMove")
+        observer.observe("ExecutePlayerMove")
+        assert observer.error is None
+        assert observer.counts["PlayerCanExecuteMove"] == 1
+        assert observer.counts["ExecutePlayerMove"] == 1
+        assert observer.exchange is None
+        assert observer.turn is None
+        before_exchange = observer.snapshot()
+        assert before_exchange["settled"] is False
+        assert before_exchange["turn"] is None
+
         observer.observe("LinkBattleExchangeData")
         observer.observe("post_exchange")
         assert "before battle baseline" in observer.error
         assert observer.exchange is None
+        after_error = observer.snapshot()
+        assert after_error["settled"] is False
+        assert after_error["exchange_seq"] is None
+        assert after_error["turn"] is None
         return
 
     observer.observe("MainInBattleLoop")
@@ -175,6 +190,29 @@ def test_observer_rejects_partial_hook_sequences(case: str, monkeypatch) -> None
         assert peer_snapshot["settled"] is False
         assert peer_snapshot["unsupported_reason"] is None
         assert verify_battle_turns([snapshot, peer_snapshot]) == ["settled snapshot is missing"]
+
+        complete_observer, complete_memory, complete_state = _prepared_observer(
+            monkeypatch, status_actor="enemy"
+        )
+        complete_snapshot = _complete_turn(
+            complete_observer,
+            complete_memory,
+            complete_state,
+            status_actor="enemy",
+        )
+        assert complete_snapshot["settled"] is True
+        assert complete_snapshot["turn"]["actions"]["local"]["damage_samples"][0]["damage"] == 1
+
+        partial_observer, _, _ = _prepared_observer(monkeypatch)
+        partial_observer.observe("MainInBattleLoop")
+        partial_snapshot = partial_observer.snapshot()
+        assert partial_observer.error is None
+        assert partial_observer.counts["MainInBattleLoop"] == 1
+        assert partial_snapshot["turn"] is None
+        assert partial_snapshot["settled"] is False
+        assert verify_battle_turns([complete_snapshot, partial_snapshot]) == [
+            "settled snapshot is missing"
+        ]
     elif case == "entry-without-action":
         snapshot = observer.snapshot()
         assert observer.error is None

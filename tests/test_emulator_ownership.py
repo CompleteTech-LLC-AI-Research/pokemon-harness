@@ -529,7 +529,7 @@ def test_cross_provider_pair_attempts_fail_without_lock_cycles_or_claim_loss():
 def test_rejected_provider_claim_does_not_write_backend_or_stop_transport():
     from types import SimpleNamespace
 
-    from pokered_harness.ownership import EmulatorOwnershipError
+    from pokered_harness.ownership import EmulatorOwnershipError, owner_for
 
     class Core:
         def __init__(self):
@@ -570,6 +570,56 @@ def test_rejected_provider_claim_does_not_write_backend_or_stop_transport():
     assert first.attached == (endpoint,) and second.attached == ()
     endpoint.tick = original_tick
     first.detach_all()
+
+    local = _fake_local_provider()
+    local.attach(endpoint)
+    owner = owner_for(endpoint)
+    stale_provider_ref = owner._provider
+    assert stale_provider_ref is not None
+    assert stale_provider_ref() is local
+    local_ref = weakref.ref(local)
+    del local
+    gc.collect()
+    assert local_ref() is None
+    assert stale_provider_ref() is None
+    assert owner._provider is stale_provider_ref
+
+    endpoint.stopped = True
+    closed_backend = core.backend
+    closed_writes = list(core.writes)
+    closed_starts = list(starts)
+    closed_stopped = list(stopped)
+    closed_ticks = list(ticks)
+    closed_stop_calls = list(endpoint.stop_calls)
+    closed_tick_calls = []
+    closed_frame_count = endpoint.frame_count
+    closed_rendered = endpoint.rendered
+
+    def record_closed_tick(*args, **kwargs):
+        closed_tick_calls.append((args, kwargs))
+        return original_tick(*args, **kwargs)
+
+    endpoint.tick = record_closed_tick
+    try:
+        with pytest.raises(EmulatorOwnershipError, match="emulator session is closed"):
+            second.attach(endpoint)
+    finally:
+        endpoint.tick = original_tick
+
+    assert owner._provider is stale_provider_ref
+    assert stale_provider_ref() is None
+    assert core.backend is closed_backend
+    assert core.writes == closed_writes
+    assert starts == closed_starts
+    assert stopped == closed_stopped
+    assert ticks == closed_ticks
+    assert closed_tick_calls == []
+    assert endpoint.frame_count == closed_frame_count
+    assert endpoint.rendered == closed_rendered
+    assert endpoint.stop_calls == closed_stop_calls
+    assert first.attached == ()
+    assert second.attached == ()
+    assert second._network_backend is network
 
 
 class _RecordingMemory:
