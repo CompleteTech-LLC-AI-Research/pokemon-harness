@@ -1,9 +1,9 @@
-# Native unit validation for the vendored pinball split
+# Native unit and timing validation for the vendored pinball split
 
-The pinball split is already on `master`. Issue #138 remains open until the
-native unit lane has a terminal passing result and the exact candidate has
-its required independent review. This recipe supplies a runnable lane, not
-that result. It does not change the release decision from **PARTIAL**.
+The pinball split is already on `master`. The public hosted native CI
+workflow is configured to run the complete unit tier and five timing repeats.
+Configuration alone is not a passing result or independent review, and it
+does not change the release decision from **PARTIAL**.
 
 ## Execute on an eligible host
 
@@ -45,10 +45,11 @@ is not a passing gate.
 4. Verifies the current pin, the compiled-runtime flag, both pinball modules'
    extension origins, their 1000-line limit, explicit data exports, facade/data
    object identity, and the compiled plugin manager's typed Pinball wrapper slot.
-5. Runs the existing `production_gate.py --runtime-mode cython --tier unit`
-   unchanged, retaining the gate report and raw output. No selected test is
-   omitted, no assertion or timeout is relaxed, and there is no retry-until-green
-   loop. Build and import proof never substitute for this full unit run.
+5. Runs `production_gate.py` with `--runtime-mode cython --tier unit --tier timing`
+   and `--repeat-timing 5`, retaining the gate report and raw output.
+   No selected test is omitted, no assertion or timeout is relaxed, and there
+   is no retry-until-green loop. Build and import proof never substitute for
+   this complete unit-and-timing run.
 
 ## Evidence and acceptance
 
@@ -58,8 +59,8 @@ an exit-code record when setup reaches the execution phase. Prerequisite
 failure records `BLOCKED`; interrupted jobs or missing terminal reports remain
 unqualified. A final exit code alone is not a release verdict. Review all
 records, matching the preflight and final commits to the exact reviewed head,
-and require the unchanged gate's clean unit-tier PASS with no skipped, xfailed,
-failed, errored, or timed-out selected test.
+and require a clean unit-tier PASS plus five successful timing repeats, with no
+skipped, xfailed, failed, errored, or timed-out selected test.
 
 `work/` contains the disposable virtual environment and temporary files. It is
 not uploaded by the workflow. Keep all generated output outside Git, and do

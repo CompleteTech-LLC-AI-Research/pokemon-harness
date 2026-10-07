@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# A fresh native build plus the complete, unchanged ROM-free unit tier.
+# A fresh native build plus the complete ROM-free unit tier and five
+# timing repeats.
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,7 +64,8 @@ run_logged bootstrap-check "$native_python" scripts/bootstrap_pyboy.py --mode cy
 run_logged pinball-proof "$native_python" scripts/native_unit_ci.py verify "$NATIVE_UNIT_OUTPUT"
 
 # No -k filter, xfail/skip exemption, source fallback, retry, or longer deadline.
-# The existing gate owns the selected count, runtime proof, and terminal verdict.
+# The existing gate owns selected counts, runtime proof, repeated timing,
+# and verdict.
 run_logged unit-gate "$native_python" scripts/production_gate.py \
-    --runtime-mode cython --tier unit \
+    --runtime-mode cython --tier unit --tier timing --repeat-timing 5 \
     --evidence-dir "$evidence/gate" --raw-output-dir "$evidence/raw"
