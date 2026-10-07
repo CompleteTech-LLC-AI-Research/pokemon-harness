@@ -20,6 +20,7 @@ from pokered_harness.link.serial_link import (
     SerialLinkTimeout,
     TcpSerialLink,
 )
+from tests._serial_link_pair import make_tcp_pair
 
 # --- helpers ---------------------------------------------------------------
 
@@ -64,24 +65,8 @@ def _wait_for_reader_stop(link: TcpSerialLink, timeout_s: float = 1.0) -> None:
 
 
 def _make_tcp_pair(a_rom: str = "blue", b_rom: str = "blue") -> tuple[TcpSerialLink, TcpSerialLink]:
-    """Spin up a listener + connector on localhost and return both ends."""
-    port = _free_port()
-    holder: dict[str, TcpSerialLink] = {}
-
-    def _listen() -> None:
-        holder["server"] = TcpSerialLink.listen(port, a_rom)
-
-    t = threading.Thread(target=_listen, daemon=True)
-    t.start()
-    # Give the listener a moment to bind before we connect.
-    for _ in range(50):
-        time.sleep(0.01)
-        if t.is_alive() is False or "server" in holder:
-            break
-    client = TcpSerialLink.connect("127.0.0.1", port, b_rom)
-    t.join(timeout=2.0)
-    server = holder["server"]
-    return server, client
+    """Start a bounded listener/connector pair on localhost."""
+    return make_tcp_pair(_free_port(), a_rom, b_rom)
 
 
 # --- InProcessSerialLink ---------------------------------------------------
