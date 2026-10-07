@@ -961,7 +961,7 @@ def test_timeout_stops_build_descendants(tmp_path, monkeypatch, startup_delay) -
     while True:
         try:
             state = status.read_text(encoding="ascii").split(")", 1)[1].split()[0]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             break
         if state in {"Z", "X"}:
             break
