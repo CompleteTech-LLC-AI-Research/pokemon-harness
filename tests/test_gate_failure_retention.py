@@ -27,13 +27,17 @@ def _trace(lines=180):
     )
 
 
-def _report(path, failures, *, kind="failed"):
+def _report(path, failures, *, kind="failed", when="call"):
     records = [
         {
             "nodeid": nodeid,
-            "outcome": kind if reason is not None else "passed",
-            "when": "call",
-            "was_xfail": False,
+            "outcome": "skipped"
+            if kind == "xfailed" and reason is not None
+            else kind
+            if reason is not None
+            else "passed",
+            "when": when,
+            "was_xfail": kind == "xfailed" and reason is not None,
             "reason": reason or "",
         }
         for nodeid, reason in failures
@@ -42,7 +46,7 @@ def _report(path, failures, *, kind="failed"):
         {
             "nodeid": "tests/test_fake.py::test_pass",
             "outcome": "passed",
-            "when": "call",
+            "when": when,
             "was_xfail": False,
             "reason": "",
         }
@@ -77,13 +81,13 @@ def _report(path, failures, *, kind="failed"):
 
 @pytest.fixture
 def run_records(tmp_path, monkeypatch):
-    def run(iterations, *, kind="failed", timing=False):
+    def run(iterations, *, kind="failed", timing=False, when="call"):
         calls = []
 
         def fake_run(**kwargs):
             failures = iterations[len(calls)]
             calls.append(kwargs)
-            returncode, report = _report(kwargs["report_path"], failures, kind=kind)
+            returncode, report = _report(kwargs["report_path"], failures, kind=kind, when=when)
             # The traceback precedes enough PASS noise to defeat output-tail retention.
             output = "\n".join(reason for _, reason in failures if reason is not None)
             output += "\n" + "PASSED tests/test_fake.py::test_later_success\n" * 500
@@ -222,6 +226,76 @@ def test_early_failure_survives_four_successful_repeats(tmp_path, run_records):
     for rendered in (text, stdout):
         assert ORIGINAL_LINE in rendered
         assert TERMINAL_EXCEPTION in rendered
+
+
+def test_timing_repeats_retain_zero_exit_unexpected_outcome(tmp_path, run_records):
+    reason = "legacy xfail unexpectedly remains in the required timing tier"
+    nodeid = "tests/test_fake.py::test_unexpected_xfail"
+    result = run_records(
+        [[(nodeid, reason)]] + [[(nodeid, None)]] * 4,
+        kind="xfailed",
+        timing=True,
+    )
+
+    assert result.status == "FAIL"
+    assert result.counts == gate.Counts(total=10, passed=9, xfailed=1)
+    assert result.returncodes == [0, 0, 0, 0, 0]
+    assert result.skip_reasons == {reason: 1}
+    (detail,) = result.failure_details
+    assert detail.nodeid == nodeid
+    assert detail.outcome == "xfailed"
+    assert detail.reason == reason
+    assert detail.iteration == 1
+    saved, text, stdout = _bundle(tmp_path, result)
+    assert saved["tiers"][0]["failure_details"][0]["reason"] == reason
+    for rendered in (text, stdout):
+        assert reason in rendered
+        assert nodeid in rendered
+
+
+@pytest.mark.parametrize("phase", ["setup", "call", "teardown"])
+def test_failure_phase_survives_gate_and_evidence(tmp_path, run_records, phase):
+    nodeid = "tests/test_fake.py::test_phase_failure"
+    result = run_records([[(nodeid, "bounded phase failure")]], when=phase)
+    assert result.status == "FAIL"
+    assert result.failure_details[0].when == phase
+
+    legacy_reason = "legacy constructor detail"
+    legacy = gate.FailureDetail(
+        iteration=1,
+        nodeid="tests/test_fake.py::test_legacy_constructor",
+        outcome="failed",
+        reason=legacy_reason,
+        original_chars=len(legacy_reason),
+        omitted_chars=0,
+        truncated=False,
+        nodeid_original_chars=len("tests/test_fake.py::test_legacy_constructor"),
+        nodeid_omitted_chars=0,
+    )
+    assert legacy.when == ""
+    secret = "PHASE_SECRET_843"
+    invalid_reason = "unknown phase metadata"
+    invalid = gate.FailureDetail(
+        iteration=1,
+        nodeid="tests/test_fake.py::test_invalid_phase",
+        outcome="failed",
+        reason=invalid_reason,
+        original_chars=len(invalid_reason),
+        omitted_chars=0,
+        truncated=False,
+        nodeid_original_chars=len("tests/test_fake.py::test_invalid_phase"),
+        nodeid_omitted_chars=0,
+        when=f"unexpected-phase token={secret}",
+    )
+    result.failure_details.extend((legacy, invalid))
+    saved, text, stdout = _bundle(tmp_path / "phase-boundary", result)
+    details = saved["tiers"][0]["failure_details"]
+    assert [detail["when"] for detail in details] == [phase, "", ""]
+    for rendered in (json.dumps(saved), text, stdout):
+        assert secret not in rendered
+        assert "unexpected-phase" not in rendered
+    for rendered in (text, stdout):
+        assert f"when={phase}" in rendered
 
 
 def test_secret_and_rom_blob_redacted_before_clipping_and_counting(tmp_path, run_records):

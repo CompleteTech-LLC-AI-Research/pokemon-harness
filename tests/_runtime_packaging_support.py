@@ -7,6 +7,7 @@ original module.
 
 import importlib.metadata
 import importlib.util
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,3 +72,17 @@ def _load_bootstrap():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_bootstrap_with_owned_src_metadata_last(monkeypatch):
+    """Load bootstrap with this checkout's source metadata last on sys.path."""
+    source_root = (ROOT / "src").resolve()
+    untouched = []
+    owned = []
+    for entry in list(sys.path):
+        if Path(entry).resolve() == source_root:
+            owned.append(entry)
+        else:
+            untouched.append(entry)
+    monkeypatch.setattr(sys, "path", [*untouched, *owned])
+    return _load_bootstrap()

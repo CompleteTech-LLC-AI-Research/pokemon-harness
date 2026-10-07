@@ -490,12 +490,60 @@ def test_unsolicited_edge_responses_fail_closed_without_wedging_shutdown():
             time.sleep(0.01)
         assert isinstance(a._reader_exc, NetworkBackendError)
         assert "unsolicited EDGE_RESP" in str(a._reader_exc)
+        sent_before_retry = a.debug_snapshot()["edge_req_sent"]
+        assert sent_before_retry == 0
+        with pytest.raises(NetworkBackendError, match="backend closed"):
+            a.on_edge(our_bit=1, our_role=1)
+        assert a.debug_snapshot()["edge_req_sent"] == sent_before_retry
         started = time.monotonic()
         a.stop()
         assert time.monotonic() - started < 0.5
         assert a._reader is not None and not a._reader.is_alive()
     finally:
         b.stop()
+
+
+def test_edge_timeout_closes_transport_and_rejects_reuse(monkeypatch):
+    """A live peer without a reader cannot leave an edge request reusable."""
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.08)
+    caller, silent_peer = NetworkBackend.pair()
+    caller.start_receiver(local_core=None)
+    before = caller.debug_snapshot()["edge_req_sent"]
+    started = time.monotonic()
+    try:
+        with pytest.raises(NetworkBackendError, match="no EDGE_RESP"):
+            caller.on_edge(our_bit=1, our_role=1)
+        assert time.monotonic() - started < 0.5
+        assert not caller.connected
+        sent_after_timeout = caller.debug_snapshot()["edge_req_sent"]
+        assert sent_after_timeout == before + 1
+        with pytest.raises(NetworkBackendError, match="backend closed"):
+            caller.on_edge(our_bit=1, our_role=1)
+        assert caller.debug_snapshot()["edge_req_sent"] == sent_after_timeout
+    finally:
+        caller.stop(timeout_s=1.0)
+        silent_peer.stop(timeout_s=1.0)
+
+
+def test_single_unsolicited_edge_response_fails_closed_without_reuse():
+    """One unsolicited frame is terminal and cannot seed a future edge."""
+    caller, sender = NetworkBackend.pair()
+    caller.start_receiver(local_core=None)
+    try:
+        sender._sock.sendall(struct.pack(">BB", _OP_EDGE_RESP, 1))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and caller._reader_exc is None:
+            time.sleep(0.005)
+        assert isinstance(caller._reader_exc, NetworkBackendError)
+        assert "unsolicited EDGE_RESP" in str(caller._reader_exc)
+        sent_before_retry = caller.debug_snapshot()["edge_req_sent"]
+        assert sent_before_retry == 0
+        with pytest.raises(NetworkBackendError, match="backend closed"):
+            caller.on_edge(our_bit=1, our_role=1)
+        assert caller.debug_snapshot()["edge_req_sent"] == sent_before_retry
+    finally:
+        caller.stop(timeout_s=1.0)
+        sender.stop(timeout_s=1.0)
 
 
 def test_duplicate_pending_sync_fails_closed():

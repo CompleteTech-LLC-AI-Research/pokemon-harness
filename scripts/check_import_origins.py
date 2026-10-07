@@ -34,6 +34,11 @@ at the same pin, so it cannot distinguish two checkouts and an installed copy
 could report any value it liked.  Provenance is decided by location only, which
 is the property an installed copy cannot fabricate about itself.
 
+That statement describes ``check_origins`` and its CLI.  The separate
+``attest_selected_module_owners`` API can additionally compare the actual
+selected module files with editable source paths or local wheel ``RECORD``
+digests; those records are installation evidence, not signatures.
+
 A stale worktree satisfies neither: its install records that other directory,
 which is neither this checkout nor a staging directory beneath this checkout.
 
@@ -47,27 +52,44 @@ import argparse
 import importlib.metadata  # noqa: F401 - preserves the established monkeypatch seam
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from types import ModuleType
 
 if __package__:
     from . import _import_origin_resolution
-else:
+elif __name__ in {"__main__", "check_import_origins"}:
     import _import_origin_resolution
+else:
+    from scripts import _import_origin_resolution
 
 if __package__:
     from . import _import_origin_paths
-else:
+elif __name__ in {"__main__", "check_import_origins"}:
     import _import_origin_paths
+else:
+    from scripts import _import_origin_paths
 
 if __package__:
     from . import _import_origin_finders
-else:
+elif __name__ in {"__main__", "check_import_origins"}:
     import _import_origin_finders
+else:
+    from scripts import _import_origin_finders
 
 if __package__:
     from . import _import_origin_attestations
-else:
+elif __name__ in {"__main__", "check_import_origins"}:
     import _import_origin_attestations
+else:
+    from scripts import _import_origin_attestations
+
+if __package__:
+    from . import _import_origin_selected_owners
+elif __name__ in {"__main__", "check_import_origins"}:
+    import _import_origin_selected_owners
+else:
+    from scripts import _import_origin_selected_owners
 
 _VARIABLE_LENGTH_ALGORITHMS = _import_origin_attestations._VARIABLE_LENGTH_ALGORITHMS
 _MAX_RECORDED_DIGEST_LENGTH = _import_origin_attestations._MAX_RECORDED_DIGEST_LENGTH
@@ -190,6 +212,13 @@ def _record_digests(root: Path) -> dict[str, set[tuple[str, str]]]:
 
 
 _record_digests.__doc__ = _import_origin_attestations._record_digests.__doc__
+
+
+def _record_claim_rows(root: Path) -> dict[str, list[dict[str, str | None]]]:
+    return _import_origin_attestations._record_claim_rows(root, api=globals())
+
+
+_record_claim_rows.__doc__ = _import_origin_attestations._record_claim_rows.__doc__
 
 
 def _file_digest(
@@ -355,6 +384,29 @@ def _foreign_path_locations(
 
 
 _foreign_path_locations.__doc__ = _import_origin_resolution._foreign_path_locations.__doc__
+
+
+def attest_selected_module_owners(
+    modules: Mapping[str, ModuleType],
+    expected_owners: Mapping[str, str],
+    *,
+    project_root: Path,
+    editable_module_paths: Mapping[str, Path] | None = None,
+) -> dict[str, object]:
+    """Attest selected live module files against editable roots or RECORD bytes.
+
+    This optional API supplements the location-only ``check_origins`` report.
+    ``direct_url.json`` and ``RECORD`` are local installation evidence, not
+    signatures or protection against changes made after this bounded check.
+    """
+
+    return _import_origin_selected_owners.attest_selected_module_owners(
+        modules,
+        expected_owners,
+        project_root=project_root,
+        editable_module_paths=editable_module_paths,
+        api=globals(),
+    )
 
 
 def check_origins(project_root: Path, packages: tuple[str, ...] = REQUIRED_PACKAGES) -> dict:

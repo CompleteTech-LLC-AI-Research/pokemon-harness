@@ -21,11 +21,17 @@ from tests._runtime_packaging_support import (
     EXPECTED_PYBOY_REVISION,
     ROOT,
     _load_bootstrap,
+    _load_bootstrap_with_owned_src_metadata_last,
 )
 
 
-def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
+def test_bootstrap_declares_and_checks_both_runtime_modes(tmp_path: Path) -> None:
+    from pyboy.core import serial
+
+    selected_mode = "source" if serial.__file__.endswith(".py") else "cython"
     bootstrap = (ROOT / "scripts" / "bootstrap_pyboy.py").read_text(encoding="utf-8")
+    contract = (ROOT / "scripts" / "_bootstrap_runtime_contract.py").read_text(encoding="utf-8")
+    probes = (ROOT / "scripts" / "_bootstrap_runtime_probes.py").read_text(encoding="utf-8")
 
     assert 'choices=("source", "cython")' in bootstrap
     assert '"--check"' in bootstrap
@@ -38,8 +44,160 @@ def test_bootstrap_declares_and_checks_both_runtime_modes() -> None:
     assert "_native_build_source(staged_inputs)" in bootstrap
     assert '"--build-evidence"' in bootstrap
     assert "_write_build_evidence(" in bootstrap
-    assert "apply_external_edge" in bootstrap
-    assert "cython_compiled" in bootstrap
+    assert '"--install-timeout"' in bootstrap and '"--check-timeout"' in bootstrap
+    assert "math.isfinite" in bootstrap
+    assert "apply_external_edge" in contract
+    assert "cython_compiled" in contract
+    assert "get_physical_clock" in contract
+    assert "owner_thread" in probes and "release_owner_pump" in probes
+
+    script = ROOT / "scripts" / "bootstrap_pyboy.py"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    for arguments, cwd, expected_status in (
+        ([str(script), "--help"], tmp_path, 0),
+        ([str(script), "--mode", "invalid", "--check"], tmp_path, 2),
+        ([str(script), "--mode", selected_mode, "--check"], tmp_path, 0),
+        (["-m", "scripts.bootstrap_pyboy", "--mode", selected_mode, "--check"], ROOT, 0),
+    ):
+        completed = subprocess.run(
+            [sys.executable, *arguments],
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == expected_status, (
+            arguments,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+
+    alias_probe = f"""import importlib.util, pathlib, sys, warnings
+warnings.simplefilter("error", ImportWarning)
+path = pathlib.Path({str(script.resolve())!r})
+spec = importlib.util.spec_from_file_location("bootstrap_pyboy_foreign_file_alias", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+assert module.__package__ == ""
+assert module.__spec__ is spec
+namespace = sys.modules["scripts"]
+assert namespace.__file__ is None
+assert namespace.__spec__.origin is None
+assert [pathlib.Path(item).resolve() for item in namespace.__path__] == [path.parent]
+for name in (
+    "_bootstrap_runtime_contract",
+    "_bootstrap_runtime_probes",
+    "check_import_origins",
+    "_import_origin_resolution",
+    "_import_origin_paths",
+    "_import_origin_finders",
+    "_import_origin_attestations",
+    "_import_origin_selected_owners",
+):
+    helper = sys.modules[f"scripts.{{name}}"]
+    assert pathlib.Path(helper.__file__).resolve() == path.parent / f"{{name}}.py"
+print("foreign-cwd bootstrap file alias imports the lane-owned helpers")
+"""
+    alias_result = subprocess.run(
+        [sys.executable, "-c", alias_probe],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    assert alias_result.returncode == 0, alias_result.stdout + alias_result.stderr
+
+    foreign_namespace_probe = f"""import importlib.machinery, importlib.util, pathlib, sys, types, warnings
+warnings.simplefilter("error", ImportWarning)
+path = pathlib.Path({str(script.resolve())!r})
+foreign_path = path.parent.parent / "foreign-scripts"
+namespace = types.ModuleType("scripts")
+namespace.__file__ = None
+namespace.__loader__ = None
+namespace.__package__ = "scripts"
+namespace.__path__ = [str(foreign_path)]
+namespace.__spec__ = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+namespace.__spec__.submodule_search_locations = [str(foreign_path)]
+sys.modules["scripts"] = namespace
+before_children = {{name: module for name, module in sys.modules.items() if name.startswith("scripts.")}}
+spec = importlib.util.spec_from_file_location("bootstrap_pyboy_foreign_file_alias", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+try:
+    spec.loader.exec_module(module)
+except ImportError as exc:
+    assert "belongs to another source tree" in str(exc)
+else:
+    raise AssertionError("a foreign scripts namespace was accepted")
+assert sys.modules["scripts"] is namespace
+assert namespace.__path__ == [str(foreign_path)]
+assert module.__spec__ is spec and module.__package__ == ""
+assert {{name: module for name, module in sys.modules.items() if name.startswith("scripts.")}} == before_children
+print("foreign scripts namespace rejected before helper imports")
+sys.modules.pop(spec.name)
+sys.modules.pop("scripts")
+namespace = types.ModuleType("scripts")
+namespace.__file__ = None
+namespace.__loader__ = None
+namespace.__package__ = "scripts"
+namespace.__path__ = [str(path.parent)]
+namespace_spec = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+namespace_spec.submodule_search_locations = [str(path.parent)]
+namespace.__spec__ = namespace_spec
+namespace_before = (
+    namespace.__dict__.copy(),
+    tuple(namespace.__path__),
+    namespace_spec.origin,
+    tuple(namespace_spec.submodule_search_locations),
+)
+sys.modules["scripts"] = namespace
+foreign_child = types.ModuleType("scripts._bootstrap_runtime_contract")
+foreign_child.__file__ = str(path.parent.parent / "foreign" / "_bootstrap_runtime_contract.py")
+sys.modules[foreign_child.__name__] = foreign_child
+before_children = {{name: child for name, child in sys.modules.items() if name.startswith("scripts.")}}
+assert before_children == {{foreign_child.__name__: foreign_child}}
+cached_child_spec = importlib.util.spec_from_file_location("bootstrap_pyboy_cached_child_alias", path)
+assert cached_child_spec is not None and cached_child_spec.loader is not None
+cached_child_module = importlib.util.module_from_spec(cached_child_spec)
+sys.modules[cached_child_spec.name] = cached_child_module
+try:
+    cached_child_spec.loader.exec_module(cached_child_module)
+except ImportError as exc:
+    assert "belongs to another source tree" in str(exc)
+else:
+    raise AssertionError("a foreign cached bootstrap helper was accepted")
+assert sys.modules["scripts"] is namespace
+assert namespace.__dict__ == namespace_before[0]
+assert tuple(namespace.__path__) == namespace_before[1]
+assert namespace.__spec__ is namespace_before[0]["__spec__"]
+assert namespace.__spec__.origin == namespace_before[2]
+assert tuple(namespace.__spec__.submodule_search_locations) == namespace_before[3]
+assert cached_child_module.__spec__ is cached_child_spec and cached_child_module.__package__ == ""
+assert {{name: child for name, child in sys.modules.items() if name.startswith("scripts.")}} == before_children
+print("foreign cached helper rejected before static imports without namespace mutation")
+"""
+    foreign_namespace_result = subprocess.run(
+        [sys.executable, "-c", foreign_namespace_probe],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    assert foreign_namespace_result.returncode == 0, (
+        foreign_namespace_result.stdout + foreign_namespace_result.stderr
+    )
 
 
 def test_bootstrap_build_evidence_record_is_self_identifying(tmp_path) -> None:
@@ -448,7 +606,7 @@ def test_bootstrap_source_mode_installs_the_harness_distribution(monkeypatch) ->
     monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module.main(["--mode", "source"]) == 0
-    assert len(calls) == 2
+    assert len(calls) == 3
     build_command, build_kwargs = calls[0]
     assert build_command == [
         "pip",
@@ -471,6 +629,17 @@ def test_bootstrap_source_mode_installs_the_harness_distribution(monkeypatch) ->
     ]
     assert kwargs["cwd"] == module.ROOT
     assert kwargs["env"]["PYBOY_NO_CYTHON"] == "1"
+    probe_command, probe_kwargs = calls[2]
+    assert probe_command == [
+        sys.executable,
+        str(module.ROOT / "scripts" / "bootstrap_pyboy.py"),
+        "--mode",
+        "source",
+        "--check-timeout",
+        "30",
+        "--_runtime-probe",
+    ]
+    assert probe_kwargs["timeout"] == module.CHECK_TIMEOUT_SECONDS
 
 
 def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(tmp_path, monkeypatch) -> None:
@@ -502,7 +671,7 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(tmp_path, monkey
     monkeypatch.setattr(module, "_run_bounded", fake_run)
 
     assert module.main(["--mode", "cython"]) == 0
-    assert len(calls) == 3
+    assert len(calls) == 5
     build_command, build_kwargs = calls[0]
     assert build_command == [
         "pip",
@@ -543,6 +712,12 @@ def test_bootstrap_cython_mode_targets_only_the_checked_in_fork(tmp_path, monkey
         "pyboy.core.mb",
         "pyboy.core.serial",
     )
+    check_command, check_kwargs = calls[3]
+    assert check_command == [sys.executable, "-m", "pip", "check"]
+    assert check_kwargs["timeout"] == module.CHECK_TIMEOUT_SECONDS
+    probe_command, probe_kwargs = calls[4]
+    assert probe_command[-2:] == ["30", "--_runtime-probe"]
+    assert probe_kwargs["timeout"] == module.CHECK_TIMEOUT_SECONDS
 
 
 def test_native_build_snapshot_excludes_stale_outputs_and_preserves_inputs(
@@ -646,7 +821,10 @@ def test_bootstrap_cython_mode_rejects_a_missing_harness_owner(monkeypatch) -> N
 
 
 def test_bootstrap_reports_an_incompatible_serial_constructor(monkeypatch) -> None:
-    module = _load_bootstrap()
+    from pyboy.core import serial
+
+    selected_mode = "source" if serial.__file__.endswith(".py") else "cython"
+    module = _load_bootstrap_with_owned_src_metadata_last(monkeypatch)
 
     class BrokenSerial:
         def __init__(self, *_args) -> None:
@@ -656,11 +834,11 @@ def test_bootstrap_reports_an_incompatible_serial_constructor(monkeypatch) -> No
     monkeypatch.setattr(
         module,
         "_package_distributions",
-        lambda package: {"pokered-harness", "pyboy"} if package == "pyboy" else set(),
+        lambda package: {"pokered-harness"} if package == "pyboy" else set(),
     )
 
     with pytest.raises(SystemExit, match="serial contract could not be constructed"):
-        module._verify_runtime("source")
+        module._verify_runtime(selected_mode)
 
 
 def test_bootstrap_rejects_a_runtime_without_frame_ownership(monkeypatch) -> None:
@@ -672,3 +850,150 @@ def test_bootstrap_rejects_a_runtime_without_frame_ownership(monkeypatch) -> Non
     mode = "cython" if utils.cython_compiled else "source"
     with pytest.raises(SystemExit, match="PyBoy._tick frame ownership is unavailable"):
         module._verify_runtime(mode)
+
+
+@pytest.mark.parametrize("mode", ["source", "cython"])
+def test_install_checks_fresh_runtime_only_after_success(mode, monkeypatch, tmp_path) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(module, "_metadata_was_present", lambda: True)
+    monkeypatch.setattr(module, "_remove_generated_pyboy_metadata", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "_pip_command", lambda: [sys.executable, "-m", "pip", "install"])
+    monkeypatch.setattr(module, "_native_build_source", lambda _sink: module.nullcontext(tmp_path))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    failed = False
+
+    def run(command, **kwargs):
+        nonlocal failed
+        command = list(command)
+        calls.append((command, kwargs))
+        is_install = "--no-build-isolation" in command or command[-1:] == list(
+            module.BUILD_REQUIREMENTS[-1:]
+        )
+        if failed and is_install:
+            return SimpleNamespace(returncode=9)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module, "_run_bounded", run)
+    assert module.main(["--mode", mode, "--install-timeout", "7", "--check-timeout", "3"]) == 0
+    expected_count = 3 if mode == "source" else 5
+    assert len(calls) == expected_count
+    probe_command, probe_kwargs = calls[-1]
+    assert probe_command == [
+        sys.executable,
+        str(module.ROOT / "scripts" / "bootstrap_pyboy.py"),
+        "--mode",
+        mode,
+        "--check-timeout",
+        "3",
+        "--_runtime-probe",
+    ]
+    assert probe_kwargs["timeout"] == 3
+    assert all(
+        kwargs["timeout"] == 7
+        for command, kwargs in calls
+        if "--no-build-isolation" in command or command[2:3] == ["--no-deps"]
+    )
+    if mode == "cython":
+        assert calls[-2][0] == [sys.executable, "-m", "pip", "check"]
+        assert calls[-2][1]["timeout"] == 3
+
+    calls.clear()
+    failed = True
+    assert module.main(["--mode", mode]) == 9
+    assert not any(command[-1:] == ["--_runtime-probe"] for command, _ in calls)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_invalid_deadline_rejected_before_work(value, monkeypatch) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(module, "_validate_source", lambda: pytest.fail("source check started"))
+    for option in ("--install-timeout", "--check-timeout"):
+        with pytest.raises(SystemExit) as error:
+            module.main([option, value])
+        assert error.value.code == 2
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process-state observation")
+@pytest.mark.parametrize("startup_delay", [0, 3])
+def test_timeout_stops_build_descendants(tmp_path, monkeypatch, startup_delay) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    pid_file = tmp_path / "descendant.pid"
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        f"time.sleep({startup_delay})\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"pid_path = pathlib.Path({str(pid_file)!r})\n"
+        "ready_path = pid_path.with_suffix('.ready')\n"
+        "ready_path.write_text(str(child.pid), encoding='ascii')\n"
+        "ready_path.replace(pid_path)\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    original_popen = subprocess.Popen
+
+    def start_ready_descendant(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        deadline = time.monotonic() + 30
+        try:
+            while not pid_file.is_file():
+                assert process.poll() is None, "build parent exited before descendant readiness"
+                assert time.monotonic() < deadline, "build descendant did not become ready"
+                time.sleep(0.01)
+            assert int(pid_file.read_text(encoding="ascii")) > 0
+            return process
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+            raise
+
+    monkeypatch.setattr(module.subprocess, "Popen", start_ready_descendant)
+    with pytest.raises(subprocess.TimeoutExpired):
+        module._run_bounded([sys.executable, str(launcher)], env=os.environ.copy(), timeout=2)
+    descendant = int(pid_file.read_text(encoding="ascii"))
+    status = Path(f"/proc/{descendant}/stat")
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            state = status.read_text(encoding="ascii").split(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        if state in {"Z", "X"}:
+            break
+        assert time.monotonic() < deadline, f"build descendant is still executing: {state}"
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize("mode", ["source", "cython"])
+def test_check_only_does_not_stage_or_install(mode, monkeypatch, capsys) -> None:
+    module = _load_bootstrap()
+    monkeypatch.setattr(module, "_validate_source", lambda: None)
+    monkeypatch.setattr(
+        module, "_native_build_source", lambda *_args: pytest.fail("staging started")
+    )
+    monkeypatch.setattr(module, "_pip_command", lambda: pytest.fail("installer started"))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module, "_run_bounded", run)
+    assert module.main(["--mode", mode, "--check"]) == 0
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[-3:] == ["--check-timeout", "30", "--_runtime-probe"]
+    assert kwargs["timeout"] == 30
+    assert (kwargs["env"].get("PYBOY_NO_CYTHON") == "1") == (mode == "source")
+
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(module, "_run_bounded", timeout)
+    assert module.main(["--mode", mode, "--check"]) == 124
+    assert "bootstrap command timed out after 30 seconds" in capsys.readouterr().err

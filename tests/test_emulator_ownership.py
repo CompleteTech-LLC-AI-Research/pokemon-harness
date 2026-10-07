@@ -10,6 +10,7 @@ from contextlib import nullcontext
 import pytest
 
 from pokered_harness import mcp_server
+from pokered_harness.link.network_backend import NetworkBackend
 from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
 from pokered_harness.session import Session, SessionCleanupTimeoutError, SessionClosedError
 from tests.conftest import DictMemory
@@ -528,7 +529,7 @@ def test_cross_provider_pair_attempts_fail_without_lock_cycles_or_claim_loss():
 def test_rejected_provider_claim_does_not_write_backend_or_stop_transport():
     from types import SimpleNamespace
 
-    from pokered_harness.ownership import EmulatorOwnershipError
+    from pokered_harness.ownership import EmulatorOwnershipError, owner_for
 
     class Core:
         def __init__(self):
@@ -548,18 +549,159 @@ def test_rejected_provider_claim_does_not_write_backend_or_stop_transport():
     core = Core()
     endpoint.mb.serial = core
     first = _fake_local_provider()
-    stopped = []
+    starts, stopped, ticks = [], [], []
+    original_tick = endpoint.tick
+    endpoint.tick = lambda *args, **kwargs: ticks.append((args, kwargs))
     network = SimpleNamespace(
-        start_receiver=lambda **kwargs: None, stop=lambda: stopped.append(True)
+        start_receiver=lambda **kwargs: starts.append(kwargs),
+        stop=lambda: stopped.append(True),
     )
     second = PyBoyLinkSession(network_backend=network)
     first.attach(endpoint)
+    prior_backend = core.backend
     with pytest.raises(EmulatorOwnershipError, match="another provider"):
         second.attach(endpoint)
     assert core.writes == []
+    assert core.backend is prior_backend
+    assert second._network_backend is network
+    assert starts == []
     assert stopped == []
+    assert ticks == []
     assert first.attached == (endpoint,) and second.attached == ()
+    endpoint.tick = original_tick
     first.detach_all()
+
+    local = _fake_local_provider()
+    local.attach(endpoint)
+    owner = owner_for(endpoint)
+    stale_provider_ref = owner._provider
+    assert stale_provider_ref is not None
+    assert stale_provider_ref() is local
+    local_ref = weakref.ref(local)
+    del local
+    gc.collect()
+    assert local_ref() is None
+    assert stale_provider_ref() is None
+    assert owner._provider is stale_provider_ref
+
+    endpoint.stopped = True
+    closed_backend = core.backend
+    closed_writes = list(core.writes)
+    closed_starts = list(starts)
+    closed_stopped = list(stopped)
+    closed_ticks = list(ticks)
+    closed_stop_calls = list(endpoint.stop_calls)
+    closed_tick_calls = []
+    closed_frame_count = endpoint.frame_count
+    closed_rendered = endpoint.rendered
+
+    def record_closed_tick(*args, **kwargs):
+        closed_tick_calls.append((args, kwargs))
+        return original_tick(*args, **kwargs)
+
+    endpoint.tick = record_closed_tick
+    try:
+        with pytest.raises(EmulatorOwnershipError, match="emulator session is closed"):
+            second.attach(endpoint)
+    finally:
+        endpoint.tick = original_tick
+
+    assert owner._provider is stale_provider_ref
+    assert stale_provider_ref() is None
+    assert core.backend is closed_backend
+    assert core.writes == closed_writes
+    assert starts == closed_starts
+    assert stopped == closed_stopped
+    assert ticks == closed_ticks
+    assert closed_tick_calls == []
+    assert endpoint.frame_count == closed_frame_count
+    assert endpoint.rendered == closed_rendered
+    assert endpoint.stop_calls == closed_stop_calls
+    assert first.attached == ()
+    assert second.attached == ()
+    assert second._network_backend is network
+
+
+class _RecordingMemory:
+    """Record all writes, including assignments that leave a value unchanged."""
+
+    def __init__(self):
+        self._memory = DictMemory({0xFFAA: 0x7E, 0xFFAB: 0x01})
+        self.writes = []
+
+    def __getitem__(self, address):
+        return self._memory[address]
+
+    def __setitem__(self, address, value):
+        self.writes.append((address, value))
+        self._memory[address] = value
+
+
+@pytest.mark.parametrize(
+    "internal_clock",
+    [pytest.param(True, id="local-internal"), pytest.param(False, id="peer-internal")],
+)
+def test_network_attach_never_writes_role_status_ram(internal_clock, monkeypatch):
+    peer, backend = NetworkBackend.pair()
+    endpoint = _endpoint("a")
+    endpoint.memory = _RecordingMemory()
+    serial = endpoint.mb.serial
+    serial.set_SB(0xA5)
+    serial.set_SC(0x00)
+    before_serial = (serial.SB, serial.SC, serial.clock)
+    register_writes = []
+
+    class RecordingSerial:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+        def __setattr__(self, name, value):
+            if name == "_wrapped":
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._wrapped, name, value)
+
+        def set_SB(self, value):
+            register_writes.append(("SB", value))
+            return self._wrapped.set_SB(value)
+
+        def set_SC(self, value):
+            register_writes.append(("SC", value))
+            return self._wrapped.set_SC(value)
+
+    serial_proxy = RecordingSerial(serial)
+    monkeypatch.setattr(endpoint.mb, "serial", serial_proxy)
+    assert endpoint.mb.serial is serial_proxy
+    # Prove the memory facade detects same-value writes before using an empty
+    # write log as evidence for the attach/negotiation/detach path.
+    endpoint.memory[0xFFAB] = 0x01
+    endpoint.memory[0xFFAB] = 0x01
+    assert endpoint.memory.writes == [(0xFFAB, 0x01), (0xFFAB, 0x01)]
+    endpoint.memory.writes.clear()
+    provider = PyBoyLinkSession(
+        network_backend=backend,
+        network_is_internal_clock=internal_clock,
+    )
+
+    try:
+        provider.attach(endpoint)
+        assert provider.negotiate_network_clock_role("red") is internal_clock
+        assert provider._network_is_internal_clock is internal_clock
+        assert (serial.SB, serial.SC, serial.clock) == before_serial
+        assert register_writes == []
+        assert endpoint.memory.writes == []
+
+        provider.detach(endpoint)
+        assert (serial.SB, serial.SC, serial.clock) == before_serial
+        assert register_writes == []
+        assert endpoint.memory.writes == []
+    finally:
+        provider.detach_all()
+        peer.stop()
+    assert endpoint.memory.writes == []
 
 
 def test_close_rejects_reverse_owner_order_without_stopping_then_can_retry():

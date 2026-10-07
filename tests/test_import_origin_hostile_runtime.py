@@ -659,6 +659,7 @@ def test_no_detail_line_names_an_exception_type_unsafely():
         origins._import_origin_finders,
         origins._import_origin_paths,
         origins._import_origin_resolution,
+        origins._import_origin_selected_owners,
     )
     scanned_helper_names = {module.__name__.rsplit(".", 1)[-1] for module in helper_modules}
     available_helper_names = {
@@ -680,9 +681,14 @@ def test_no_detail_line_names_an_exception_type_unsafely():
         "class controls its own metaclass"
     )
     with tempfile.TemporaryDirectory() as temporary_directory:
-        mutated_helper = Path(temporary_directory) / "_import_origin_mutated.py"
-        mutated_helper.write_text("type(exc).__name__\n", encoding="utf-8")
-        assert unsafe_type_name_sources([*source_paths, mutated_helper]) == [mutated_helper]
+        for index, module in enumerate(helper_modules):
+            helper_path = Path(module.__file__)
+            mutated_helper = Path(temporary_directory) / f"{index}_{helper_path.name}"
+            mutated_helper.write_text(
+                f"{helper_path.read_text(encoding='utf-8')}\ntype(exc).__name__\n",
+                encoding="utf-8",
+            )
+            assert unsafe_type_name_sources([*source_paths, mutated_helper]) == [mutated_helper]
 
 
 def test_a_hostile_site_module_attribute_cannot_abort_the_guard(tmp_path, monkeypatch):

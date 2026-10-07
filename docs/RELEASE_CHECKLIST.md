@@ -254,8 +254,13 @@ beyond `2^31`, dispatch lock ordering and admission deadlines, failure-first
 gate evidence, partial pipe capture, and corrected timing-test ordering.
 Peer stack diagnostics are opt-in through positive finite
 `POKERED_PEER_TRACE_AFTER_SECONDS`; optional `POKERED_PEER_TRACE_DIR` must
-already exist. Capture is bounded to two one-shot dumps and makes no ROM
-changes. Experimental coordinator `344aa95` is on another branch and is not
+already exist. The owned Python capture worker allows at most two attempts per
+peer, including cleanup, formats at most 512 KiB per dump, and emits no locals,
+source text, or native C frames. Capture may wait for the GIL; no capture is
+promised during an indefinitely GIL-held native call. A blocked sink cannot
+block the peer caller; close waits at most 250 ms while a reaper retains any
+still-owned descriptor. Diagnostics make no ROM changes and do not qualify
+gameplay. Experimental coordinator `344aa95` is on another branch and is not
 included in this candidate or its qualification claim.
 
 The state-validity, transport, and release-gate hardening represented by the

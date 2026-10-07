@@ -195,6 +195,20 @@ themselves prove gameplay or eliminate the open gates above.
 
 ## Verification and handoff
 
+### Managed delegation
+
+Use exactly three agent levels for substantive work: the coordinator, its
+subagents, and their bounded subsubagents. Do not create a fourth level.
+Assign disjoint ownership lanes, coordinate shared state through the parent,
+and require independent verification before reporting completion. A third-level
+agent must finish its bounded assignment without spawning another agent.
+Default delegated work to `gpt-5.6-luna` with maximum reasoning and the fastest
+supported execution path. If that model is unavailable, use the supported Luna
+replacement with maximum reasoning and disclose the fallback. Enable Fast through
+supported configuration for ongoing delegated calls; report an unexposed effective
+tier honestly. Preserve unrelated changes and report inaccessible scope rather
+than guessing.
+
 Use `scripts/production_gate.py` with the same interpreter used by installation
 and MCP for a single-runtime gate. For the dual gate, pass the source
 environment with `--python` and the separately bootstrapped Cython environment

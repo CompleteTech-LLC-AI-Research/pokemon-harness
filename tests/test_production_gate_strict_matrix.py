@@ -296,6 +296,88 @@ def test_asset_inspection_reports_hash_mismatch_and_missing_inputs(tmp_path):
     assert any("blue-stock" in problem for problem in gate.required_asset_problems(records))
 
 
+@pytest.mark.parametrize(
+    "kind,relative,label",
+    [
+        ("rom", Path("red/pokemon-red.gb"), "red-stock"),
+        ("symbol", Path("red/pokemon-red.sym"), "red"),
+    ],
+    ids=("rom", "symbol"),
+)
+def test_asset_inspection_fails_closed_when_pin_is_missing(tmp_path, kind, relative, label):
+    rom_root = tmp_path / "rom"
+    asset_path = rom_root / relative
+    asset_path.parent.mkdir(parents=True)
+    asset_path.write_bytes(b"present but unpinned")
+
+    records = gate.inspect_assets(rom_root, tmp_path / "fixtures", {})
+    record = next(record for record in records if record.label == label)
+
+    assert record.kind == kind
+    assert record.status == "sha1-unpinned"
+    assert record.expected_sha1 is None
+    assert record.actual_sha1 == hashlib.sha1(b"present but unpinned").hexdigest()
+    assert any(
+        problem.startswith(f"{kind} {label}: sha1-unpinned")
+        for problem in gate.required_asset_problems(records)
+    )
+
+
+def test_asset_inspection_validates_fixture_hash_when_pin_is_available(tmp_path):
+    fixture_root = tmp_path / "fixtures"
+    fixture_path = fixture_root / "red" / "cable_club.state"
+    fixture_path.parent.mkdir(parents=True)
+    fixture_path.write_bytes(b"fixture pin is enforced")
+    wrong_pin = "0" * 40
+
+    records = gate.inspect_assets(
+        tmp_path / "rom",
+        fixture_root,
+        {Path("red/cable_club.state"): wrong_pin},
+    )
+    record = next(record for record in records if record.label == "red cable-club")
+
+    assert record.status == "sha1-mismatch"
+    assert record.expected_sha1 == wrong_pin
+    assert record.actual_sha1 == hashlib.sha1(b"fixture pin is enforced").hexdigest()
+    assert any(
+        problem.startswith("fixture red cable-club: sha1-mismatch")
+        for problem in gate.required_asset_problems(records)
+    )
+
+
+def test_asset_inspection_fingerprint_changes_with_input_bytes(tmp_path):
+    rom_root = tmp_path / "rom"
+    rom_path = rom_root / "red" / "pokemon-red.gb"
+    rom_path.parent.mkdir(parents=True)
+    serialized = []
+    digests = []
+    for content in (b"rom-a", b"rom-b"):
+        rom_path.write_bytes(content)
+        record = next(
+            row
+            for row in gate.inspect_assets(rom_root, tmp_path / "fixtures", {})
+            if row.label == "red-stock"
+        )
+        payload = gate.build_evidence_payload(
+            project_root=tmp_path,
+            rom_root=rom_root,
+            fixture_root=tmp_path / "fixtures",
+            runtime={},
+            assets=[record],
+            collections=[],
+            tiers=[],
+            gate_problems=[],
+            overall="PARTIAL",
+        )
+        digests.append(record.actual_sha1)
+        serialized.append(payload["assets"][0])
+
+    assert digests == [hashlib.sha1(b"rom-a").hexdigest(), hashlib.sha1(b"rom-b").hexdigest()]
+    assert digests[0] != digests[1]
+    assert serialized[0] != serialized[1]
+
+
 def test_environment_uses_gate_worktree_and_does_not_override_explicit_rom(tmp_path, monkeypatch):
     rom_root = tmp_path / "rom"
     red = rom_root / "red"

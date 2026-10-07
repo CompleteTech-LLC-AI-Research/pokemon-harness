@@ -12,6 +12,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from typing import Any
 
 import pytest
 from pyboy.core.serial import CYCLES_PER_BYTE_DMG, Serial
@@ -555,6 +556,92 @@ def test_network_owner_pump_fail_closed_on_nonempty_service_error() -> None:
     assert backend.service_calls == 1
     assert backend.closed_errors == [error]
 
+    import socket
+    import time
+
+    from pokered_harness.link import network_backend as network_module
+    from pokered_harness.link.network_backend import NetworkBackendError
+    from pokered_harness.link.serial_coordinator import SerialOperationGate
+
+    backend_sock, peer_sock = socket.socketpair()
+    backend, response_queue_probe = _network_backend_with_queue_probe(backend_sock)
+    peer_sock.settimeout(1.0)
+
+    class FailingCore:
+        transfer_enabled = 1
+        internal_clock = 0
+        SB = 0
+        SC = 0x80
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def peek_out_bit(self) -> int:
+            return 0
+
+        def apply_external_edge(self, _bit: int) -> bool:
+            self.calls += 1
+            raise error
+
+    core = FailingCore()
+    try:
+        assert peer_sock.recv(2)[0] == network_module._OP_HELLO
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_HELLO, 0x22))
+        backend.start_receiver(
+            local_core=core,
+            serial_gate=SerialOperationGate(),
+            dispatch_to_owner=True,
+        )
+        assert backend._hello_received.wait(timeout=1.0)
+        assert response_queue_probe.owner_get_entered.wait(timeout=1.0)
+        peer_sock.sendall(network_module._FRAME.pack(network_module._OP_EDGE_REQ, 1))
+        deadline = time.monotonic() + 1.0
+        while backend._edge_queue.empty():
+            assert time.monotonic() < deadline, "owner pump request was not queued"
+            time.sleep(0.001)
+
+        pump = PyBoyLinkSession._make_network_owner_pump(backend)
+        pump()
+        failure = backend._reader_exc
+        assert isinstance(failure, NetworkBackendError)
+        assert "owner failed to apply incoming EDGE_REQ" in str(failure)
+        assert failure.__cause__ is error
+        assert core.calls == 1
+        assert backend.debug_snapshot()["owner_edge_errors"] == 1
+        assert backend.debug_snapshot()["owner_edge_applied"] == 0
+        assert not response_queue_probe.owner_get_gate_timed_out.is_set(), (
+            "owner response queue gate timed out before observation"
+        )
+        assert response_queue_probe.non_none_put_get_counts == (0, 0), (
+            "failed owner-edge application published a non-None response"
+        )
+        assert response_queue_probe.none_put_get_counts == (1, 0), (
+            "stop marker was not queued exactly once before owner release"
+        )
+        response_queue_probe.release_owner_get.set()
+        assert response_queue_probe.owner_get_release_observed.wait(timeout=1.0), (
+            "owner response queue gate release was not observed"
+        )
+        assert response_queue_probe.stop_marker_consumed.wait(timeout=1.0), (
+            "owner did not consume the real stop marker"
+        )
+        assert not response_queue_probe.owner_get_gate_timed_out.is_set(), (
+            "owner response queue gate timed out during marker handoff"
+        )
+        assert response_queue_probe.none_put_get_counts == (1, 1)
+        assert response_queue_probe.non_none_put_get_counts == (0, 0), (
+            "unexpected non-None response was observed during marker handoff"
+        )
+        assert backend._completed_edge_queue.empty()
+        assert peer_sock.recv(1) == b""
+    finally:
+        response_queue_probe.release_owner_get.set()
+        try:
+            assert backend.stop(timeout_s=1.0) is True
+        finally:
+            response_queue_probe.restore()
+            peer_sock.close()
+
 
 def test_network_owner_pump_without_queue_uses_legacy_service_fallback() -> None:
     """Backends without the private queue attribute retain old behavior."""
@@ -578,3 +665,115 @@ def test_network_owner_pump_empty_probe_error_fails_closed() -> None:
     assert backend.service_calls == 0
     assert backend.closed_errors == [error]
     assert backend._closed is True
+
+
+def test_network_owner_pump_reentrant_dispatch_preserves_default_stream(monkeypatch) -> None:
+    """Nested empty owner polling leaves the native default byte path intact."""
+    edge_queue: queue.Queue[str] = queue.Queue()
+    edge_queue.put_nowait("inbound-edge")
+    serial = Serial(False)
+    serial.set_SB(0x3C)
+    serial.set_SC(0x80)
+
+    class ReentrantBackend:
+        def __init__(self) -> None:
+            self._edge_queue = edge_queue
+            self.service_calls = 0
+            self.serviced: list[str] = []
+            self.closed_errors: list[BaseException] = []
+
+        def service_pending_edges(self) -> int:
+            self.service_calls += 1
+            self.serviced.append(self._edge_queue.get_nowait())
+            serial.dispatch_owner()
+            return 1
+
+        def _mark_closed(self, error: BaseException) -> None:
+            self.closed_errors.append(error)
+
+    backend = ReentrantBackend()
+    serial.owner_dispatch_callback = PyBoyLinkSession._make_network_owner_pump(backend)
+    serial.owner_dispatch_enabled = True
+    serial.dispatch_owner()
+    assert backend.service_calls == 1
+    assert backend.serviced == ["inbound-edge"]
+    assert edge_queue.empty()
+    assert backend.closed_errors == []
+
+    serial.set_SB(0x3C)
+    serial.set_SC(0x81)
+    assert serial.tick(serial.clock_target * 8) is True
+    completed_byte = serial.SB
+    assert serial.tick(serial.last_cycles + serial.clock_target * 8) is False
+    assert serial.SB == completed_byte
+    assert backend.service_calls == 1
+    assert backend.closed_errors == []
+
+
+class _CompletedEdgeQueueProbe:
+    """Observe one real owner response queue without replacing its queue."""
+
+    def __init__(self, backend: NetworkBackend) -> None:
+        self._backend = backend
+        self._queue = backend._completed_edge_queue
+        self._original_get = self._queue.get
+        self._original_put_nowait = self._queue.put_nowait
+        self._record_lock = threading.Lock()
+        self._first_owner_get_seen = False
+        self._put_items: list[object] = []
+        self._get_items: list[object] = []
+        self.owner_get_entered = threading.Event()
+        self.release_owner_get = threading.Event()
+        self.owner_get_release_observed = threading.Event()
+        self.owner_get_gate_timed_out = threading.Event()
+        self.stop_marker_consumed = threading.Event()
+        self._queue.get = self._get
+        self._queue.put_nowait = self._put_nowait
+
+    def _get(self, *args: Any, **kwargs: Any) -> object:
+        is_owner_worker = threading.current_thread() is self._backend._edge_worker
+        if is_owner_worker:
+            with self._record_lock:
+                gate_first_get = not self._first_owner_get_seen
+                self._first_owner_get_seen = True
+            if gate_first_get:
+                self.owner_get_entered.set()
+                if self.release_owner_get.wait(timeout=2.0):
+                    self.owner_get_release_observed.set()
+                else:
+                    self.owner_get_gate_timed_out.set()
+
+        item = self._original_get(*args, **kwargs)
+        with self._record_lock:
+            self._get_items.append(item)
+        if item is None:
+            self.stop_marker_consumed.set()
+        return item
+
+    def _put_nowait(self, item: object) -> None:
+        self._original_put_nowait(item)
+        with self._record_lock:
+            self._put_items.append(item)
+
+    @property
+    def none_put_get_counts(self) -> tuple[int, int]:
+        with self._record_lock:
+            puts = sum(item is None for item in self._put_items)
+            gets = sum(item is None for item in self._get_items)
+        return puts, gets
+
+    @property
+    def non_none_put_get_counts(self) -> tuple[int, int]:
+        with self._record_lock:
+            puts = sum(item is not None for item in self._put_items)
+            gets = sum(item is not None for item in self._get_items)
+        return puts, gets
+
+    def restore(self) -> None:
+        self._queue.get = self._original_get
+        self._queue.put_nowait = self._original_put_nowait
+
+
+def _network_backend_with_queue_probe(sock: Any) -> tuple[NetworkBackend, _CompletedEdgeQueueProbe]:
+    backend = NetworkBackend(sock, local_rom_version="red")
+    return backend, _CompletedEdgeQueueProbe(backend)

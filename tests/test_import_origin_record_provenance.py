@@ -9,6 +9,7 @@ import io
 import json
 import sys
 import types
+from collections import UserDict
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from scripts.check_import_origins import (
     _site_packages_roots,
     check_origins,
 )
+from tests._bootstrap_admission_test_support import make_recorded_module, write_hashless_claim
 
 
 def test_source_copied_into_site_packages_does_not_certify_an_execed_finder(tmp_path, monkeypatch):
@@ -653,3 +655,156 @@ def test_the_guard_refuses_rather_than_traceback_on_any_escape(tmp_path, monkeyp
         monkeypatch.setattr(origins, "_allowed_roots", raise_interrupt)
         with pytest.raises(type(interrupt)):
             check_origins(tmp_path, ("anything",))
+
+
+def test_source_editable_accepts_only_declared_import_paths(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    module_path = root / "vendor" / "pyboy-src" / "pyboy" / "core" / "serial.py"
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("SERIAL = True\n", encoding="utf-8")
+    module = types.ModuleType("pyboy.core.serial")
+    module.__file__ = str(module_path)
+    site = tmp_path / "site-packages"
+    site.mkdir()
+
+    editable_root = [root]
+
+    class EditableDistribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"url": editable_root[0].as_uri(), "dir_info": {"editable": True}})
+
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [site])
+    monkeypatch.setattr(origins, "_distribution", lambda _name: EditableDistribution())
+    expected = {"pyboy.core.serial": module_path}
+    report = origins.attest_selected_module_owners(
+        UserDict({"pyboy.core.serial": module}),
+        UserDict({"pyboy.core.serial": "pokered-harness"}),
+        project_root=root,
+        editable_module_paths=UserDict(expected),
+    )
+    assert report["ok"], report
+    assert report["modules"]["pyboy.core.serial"]["basis"] == "editable-source-path"
+
+    foreign_path = root / "vendor" / "pyboy-src-copy" / "pyboy" / "core" / "serial.py"
+    report = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module},
+        {"pyboy.core.serial": "pokered-harness"},
+        project_root=root,
+        editable_module_paths={"pyboy.core.serial": foreign_path},
+    )
+    assert not report["ok"], report
+    assert "declared editable path" in " ".join(report["errors"])
+    editable_root[0] = root / "other-checkout"
+    report = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module},
+        {"pyboy.core.serial": "pokered-harness"},
+        project_root=root,
+        editable_module_paths=expected,
+    )
+    assert not report["ok"], report
+    assert "direct_url" in " ".join(report["errors"])
+    editable_root[0] = root
+    write_hashless_claim(site, "pokered-harness", module)
+    report = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module},
+        {"pyboy.core.serial": "pokered-harness"},
+        project_root=root,
+        editable_module_paths=expected,
+    )
+    assert not report["ok"], report
+    assert "hashless or malformed RECORD claim" in " ".join(report["errors"])
+    empty = origins.attest_selected_module_owners({}, {}, project_root=root)
+    assert not empty["ok"], empty
+    mismatched = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module}, {}, project_root=root
+    )
+    assert not mismatched["ok"], mismatched
+
+
+def test_wheel_record_rejects_overwritten_or_unowned_module(tmp_path, monkeypatch):
+    site = tmp_path / "site-packages"
+    module = make_recorded_module(tmp_path, "pyboy.core.serial", "pokered-harness", b"serial core")
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [site])
+    expected = {"pyboy.core.serial": "pokered-harness"}
+    report = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module}, expected, project_root=tmp_path
+    )
+    assert report["ok"], report
+    assert report["modules"]["pyboy.core.serial"]["basis"] == "record"
+
+    Path(module.__file__).write_bytes(b"overwritten serial core")
+    report = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module}, expected, project_root=tmp_path
+    )
+    assert not report["ok"], report
+    assert "differ from the expected RECORD digest" in " ".join(report["errors"])
+
+    record = site / "pokered-harness-1.0.dist-info" / "RECORD"
+    record.unlink()
+    write_hashless_claim(site, "pokered-harness", module)
+    report = origins.attest_selected_module_owners(
+        {"pyboy.core.serial": module}, expected, project_root=tmp_path
+    )
+    assert not report["ok"], report
+    assert "hashless or malformed RECORD claim" in " ".join(report["errors"])
+
+
+def test_native_requires_fork_records_and_retains_harness_owner(tmp_path, monkeypatch):
+    site = tmp_path / "site-packages"
+    names = (
+        "pyboy",
+        "pyboy.pyboy",
+        "pyboy.utils",
+        "pyboy.core.mb",
+        "pyboy.core.serial",
+        "pyboy.link",
+    )
+    modules = {name: make_recorded_module(tmp_path, name, "pyboy", name.encode()) for name in names}
+    modules["pokered_harness"] = make_recorded_module(
+        tmp_path, "pokered_harness", "pokered-harness", b"harness"
+    )
+    owners = {name: "pyboy" for name in names}
+    owners["pokered_harness"] = "pokered-harness"
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [site])
+
+    report = origins.attest_selected_module_owners(modules, owners, project_root=tmp_path)
+    assert report["ok"], report
+    assert report["modules"]["pyboy.link"]["record_owner"] == "pyboy"
+    assert report["modules"]["pokered_harness"]["record_owner"] == "pokered-harness"
+
+    editable_root = tmp_path / "native-editable-checkout"
+    editable_modules = {
+        name: make_recorded_module(editable_root, name, "pyboy", name.encode()) for name in names
+    }
+    harness_path = editable_root / "src" / "pokered_harness" / "__init__.py"
+    harness_path.parent.mkdir(parents=True)
+    harness_path.write_text("NATIVE_HARNESS = True\n", encoding="utf-8")
+    harness_module = types.ModuleType("pokered_harness")
+    harness_module.__file__ = str(harness_path)
+    editable_modules["pokered_harness"] = harness_module
+
+    class EditableHarnessDistribution:
+        def read_text(self, filename):
+            if filename != "direct_url.json":
+                return None
+            return json.dumps({"url": editable_root.as_uri(), "dir_info": {"editable": True}})
+
+    native_site = editable_root / "site-packages"
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [native_site])
+    monkeypatch.setattr(origins, "_distribution", lambda _name: EditableHarnessDistribution())
+    report = origins.attest_selected_module_owners(
+        editable_modules,
+        owners,
+        project_root=editable_root,
+        editable_module_paths={"pokered_harness": harness_path},
+    )
+    assert report["ok"], report
+    assert report["modules"]["pokered_harness"]["basis"] == "editable-source-path"
+
+    owners["pokered_harness"] = "pyboy"
+    monkeypatch.setattr(origins, "_site_packages_roots", lambda: [site])
+    report = origins.attest_selected_module_owners(modules, owners, project_root=tmp_path)
+    assert not report["ok"], report
+    assert "pokered_harness: module file is recorded by the wrong distribution" in report["errors"]

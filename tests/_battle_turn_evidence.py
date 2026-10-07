@@ -282,6 +282,8 @@ def validate_turn(baseline: dict[str, Any], turn: dict[str, Any]) -> None:
                 raise ValueError("faint-skipped action has execution evidence")
             if turn[opposite]["hp"] == 0:
                 raise ValueError("faint skip target is the wrong combatant")
+            if turn[side]["hp"] != 0:
+                raise ValueError("faint skip actor is not fainted")
         elif not action["executed"] or not action["done"]:
             raise ValueError("action did not complete before settled boundary")
 
@@ -379,6 +381,8 @@ def verify_battle_turns(
             ):
                 raise ValueError("KO outcome lacks EndOfBattle evidence")
             if terminal is not None:
+                if not isinstance(terminal, dict) or terminal.get("boundary") != "EndOfBattle":
+                    raise ValueError("terminal boundary is invalid")
                 _integer(
                     terminal.get("seq"), item["settled_seq"] + 1, MAX_SEQUENCE, "terminal sequence"
                 )
@@ -413,13 +417,38 @@ def verify_battle_turns(
                 and {lterm[field], rterm[field]} != {0, 1}
             ):
                 raise ValueError("battle terminal results are not complementary")
-        if require_cleanup or left.get("cleanup") is not None or right.get("cleanup") is not None:
+            if (
+                lterm is not None
+                and rterm is not None
+                and (lterm[field], rterm[field])
+                not in (
+                    (0, 1),
+                    (1, 0),
+                    (2, 2),
+                )
+            ):
+                raise ValueError("battle terminal results are not complementary")
+        if (
+            require_cleanup
+            or left.get("terminal") is not None
+            or right.get("terminal") is not None
+            or left.get("cleanup") is not None
+            or right.get("cleanup") is not None
+        ):
             for item in (left, right):
                 cleanup = item.get("cleanup")
                 if not isinstance(cleanup, dict) or cleanup.get("is_in_battle") != 0:
                     raise ValueError("battle cleanup is incomplete")
                 if cleanup.get("map") != COLOSSEUM_MAP_ID or cleanup.get("link_state") != 1:
                     raise ValueError("battle cleanup returned to an unexpected state")
+                terminal = item.get("terminal")
+                if terminal is not None:
+                    _integer(
+                        cleanup.get("seq"),
+                        terminal["seq"] + 1,
+                        MAX_SEQUENCE,
+                        "cleanup sequence",
+                    )
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         return [str(exc)]
     return errors

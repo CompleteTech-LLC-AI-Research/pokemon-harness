@@ -12,15 +12,19 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
 
 import scripts.tcp_link_matrix as matrix
+import tests._pyboy_link_session_subprocess_support as peer_subprocess_support
+from scripts import _timed_trade_probe, validate_fixture_manifest
 from scripts.tcp_link_matrix import (
     LOCAL_VARIANT_NODEIDS,
     LOCAL_VERSION_PAIR_NODEIDS,
@@ -41,6 +45,8 @@ from tests._tier_config import (
     TIER_REQUIRED_NODEIDS,
     classify_test,
 )
+from tests.test_timed_trade_probe import adjudicate as adjudicate_trade
+from tests.test_timed_trade_probe import owners as trade_owners
 
 
 def test_tier_classifier_rejects_unknown_test_modules():
@@ -69,6 +75,14 @@ def test_tier_classifier_marks_late_rearm_as_timing_sensitive():
     )
     assert "unit" in marks
     assert "timing_sensitive" in marks
+
+
+def test_tier_classifier_marks_bootstrap_descendant_timeout_as_timing_sensitive():
+    marks = classify_test(
+        "tests/test_runtime_packaging_bootstrap.py",
+        "test_timeout_stops_build_descendants",
+    )
+    assert {"unit", "timing_sensitive"} <= marks
 
 
 _SUBPROCESS_MODULE = "tests/test_pyboy_link_session_subprocess.py"
@@ -257,6 +271,24 @@ def test_versions_sha_parser_pairs_each_rom_path(tmp_path):
     }
 
 
+def test_versions_symbol_sha_parser_pairs_each_symbol_path(tmp_path):
+    versions = tmp_path / "VERSIONS.md"
+    versions.write_text(
+        """
+| Symbols | `rom/red/pokemon-red.sym` |
+| Symbol SHA-1 | `AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA` |
+| Symbols | `rom/blue/pokemon-blue.sym` |
+| Symbol SHA-1 | `BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB` |
+""",
+        encoding="utf-8",
+    )
+
+    assert gate.parse_expected_sha1(versions) == {
+        Path("red/pokemon-red.sym"): "a" * 40,
+        Path("blue/pokemon-blue.sym"): "b" * 40,
+    }
+
+
 def test_pyboy_version_parser_accepts_revision_annotation(tmp_path):
     versions = tmp_path / "VERSIONS.md"
     versions.write_text(
@@ -283,6 +315,118 @@ def test_fixture_manifest_schema_validation_uses_selected_interpreter(tmp_path):
     # Every admitted row is reported, including the captured boundary rows and
     # the six-member slots fixtures.
     assert result["entries"] == 31
+
+
+@pytest.mark.parametrize(
+    "fault,message",
+    [
+        ("missing", "fixture missing"),
+        ("size", "fixture size mismatch"),
+        ("sha1", "fixture SHA-1 mismatch"),
+        ("sha256", "fixture SHA-256 mismatch"),
+    ],
+    ids=("missing", "size", "sha1", "sha256"),
+)
+def test_canonical_fixture_validator_rejects_invalid_bytes(tmp_path, fault, message):
+    content = b"canonical fixture bytes"
+    fixture_root = tmp_path / "fixtures"
+    fixture_path = fixture_root / "red" / "cable_club.state"
+    fixture_root.joinpath("red").mkdir(parents=True)
+    if fault != "missing":
+        fixture_path.write_bytes(content)
+    fixture = {
+        "id": "red-color-ordinary",
+        "path": "red/cable_club.state",
+        "kind": "ordinary",
+        "version": "red",
+        "variant": "color",
+        "size_bytes": len(content) + int(fault == "size"),
+        "sha1": hashlib.sha1(content).hexdigest(),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "expected_rom": {"path": "rom/red/pokemon-red-color.gb", "sha1": "a" * 40},
+        "expected_symbols": {"path": "rom/red/pokemon-red.sym", "sha1": "b" * 40},
+        "repository_distributed": False,
+        "provenance": {
+            "status": "partial",
+            "source_state": "operator supplied",
+            "capture_command_template": "operator supplied",
+            "runtime_identity": None,
+            "captured_at_utc": None,
+            "verification_method": None,
+        },
+    }
+    if fault == "sha1":
+        fixture["sha1"] = "f" * 40
+    elif fault == "sha256":
+        fixture["sha256"] = "f" * 64
+    document = {
+        "manifest_id": "pokered-harness.external-link-fixtures",
+        "manifest_version": 1,
+        "fixture_root": "tests/fixtures/link",
+        "asset_policy": {
+            "repository_distributed": False,
+            "validation_policy": "fail closed on missing, size, SHA-1, or SHA-256 mismatch",
+        },
+        "fixtures": [fixture],
+    }
+
+    rows = validate_fixture_manifest._validate_schema(document)
+    with pytest.raises(ValueError, match=message):
+        validate_fixture_manifest._validate_assets(rows, fixture_root)
+
+
+def test_fixture_manifest_preflight_rejects_missing_manifest(tmp_path):
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    scripts.mkdir(parents=True)
+    validator = Path(__file__).resolve().parents[1] / "scripts" / "validate_fixture_manifest.py"
+    shutil.copyfile(validator, scripts / validator.name)
+
+    result = gate.run_fixture_manifest_validation(
+        project_root=project,
+        python_executable=Path(sys.executable),
+        environment={},
+        fixture_root=tmp_path / "fixtures",
+        validate_bytes=False,
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["mode"] == "schema"
+    assert result["returncode"] == 2
+    assert result["entries"] is None
+    assert "manifest not found" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "payload,expectation",
+    [
+        ("{broken", "malformed"),
+        ("[]", "list"),
+        ('{"status":"child-failed"}', "object"),
+    ],
+    ids=("malformed", "list", "object"),
+)
+def test_peer_result_parser_rejects_malformed_or_non_mapping_payloads(payload, expectation):
+    prefix = peer_subprocess_support._RESULT_PREFIX
+    captured = {
+        "stdout": [f"{prefix}{payload}\n{prefix}{{}}\n"],
+        "stderr": [],
+    }
+    process = SimpleNamespace(returncode=17)
+
+    if expectation == "malformed":
+        with pytest.raises(json.JSONDecodeError):
+            peer_subprocess_support._parse_result(process, captured, label="listener")
+    elif expectation == "list":
+        with pytest.raises(pytest.fail.Exception, match="non-object result"):
+            peer_subprocess_support._parse_result(process, captured, label="listener")
+    else:
+        result = peer_subprocess_support._parse_result(
+            process,
+            {"stdout": [f"{prefix}{payload}\n"], "stderr": []},
+            label="listener",
+        )
+        assert result == {"status": "child-failed", "_supervisor_returncode": 17}
 
 
 def test_fixture_manifest_provenance_requires_certified_entries(tmp_path):
@@ -619,4 +763,19 @@ def test_required_nodeid_checker_preserves_parameterized_case_identity():
             "required matrix case is absent from selected items: "
             "tests/test_matrix.py::test_pair[red-blue]"
         )
+    ]
+
+
+@pytest.mark.parametrize("field", ["before_party", "copied_party", "final_party"])
+def test_reciprocal_exchange_rejects_missing_party_snapshot(field):
+    evidence = trade_owners()
+    for owner in evidence:
+        del owner[field]
+
+    result = adjudicate_trade(_timed_trade_probe, evidence)
+
+    assert result["complete"] is False
+    assert result["errors"] == [
+        "owner 0: missing party evidence",
+        "owner 1: missing party evidence",
     ]

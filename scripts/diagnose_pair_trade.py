@@ -187,6 +187,16 @@ def _version_and_asset_metadata() -> dict[str, object]:
     assets: dict[str, object] = {}
     source_files = [
         Path(__file__).resolve(),
+        REPO_ROOT / "scripts" / "_diagnose_pair_trade_support.py",
+        REPO_ROOT / "src" / "pokered_harness" / "_session_support.py",
+        REPO_ROOT / "src" / "pokered_harness" / "_session_mixins.py",
+        REPO_ROOT / "src" / "pokered_harness" / "_session_observation.py",
+        REPO_ROOT / "tests" / "_pyboy_link_session_roms_support.py",
+        REPO_ROOT / "tests" / "_pyboy_link_session_roms_trade_support.py",
+        REPO_ROOT / "tests" / "_pyboy_link_session_roms_battle_support.py",
+        REPO_ROOT / "tests" / "test_pyboy_link_session_roms_serial.py",
+        REPO_ROOT / "tests" / "test_pyboy_link_session_roms_diagnostics.py",
+        REPO_ROOT / "tests" / "_battle_turn_evidence.py",
         REPO_ROOT / "tests" / "test_pyboy_link_session_roms.py",
         REPO_ROOT / "tests" / "_pair_checkpoints.py",
         REPO_ROOT / "src" / "pokered_harness" / "config.py",
