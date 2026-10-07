@@ -442,7 +442,10 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
     script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
     assert "github.event.repository.private == false" in workflow
     assert "github.event.repository.visibility == 'public'" in workflow
+    assert "name: Native unit and timing validation" in workflow
     assert "runs-on: ubuntu-latest" in workflow
+    assert "timeout-minutes: 60" in workflow
+    assert "five timing repeats" in workflow
     assert "persist-credentials: false" in workflow
     assert "if: ${{ always() }}" in workflow
     assert "${{ env.NATIVE_UNIT_OUTPUT }}/evidence/" in workflow
@@ -450,9 +453,16 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
     assert "set -euo pipefail" in script
     assert "--mode cython --check" in script
     assert "--build-evidence" in script
-    assert "--runtime-mode cython --tier unit" in script
+    assert "--runtime-mode cython --tier unit --tier timing --repeat-timing 5" in script
     commands = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
-    for bypass in ("--timeout-seconds", "--unit-only", "--allow-skip", "|| true", " -k "):
+    for bypass in (
+        "--timeout-seconds",
+        "--matrix-timeout-seconds",
+        "--unit-only",
+        "--allow-skip",
+        "|| true",
+        " -k ",
+    ):
         assert bypass not in commands
     assert "rm -" not in script
     assert "trap finish EXIT" in script
