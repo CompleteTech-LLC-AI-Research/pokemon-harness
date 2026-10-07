@@ -12,6 +12,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from typing import Any
 
 import pytest
 from pyboy.core.serial import CYCLES_PER_BYTE_DMG, Serial
@@ -563,7 +564,7 @@ def test_network_owner_pump_fail_closed_on_nonempty_service_error() -> None:
     from pokered_harness.link.serial_coordinator import SerialOperationGate
 
     backend_sock, peer_sock = socket.socketpair()
-    backend = NetworkBackend(backend_sock, local_rom_version="red")
+    backend, response_queue_probe = _network_backend_with_queue_probe(backend_sock)
     peer_sock.settimeout(1.0)
 
     class FailingCore:
@@ -592,6 +593,7 @@ def test_network_owner_pump_fail_closed_on_nonempty_service_error() -> None:
             dispatch_to_owner=True,
         )
         assert backend._hello_received.wait(timeout=1.0)
+        assert response_queue_probe.owner_get_entered.wait(timeout=1.0)
         peer_sock.sendall(network_module._FRAME.pack(network_module._OP_EDGE_REQ, 1))
         deadline = time.monotonic() + 1.0
         while backend._edge_queue.empty():
@@ -607,12 +609,37 @@ def test_network_owner_pump_fail_closed_on_nonempty_service_error() -> None:
         assert core.calls == 1
         assert backend.debug_snapshot()["owner_edge_errors"] == 1
         assert backend.debug_snapshot()["owner_edge_applied"] == 0
+        assert not response_queue_probe.owner_get_gate_timed_out.is_set(), (
+            "owner response queue gate timed out before observation"
+        )
+        assert response_queue_probe.non_none_put_get_counts == (0, 0), (
+            "failed owner-edge application published a non-None response"
+        )
+        assert response_queue_probe.none_put_get_counts == (1, 0), (
+            "stop marker was not queued exactly once before owner release"
+        )
+        response_queue_probe.release_owner_get.set()
+        assert response_queue_probe.owner_get_release_observed.wait(timeout=1.0), (
+            "owner response queue gate release was not observed"
+        )
+        assert response_queue_probe.stop_marker_consumed.wait(timeout=1.0), (
+            "owner did not consume the real stop marker"
+        )
+        assert not response_queue_probe.owner_get_gate_timed_out.is_set(), (
+            "owner response queue gate timed out during marker handoff"
+        )
+        assert response_queue_probe.none_put_get_counts == (1, 1)
+        assert response_queue_probe.non_none_put_get_counts == (0, 0), (
+            "unexpected non-None response was observed during marker handoff"
+        )
         assert backend._completed_edge_queue.empty()
         assert peer_sock.recv(1) == b""
     finally:
+        response_queue_probe.release_owner_get.set()
         try:
             assert backend.stop(timeout_s=1.0) is True
         finally:
+            response_queue_probe.restore()
             peer_sock.close()
 
 
@@ -681,3 +708,72 @@ def test_network_owner_pump_reentrant_dispatch_preserves_default_stream(monkeypa
     assert serial.SB == completed_byte
     assert backend.service_calls == 1
     assert backend.closed_errors == []
+
+
+class _CompletedEdgeQueueProbe:
+    """Observe one real owner response queue without replacing its queue."""
+
+    def __init__(self, backend: NetworkBackend) -> None:
+        self._backend = backend
+        self._queue = backend._completed_edge_queue
+        self._original_get = self._queue.get
+        self._original_put_nowait = self._queue.put_nowait
+        self._record_lock = threading.Lock()
+        self._first_owner_get_seen = False
+        self._put_items: list[object] = []
+        self._get_items: list[object] = []
+        self.owner_get_entered = threading.Event()
+        self.release_owner_get = threading.Event()
+        self.owner_get_release_observed = threading.Event()
+        self.owner_get_gate_timed_out = threading.Event()
+        self.stop_marker_consumed = threading.Event()
+        self._queue.get = self._get
+        self._queue.put_nowait = self._put_nowait
+
+    def _get(self, *args: Any, **kwargs: Any) -> object:
+        is_owner_worker = threading.current_thread() is self._backend._edge_worker
+        if is_owner_worker:
+            with self._record_lock:
+                gate_first_get = not self._first_owner_get_seen
+                self._first_owner_get_seen = True
+            if gate_first_get:
+                self.owner_get_entered.set()
+                if self.release_owner_get.wait(timeout=2.0):
+                    self.owner_get_release_observed.set()
+                else:
+                    self.owner_get_gate_timed_out.set()
+
+        item = self._original_get(*args, **kwargs)
+        with self._record_lock:
+            self._get_items.append(item)
+        if item is None:
+            self.stop_marker_consumed.set()
+        return item
+
+    def _put_nowait(self, item: object) -> None:
+        self._original_put_nowait(item)
+        with self._record_lock:
+            self._put_items.append(item)
+
+    @property
+    def none_put_get_counts(self) -> tuple[int, int]:
+        with self._record_lock:
+            puts = sum(item is None for item in self._put_items)
+            gets = sum(item is None for item in self._get_items)
+        return puts, gets
+
+    @property
+    def non_none_put_get_counts(self) -> tuple[int, int]:
+        with self._record_lock:
+            puts = sum(item is not None for item in self._put_items)
+            gets = sum(item is not None for item in self._get_items)
+        return puts, gets
+
+    def restore(self) -> None:
+        self._queue.get = self._original_get
+        self._queue.put_nowait = self._original_put_nowait
+
+
+def _network_backend_with_queue_probe(sock: Any) -> tuple[NetworkBackend, _CompletedEdgeQueueProbe]:
+    backend = NetworkBackend(sock, local_rom_version="red")
+    return backend, _CompletedEdgeQueueProbe(backend)
