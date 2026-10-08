@@ -359,10 +359,17 @@ BYPASS_SHAPES = (
     # truthy sibling, and it is pinned above.
     ("comparison and flag", "assert x != 1 and flag", True),
     ("flag and comparison", "assert flag and x != 1", True),
-    # A tautology in the leading position does decide an `and`, because
-    # `True and <comparison>` never evaluates the comparison at all.
-    ("tautology and comparison", "assert (1 == 1) and x != 1", False),
-    ("truthy literal and comparison", "assert True and x != 1", False),
+    # A leading tautology does NOT decide an `and`: Python continues past a
+    # truthy operand, so `True and <comparison>` evaluates the comparison and
+    # the assert fails when it is false. These two rows were pinned as
+    # bypasses, which was wrong (a live comparison reported as dead).
+    ("tautology and comparison", "assert (1 == 1) and x != 1", True),
+    ("truthy literal and comparison", "assert True and x != 1", True),
+    ("literal run and comparison", "assert True and True and x != 1", True),
+    ("count tautology and comparison", "assert len(y) >= 0 and x != 1", True),
+    # A nested bypass behind the leading literal is still one: the inner `or`
+    # decides that operand, so the comparison inside it never runs.
+    ("literal and nested or bypass", "assert True and (x != 1 or True)", False),
     # ...but not in a trailing position: the comparison is evaluated first.
     ("comparison and tautology", "assert x != 1 and (1 == 1)", True),
     # A preceding operand that could be falsy leaves the comparison reachable.
