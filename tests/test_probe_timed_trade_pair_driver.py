@@ -48,13 +48,17 @@ def test_trade_pair_deadline_is_read_through_the_injected_clock():
       consumes the fake budget, so the run ends as ``frame_bound`` instead of
       the asserted deadline termination.
     * Reverting only the owner's clock argument while the helper still builds
-      deadlines from the fake clock mixes epochs (fake deadlines near the
-      clock's start value of 1000.0 against real monotonic reads). That does
-      not isolate the seam; it breaks setup in both halves.
+      deadlines from the fake clock mixes epochs: fake deadlines near the
+      clock's start value of 1000.0 (about 1003 s) meet real monotonic reads.
+      The recorded #274 mutation of exactly this kind showed setup failures in
+      both halves. That outcome assumes the host's real monotonic clock is
+      already past those fake deadlines, was not re-run here, and is recorded
+      for that one partial mutation only; it does not isolate the seam.
 
-    So the slow half is the discriminating assertion for the full reversion, the
-    fast half guards the frame-bound contract, and failing both halves points to
-    mixed-epoch setup rather than to one clean seam reversion.
+    So the slow half is the discriminating assertion for the full reversion and
+    the fast half guards the frame-bound contract. A failure of either or both
+    halves is not, on its own, a diagnosis: the mixed-epoch explanation is
+    claimed only for the recorded partial mutation described above.
     """
     _session, fast_record, _goal, _done_at = run_authored_goal_owner(clock_step=0.0)
     assert fast_record["errors"] == []
