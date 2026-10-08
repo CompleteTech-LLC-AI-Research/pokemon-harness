@@ -25,6 +25,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._qualification_runner_support import uv_audit_records, uv_expected
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VENDOR_ROOT = PROJECT_ROOT / "vendor" / "pyboy-src"
 
@@ -857,22 +859,27 @@ def test_native_uv_script_runs_unchanged_bootstrap_without_pip_or_gate():
     assert "uv 0.12.17" in script
 
 
+_UV_AUDIT = {"uv": "/bin/uv", "target": "/w/py", "expected": uv_expected(None)}
+
+
 def _uv_records(uv, target):
+    return uv_audit_records(uv, target)
+
+
+def _uv_swap(records, old, new):
     return [
-        {"argv": [target, "-m", "pip", "--version"]},
-        {"argv": [target, "-m", "ensurepip", "--upgrade"]},
-        {"argv": [uv, "pip", "install", "--python", target, "--force-reinstall", "setuptools"]},
-        {"argv": [uv, "pip", "install", "--python", target, "--no-deps", "-e", "/repo"]},
-        {"argv": [uv, "pip", "install", "--python", target, "--no-build-isolation", "x"]},
-        {"argv": [uv, "pip", "check", "--python", target]},
+        {
+            **x,
+            "executable": x["executable"].replace(old, new),
+            "argv": [a.replace(old, new) for a in x["argv"]],
+        }
+        for x in records
     ]
 
 
 def test_uv_audit_accepts_the_real_fallback_shape(native_ci):
-    assert (
-        native_ci.validate_uv_audit(_uv_records("/bin/uv", "/w/py"), uv="/bin/uv", target="/w/py")
-        == []
-    )
+    records = _uv_records("/bin/uv", "/w/py")
+    assert native_ci.validate_uv_audit(records, **_UV_AUDIT) == []
 
 
 @pytest.mark.parametrize(
@@ -880,23 +887,15 @@ def test_uv_audit_accepts_the_real_fallback_shape(native_ci):
     [
         (lambda r: [], "empty"),
         (
-            lambda r: [{"argv": [r[0]["argv"][0], "-m", "pip", "install", "x"]}, *r],
+            lambda r: [{**r[0], "argv": [r[0]["argv"][0], "-m", "pip", "install", "x"]}, *r],
             "pip was executed",
         ),
-        (
-            lambda r: [
-                {**x, "argv": [a.replace("/w/py", "/w/other") for a in x["argv"]]} for x in r
-            ],
-            "probe",
-        ),
-        (
-            lambda r: [{"argv": [a.replace("/bin/uv", "/evil/uv") for a in x["argv"]]} for x in r],
-            "unexpected uv",
-        ),
+        (lambda r: _uv_swap(r, "/w/py", "/w/other"), "probe"),
+        (lambda r: _uv_swap(r, "/bin/uv", "/evil/uv"), "unexpected uv"),
         (lambda r: [r[0], *r[2:]], "probe"),
         (lambda r: [r[1], r[0], *r[2:]], "probe order"),
-        (lambda r: r[:-1], "uv pip check"),
-        (lambda r: [r[0], r[1], r[2]], "editable"),
+        (lambda r: [*r[:5], *r[6:]], "uv pip check"),
+        (lambda r: r[:3], "editable"),
     ],
     ids=[
         "empty",
@@ -910,14 +909,13 @@ def test_uv_audit_accepts_the_real_fallback_shape(native_ci):
     ],
 )
 def test_uv_audit_rejects_wrong_pip_target_and_incomplete_evidence(native_ci, mutate, expected):
-    problems = native_ci.validate_uv_audit(
-        mutate(_uv_records("/bin/uv", "/w/py")), uv="/bin/uv", target="/w/py"
-    )
+    problems = native_ci.validate_uv_audit(mutate(_uv_records("/bin/uv", "/w/py")), **_UV_AUDIT)
     assert any(expected in problem for problem in problems), problems
 
 
 def _uv_state(**changes):
     state = {
+        "label": "after",
         "in_venv": True,
         "target_python": "/w/py",
         "pip_importable": False,
@@ -939,11 +937,12 @@ def _uv_state(**changes):
     ids=["seeded-before", "seeded-after", "no-fault", "not-venv", "other-target"],
 )
 def test_uv_states_reject_seeded_or_unfaulted_environments(native_ci, label, changes, expected):
-    states = {name: _uv_state() for name in native_ci.UV_STATE_LABELS}
-    assert native_ci.validate_uv_states(states) == []
-    states[label] = _uv_state(**changes)
-    assert any(expected in problem for problem in native_ci.validate_uv_states(states))
-    assert any("missing" in p for p in native_ci.validate_uv_states({**states, "before": None}))
+    states = {name: _uv_state(label=name) for name in native_ci.UV_STATE_LABELS}
+    assert native_ci.validate_uv_states(states, target="/w/py") == []
+    states[label] = _uv_state(label=label, **changes)
+    assert any(expected in p for p in native_ci.validate_uv_states(states, target="/w/py"))
+    missing = native_ci.validate_uv_states({**states, "before": None}, target="/w/py")
+    assert any("missing" in p for p in missing)
 
 
 def test_uv_instrument_faults_ensurepip_and_logs_argv_only_in_owned_env(native_ci, tmp_path):

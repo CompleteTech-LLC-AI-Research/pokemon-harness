@@ -15,6 +15,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -271,6 +272,7 @@ def uv_instrument(output: Path) -> None:
 def uv_state(output: Path, label: str) -> dict[str, Any]:
     """Record whether pip and ensurepip are reachable from the target interpreter."""
     state: dict[str, Any] = {
+        "schema_version": 1,
         "label": label,
         "target_python": os.path.abspath(sys.executable),
         "in_venv": sys.prefix != sys.base_prefix,
@@ -289,146 +291,504 @@ def uv_state(output: Path, label: str) -> dict[str, Any]:
     return state
 
 
-def validate_uv_states(states: dict[str, dict[str, Any]]) -> list[str]:
+def _hex64(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _code(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _fingerprint(identity: dict[str, Any]) -> str:
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_uv_states(states: dict[str, Any], *, target: str) -> list[str]:
+    """Fail closed on missing, foreign or malformed pip/ensurepip state records."""
     problems: list[str] = []
+    target = os.path.abspath(target)
     for label in UV_STATE_LABELS:
         state = states.get(label)
-        if not isinstance(state, dict):
+        if not isinstance(state, dict) or not state:
             problems.append(f"missing {label} pip/ensurepip state")
             continue
-        if not state.get("in_venv"):
+        if state.get("label") != label:
+            problems.append(f"{label}: record carries a foreign phase label")
+        if not isinstance(state.get("target_python"), str) or (
+            os.path.abspath(state["target_python"]) != target
+        ):
+            problems.append(f"{label}: state describes a different target interpreter")
+        if state.get("in_venv") is not True:
             problems.append(f"{label}: target is not an isolated environment")
-        if state.get("pip_importable") or state.get("pip_version", {}).get("returncode") == 0:
+        if state.get("pip_importable") is not False:
+            problems.append(f"{label}: pip is present or unrecorded in the UV environment")
+        codes = {}
+        for key in ("pip_version", "ensurepip_version"):
+            record = state.get(key)
+            code = record.get("returncode") if isinstance(record, dict) else None
+            if not _code(code):
+                problems.append(f"{label}: {key} has no recorded integer return code")
+            codes[key] = code
+        if _code(codes["pip_version"]) and codes["pip_version"] == 0:
             problems.append(f"{label}: pip is present in the UV environment")
-        if label != "before" and state.get("ensurepip_version", {}).get("returncode") == 0:
+        if (
+            label != "before"
+            and _code(codes["ensurepip_version"])
+            and (codes["ensurepip_version"] == 0)
+        ):
             problems.append(
                 f"{label}: ensurepip is still available, so the uv fallback is unreachable"
             )
-    if len({state.get("target_python") for state in states.values() if state}) > 1:
-        problems.append("states describe different target interpreters")
     return problems
 
 
-def validate_uv_audit(records: list[dict[str, Any]], *, uv: str, target: str) -> list[str]:
-    """Reject audit evidence unless the real bootstrap selected uv for this target."""
-    if not records:
+def validate_uv_audit(
+    records: list[Any], *, uv: str, target: str, expected: dict[str, Any]
+) -> list[str]:
+    """Accept only the unchanged bootstrap's exact probe, install, check, probe sequence."""
+    if not isinstance(records, list) or not records:
         return ["audit log is empty"]
+    if not uv:
+        return ["the pinned uv path is unknown"]
     problems: list[str] = []
     uv_real = os.path.realpath(uv)
     target = os.path.abspath(target)
-    pip_probe = ensure_probe = first_install = None
-    installs = checks = 0
-    editable = unisolated = False
+    root = os.path.realpath(expected["root"])
+    base = ["pip", "install", "--python", target, "--force-reinstall", "--no-deps"]
+    rows: list[tuple[int, int, list[str]]] = []
     for index, record in enumerate(records):
-        argv = [str(item) for item in record.get("argv") or []]
-        if not argv:
-            continue
+        argv = record.get("argv") if isinstance(record, dict) else None
+        if not (
+            isinstance(argv, list)
+            and argv
+            and all(isinstance(item, str) for item in argv)
+            and _code(record.get("pid"))
+            and isinstance(record.get("executable"), str)
+        ):
+            problems.append(f"record {index}: malformed audit record")
+        elif record["executable"] != argv[0]:
+            problems.append(f"record {index}: executable does not match argv[0]")
+        else:
+            rows.append((index, record["pid"], argv))
+
+    def role(argv: list[str]) -> str | None:
         program, rest = argv[0], argv[1:]
-        if rest[:1] == ["-m"] and rest[1:2] == ["pip"] and rest[2:3] in (["install"], ["check"]):
-            problems.append(f"record {index}: pip was executed by the interpreter")
-        elif os.path.abspath(program) == target and rest == ["-m", "pip", "--version"]:
-            pip_probe = index if pip_probe is None else pip_probe
-        elif os.path.abspath(program) == target and rest[:2] == ["-m", "ensurepip"]:
-            ensure_probe = index if ensure_probe is None else ensure_probe
-        elif rest[:1] == ["pip"] and rest[1:2] in (["install"], ["check"]):
+        if rest[:2] == ["-m", "pip"] and rest != ["-m", "pip", "--version"]:
+            return "pip-executed"
+        if os.path.basename(program) == "uv":
             if os.path.realpath(program) != uv_real:
-                problems.append(f"record {index}: unexpected uv executable")
-            option = rest.index("--python") if "--python" in rest else -1
-            if option < 0 or option + 1 >= len(rest) or os.path.abspath(rest[option + 1]) != target:
-                problems.append(f"record {index}: uv does not target the owned interpreter")
-            if rest[1] == "install":
-                installs += 1
-                first_install = index if first_install is None else first_install
-                editable = editable or "-e" in rest
-                unisolated = unisolated or "--no-build-isolation" in rest
-            else:
-                checks += 1
-    if pip_probe is None or ensure_probe is None:
-        problems.append("bootstrap did not probe pip then ensurepip on the target interpreter")
-    if first_install is None or installs < 3 or not editable or not unisolated:
-        problems.append("bootstrap did not run the build, editable and native uv installs")
-    if checks < 1:
-        problems.append("bootstrap did not run uv pip check")
-    if None not in (pip_probe, ensure_probe, first_install) and not (
-        pip_probe < ensure_probe < first_install
-    ):
-        problems.append("probe order was not pip, ensurepip, then uv install")
+                return "foreign-uv"
+            if len(rest) > 3 and os.path.abspath(rest[3]) == target:
+                rest = [*rest[:3], target, *rest[4:]]
+            if rest == ["pip", "check", "--python", target]:
+                return "uv pip check"
+            if rest == [*base, *expected["build_requirements"]]:
+                return "install-build"
+            if rest == [*base, "--no-build-isolation", "-e", rest[-1]] and (
+                os.path.realpath(rest[-1]) == root
+            ):
+                return "install-editable"
+            staged = Path(rest[-1]) if rest else Path()
+            if (
+                rest[:-1] == [*base, "--no-build-isolation", expected["cython_requirement"]]
+                and staged.name == "pyboy-src"
+                and staged.parent.name.startswith("pyboy-native-")
+                and os.path.realpath(staged.parent.parent) == os.path.join(root, "build")
+            ):
+                return "install-native"
+            return "unrecognized-uv"
+        if os.path.abspath(program) != target:
+            return None
+        if rest == ["-m", "pip", "--version"]:
+            return "pip-probe"
+        if rest == ["-m", "ensurepip", "--upgrade"]:
+            return "ensurepip"
+        if (
+            len(rest) == 6
+            and rest[0] == expected["bootstrap_script"]
+            and rest[1:3] == ["--mode", "cython"]
+            and rest[3] == "--check-timeout"
+            and rest[5] == "--_runtime-probe"
+        ):
+            return "runtime-probe"
+        return None
+
+    tagged = [(index, pid, role(argv)) for index, pid, argv in rows]
+    messages = {
+        "pip-executed": "pip was executed through python -m pip",
+        "foreign-uv": "unexpected uv binary invoked",
+        "unrecognized-uv": "unexpected uv command (not a bootstrap install or check role)",
+    }
+    for index, _, name in tagged:
+        if name in messages:
+            problems.append(f"record {index}: {messages[name]}")
+    owner = next((pid for _, pid, name in tagged if name == "ensurepip"), None)
+    if owner is None:
+        return [*problems, "bootstrap did not probe pip then ensurepip on the target interpreter"]
+    mine = [name for _, pid, name in tagged if pid == owner and name]
+    wanted = ["pip-probe", "ensurepip", "install-build", "install-editable"]
+    wanted += ["install-native", "uv pip check", "runtime-probe"]
+    if mine != wanted:
+        problems.append(f"probe order/role sequence differs: got {mine}, required {wanted}")
+    stray = [index for index, pid, name in tagged if pid == owner and name is None]
+    if stray:
+        problems.append(f"bootstrap process made unexpected subprocess records {stray}")
+    last = max(
+        (i for i, pid, name in tagged if pid == owner and name == "runtime-probe"), default=-1
+    )
+    later = [name for i, pid, name in tagged if pid != owner and name is not None and i > last]
+    if later != ["runtime-probe"] * len(later) or not later:
+        problems.append("bootstrap --check did not follow with its runtime probe")
+    if any(pid != owner and name not in (None, "runtime-probe") for _, pid, name in tagged):
+        problems.append("a bootstrap role was executed by a different process")
     return problems
 
 
+def validate_native_build(
+    document: Any, expected: dict[str, Any], live_identity: dict[str, Any] | None
+) -> list[str]:
+    """Strictly validate bootstrap_pyboy's own evidence record; missing or odd fails."""
+    if not isinstance(document, dict) or not document:
+        return ["native build evidence is missing, empty or not a JSON object"]
+    problems: list[str] = []
+
+    def need(condition: bool, message: str) -> None:
+        if not condition:
+            problems.append(message)
+
+    need(document.get("evidence_version") == expected["evidence_version"], "build evidence version")
+    need(document.get("procedure") == "bootstrap_pyboy --mode cython", "build procedure")
+    need(document.get("mode") == "cython", "build mode is not cython")
+    need(document.get("status") == "complete", "build status is not complete")
+    inputs = document.get("build_inputs_sha256")
+    need(_hex64(inputs) and inputs == expected["build_inputs_sha256"], "build inputs digest")
+    interpreter = document.get("interpreter")
+    need(
+        isinstance(interpreter, dict)
+        and interpreter.get("python_version") == expected["python_version"]
+        and interpreter.get("prefix_name") == expected["prefix_name"],
+        "build interpreter does not match the target environment",
+    )
+    producer = document.get("producer")
+    need(
+        isinstance(producer, dict)
+        and producer.get("script") == "scripts/bootstrap_pyboy.py"
+        and producer.get("script_sha256") == expected["script_sha256"],
+        "build producer is not the checked-in bootstrap",
+    )
+    stamp = document.get("completed_at")
+    need(
+        isinstance(stamp, str)
+        and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp) is not None,
+        "build completion time is malformed",
+    )
+    identity = document.get("runtime_identity")
+    if not isinstance(identity, dict) or not identity:
+        problems.append("build runtime identity is missing")
+        return problems
+    need(document.get("installed_fingerprint") == _fingerprint(identity), "build fingerprint")
+    need(identity.get("python") == expected["python_version"], "identity python version")
+    need(identity.get("version") == expected["version"], "identity PyBoy version")
+    need(identity.get("revision") == expected["revision"], "identity PyBoy revision pin")
+    need(identity.get("cython_compiled") is True, "identity is not a compiled runtime")
+    artifacts = identity.get("artifacts")
+    modules = identity.get("modules")
+    if not (
+        isinstance(artifacts, dict) and artifacts and all(_hex64(v) for v in artifacts.values())
+    ):
+        problems.append("identity artifact digests are missing or malformed")
+        artifacts = {}
+    if not isinstance(modules, dict) or set(modules) != set(expected["runtime_modules"]):
+        problems.append("identity module set differs from the runtime modules")
+        modules = {}
+    for name, item in modules.items():
+        kind = "cython" if name in expected["cython_modules"] else "source"
+        ok = isinstance(item, dict) and item.get("kind") == kind and _hex64(item.get("sha256"))
+        if ok and artifacts.get(item.get("artifact")) != item["sha256"]:
+            ok = False
+        need(ok, f"identity module {name} is not a bound {kind} artifact")
+    if live_identity is not None:
+        need(identity == live_identity, "build identity differs from the installed runtime")
+    return problems
+
+
+def validate_pinball_proof(
+    proof: Any,
+    expected: dict[str, Any],
+    origin_hashes: dict[str, str | None],
+    identity: Any,
+) -> list[str]:
+    """Require the complete native Pinball proof bound to this head, target and build."""
+    if not isinstance(proof, dict) or not proof:
+        return ["pinball proof is missing, empty or not a JSON object"]
+    problems: list[str] = []
+    suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    for key, value in (
+        ("schema_version", 1),
+        ("scope", "native-pinball-import-proof-not-gameplay"),
+        ("status", "PASS"),
+        ("problems", []),
+        ("expected_revision", expected["revision"]),
+        ("loaded_revision", expected["revision"]),
+        ("harness_head", expected["head"]),
+    ):
+        if proof.get(key) != value or type(proof.get(key)) is not type(value):
+            problems.append(f"pinball proof {key} is not {value!r}")
+    origins = proof.get("module_origins")
+    lines = proof.get("source_line_counts")
+    if not isinstance(origins, dict) or set(origins) != set(PINBALL_MODULES):
+        return [*problems, "pinball proof module origins are incomplete"]
+    if not isinstance(lines, dict) or set(lines) != set(PINBALL_MODULES):
+        problems.append("pinball proof line counts are incomplete")
+    elif not all(_code(v) and 0 < v <= 1000 for v in lines.values()):
+        problems.append("pinball proof line counts are not bounded integers")
+    artifacts = identity.get("artifacts") if isinstance(identity, dict) else None
+    prefix = os.path.realpath(expected["prefix"]) + os.sep
+    for name in PINBALL_MODULES:
+        origin = origins[name]
+        base = os.path.basename(origin) if isinstance(origin, str) else ""
+        package = name.split(".")[1:-1]
+        relative = "/".join([*package, base])
+        if not (
+            base.startswith(name.rsplit(".", 1)[-1] + ".")
+            and base.endswith(suffixes)
+            and os.path.realpath(origin).endswith(os.sep.join(["pyboy", *package, base]))
+        ):
+            problems.append(f"{name} origin is not its native extension in the pyboy package")
+            continue
+        if not os.path.realpath(origin).startswith(prefix):
+            problems.append(f"{name} origin is outside the target environment")
+        digest = origin_hashes.get(origin)
+        if (
+            not _hex64(digest)
+            or not isinstance(artifacts, dict)
+            or artifacts.get(relative) != digest
+        ):
+            problems.append(f"{name} origin bytes are not the build identity artifact")
+    return problems
+
+
+def validate_uv_commands(records: Any, *, uv: str, target: str) -> list[str]:
+    """Require retained raw version/list/check subprocess evidence with zero terminal codes."""
+    target = os.path.abspath(target)
+    argvs = {
+        "version": [uv, "--version"],
+        "list": [uv, "pip", "list", "--python", target, "--format", "json"],
+        "check": [uv, "pip", "check", "--python", target],
+    }
+    by_name = (
+        {r.get("name"): r for r in records if isinstance(r, dict)}
+        if isinstance(records, list)
+        else {}
+    )
+    problems: list[str] = []
+    for name, argv in argvs.items():
+        record = by_name.get(name)
+        if record is None:
+            problems.append(f"uv {name} subprocess evidence is missing")
+            continue
+        if record.get("argv") != argv:
+            problems.append(f"uv {name}: command differs from the required argv")
+        if not _code(record.get("returncode")) or record.get("timed_out") is not False:
+            problems.append(f"uv {name}: no terminal return code (timed out or not run)")
+        elif record["returncode"] != 0:
+            problems.append(f"uv {name} failed with return code {record['returncode']}")
+        for stream in ("stdout", "stderr"):
+            text = record.get(stream)
+            digest = record.get(f"{stream}_sha256")
+            if not isinstance(text, str) or digest != hashlib.sha256(text.encode()).hexdigest():
+                problems.append(f"uv {name}: raw {stream} is missing or unbound")
+        if record.get("truncated") is not False:
+            problems.append(f"uv {name}: raw output was truncated")
+    version = by_name.get("version", {}).get("stdout", "")
+    if isinstance(version, str) and version.split()[:2] != ["uv", UV_TOOL_VERSION]:
+        problems.append(f"uv version is not {UV_TOOL_VERSION}: {version.strip()[:80]}")
+    try:
+        names = {
+            re.sub(r"[-_.]+", "-", item["name"]).lower()
+            for item in json.loads(by_name.get("list", {}).get("stdout", ""))
+        }
+    except (ValueError, KeyError, TypeError):
+        names = None
+        problems.append("uv pip list output is not a JSON package listing")
+    if names is not None and "pip" in names:
+        problems.append("pip is installed according to uv pip list")
+    if names is not None and "pokered-harness" not in names:
+        problems.append("uv pip list does not show the installed harness distribution")
+    return problems
+
+
+def native_source_digest(source_root: Path, revision: Path, suffixes: Any) -> str:
+    """Recompute the bootstrap's staged-input digest from the vendored source."""
+    digest = hashlib.sha256()
+    for directory, children, filenames in os.walk(source_root):
+        children[:] = sorted(
+            n
+            for n in children
+            if not n.startswith(".")
+            and n not in {"build", "dist", "__pycache__", "venv"}
+            and not n.endswith(".egg-info")
+        )
+        for name in children:
+            if (Path(directory) / name).is_symlink():
+                raise ValueError("native build inputs must not contain symlinked directories")
+        for name in sorted(filenames):
+            source = Path(directory) / name
+            if source.is_symlink():
+                raise ValueError(f"symlinked native input {source}")
+            if source.suffix not in suffixes and source != revision:
+                continue
+            digest.update(source.relative_to(source_root).as_posix().encode() + b"\0")
+            digest.update(hashlib.sha256(source.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def _sha256(path: Path) -> str | None:
-    if not path.is_file():
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _load_json(path: Path, problems: list[str]) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        problems.append(f"{path.name} is missing or not JSON: {type(exc).__name__}")
         return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _run_retained(name: str, argv: list[str], timeout: int) -> dict[str, Any]:
+    """Run one verification command and keep bounded raw output and its terminal status."""
+    limit = 4_000_000
+    record: dict[str, Any] = {"name": name, "argv": argv, "timed_out": False}
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+        code, out, err = result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        record["timed_out"] = True
+        code, out, err = None, exc.stdout or b"", exc.stderr or b""
+    record["returncode"] = code
+    record["truncated"] = len(out) > limit or len(err) > limit
+    for stream, data in (("stdout", out), ("stderr", err)):
+        text = data[:limit].decode("utf-8", errors="replace")
+        record[stream] = text
+        record[f"{stream}_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+    return record
 
 
 def uv_verify(root: Path, output: Path, uv: str | None) -> None:
-    """Combine state, audit and native proof into one verdict; BLOCKED/FAIL is never PASS."""
+    """Combine state, audit, build, pinball and command evidence; anything else is not PASS."""
+    root = root.resolve()
     evidence = output / "evidence"
     uv = uv or shutil.which("uv") or ""
     target = os.path.abspath(sys.executable)
     problems: list[str] = []
-    states = {}
-    for label in UV_STATE_LABELS:
-        path = evidence / f"uv-state-{label}.json"
-        states[label] = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
-    problems += validate_uv_states(states)
+    states = {
+        label: _load_json(evidence / f"uv-state-{label}.json", problems)
+        for label in UV_STATE_LABELS
+    }
+    problems += validate_uv_states(states, target=target)
+    spec = importlib.util.spec_from_file_location(
+        "_uv_qualification_bootstrap", root / "scripts" / "bootstrap_pyboy.py"
+    )
+    bootstrap = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(bootstrap)  # type: ignore[union-attr]
+    preflight = _load_json(evidence / "preflight.json", problems)
+    head = _git(root, "rev-parse", "HEAD")
+    if not isinstance(preflight, dict) or preflight.get("harness_head") != head:
+        problems.append("checkout HEAD differs from the preflight head")
+    expected = {
+        "root": str(root),
+        "head": head,
+        "prefix": sys.prefix,
+        "prefix_name": Path(sys.prefix).name,
+        "python_version": sys.version.split()[0],
+        "evidence_version": bootstrap.BUILD_EVIDENCE_VERSION,
+        "build_requirements": list(bootstrap.BUILD_REQUIREMENTS),
+        "cython_requirement": bootstrap.CYTHON_REQUIREMENT,
+        "bootstrap_script": str(root / "scripts" / "bootstrap_pyboy.py"),
+        "script_sha256": _sha256(root / "scripts" / "bootstrap_pyboy.py"),
+        "version": bootstrap.EXPECTED_PYBOY_VERSION,
+        "revision": (root / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION")
+        .read_text(encoding="ascii")
+        .strip(),
+        "runtime_modules": list(bootstrap.RUNTIME_MODULES),
+        "cython_modules": list(bootstrap.CYTHON_MODULES),
+        "build_inputs_sha256": native_source_digest(
+            root / "vendor" / "pyboy-src",
+            root / "vendor" / "pyboy-src" / "POKERED_HARNESS_PYBOY_REVISION",
+            bootstrap.NATIVE_INPUT_SUFFIXES,
+        ),
+    }
+    if expected["revision"] != bootstrap.EXPECTED_REVISION:
+        problems.append("checkout PyBoy pin differs from the bootstrap's expected revision")
     log = evidence / "uv-audit.jsonl"
-    records = []
-    if log.is_file():
+    records: list[Any] = []
+    try:
         for line in log.read_text(encoding="utf-8").splitlines():
             records.append(json.loads(line))
-    if not uv:
-        problems.append("uv is not on PATH")
-    else:
-        problems += validate_uv_audit(records, uv=uv, target=target)
-        version = subprocess.run(
-            [uv, "--version"], capture_output=True, text=True, timeout=60, check=False
+    except (OSError, ValueError):
+        problems.append("uv-audit.jsonl is missing or malformed")
+    problems += validate_uv_audit(records, uv=uv, target=target, expected=expected)
+    try:
+        live = bootstrap._runtime_identity()
+    except Exception as exc:  # noqa: BLE001 - an unreadable runtime is a failed proof
+        live = None
+        problems.append(f"installed runtime identity is unavailable: {type(exc).__name__}")
+    build = _load_json(evidence / "native-build.json", problems)
+    problems += validate_native_build(build, expected, live)
+    if live is None:
+        problems.append("native build cannot be bound to the installed runtime")
+    proof = _load_json(evidence / "pinball-native.json", problems)
+    origins = proof.get("module_origins") if isinstance(proof, dict) else None
+    hashes = {}
+    for origin in origins.values() if isinstance(origins, dict) else ():
+        hashes[origin] = _sha256(Path(origin)) if isinstance(origin, str) else None
+    identity = build.get("runtime_identity") if isinstance(build, dict) else None
+    problems += validate_pinball_proof(proof, expected, hashes, identity)
+    commands = [
+        _run_retained("version", [uv, "--version"], 60),
+        _run_retained("list", [uv, "pip", "list", "--python", target, "--format", "json"], 120),
+        _run_retained("check", [uv, "pip", "check", "--python", target], 120),
+    ]
+    _write_json(evidence / "uv-verify-commands.json", {"schema_version": 1, "commands": commands})
+    problems += validate_uv_commands(commands, uv=uv, target=target)
+    if Path(sys.prefix).resolve() in Path(uv).resolve().parents:
+        problems.append("uv was installed inside the target environment")
+    bindings = {
+        name: _sha256(evidence / name)
+        for name in (
+            "preflight.json",
+            "uv-state-before.json",
+            "uv-state-faulted.json",
+            "uv-state-after.json",
+            "uv-audit.jsonl",
+            "native-build.json",
+            "pinball-native.json",
+            "uv-verify-commands.json",
         )
-        if version.stdout.split()[:2] != ["uv", UV_TOOL_VERSION]:
-            problems.append(f"uv version is not {UV_TOOL_VERSION}: {version.stdout.strip()}")
-        if Path(sys.prefix).resolve() in Path(uv).resolve().parents:
-            problems.append("uv was installed inside the target environment")
-        listing = subprocess.run(
-            [uv, "pip", "list", "--python", target, "--format", "json"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if listing.returncode:
-            problems.append("uv pip list failed")
-        elif "pip" in {item["name"].lower() for item in json.loads(listing.stdout)}:
-            problems.append("pip is installed according to uv pip list")
-        check = subprocess.run(
-            [uv, "pip", "check", "--python", target],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if check.returncode:
-            problems.append("final uv pip check failed")
-    proof_path = evidence / "pinball-native.json"
-    proof = json.loads(proof_path.read_text(encoding="utf-8")) if proof_path.is_file() else {}
-    if proof.get("status") != "PASS":
-        problems.append("native pinball import proof did not PASS")
+    }
     inputs = {
         name: _sha256(root / name)
         for name in ("pyproject.toml", "uv.lock", "scripts/bootstrap_pyboy.py")
     }
-    inputs["native-build.json"] = _sha256(evidence / "native-build.json")
-    inputs["uv-audit.jsonl"] = _sha256(log)
-    if not all(inputs.values()):
+    if not all(bindings.values()) or not all(inputs.values()):
         problems.append("a required input/evidence hash is missing")
     _write_json(
         evidence / "uv-qualification.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "scope": "pip-less-uv-native-bootstrap-qualification-not-full-unit-gate",
             "simulation": "ensurepip unavailability is a fault injected only in the owned UV env",
             "uv": uv,
+            "uv_binary_sha256": _sha256(Path(os.path.realpath(uv))) if uv else None,
             "target_python": target,
+            "target_python_sha256": _sha256(Path(os.path.realpath(target))),
+            "head": head,
+            "build_inputs_sha256": expected["build_inputs_sha256"],
+            "installed_fingerprint": build.get("installed_fingerprint")
+            if isinstance(build, dict)
+            else None,
+            "evidence_sha256": bindings,
             "input_sha256": inputs,
             "audit_records": len(records),
             "status": "FAIL" if problems else "PASS",

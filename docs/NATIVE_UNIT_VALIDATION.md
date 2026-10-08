@@ -108,14 +108,36 @@ What it does, in order:
 5. Runs the native import and pinball proof, then re-checks that pip is still
    absent, and validates the audit with a pure validator.
 
-Acceptance requires all of: pip absent before and after; the fault in place;
-a recorded `uv pip install --python <target>` and `uv pip check --python
-<target>` argv that resolve to the pinned uv binary and the owned target
-interpreter; no `-m pip` selection; the compiled native import and pinball
-proof; target executable, origin and build-input hashes; bounded raw logs and
-terminal codes; unchanged HEAD and a clean worktree at the end. The validator
-rejects wrong-pip, wrong-target, empty and seeded-environment evidence. The
-CLI command string alone is never treated as proof of selection.
+Acceptance requires every record below to validate; missing, corrupt, foreign
+or contradictory evidence fails closed and is never treated as PASS:
+
+- Typed pip/ensurepip state for `before`, `faulted` and `after`: matching phase
+  labels, the verifier's own target interpreter, recorded integer return codes
+  (booleans are rejected), pip absent throughout and ensurepip failing once the
+  fault is in place.
+- The audit log: the unchanged bootstrap process's exact sequence of pip probe,
+  `ensurepip --upgrade`, build-requirement install, editable install of this
+  checkout, native install of the staged `pyboy-src` with the pinned Cython,
+  `uv pip check`, then the runtime probe. Each argv must match the bootstrap's
+  own constants and flags, name the pinned uv binary and the owned target, and
+  carry an `executable` equal to `argv[0]`. Unrelated build-tool subprocesses
+  from uv's builds are ignored; a stray, extra or reordered bootstrap call is not.
+- The bootstrap's own `native-build.json` (complete cython record bound to the
+  checked-in producer script, the staged-input digest recomputed from the vendored
+  source, this interpreter, and the installed runtime fingerprint) and a full
+  `pinball-native.json` (PASS, this head, the pinned revision, both native
+  extension origins inside the target environment whose bytes match the build
+  identity), never only a status field.
+- The retained `uv-verify-commands.json` with the argv, raw stdout and stderr,
+  digests and terminal return code of `uv --version` (must be 0.12.17 and exit
+  0), `uv pip list --format json` (no pip; the harness distribution present) and
+  `uv pip check`; its sha256 and those of every other evidence file are bound
+  into `uv-qualification.json`.
+- Unchanged HEAD and a clean worktree at the end, bounded raw logs and terminal
+  codes.
+
+The pure validators are exercised only with authored fixtures; those controls are
+not hosted or native proof.
 
 The job uploads its evidence with `if: always()` and 14-day retention, and is
 bounded to 45 minutes. A failed, skipped, disabled or preflight-blocked run is
