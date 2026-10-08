@@ -948,7 +948,7 @@ def main(argv: list[str] | None = None) -> int:
             return result.returncode
         if args.mode == "cython":
             dependency_check = _run_bounded(
-                [sys.executable, "-m", "pip", "check"],
+                _bootstrap_runtime_contract.dependency_check_command(pip_install, sys.executable),
                 cwd=ROOT,
                 env=env,
                 timeout=args.check_timeout,

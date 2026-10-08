@@ -80,3 +80,14 @@ They are not execution of compiled PyBoy or the full unit suite. Neither the
 workflow definition nor passing controls close issue #138. Preserve the
 historical evidence and runtime pin; real-ROM re-qualification remains owned
 by #235, and full release qualification remains separate.
+
+## Historical native failure boundary
+
+Local native `85d66e784cad314f2aed44e2362cd914a6623e39` remains
+**FAIL (exit 1)**: the unit tier passed 8525 tests, the timing tier passed
+2228 of 2230 with two repeat-2 failures, and the original return codes were
+`[0, 1, 0, 0, 0]`. The cause is **unproven**, and there was no retry. Hosted
+or current-head success neither explains nor waives it. The 40 transferred
+original failure members and 2 hand-offs authenticate, but they do not prove
+the broader 36-input semantic map. Bootstrap installer or dependency-check
+changes are not evidence for, or a repair of, these timing failures.

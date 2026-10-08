@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -437,9 +438,62 @@ def test_native_ci_host_blocks_root_unknown_shm_and_unsafe_environment(native_ci
     assert "--secret-private-filter" not in json.dumps((facts, problems))
 
 
+_GATE_CONTRACT = {
+    "--runtime-mode": ["cython"],
+    "--tier": ["unit", "timing"],
+    "--repeat-timing": ["5"],
+}
+_GATE_RETAINED = ("--evidence-dir", "--raw-output-dir")
+_GATE_FLAGS = "--runtime-mode cython --tier unit --tier timing --repeat-timing 5"
+_BOUNDARY_HEADING = "## Historical native failure boundary"
+_BOUNDARY_FACTS = (
+    "85d66e784cad314f2aed44e2362cd914a6623e39",
+    "FAIL (exit 1)",
+    "8525",
+    "2228 of 2230",
+    "two repeat-2 failures",
+    "[0, 1, 0, 0, 0]",
+    "unproven",
+    "no retry",
+    "neither explains nor waives it",
+    "do not prove the broader 36-input semantic map",
+    "not evidence for",
+)
+
+
+def _gate_problems(script: str) -> list[str]:
+    """Check the one executable production_gate.py command; comment text never counts."""
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    joined = code.replace("\\\n", " ").splitlines()
+    commands = [line for line in joined if "scripts/production_gate.py" in line]
+    if len(commands) != 1:
+        return [f"expected one executable production_gate.py command, found {len(commands)}"]
+    words = shlex.split(commands[0])
+
+    def values(option: str) -> list[str]:
+        return [words[i + 1] for i, word in enumerate(words[:-1]) if word == option]
+
+    problems = [
+        f"{option} is {values(option)}, expected {expected}"
+        for option, expected in _GATE_CONTRACT.items()
+        if sorted(values(option)) != sorted(expected)
+    ]
+    return problems + [f"{o} must appear once" for o in _GATE_RETAINED if len(values(o)) != 1]
+
+
+def _boundary_problems(document: str) -> list[str]:
+    """Check the historical-failure facts inside their own section of the document."""
+    _, found, tail = document.partition(_BOUNDARY_HEADING + "\n")
+    if not found:
+        return [f"missing section {_BOUNDARY_HEADING!r}"]
+    section = " ".join(tail.split("\n## ", 1)[0].split())
+    return [f"boundary lacks {fact!r}" for fact in _BOUNDARY_FACTS if fact not in section]
+
+
 def test_native_ci_workflow_preserves_public_only_native_gate():
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "native-unit.yml").read_text()
     script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    document = (PROJECT_ROOT / "docs" / "NATIVE_UNIT_VALIDATION.md").read_text(encoding="utf-8")
     assert "github.event.repository.private == false" in workflow
     assert "github.event.repository.visibility == 'public'" in workflow
     assert "name: Native unit and timing validation" in workflow
@@ -453,7 +507,11 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
     assert "set -euo pipefail" in script
     assert "--mode cython --check" in script
     assert "--build-evidence" in script
-    assert "--runtime-mode cython --tier unit --tier timing --repeat-timing 5" in script
+    assert _gate_problems(script) == []
+    prose = " ".join(document.replace("`", "").split())
+    for option, values in _GATE_CONTRACT.items():
+        assert all(f"{option} {value}" in prose for value in values)
+    assert _boundary_problems(document) == []
     commands = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     for bypass in (
         "--timeout-seconds",
@@ -466,6 +524,54 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
         assert bypass not in commands
     assert "rm -" not in script
     assert "trap finish EXIT" in script
+
+
+@pytest.mark.parametrize(
+    "weaken",
+    [
+        pytest.param(lambda s: s.replace("--repeat-timing 5", "--repeat-timing 1"), id="repeats"),
+        pytest.param(lambda s: s.replace("--tier timing ", ""), id="timing-tier-dropped"),
+        pytest.param(lambda s: s.replace("--tier timing ", "--tier timing --tier rom "), id="tier"),
+        pytest.param(lambda s: s.replace("cython --tier", "source --tier"), id="runtime-mode"),
+        pytest.param(lambda s: s.replace("--raw-output-dir", "--raw-dir"), id="raw-output"),
+        pytest.param(lambda s: s + "run_logged x python scripts/production_gate.py\n", id="second"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_weakened_executable_command(weaken):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = weaken(script)
+    assert mutated != script
+    assert _gate_problems(script) == []
+    assert _gate_problems(mutated)
+
+
+def test_native_ci_gate_contract_ignores_flags_present_only_in_a_comment():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    weakened = script.replace(_GATE_FLAGS, "--runtime-mode cython --tier unit")
+    commented = weakened + f"\n# {_GATE_FLAGS}\n"
+    assert weakened != script
+    assert _GATE_FLAGS in commented  # the earlier whole-script substring check accepted this
+    assert _gate_problems(commented)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param(_BOUNDARY_HEADING, "## Notes", id="section-removed"),
+        pytest.param("FAIL (exit 1)", "PASS (exit 0)", id="verdict-flipped"),
+        pytest.param("2228 of 2230", "2230 of 2230", id="timing-counts"),
+        pytest.param("unproven", "fixed", id="cause-claimed"),
+        pytest.param("no retry", "one retry", id="retry-claimed"),
+        pytest.param("neither explains nor waives it", "explains and waives it", id="waiver"),
+        pytest.param("do not prove", "prove", id="semantic-map-claimed"),
+    ],
+)
+def test_native_validation_document_rejects_altered_historical_boundary(old, new):
+    document = (PROJECT_ROOT / "docs" / "NATIVE_UNIT_VALIDATION.md").read_text(encoding="utf-8")
+    mutated = document.replace(old, new)
+    assert mutated != document
+    assert _boundary_problems(document) == []
+    assert _boundary_problems(mutated)
 
 
 @pytest.mark.parametrize("failure,expected", [("none", 0), ("build", 7), ("gate", 9), ("head", 2)])
