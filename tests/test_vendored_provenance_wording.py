@@ -465,10 +465,12 @@ def _gate_problems(script: str) -> list[str]:
     """Check the one executable production_gate.py command; comment text never counts."""
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     joined = code.replace("\\\n", " ").splitlines()
-    commands = [line for line in joined if "scripts/production_gate.py" in line]
+    gate = "scripts/production_gate.py"
+    tokenized = (shlex.split(line, comments=True) for line in joined if gate in line)
+    commands = [words for words in tokenized if gate in words]
     if len(commands) != 1:
         return [f"expected one executable production_gate.py command, found {len(commands)}"]
-    words = shlex.split(commands[0])
+    words = commands[0]
 
     def values(option: str) -> list[str]:
         return [words[i + 1] for i, word in enumerate(words[:-1]) if word == option]
@@ -535,6 +537,19 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
         pytest.param(lambda s: s.replace("cython --tier", "source --tier"), id="runtime-mode"),
         pytest.param(lambda s: s.replace("--raw-output-dir", "--raw-dir"), id="raw-output"),
         pytest.param(lambda s: s + "run_logged x python scripts/production_gate.py\n", id="second"),
+        pytest.param(
+            lambda s: s.replace(
+                _GATE_FLAGS, "--runtime-mode cython --tier unit # --tier timing --repeat-timing 5"
+            ),
+            id="inline-comment",
+        ),
+        pytest.param(
+            lambda s: s.replace(_GATE_FLAGS, "--runtime-mode cython --tier unit").replace(
+                '--raw-output-dir "$evidence/raw"',
+                '--raw-output-dir "$evidence/raw" # --tier timing --repeat-timing 5',
+            ),
+            id="trailing-inline-comment",
+        ),
     ],
 )
 def test_native_ci_gate_contract_rejects_weakened_executable_command(weaken):
