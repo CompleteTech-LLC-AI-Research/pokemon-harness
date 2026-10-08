@@ -45,7 +45,9 @@ def _record(event, args):
         return
     try:
         argv = [str(item) for item in (args[1] or [])]
-        line = json.dumps({{"pid": os.getpid(), "executable": str(args[0]), "argv": argv}})
+        line = json.dumps(
+            {{"pid": os.getpid(), "ppid": os.getppid(), "executable": str(args[0]), "argv": argv}}
+        )
         descriptor = os.open(_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(descriptor, (line + "\\n").encode())
@@ -357,6 +359,7 @@ def validate_uv_audit(
     root = os.path.realpath(expected["root"])
     base = ["pip", "install", "--python", target, "--force-reinstall", "--no-deps"]
     rows: list[tuple[int, int, list[str]]] = []
+    parents: dict[int, int] = {}
     for index, record in enumerate(records):
         argv = record.get("argv") if isinstance(record, dict) else None
         if not (
@@ -365,12 +368,14 @@ def validate_uv_audit(
             and all(isinstance(item, str) for item in argv)
             and _code(record.get("pid"))
             and isinstance(record.get("executable"), str)
+            and _code(record.get("ppid"))
         ):
             problems.append(f"record {index}: malformed audit record")
         elif record["executable"] != argv[0]:
             problems.append(f"record {index}: executable does not match argv[0]")
         else:
             rows.append((index, record["pid"], argv))
+            parents[index] = record["ppid"]
 
     def role(argv: list[str]) -> str | None:
         program, rest = argv[0], argv[1:]
@@ -415,6 +420,7 @@ def validate_uv_audit(
         return None
 
     tagged = [(index, pid, role(argv)) for index, pid, argv in rows]
+    argvs = {index: argv for index, _, argv in rows}
     messages = {
         "pip-executed": "pip was executed through python -m pip",
         "foreign-uv": "unexpected uv binary invoked",
@@ -431,18 +437,93 @@ def validate_uv_audit(
     wanted += ["install-native", "uv pip check", "runtime-probe"]
     if mine != wanted:
         problems.append(f"probe order/role sequence differs: got {mine}, required {wanted}")
-    stray = [index for index, pid, name in tagged if pid == owner and name is None]
-    if stray:
-        problems.append(f"bootstrap process made unexpected subprocess records {stray}")
+
+    def first(name: str, pid: int | None = None) -> int:
+        found = (i for i, p, n in tagged if n == name and (pid is None or p == pid))
+        return next(found, -1)
+
+    build_probe = first("runtime-probe", owner)
     last = max(
         (i for i, pid, name in tagged if pid == owner and name == "runtime-probe"), default=-1
     )
-    later = [name for i, pid, name in tagged if pid != owner and name is not None and i > last]
-    if later != ["runtime-probe"] * len(later) or not later:
-        problems.append("bootstrap --check did not follow with its runtime probe")
+    later = [(i, pid) for i, pid, name in tagged if pid != owner and name == "runtime-probe"]
+    later = [item for item in later if item[0] > last]
+    if len(later) != 1:
+        problems.append("bootstrap --check did not follow with exactly one runtime probe")
+    check_probe, checker = later[0] if later else (-1, None)
     if any(pid != owner and name not in (None, "runtime-probe") for _, pid, name in tagged):
         problems.append("a bootstrap role was executed by a different process")
+    window = (first("install-build", owner), first("uv pip check", owner))
+    probes = {owner: build_probe, checker: check_probe}
+    children: dict[int, int] = {}
+    for index, pid, name in tagged:
+        if name is not None:
+            continue
+        parent = parents.get(index)
+        discovery = _sdl_discovery_call(argvs[index])
+        if pid == owner:
+            if not (discovery and 0 <= build_probe < index):
+                problems.append(f"bootstrap process made unexpected subprocess records [{index}]")
+        elif pid == checker:
+            problems.append(
+                f"bootstrap --check process made unexpected subprocess records [{index}]"
+            )
+        elif parent in probes and parent is not None:
+            if not (discovery and 0 <= probes[parent] < index):
+                problems.append(f"record {index}: unexpected subprocess from a runtime probe")
+            elif children.setdefault(parent, pid) != pid:
+                problems.append(f"record {index}: runtime probe calls came from a second process")
+        elif not (0 <= window[0] < index < window[1]):
+            problems.append(f"record {index}: unexpected subprocess outside the uv install window")
     return problems
+
+
+_SYSTEM_TOOL_DIRS = ("/sbin", "/usr/sbin", "/bin", "/usr/bin", "/usr/local/bin")
+_SDL_LIBRARY = r"SDL2(?:_(?:image|ttf))?(?:-2\.0(?:\.0)?)?d?"
+
+
+def _sdl_discovery_call(argv: list[str]) -> bool:
+    """Classify a subprocess as ctypes.util.find_library probing for pysdl2's libraries.
+
+    pysdl2 (imported through pyboy's window plugin) searches the system for each SDL2
+    library name even when pysdl2-dll is bundled; on Linux that runs ldconfig, then the
+    gcc and ld linker traces, then objdump for a found file. Only these exact argv
+    shapes for SDL2/SDL2_image/SDL2_ttf names count; the caller additionally requires
+    the importing process and phase.
+    """
+    program, rest = argv[0], argv[1:]
+    link = f"-l{_SDL_LIBRARY}"
+    name = Path(program).name
+    if str(Path(program).parent) not in _SYSTEM_TOOL_DIRS and program != "ld":
+        return False
+    if name == "ldconfig":
+        return rest == ["-p"]
+    if name in ("gcc", "cc"):
+        return (
+            len(rest) == 4
+            and rest[:2] == ["-Wl,-t", "-o"]
+            and os.path.isabs(rest[2])
+            and re.fullmatch(link, rest[3]) is not None
+        )
+    if program == "ld":
+        flags = rest[1:-3]
+        return (
+            len(rest) >= 4
+            and rest[0] == "-t"
+            and len(flags) % 2 == 0
+            and all(item == "-L" if i % 2 == 0 else bool(item) for i, item in enumerate(flags))
+            and rest[-3:-1] == ["-o", os.devnull]
+            and re.fullmatch(link, rest[-1]) is not None
+        )
+    if name == "objdump":
+        library = Path(rest[3]).name if len(rest) == 4 else ""
+        return (
+            len(rest) == 4
+            and rest[:3] == ["-p", "-j", ".dynamic"]
+            and os.path.isabs(rest[3])
+            and re.fullmatch(f"lib{_SDL_LIBRARY}[\\w.+-]*\\.so[\\w.]*", library) is not None
+        )
+    return False
 
 
 def validate_native_build(
@@ -502,7 +583,9 @@ def validate_native_build(
     if not isinstance(modules, dict) or set(modules) != set(expected["runtime_modules"]):
         problems.append("identity module set differs from the runtime modules")
         modules = {}
-    extension = re.compile(r"\.(cpython-[\w-]+|abi3)\.(so|pyd)$")
+    # Any suffix the bootstrap's own _module_kind accepts on a supported platform:
+    # untagged, CPython-tagged (Linux/macOS), abi3, or Windows cpNNN-<platform>.
+    extension = re.compile(r"\w+(?:\.(?:cpython-[\w-]+|cp\d+[\w-]*|abi3))?\.(?:so|pyd)")
     for name, item in modules.items():
         required = name in expected["cython_modules"]
         kind = item.get("kind") if isinstance(item, dict) else None
@@ -513,7 +596,7 @@ def validate_native_build(
         else:
             ok = ok and kind in ("source", "cython")
         if ok and isinstance(artifact, str):
-            native = extension.search(artifact) is not None
+            native = extension.fullmatch(artifact.replace("\\", "/").rsplit("/", 1)[-1]) is not None
             ok = native if kind == "cython" else artifact.endswith(".py")
         else:
             ok = False

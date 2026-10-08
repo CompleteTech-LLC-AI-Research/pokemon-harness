@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._qualification_runner_support import uv_audit_records, uv_expected
+from tests._bootstrap_stage_test_support import uv_audit_records, uv_expected
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VENDOR_ROOT = PROJECT_ROOT / "vendor" / "pyboy-src"

@@ -216,13 +216,13 @@ def test_recover_keeps_active_lease(tmp_path: Path):
 # Adversarial controls for the UV-bootstrap evidence validators. Fixtures are
 # authored values; they are not real native build or install proof.
 def _uv_ci():
-    from tests._qualification_runner_support import load_native_ci
+    from tests._bootstrap_stage_test_support import load_native_ci
 
     return load_native_ci()
 
 
 def _uv_build_case(change):
-    from tests._qualification_runner_support import uv_expected, uv_native_build
+    from tests._bootstrap_stage_test_support import uv_expected, uv_native_build
 
     ci = _uv_ci()
     expected = uv_expected(ci)
@@ -294,7 +294,7 @@ def test_native_build_evidence_must_match_installed_runtime():
 
 
 def _pinball_case(change):
-    from tests._qualification_runner_support import uv_expected, uv_native_build, uv_pinball
+    from tests._bootstrap_stage_test_support import uv_expected, uv_native_build, uv_pinball
 
     ci = _uv_ci()
     expected = uv_expected(ci)
@@ -418,7 +418,7 @@ def test_uv_states_reject_malformed_foreign_or_bool_records(changes, expected_te
 
 
 def _audit(change):
-    from tests._qualification_runner_support import uv_audit_records, uv_expected
+    from tests._bootstrap_stage_test_support import uv_audit_records, uv_expected
 
     ci = _uv_ci()
     expected = uv_expected(ci)
@@ -486,14 +486,19 @@ def test_uv_audit_requires_exact_roles_targets_and_order(change, expected_text):
 
 
 def test_uv_audit_ignores_unrelated_build_subprocesses_but_not_stray_bootstrap_calls():
-    unrelated = {"pid": 900, "executable": "/usr/bin/gcc", "argv": ["/usr/bin/gcc", "-c", "x.c"]}
+    unrelated = {
+        "pid": 900,
+        "ppid": 899,
+        "executable": "/usr/bin/gcc",
+        "argv": ["/usr/bin/gcc", "-c", "x.c"],
+    }
     assert _audit(lambda r: [*r[:3], unrelated, *r[3:]]) == []
-    stray = {"pid": 100, "executable": "/usr/bin/gcc", "argv": ["/usr/bin/gcc"]}
+    stray = {"pid": 100, "ppid": 50, "executable": "/usr/bin/gcc", "argv": ["/usr/bin/gcc"]}
     assert any("unexpected subprocess" in p for p in _audit(lambda r: [*r[:3], stray, *r[3:]]))
 
 
 def _commands(change):
-    from tests._qualification_runner_support import uv_commands
+    from tests._bootstrap_stage_test_support import uv_commands
 
     ci = _uv_ci()
     records = uv_commands("/bin/uv", "/w/py")
@@ -564,7 +569,7 @@ def test_uv_command_listing_rejects_pip_and_missing_harness():
 
 
 def _kind_case(optional, change=None):
-    from tests._qualification_runner_support import uv_expected, uv_native_build
+    from tests._bootstrap_stage_test_support import uv_expected, uv_native_build
 
     ci = _uv_ci()
     expected = uv_expected(ci)
@@ -619,3 +624,190 @@ def _set(name, **changes):
 def test_native_build_rejects_unknown_or_inconsistent_module_kinds(optional, change, expected_text):
     problems = _kind_case(optional, change)
     assert any(expected_text in problem for problem in problems), problems
+
+
+def _record(pid, ppid, *argv):
+    return {"pid": pid, "ppid": ppid, "executable": argv[0], "argv": list(argv)}
+
+
+def _moved(source, to):
+    def apply(records):
+        rows = list(records)
+        rows.insert(to, rows.pop(source))
+        return rows
+
+    return apply
+
+
+def _extra(index, *record):
+    return lambda r: [*r[:index], _record(*record), *r[index:]]
+
+
+# Fixture order: 0-5 installers and check, 6 build probe (pid 100), 7-9 its child's SDL
+# discovery (pid 101), 10-12 the build process's own discovery, 13 the --check probe
+# (pid 200), 14-16 that probe child's discovery (pid 201).
+def test_uv_audit_accepts_sdl_discovery_in_the_real_process_order():
+    assert _audit(lambda r: r) == []
+    assert _audit(lambda r: [x for x in r if x["pid"] not in (101, 201)]) == []
+    objdump = ["/usr/bin/objdump", "-p", "-j", ".dynamic", "/usr/lib/libSDL2-2.0.so.0.3200.10"]
+    linked = ["ld", "-t", "-L", "/opt/lib", "-o", "/dev/null", "-lSDL2_image-2.0d"]
+    more = [_record(100, 50, *objdump), _record(201, 200, *linked), _record(100, 50, *linked)]
+    assert _audit(lambda r: [*r[:13], more[0], *r[13:], *more[1:]]) == []
+    unrelated = _record(900, 899, "/usr/bin/gcc", "-c", "x.c")
+    assert _audit(lambda r: [*r[:3], unrelated, *r[3:]]) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_text"),
+    [
+        (_moved(10, 6), "unexpected subprocess records"),
+        (_extra(7, 101, 100, "/usr/bin/curl", "https://example.invalid"), "runtime probe"),
+        (_extra(10, 100, 50, "/usr/bin/gcc", "-c", "x.c"), "unexpected subprocess records"),
+        (_extra(10, 100, 50, "/sbin/ldconfig", "-p", "-v"), "unexpected subprocess records"),
+        (_extra(10, 100, 50, "/usr/bin/gcc", "-Wl,-t", "-o", "/t/x", "-lc"), "unexpected"),
+        (_extra(10, 100, 50, "/usr/bin/gcc", "-Wl,-t", "-o", "t/x", "-lSDL2"), "unexpected"),
+        (_extra(10, 100, 50, "ld", "-t", "-o", "/tmp/x", "-lSDL2"), "unexpected"),
+        (_extra(10, 100, 50, "/tmp/ldconfig", "-p"), "unexpected"),
+        (_extra(10, 100, 50, "/usr/bin/objdump", "-p", "/lib/libSDL2.so"), "unexpected"),
+        (_extra(7, 999, 998, "/sbin/ldconfig", "-p"), "install window"),
+        (_extra(14, 201, 200, "/usr/bin/gcc", "-c", "x.c"), "runtime probe"),
+        (_extra(15, 300, 200, "/sbin/ldconfig", "-p"), "runtime probe"),
+        (_extra(14, 200, 50, "/sbin/ldconfig", "-p"), "--check process"),
+        (_extra(14, 200, 50, "/usr/bin/gcc", "-c", "x.c"), "--check process"),
+        (lambda r: [*r, dict(r[13])], "exactly one runtime probe"),
+        (lambda r: [*r, {**r[13], "pid": 300}], "exactly one runtime probe"),
+        (lambda r: [*r[:13], *r[14:]], "exactly one runtime probe"),
+        (_moved(13, 6), "exactly one runtime probe"),
+        (
+            lambda r: [
+                *r[:13],
+                {**r[13], "argv": ["/usr/bin/python3", *r[13]["argv"][1:]]},
+                *r[14:],
+            ],
+            "exactly one runtime probe",
+        ),
+        (lambda r: [{k: v for k, v in x.items() if k != "ppid"} for x in r], "malformed"),
+        (lambda r: [{**x, "ppid": True} for x in r], "malformed"),
+        (lambda r: [{**x, "ppid": "50"} for x in r], "malformed"),
+    ],
+    ids=[
+        "discovery-before-build-probe",
+        "unknown-exe-from-probe-child",
+        "unknown-owner-call-after-probe",
+        "discovery-with-extra-flag",
+        "discovery-unrelated-library",
+        "discovery-relative-output",
+        "discovery-ld-wrong-output",
+        "discovery-untrusted-ldconfig-path",
+        "discovery-objdump-without-dynamic-section",
+        "discovery-from-unrelated-process",
+        "unknown-call-from-check-probe-child",
+        "discovery-from-wrong-parent",
+        "discovery-from-check-owner",
+        "unknown-call-from-check-owner",
+        "duplicate-check-probe",
+        "duplicate-probe-other-pid",
+        "missing-check-probe",
+        "check-probe-before-build-probe",
+        "foreign-interpreter-check-probe",
+        "no-ppid",
+        "bool-ppid",
+        "string-ppid",
+    ],
+)
+def test_uv_audit_rejects_unjustified_or_misplaced_subprocess_records(change, expected_text):
+    problems = _audit(change)
+    assert any(expected_text in problem for problem in problems), problems
+
+
+_SUFFIXES = {
+    "linux-tagged": ".cpython-312-x86_64-linux-gnu.so",
+    "linux-abi3": ".abi3.so",
+    "windows-tagged": ".cp312-win_amd64.pyd",
+    "windows-abi3": ".abi3.pyd",
+    "linux-untagged": ".so",
+    "windows-untagged": ".pyd",
+}
+
+
+def _suffix_case(suffix, optional, required=None):
+    from tests._bootstrap_stage_test_support import uv_expected, uv_native_build
+
+    ci = _uv_ci()
+    expected = uv_expected(ci)
+    document = uv_native_build(expected, optional=optional, suffix=suffix, required_suffix=required)
+    return ci.validate_native_build(document, expected, document["runtime_identity"])
+
+
+@pytest.mark.parametrize("optional", ["source", "cython"])
+@pytest.mark.parametrize("suffix", _SUFFIXES.values(), ids=_SUFFIXES)
+def test_native_build_accepts_every_platform_extension_filename_form(suffix, optional):
+    assert _suffix_case(suffix, optional) == []
+    mixed = _suffix_case(".so", optional, required=suffix)
+    assert mixed == []
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".dll", ".so.txt", ".pyc", ".cpython-312-x86_64-linux-gnu", ".txt.so.py", "so", ".a.b.so"],
+    ids=["dll", "so-txt", "pyc", "no-extension", "py-after-so", "bare-so", "dotted-stem"],
+)
+def test_native_build_rejects_artifact_names_that_are_not_extension_modules(suffix):
+    problems = _suffix_case(suffix, "cython")
+    assert any("pyboy.utils" in problem for problem in problems), problems
+
+
+def test_provenance_tests_collect_without_the_unix_only_reservation_probe():
+    # The isolated interpreter makes `import fcntl` fail as on Windows. The pure UV fixtures
+    # and the provenance module must still import, while the reservation support, which
+    # needs fcntl, must not: that proves the trap is live. No Windows run is claimed.
+    code = (
+        "import sys\nsys.modules['fcntl'] = None\n"
+        "import tests._bootstrap_stage_test_support, tests.test_vendored_provenance_wording\n"
+        "print('imported')\n"
+        "try:\n    import tests._qualification_runner_support\n"
+        "except ImportError:\n    print('trap-live')\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["imported", "trap-live"], done.stdout
+
+
+def test_uv_instrument_records_pid_and_parent_on_posix_layouts(tmp_path):
+    # POSIX-specific scope: needs a `bin/python` venv layout and the .pth audit hook; the
+    # Windows `Scripts` layout and PowerShell hosts are outside this unit control.
+    import venv
+
+    output = tmp_path / "out"
+    (output / "evidence").mkdir(parents=True)
+    env_dir = output / "work" / "uvenv"
+    venv.create(env_dir, with_pip=False)
+    python = str(env_dir / "bin" / "python")
+    script = str(REPO_ROOT / "scripts" / "native_unit_ci.py")
+    setup = subprocess.run(
+        [python, script, "uv-instrument", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert setup.returncode == 0, setup.stderr
+    active = {**os.environ, "NATIVE_UV_AUDIT_ACTIVE": "1"}
+    code = "import subprocess, os; subprocess.run(['true', 'marker']); print(os.getpid())"
+    done = subprocess.run(
+        [python, "-c", code], capture_output=True, text=True, timeout=60, env=active, check=False
+    )
+    records = [
+        json.loads(line)
+        for line in (output / "evidence" / "uv-audit.jsonl").read_text().splitlines()
+    ]
+    mine = [r for r in records if r["argv"][-1] == "marker"]
+    assert len(mine) == 1 and mine[0]["pid"] == int(done.stdout)
+    assert mine[0]["ppid"] == os.getpid() and mine[0]["executable"] == "true"

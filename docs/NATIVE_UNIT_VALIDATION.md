@@ -120,14 +120,27 @@ or contradictory evidence fails closed and is never treated as PASS:
   checkout, native install of the staged `pyboy-src` with the pinned Cython,
   `uv pip check`, then the runtime probe. Each argv must match the bootstrap's
   own constants and flags, name the pinned uv binary and the owned target, and
-  carry an `executable` equal to `argv[0]`. Unrelated build-tool subprocesses
-  from uv's builds are ignored; a stray, extra or reordered bootstrap call is not.
+  carry an integer `pid`, an integer `ppid` and an `executable` equal to `argv[0]`.
+  The `--check` process must run exactly one runtime probe, after the build
+  process's probe, and nothing else. Importing pyboy also loads pysdl2, whose
+  library search runs `ldconfig -p`, `gcc -Wl,-t -o <tmp> -lSDL2...`, `ld -t -o
+  /dev/null -lSDL2...` and `objdump -p -j .dynamic <SDL2 file>` even with the
+  bundled SDL libraries. Only those exact argv shapes (SDL2, SDL2_image and
+  SDL2_ttf names, system tool directories) are accepted, and only from the build
+  process after its probe or from a runtime-probe child (one process per probe,
+  recognised by `ppid`) after that probe started. Other build-tool subprocesses
+  are tolerated only inside the uv install window; any other stray, extra,
+  duplicate or reordered call, including from the `--check` process, fails.
 - The bootstrap's own `native-build.json` (complete cython record bound to the
   checked-in producer script, the staged-input digest recomputed from the vendored
   source, this interpreter, and the installed runtime fingerprint) and a full
   `pinball-native.json` (PASS, this head, the pinned revision, both native
   extension origins inside the target environment whose bytes match the build
-  identity), never only a status field.
+  identity), never only a status field. Extension filenames follow the bootstrap's
+  own runtime contract on every supported platform: untagged `.so`/`.pyd`,
+  `.cpython-<tag>.so`, `.abi3.so`/`.pyd` and Windows `.cp312-win_amd64.pyd`, not the
+  reviewing interpreter's ABI. The four required modules stay compiled; optional
+  `pyboy` and `pyboy.link` may be source or compiled.
 - The retained `uv-verify-commands.json` with the argv, raw stdout and stderr,
   digests and terminal return code of `uv --version` (must be 0.12.17 and exit
   0), `uv pip list --format json` (no pip; the harness distribution present) and
@@ -137,7 +150,13 @@ or contradictory evidence fails closed and is never treated as PASS:
   codes.
 
 The pure validators are exercised only with authored fixtures; those controls are
-not hosted or native proof.
+not hosted or native proof. The UV fixtures live in the portable
+`tests/_bootstrap_stage_test_support.py` so the provenance tests collect where the
+Unix-only reservation helpers (`fcntl`) do not import; an isolated-interpreter
+control simulates that absence and claims no Windows run. The one instrumentation
+control that builds a venv uses the POSIX `bin/python` layout and is POSIX-specific.
+The focused counts are 8 old and 67 new native-module tests at the third repair,
+13 more at the fourth, then the fifth repair's cases.
 
 The job uploads its evidence with `if: always()` and 14-day retention, and is
 bounded to 45 minutes. A failed, skipped, disabled or preflight-blocked run is
