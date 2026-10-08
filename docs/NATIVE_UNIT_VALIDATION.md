@@ -121,16 +121,20 @@ or contradictory evidence fails closed and is never treated as PASS:
   `uv pip check`, then the runtime probe. Each argv must match the bootstrap's
   own constants and flags, name the pinned uv binary and the owned target, and
   carry an integer `pid`, an integer `ppid` and an `executable` equal to `argv[0]`.
-  The `--check` process must run exactly one runtime probe, after the build
-  process's probe, and nothing else. Importing pyboy also loads pysdl2, whose
+  Both bootstrap processes must be direct children of the one shell that runs the
+  script (the same `ppid`, which never appears as an audited process); the
+  `--check` process is neither the build process's child nor a probe child. Counting
+  every foreign runtime probe, exactly one is allowed, after the build probe, and
+  the `--check` process runs nothing else. Importing pyboy also loads pysdl2, whose
   library search runs `ldconfig -p`, `gcc -Wl,-t -o <tmp> -lSDL2...`, `ld -t -o
-  /dev/null -lSDL2...` and `objdump -p -j .dynamic <SDL2 file>` even with the
-  bundled SDL libraries. Only those exact argv shapes (SDL2, SDL2_image and
-  SDL2_ttf names, system tool directories) are accepted, and only from the build
-  process after its probe or from a runtime-probe child (one process per probe,
-  recognised by `ppid`) after that probe started. Other build-tool subprocesses
-  are tolerated only inside the uv install window; any other stray, extra,
-  duplicate or reordered call, including from the `--check` process, fails.
+  /dev/null -lSDL2...` and `objdump -p -j .dynamic <file>` even with the bundled SDL
+  libraries. Only those exact argv shapes (SDL2, SDL2_image and SDL2_ttf names;
+  objdump only for `libSDL2[_image|_ttf][-2.0][d].so[.N...]`; system tool
+  directories) are accepted. Build-process and build-probe-child discovery must end
+  before the `--check` probe; the `--check` probe child's discovery follows that probe.
+  Other build-tool subprocesses are tolerated only inside the uv install window; any
+  other stray, extra, duplicate, misplaced or reordered call fails. These shapes were
+  checked against records captured on Linux/Python 3.11 only, not a hosted run.
 - The bootstrap's own `native-build.json` (complete cython record bound to the
   checked-in producer script, the staged-input digest recomputed from the vendored
   source, this interpreter, and the installed runtime fingerprint) and a full

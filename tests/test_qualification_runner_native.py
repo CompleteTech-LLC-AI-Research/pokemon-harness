@@ -652,7 +652,9 @@ def test_uv_audit_accepts_sdl_discovery_in_the_real_process_order():
     objdump = ["/usr/bin/objdump", "-p", "-j", ".dynamic", "/usr/lib/libSDL2-2.0.so.0.3200.10"]
     linked = ["ld", "-t", "-L", "/opt/lib", "-o", "/dev/null", "-lSDL2_image-2.0d"]
     more = [_record(100, 50, *objdump), _record(201, 200, *linked), _record(100, 50, *linked)]
-    assert _audit(lambda r: [*r[:13], more[0], *r[13:], *more[1:]]) == []
+    # V6 correction (reviewed flaw): the former fixture appended the build owner's
+    # `linked` call after the --check child's records, i.e. late build discovery.
+    assert _audit(lambda r: [*r[:13], more[0], more[2], *r[13:], more[1]]) == []
     unrelated = _record(900, 899, "/usr/bin/gcc", "-c", "x.c")
     assert _audit(lambda r: [*r[:3], unrelated, *r[3:]]) == []
 
@@ -716,6 +718,95 @@ def test_uv_audit_accepts_sdl_discovery_in_the_real_process_order():
     ],
 )
 def test_uv_audit_rejects_unjustified_or_misplaced_subprocess_records(change, expected_text):
+    problems = _audit(change)
+    assert any(expected_text in problem for problem in problems), problems
+
+
+def _objdump(library):
+    return ["/usr/bin/objdump", "-p", "-j", ".dynamic", f"/usr/lib/{library}"]
+
+
+@pytest.mark.parametrize(
+    "library",
+    [
+        "libSDL2.so",
+        "libSDL2-2.0.so.0",
+        "libSDL2-2.0.so.0.3200.10",
+        "libSDL2d.so",
+        "libSDL2-2.0d.so",
+        "libSDL2_image-2.0.so.0",
+        "libSDL2_ttf.so",
+    ],
+)
+def test_uv_audit_accepts_real_sdl_library_names_for_objdump(library):
+    assert _audit(_extra(13, 100, 50, *_objdump(library))) == []
+    assert _audit(_extra(15, 201, 200, *_objdump(library))) == []
+
+
+def _shell_parent(pids, ppid):
+    return lambda r: [{**x, "ppid": ppid} if x["pid"] in pids else x for x in r]
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_text"),
+    [
+        (lambda r: [dict(r[13]), *r], "exactly one runtime probe"),
+        (lambda r: [{**r[13], "pid": 300}, *r], "exactly one runtime probe"),
+        (lambda r: [*r[:3], {**r[13], "pid": 300}, *r[3:]], "exactly one runtime probe"),
+        (lambda r: [*r[:6], {**r[13], "pid": 300}, *r[6:]], "exactly one runtime probe"),
+        (lambda r: [*r[:6], dict(r[13]), *r[6:]], "exactly one runtime probe"),
+        (lambda r: [{**r[13], "pid": 300}, *r[:14], *r[15:]], "exactly one runtime probe"),
+        (_shell_parent({200, 201}, 100), "shared shell parent"),
+        (_shell_parent({200, 201}, 101), "shared shell parent"),
+        (_shell_parent({200, 201}, 51), "shared shell parent"),
+        (_shell_parent({100}, 51), "shared shell parent"),
+        (lambda r: [{**x, "ppid": 51} if i == 1 else x for i, x in enumerate(r)], "shell parent"),
+        (lambda r: [*r, _record(100, 52, "/sbin/ldconfig", "-p")], "shell parent"),
+        (lambda r: [*r[:13], *r[14:], r[13]], "runtime probe"),
+        (lambda r: [*r[:10], *r[11:14], r[10], *r[14:]], "unexpected subprocess records"),
+        (lambda r: [*r[:10], *r[11:], r[10]], "unexpected subprocess records"),
+        (lambda r: [*r[:7], *r[10:], *r[7:10]], "runtime probe"),
+        (lambda r: [*r[:7], *r[8:], r[7]], "runtime probe"),
+        (_extra(13, 100, 50, *_objdump("libSDL2_unrelated.so")), "unexpected"),
+        (_extra(13, 100, 50, *_objdump("libSDL2evil.so")), "unexpected"),
+        (_extra(13, 100, 50, *_objdump("libSDL2-2.0.so.0.evil")), "unexpected"),
+        (_extra(13, 100, 50, *_objdump("libSDL2_mixer-2.0.so.0")), "unexpected"),
+        (_extra(13, 100, 50, *_objdump("libSDL3.so")), "unexpected"),
+        (_extra(13, 100, 50, *_objdump("libSDL2.so.x")), "unexpected"),
+        (_extra(15, 201, 200, *_objdump("libSDL2_unrelated.so")), "runtime probe"),
+        (_extra(13, 100, 50, *_objdump("../libSDL2.so")[:4], "libSDL2.so"), "unexpected"),
+    ],
+    ids=[
+        "early-duplicate-check-probe",
+        "early-foreign-probe-before-installs",
+        "early-foreign-probe-in-install-window",
+        "early-foreign-probe-before-build-probe",
+        "early-same-checker-probe",
+        "early-foreign-probe-replacing-check",
+        "checker-child-of-build-owner",
+        "checker-nested-under-probe-child",
+        "checker-unrelated-parent",
+        "owner-unrelated-parent",
+        "owner-inconsistent-parent",
+        "owner-record-with-second-parent",
+        "check-probe-after-its-discovery",
+        "late-build-discovery-between-check-probe-and-child",
+        "late-build-owner-discovery-after-check",
+        "late-build-probe-child-discovery-after-check",
+        "late-build-probe-child-single-discovery",
+        "objdump-sdl2-unrelated-suffix",
+        "objdump-sdl2evil",
+        "objdump-non-numeric-version",
+        "objdump-other-sdl-module",
+        "objdump-sdl3",
+        "objdump-text-version",
+        "check-child-objdump-unrelated",
+        "objdump-relative-path",
+    ],
+)
+def test_uv_audit_rejects_early_probes_inconsistent_parents_late_build_and_unrelated_libs(
+    change, expected_text
+):
     problems = _audit(change)
     assert any(expected_text in problem for problem in problems), problems
 

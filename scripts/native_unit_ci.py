@@ -446,11 +446,16 @@ def validate_uv_audit(
     last = max(
         (i for i, pid, name in tagged if pid == owner and name == "runtime-probe"), default=-1
     )
-    later = [(i, pid) for i, pid, name in tagged if pid != owner and name == "runtime-probe"]
-    later = [item for item in later if item[0] > last]
-    if len(later) != 1:
+    foreign = [(i, pid) for i, pid, name in tagged if pid != owner and name == "runtime-probe"]
+    if len(foreign) != 1 or foreign[0][0] < last:
         problems.append("bootstrap --check did not follow with exactly one runtime probe")
-    check_probe, checker = later[0] if later else (-1, None)
+    check_probe, checker = foreign[-1] if foreign else (-1, None)
+    ppids: dict[int, set[int]] = {}
+    for index, pid, _ in tagged:
+        ppids.setdefault(pid, set()).add(parents[index])
+    shell = ppids.get(owner, set())
+    if len(shell) != 1 or ppids.get(checker) != shell or shell & set(ppids):
+        problems.append("bootstrap build and --check processes lack one shared shell parent")
     if any(pid != owner and name not in (None, "runtime-probe") for _, pid, name in tagged):
         problems.append("a bootstrap role was executed by a different process")
     window = (first("install-build", owner), first("uv pip check", owner))
@@ -462,14 +467,15 @@ def validate_uv_audit(
         parent = parents.get(index)
         discovery = _sdl_discovery_call(argvs[index])
         if pid == owner:
-            if not (discovery and 0 <= build_probe < index):
+            if not (discovery and 0 <= build_probe < index < check_probe):
                 problems.append(f"bootstrap process made unexpected subprocess records [{index}]")
         elif pid == checker:
             problems.append(
                 f"bootstrap --check process made unexpected subprocess records [{index}]"
             )
         elif parent in probes and parent is not None:
-            if not (discovery and 0 <= probes[parent] < index):
+            ends = check_probe if parent == owner else len(tagged)
+            if not (discovery and 0 <= probes[parent] < index < ends):
                 problems.append(f"record {index}: unexpected subprocess from a runtime probe")
             elif children.setdefault(parent, pid) != pid:
                 problems.append(f"record {index}: runtime probe calls came from a second process")
@@ -479,6 +485,7 @@ def validate_uv_audit(
 
 
 _SYSTEM_TOOL_DIRS = ("/sbin", "/usr/sbin", "/bin", "/usr/bin", "/usr/local/bin")
+_SDL_LIBRARY_FILE = r"SDL2(?:_(?:image|ttf))?(?:-2\.0)?d?"
 _SDL_LIBRARY = r"SDL2(?:_(?:image|ttf))?(?:-2\.0(?:\.0)?)?d?"
 
 
@@ -521,7 +528,7 @@ def _sdl_discovery_call(argv: list[str]) -> bool:
             len(rest) == 4
             and rest[:3] == ["-p", "-j", ".dynamic"]
             and os.path.isabs(rest[3])
-            and re.fullmatch(f"lib{_SDL_LIBRARY}[\\w.+-]*\\.so[\\w.]*", library) is not None
+            and re.fullmatch(f"lib{_SDL_LIBRARY_FILE}\\.so(?:\\.\\d+)*", library) is not None
         )
     return False
 
