@@ -114,3 +114,111 @@ def make_contract_case(bootstrap, root: Path, *, mode: str = "source") -> Simple
         root=root,
         vendor=vendor,
     )
+
+
+def alias_probe_script(script: Path) -> str:
+    """Foreign-cwd file-alias import probe for the given bootstrap script."""
+
+    return f"""import importlib.util, pathlib, sys, warnings
+warnings.simplefilter("error", ImportWarning)
+path = pathlib.Path({str(script.resolve())!r})
+spec = importlib.util.spec_from_file_location("bootstrap_pyboy_foreign_file_alias", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+assert module.__package__ == ""
+assert module.__spec__ is spec
+namespace = sys.modules["scripts"]
+assert namespace.__file__ is None
+assert namespace.__spec__.origin is None
+assert [pathlib.Path(item).resolve() for item in namespace.__path__] == [path.parent]
+for name in (
+    "_bootstrap_runtime_contract",
+    "_bootstrap_runtime_probes",
+    "check_import_origins",
+    "_import_origin_resolution",
+    "_import_origin_paths",
+    "_import_origin_finders",
+    "_import_origin_attestations",
+    "_import_origin_selected_owners",
+):
+    helper = sys.modules[f"scripts.{{name}}"]
+    assert pathlib.Path(helper.__file__).resolve() == path.parent / f"{{name}}.py"
+print("foreign-cwd bootstrap file alias imports the lane-owned helpers")
+"""
+
+
+def foreign_namespace_probe_script(script: Path) -> str:
+    """Foreign scripts-namespace and cached-helper probe for the given bootstrap script."""
+
+    return f"""import importlib.machinery, importlib.util, pathlib, sys, types, warnings
+warnings.simplefilter("error", ImportWarning)
+path = pathlib.Path({str(script.resolve())!r})
+foreign_path = path.parent.parent / "foreign-scripts"
+namespace = types.ModuleType("scripts")
+namespace.__file__ = None
+namespace.__loader__ = None
+namespace.__package__ = "scripts"
+namespace.__path__ = [str(foreign_path)]
+namespace.__spec__ = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+namespace.__spec__.submodule_search_locations = [str(foreign_path)]
+sys.modules["scripts"] = namespace
+before_children = {{name: module for name, module in sys.modules.items() if name.startswith("scripts.")}}
+spec = importlib.util.spec_from_file_location("bootstrap_pyboy_foreign_file_alias", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+try:
+    spec.loader.exec_module(module)
+except ImportError as exc:
+    assert "belongs to another source tree" in str(exc)
+else:
+    raise AssertionError("a foreign scripts namespace was accepted")
+assert sys.modules["scripts"] is namespace
+assert namespace.__path__ == [str(foreign_path)]
+assert module.__spec__ is spec and module.__package__ == ""
+assert {{name: module for name, module in sys.modules.items() if name.startswith("scripts.")}} == before_children
+print("foreign scripts namespace rejected before helper imports")
+sys.modules.pop(spec.name)
+sys.modules.pop("scripts")
+namespace = types.ModuleType("scripts")
+namespace.__file__ = None
+namespace.__loader__ = None
+namespace.__package__ = "scripts"
+namespace.__path__ = [str(path.parent)]
+namespace_spec = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+namespace_spec.submodule_search_locations = [str(path.parent)]
+namespace.__spec__ = namespace_spec
+namespace_before = (
+    namespace.__dict__.copy(),
+    tuple(namespace.__path__),
+    namespace_spec.origin,
+    tuple(namespace_spec.submodule_search_locations),
+)
+sys.modules["scripts"] = namespace
+foreign_child = types.ModuleType("scripts._bootstrap_runtime_contract")
+foreign_child.__file__ = str(path.parent.parent / "foreign" / "_bootstrap_runtime_contract.py")
+sys.modules[foreign_child.__name__] = foreign_child
+before_children = {{name: child for name, child in sys.modules.items() if name.startswith("scripts.")}}
+assert before_children == {{foreign_child.__name__: foreign_child}}
+cached_child_spec = importlib.util.spec_from_file_location("bootstrap_pyboy_cached_child_alias", path)
+assert cached_child_spec is not None and cached_child_spec.loader is not None
+cached_child_module = importlib.util.module_from_spec(cached_child_spec)
+sys.modules[cached_child_spec.name] = cached_child_module
+try:
+    cached_child_spec.loader.exec_module(cached_child_module)
+except ImportError as exc:
+    assert "belongs to another source tree" in str(exc)
+else:
+    raise AssertionError("a foreign cached bootstrap helper was accepted")
+assert sys.modules["scripts"] is namespace
+assert namespace.__dict__ == namespace_before[0]
+assert tuple(namespace.__path__) == namespace_before[1]
+assert namespace.__spec__ is namespace_before[0]["__spec__"]
+assert namespace.__spec__.origin == namespace_before[2]
+assert tuple(namespace.__spec__.submodule_search_locations) == namespace_before[3]
+assert cached_child_module.__spec__ is cached_child_spec and cached_child_module.__package__ == ""
+assert {{name: child for name, child in sys.modules.items() if name.startswith("scripts.")}} == before_children
+print("foreign cached helper rejected before static imports without namespace mutation")
+"""

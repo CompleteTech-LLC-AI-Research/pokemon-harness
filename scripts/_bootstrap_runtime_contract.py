@@ -8,6 +8,15 @@ from typing import Any
 ContractApi = dict[str, Any]
 
 
+def dependency_check_command(pip_install: list[str], executable: str) -> list[str]:
+    """Return the dependency check for the installer that built the runtime."""
+
+    # ``uv venv`` interpreters carry no pip, so ``python -m pip check`` cannot run there.
+    if pip_install[1:4] == ["pip", "install", "--python"]:
+        return [pip_install[0], "pip", "check", "--python", executable]
+    return [executable, "-m", "pip", "check"]
+
+
 def _editable_source_paths(api: ContractApi) -> dict[str, Path]:
     root = api["ROOT"]
     vendor = api["PYBOY_SOURCE"] / "pyboy"

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
+import importlib.util
+import json
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def native_build_fixture(tmp_path: Path) -> Path:
@@ -60,3 +65,166 @@ def source_fingerprint(source: Path) -> dict[str, tuple[str, int]]:
             path.stat().st_mtime_ns,
         )
     return result
+
+
+# Authored (synthetic) fixtures for the UV-bootstrap evidence validators in
+# scripts/native_unit_ci.py. They carry no real native proof and import nothing
+# platform-specific, so the provenance tests collect on Windows too.
+def load_native_ci():
+    spec = importlib.util.spec_from_file_location(
+        "native_unit_ci_fixture_controls", REPO_ROOT / "scripts" / "native_unit_ci.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def uv_expected(native_ci, root="/repo", prefix="/w/uvenv"):
+    modules = ("pyboy", "pyboy.pyboy", "pyboy.utils", "pyboy.core.mb", "pyboy.core.serial")
+    return {
+        "root": root,
+        "head": "h" * 40,
+        "prefix": prefix,
+        "prefix_name": "uvenv",
+        "python_version": "3.12.1",
+        "evidence_version": 2,
+        "build_requirements": ["setuptools==1", "wheel==2", "cython==3.0.12", "numpy==3"],
+        "cython_requirement": "cython==3.0.12",
+        "bootstrap_script": f"{root}/scripts/bootstrap_pyboy.py",
+        "script_sha256": "5" * 64,
+        "version": "2.7.0",
+        "revision": "a" * 40,
+        "runtime_modules": [*modules, "pyboy.link"],
+        "cython_modules": [m for m in modules if m not in {"pyboy"}],
+        "build_inputs_sha256": "b" * 64,
+    }
+
+
+def uv_discovery_argvs(attempt=0):
+    """The argv shapes ctypes.util.find_library runs for one pysdl2 library name."""
+    link = ("-lSDL2", "-lSDL2-2.0", "-lSDL2_image", "-lSDL2_ttf-2.0d")[attempt % 4]
+    return [
+        ["/sbin/ldconfig", "-p"],
+        ["/usr/bin/gcc", "-Wl,-t", "-o", f"/tmp/tmp{attempt}x", link],
+        ["ld", "-t", "-o", "/dev/null", link],
+    ]
+
+
+def uv_audit_records(uv, target, expected=None, discovery=True):
+    """Audit records in the order the bootstrap runs them: the build process (pid 100)
+    runs the installers, a runtime-probe child (pid 101) and then, importing pyboy
+    itself, its own SDL discovery; --check (pid 200) runs one probe child (pid 201)."""
+    root = (expected or {"root": "/repo"})["root"]
+    requirements = (expected or uv_expected(None))["build_requirements"]
+    base = [uv, "pip", "install", "--python", target, "--force-reinstall", "--no-deps"]
+    staged = f"{root}/build/pyboy-native-x/pyboy-src"
+    probe = [target, f"{root}/scripts/bootstrap_pyboy.py", "--mode", "cython"]
+    probe += ["--check-timeout", "300", "--_runtime-probe"]
+    rows = [
+        (100, 50, [target, "-m", "pip", "--version"]),
+        (100, 50, [target, "-m", "ensurepip", "--upgrade"]),
+        (100, 50, [*base, *requirements]),
+        (100, 50, [*base, "--no-build-isolation", "-e", root]),
+        (100, 50, [*base, "--no-build-isolation", "cython==3.0.12", staged]),
+        (100, 50, [uv, "pip", "check", "--python", target]),
+        (100, 50, probe),
+    ]
+    if discovery:
+        rows += [(101, 100, argv) for argv in uv_discovery_argvs(0)]
+        rows += [(100, 50, argv) for argv in uv_discovery_argvs(1)]
+    rows.append((200, 50, probe))
+    if discovery:
+        rows += [(201, 200, argv) for argv in uv_discovery_argvs(2)]
+    return [
+        {"pid": pid, "ppid": ppid, "executable": argv[0], "argv": argv} for pid, ppid, argv in rows
+    ]
+
+
+def uv_native_build(expected, optional="source", suffix=None, required_suffix=None):
+    """A build record; `suffix` names optional compiled modules, `required_suffix` the rest."""
+    default = importlib.machinery.EXTENSION_SUFFIXES[0]
+    suffix = suffix or default
+    required_suffix = required_suffix or suffix
+    names = expected["runtime_modules"]
+    kinds = {
+        n: "cython" if n in expected["cython_modules"] or optional == "cython" else "source"
+        for n in names
+    }
+    files = {}
+    for i, n in enumerate(names):
+        if kinds[n] == "source":
+            files[n] = f"m{i}.py"
+        else:
+            files[n] = f"m{i}{required_suffix if n in expected['cython_modules'] else suffix}"
+    artifacts = {files[n]: f"{i:064x}" for i, n in enumerate(names)}
+    modules = {
+        n: {"kind": kinds[n], "sha256": f"{i:064x}", "artifact": files[n]}
+        for i, n in enumerate(names)
+    }
+    identity = {
+        "python": expected["python_version"],
+        "version": expected["version"],
+        "revision": expected["revision"],
+        "cython_compiled": True,
+        "modules": modules,
+        "artifacts": {
+            **artifacts,
+            f"plugins/game_wrapper_pokemon_pinball{default}": "c" * 64,
+            f"plugins/game_wrapper_pokemon_pinball_data{default}": "d" * 64,
+        },
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return {
+        "evidence_version": 2,
+        "procedure": "bootstrap_pyboy --mode cython",
+        "mode": "cython",
+        "status": "complete",
+        "build_inputs_sha256": expected["build_inputs_sha256"],
+        "interpreter": {"python_version": "3.12.1", "prefix_name": "uvenv"},
+        "producer": {"script": "scripts/bootstrap_pyboy.py", "script_sha256": "5" * 64},
+        "completed_at": "2026-10-08T10:00:00Z",
+        "runtime_identity": identity,
+        "installed_fingerprint": hashlib.sha256(canonical.encode()).hexdigest(),
+    }
+
+
+def uv_pinball(native_ci, expected, prefix="/w/uvenv"):
+    suffix = native_ci.importlib.machinery.EXTENSION_SUFFIXES[0]
+    stems = ("game_wrapper_pokemon_pinball", "game_wrapper_pokemon_pinball_data")
+    origins = [f"{prefix}/lib/pyboy/plugins/{stem}{suffix}" for stem in stems]
+    proof = {
+        "schema_version": 1,
+        "scope": "native-pinball-import-proof-not-gameplay",
+        "status": "PASS",
+        "expected_revision": expected["revision"],
+        "loaded_revision": expected["revision"],
+        "module_origins": dict(zip(native_ci.PINBALL_MODULES, origins, strict=True)),
+        "source_line_counts": dict.fromkeys(native_ci.PINBALL_MODULES, 900),
+        "problems": [],
+        "harness_head": expected["head"],
+    }
+    hashes = dict(zip(origins, ("c" * 64, "d" * 64), strict=True))
+    return proof, hashes
+
+
+def uv_commands(uv, target):
+    def record(name, argv, out):
+        digest = hashlib.sha256(out.encode()).hexdigest()
+        return {
+            "name": name,
+            "argv": argv,
+            "returncode": 0,
+            "timed_out": False,
+            "truncated": False,
+            "stdout": out,
+            "stdout_sha256": digest,
+            "stderr": "",
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+
+    listing = '[{"name": "pokered_harness", "version": "1"}, {"name": "cython", "version": "3"}]'
+    return [
+        record("version", [uv, "--version"], "uv 0.12.17\n"),
+        record("list", [uv, "pip", "list", "--python", target, "--format", "json"], listing),
+        record("check", [uv, "pip", "check", "--python", target], "All installed packages\n"),
+    ]

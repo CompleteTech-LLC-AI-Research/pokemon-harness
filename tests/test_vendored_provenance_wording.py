@@ -17,12 +17,15 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests._bootstrap_stage_test_support import uv_audit_records, uv_expected
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VENDOR_ROOT = PROJECT_ROOT / "vendor" / "pyboy-src"
@@ -437,9 +440,87 @@ def test_native_ci_host_blocks_root_unknown_shm_and_unsafe_environment(native_ci
     assert "--secret-private-filter" not in json.dumps((facts, problems))
 
 
+_GATE_CONTRACT = {
+    "--runtime-mode": ["cython"],
+    "--tier": ["unit", "timing"],
+    "--repeat-timing": ["5"],
+}
+_GATE_RETAINED = ("--evidence-dir", "--raw-output-dir")
+_GATE_INVOCATION = ["run_logged", "unit-gate", "$native_python", "scripts/production_gate.py"]
+_GATE_FLAGS = "--runtime-mode cython --tier unit --tier timing --repeat-timing 5"
+_BOUNDARY_HEADING = "## Historical native failure boundary"
+_BOUNDARY_FACTS = (
+    "85d66e784cad314f2aed44e2362cd914a6623e39",
+    "FAIL (exit 1)",
+    "8525",
+    "2228 of 2230",
+    "two repeat-2 failures",
+    "[0, 1, 0, 0, 0]",
+    "unproven",
+    "no retry",
+    "neither explains nor waives it",
+    "do not prove the broader 36-input semantic map",
+    "not evidence for",
+)
+
+
+# Redirections are not control operators; any other character of a punctuation run is.
+_REDIRECTION = re.compile(r"&>>|&>|>>|>&|<&|<<|<>|>\||>|<")
+
+
+def _control_operators(line: str) -> list[str]:
+    """Unquoted shell control operators; quotes stay on tokens so a quoted ';' is not one."""
+    lexer = shlex.shlex(line, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return [
+        token for token in lexer if set(token) <= set("();<>|&") and _REDIRECTION.sub("", token)
+    ]
+
+
+def _gate_problems(script: str) -> list[str]:
+    """Check the one executable production_gate.py command; comment text never counts."""
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    joined = code.replace("\\\n", " ").splitlines()
+    gate = "scripts/production_gate.py"
+    tokenized = ((line, shlex.split(line, comments=True)) for line in joined if gate in line)
+    commands = [(line, words) for line, words in tokenized if gate in words]
+    if len(commands) != 1:
+        return [f"expected one executable production_gate.py command, found {len(commands)}"]
+    line, words = commands[0]
+
+    def values(option: str) -> list[str]:
+        return [words[i + 1] for i, word in enumerate(words[:-1]) if word == option]
+
+    problems = (
+        []
+        if words[: len(_GATE_INVOCATION)] == _GATE_INVOCATION
+        else [f"invocation is {words[:4]}, expected {_GATE_INVOCATION}"]
+    )
+    problems += [
+        f"control operator {op!r} lets options reach another command"
+        for op in _control_operators(line)
+    ]
+    problems += [
+        f"{option} is {values(option)}, expected {expected}"
+        for option, expected in _GATE_CONTRACT.items()
+        if sorted(values(option)) != sorted(expected)
+    ]
+    return problems + [f"{o} must appear once" for o in _GATE_RETAINED if len(values(o)) != 1]
+
+
+def _boundary_problems(document: str) -> list[str]:
+    """Check the historical-failure facts inside their own section of the document."""
+    _, found, tail = document.partition(_BOUNDARY_HEADING + "\n")
+    if not found:
+        return [f"missing section {_BOUNDARY_HEADING!r}"]
+    section = " ".join(tail.split("\n## ", 1)[0].split())
+    return [f"boundary lacks {fact!r}" for fact in _BOUNDARY_FACTS if fact not in section]
+
+
 def test_native_ci_workflow_preserves_public_only_native_gate():
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "native-unit.yml").read_text()
     script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    document = (PROJECT_ROOT / "docs" / "NATIVE_UNIT_VALIDATION.md").read_text(encoding="utf-8")
     assert "github.event.repository.private == false" in workflow
     assert "github.event.repository.visibility == 'public'" in workflow
     assert "name: Native unit and timing validation" in workflow
@@ -453,7 +534,11 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
     assert "set -euo pipefail" in script
     assert "--mode cython --check" in script
     assert "--build-evidence" in script
-    assert "--runtime-mode cython --tier unit --tier timing --repeat-timing 5" in script
+    assert _gate_problems(script) == []
+    prose = " ".join(document.replace("`", "").split())
+    for option, values in _GATE_CONTRACT.items():
+        assert all(f"{option} {value}" in prose for value in values)
+    assert _boundary_problems(document) == []
     commands = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     for bypass in (
         "--timeout-seconds",
@@ -466,6 +551,185 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
         assert bypass not in commands
     assert "rm -" not in script
     assert "trap finish EXIT" in script
+
+
+@pytest.mark.parametrize(
+    "weaken",
+    [
+        pytest.param(lambda s: s.replace("--repeat-timing 5", "--repeat-timing 1"), id="repeats"),
+        pytest.param(lambda s: s.replace("--tier timing ", ""), id="timing-tier-dropped"),
+        pytest.param(lambda s: s.replace("--tier timing ", "--tier timing --tier rom "), id="tier"),
+        pytest.param(lambda s: s.replace("cython --tier", "source --tier"), id="runtime-mode"),
+        pytest.param(lambda s: s.replace("--raw-output-dir", "--raw-dir"), id="raw-output"),
+        pytest.param(lambda s: s + "run_logged x python scripts/production_gate.py\n", id="second"),
+        pytest.param(
+            lambda s: s.replace(
+                _GATE_FLAGS, "--runtime-mode cython --tier unit # --tier timing --repeat-timing 5"
+            ),
+            id="inline-comment",
+        ),
+        pytest.param(
+            lambda s: s.replace(_GATE_FLAGS, "--runtime-mode cython --tier unit").replace(
+                '--raw-output-dir "$evidence/raw"',
+                '--raw-output-dir "$evidence/raw" # --tier timing --repeat-timing 5',
+            ),
+            id="trailing-inline-comment",
+        ),
+    ],
+)
+def test_native_ci_gate_contract_rejects_weakened_executable_command(weaken):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = weaken(script)
+    assert mutated != script
+    assert _gate_problems(script) == []
+    assert _gate_problems(mutated)
+
+
+def test_native_ci_gate_contract_ignores_flags_present_only_in_a_comment():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    weakened = script.replace(_GATE_FLAGS, "--runtime-mode cython --tier unit")
+    commented = weakened + f"\n# {_GATE_FLAGS}\n"
+    assert weakened != script
+    assert _GATE_FLAGS in commented  # the earlier whole-script substring check accepted this
+    assert _gate_problems(commented)
+
+
+_GATE_PREFIX = 'run_logged unit-gate "$native_python" scripts/production_gate.py'
+_GATE_TAIL = (
+    f'{_GATE_FLAGS} \\\n    --evidence-dir "$evidence/gate" --raw-output-dir "$evidence/raw"'
+)
+
+
+def _split_gate(script: str, between: str) -> str:
+    canonical = f"{_GATE_PREFIX} \\\n    {_GATE_TAIL}"
+    assert canonical in script
+    partial = "--runtime-mode=cython --tier=unit"
+    return script.replace(canonical, f"{_GATE_PREFIX} {partial} {between} \\\n    {_GATE_TAIL}")
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        pytest.param(";", id="semicolon"),
+        pytest.param("&&", id="and"),
+        pytest.param("||", id="or"),
+        pytest.param("|", id="pipe"),
+        pytest.param("&", id="background"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_options_delivered_to_another_command(operator):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = _split_gate(script, f"{operator} echo")
+    assert mutated != script
+    assert _GATE_FLAGS in mutated  # a whole-script or whole-line flag search still passes
+    assert _gate_problems(script) == []
+    problems = _gate_problems(mutated)
+    assert any(f"control operator {operator!r}" in problem for problem in problems)
+
+
+def test_native_ci_gate_contract_rejects_the_independent_semicolon_counterexample():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    counterexample = (
+        'run_logged unit-gate "$native_python" scripts/production_gate.py'
+        " --runtime-mode=cython --tier=unit ; echo \\\n"
+        f"    {_GATE_FLAGS} \\\n"
+        '    --evidence-dir "$evidence/gate" --raw-output-dir "$evidence/raw"\n'
+    )
+    mutated = script.replace(f"{_GATE_PREFIX} \\\n    {_GATE_TAIL}\n", counterexample)
+    assert mutated != script
+    assert _gate_problems(mutated)
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(lambda c: f"({c})", id="subshell"),
+        pytest.param(lambda c: f"echo \\\n{c}", id="echo-prefix"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_gate_not_run_as_a_plain_command(wrap):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    canonical = f"{_GATE_PREFIX} \\\n    {_GATE_TAIL}"
+    assert canonical in script
+    mutated = script.replace(canonical, wrap(canonical))
+    assert _gate_problems(mutated)
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        pytest.param("echo", id="echo"),
+        pytest.param("true", id="true"),
+        pytest.param('"$other_python"', id="other-interpreter"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_a_different_invoked_program(program):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = script.replace(
+        _GATE_PREFIX, f"run_logged unit-gate {program} scripts/production_gate.py"
+    )
+    assert mutated != script
+    assert _GATE_FLAGS in mutated  # every required option is still present as data
+    assert _gate_problems(script) == []
+    assert any("invocation is" in problem for problem in _gate_problems(mutated))
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        pytest.param(";> /dev/null echo", id="semicolon-redirect"),
+        pytest.param(";>/dev/null echo", id="semicolon-redirect-nospace"),
+        pytest.param("|& echo", id="pipe-stderr"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_operators_grouped_with_redirections(between):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = _split_gate(script, between)
+    assert mutated != script
+    assert _GATE_FLAGS in mutated
+    assert _gate_problems(script) == []
+    assert any("control operator" in problem for problem in _gate_problems(mutated))
+
+
+def test_native_ci_gate_contract_allows_plain_redirections():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    tail = '--raw-output-dir "$evidence/raw"'
+    for redirect in ("> /dev/null", "2>&1", ">& /dev/null", "&> /dev/null"):
+        mutated = script.replace(tail, f"{tail} {redirect}")
+        assert mutated != script
+        assert _gate_problems(mutated) == [], redirect
+
+
+def test_native_ci_gate_contract_allows_quoted_and_commented_operators():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    quoted = script.replace('"$evidence/gate"', '"$evidence/gate;&|()"')
+    commented = script.replace(
+        '--raw-output-dir "$evidence/raw"', '--raw-output-dir "$evidence/raw" # ; echo && x'
+    )
+    assert quoted != script
+    assert commented != script
+    assert _gate_problems(quoted) == []
+    assert _gate_problems(commented) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param(_BOUNDARY_HEADING, "## Notes", id="section-removed"),
+        pytest.param("FAIL (exit 1)", "PASS (exit 0)", id="verdict-flipped"),
+        pytest.param("2228 of 2230", "2230 of 2230", id="timing-counts"),
+        pytest.param("unproven", "fixed", id="cause-claimed"),
+        pytest.param("no retry", "one retry", id="retry-claimed"),
+        pytest.param("neither explains nor waives it", "explains and waives it", id="waiver"),
+        pytest.param("do not prove", "prove", id="semantic-map-claimed"),
+    ],
+)
+def test_native_validation_document_rejects_altered_historical_boundary(old, new):
+    document = (PROJECT_ROOT / "docs" / "NATIVE_UNIT_VALIDATION.md").read_text(encoding="utf-8")
+    mutated = document.replace(old, new)
+    assert mutated != document
+    assert _boundary_problems(document) == []
+    assert _boundary_problems(mutated)
 
 
 @pytest.mark.parametrize("failure,expected", [("none", 0), ("build", 7), ("gate", 9), ("head", 2)])
@@ -546,3 +810,169 @@ def test_native_ci_rejects_malformed_pin(native_ci, native_ci_modules, pin):
     proof = native_ci.inspect_pinball(root)
     assert proof["status"] == "FAIL"
     assert "checkout PyBoy revision pin is malformed" in proof["problems"]
+
+
+# Pip-less uv lane controls. They use authored records and one real, empty
+# ``venv`` with no pip; no native build, uv install, or network is involved.
+UV_PIN = (
+    "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5"
+)
+
+
+def _uv_job(workflow):
+    return workflow.split("  native-uv-bootstrap:\n", 1)[1]
+
+
+def test_native_uv_job_is_sequential_public_pinned_and_keeps_pip_lane():
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "native-unit.yml").read_text()
+    job = _uv_job(workflow)
+    for required in (
+        "needs: native-unit",
+        "github.event.repository.private == false",
+        "github.event.repository.visibility == 'public'",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 45",
+        "persist-credentials: false",
+        "if: ${{ always() }}",
+        "retention-days: 14",
+        "bash scripts/run_native_uv_ci.sh",
+        UV_PIN,
+        "--require-hashes",
+    ):
+        assert required in job
+    assert "uv==latest" not in job and "uv-version" not in job
+    assert "run_native_unit_ci.sh" not in job
+    pip_job = workflow.split("  native-uv-bootstrap:\n", 1)[0]
+    assert "timeout-minutes: 60" in pip_job
+    assert pip_job.count("bash scripts/run_native_unit_ci.sh") == 1
+
+
+def test_native_uv_script_runs_unchanged_bootstrap_without_pip_or_gate():
+    script = (PROJECT_ROOT / "scripts" / "run_native_uv_ci.sh").read_text()
+    assert "uv venv --python" in script and "--seed" not in script
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert "-m pip" not in code and "ensurepip" not in code
+    assert "production_gate.py" not in script
+    assert script.count("NATIVE_UV_AUDIT_ACTIVE=1") == 2
+    assert "uv pip check --python" in script and "uv-verify" in script
+    assert "scripts/bootstrap_pyboy.py \\\n    --mode cython --build-evidence" in script
+    assert "uv 0.12.17" in script
+
+
+_UV_AUDIT = {"uv": "/bin/uv", "target": "/w/py", "expected": uv_expected(None)}
+
+
+def _uv_records(uv, target):
+    return uv_audit_records(uv, target)
+
+
+def _uv_swap(records, old, new):
+    return [
+        {
+            **x,
+            "executable": x["executable"].replace(old, new),
+            "argv": [a.replace(old, new) for a in x["argv"]],
+        }
+        for x in records
+    ]
+
+
+def test_uv_audit_accepts_the_real_fallback_shape(native_ci):
+    records = _uv_records("/bin/uv", "/w/py")
+    assert native_ci.validate_uv_audit(records, **_UV_AUDIT) == []
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda r: [], "empty"),
+        (
+            lambda r: [{**r[0], "argv": [r[0]["argv"][0], "-m", "pip", "install", "x"]}, *r],
+            "pip was executed",
+        ),
+        (lambda r: _uv_swap(r, "/w/py", "/w/other"), "probe"),
+        (lambda r: _uv_swap(r, "/bin/uv", "/evil/uv"), "unexpected uv"),
+        (lambda r: [r[0], *r[2:]], "probe"),
+        (lambda r: [r[1], r[0], *r[2:]], "probe order"),
+        (lambda r: [*r[:5], *r[6:]], "uv pip check"),
+        (lambda r: r[:3], "editable"),
+    ],
+    ids=[
+        "empty",
+        "python-pip",
+        "wrong-target",
+        "wrong-uv",
+        "no-ensurepip",
+        "order",
+        "no-check",
+        "few-installs",
+    ],
+)
+def test_uv_audit_rejects_wrong_pip_target_and_incomplete_evidence(native_ci, mutate, expected):
+    problems = native_ci.validate_uv_audit(mutate(_uv_records("/bin/uv", "/w/py")), **_UV_AUDIT)
+    assert any(expected in problem for problem in problems), problems
+
+
+def _uv_state(**changes):
+    state = {
+        "label": "after",
+        "in_venv": True,
+        "target_python": "/w/py",
+        "pip_importable": False,
+        "pip_version": {"returncode": 1},
+        "ensurepip_version": {"returncode": 1},
+    }
+    return {**state, **changes}
+
+
+@pytest.mark.parametrize(
+    ("label", "changes", "expected"),
+    [
+        ("before", {"pip_importable": True}, "pip is present"),
+        ("after", {"pip_version": {"returncode": 0}}, "pip is present"),
+        ("faulted", {"ensurepip_version": {"returncode": 0}}, "ensurepip is still available"),
+        ("after", {"in_venv": False}, "not an isolated"),
+        ("after", {"target_python": "/other/py"}, "different target"),
+    ],
+    ids=["seeded-before", "seeded-after", "no-fault", "not-venv", "other-target"],
+)
+def test_uv_states_reject_seeded_or_unfaulted_environments(native_ci, label, changes, expected):
+    states = {name: _uv_state(label=name) for name in native_ci.UV_STATE_LABELS}
+    assert native_ci.validate_uv_states(states, target="/w/py") == []
+    states[label] = _uv_state(label=label, **changes)
+    assert any(expected in p for p in native_ci.validate_uv_states(states, target="/w/py"))
+    missing = native_ci.validate_uv_states({**states, "before": None}, target="/w/py")
+    assert any("missing" in p for p in missing)
+
+
+def test_uv_instrument_faults_ensurepip_and_logs_argv_only_in_owned_env(native_ci, tmp_path):
+    import sys
+    import venv
+
+    output = tmp_path / "out"
+    (output / "evidence").mkdir(parents=True)
+    env_dir = output / "work" / "uvenv"
+    venv.create(env_dir, with_pip=False)
+    python = str(env_dir / "bin" / "python")
+    script = str(PROJECT_ROOT / "scripts" / "native_unit_ci.py")
+    run = lambda *args, **kw: subprocess.run(
+        [python, *args], capture_output=True, text=True, timeout=60, check=False, **kw
+    )
+    assert run(script, "uv-instrument", str(output)).returncode == 0
+    assert run("-m", "ensurepip", "--version").returncode != 0
+    assert run("-m", "pip", "--version").returncode != 0
+    quiet = {**os.environ, "SECRET_TOKEN": "hunter2"}
+    run("-c", "import subprocess; subprocess.run(['true'])", env=quiet)
+    assert not (output / "evidence" / "uv-audit.jsonl").exists()
+    active = {**quiet, "NATIVE_UV_AUDIT_ACTIVE": "1"}
+    run("-c", "import subprocess; subprocess.run(['true', 'marker'])", env=active)
+    log = (output / "evidence" / "uv-audit.jsonl").read_text()
+    assert '"marker"' in log and "hunter2" not in log and "SECRET_TOKEN" not in log
+    refused = subprocess.run(
+        [sys.executable, script, "uv-instrument", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert refused.returncode == 2
