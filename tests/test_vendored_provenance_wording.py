@@ -808,3 +808,172 @@ def test_native_ci_rejects_malformed_pin(native_ci, native_ci_modules, pin):
     proof = native_ci.inspect_pinball(root)
     assert proof["status"] == "FAIL"
     assert "checkout PyBoy revision pin is malformed" in proof["problems"]
+
+
+# Pip-less uv lane controls. They use authored records and one real, empty
+# ``venv`` with no pip; no native build, uv install, or network is involved.
+UV_PIN = (
+    "uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5"
+)
+
+
+def _uv_job(workflow):
+    return workflow.split("  native-uv-bootstrap:\n", 1)[1]
+
+
+def test_native_uv_job_is_sequential_public_pinned_and_keeps_pip_lane():
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "native-unit.yml").read_text()
+    job = _uv_job(workflow)
+    for required in (
+        "needs: native-unit",
+        "github.event.repository.private == false",
+        "github.event.repository.visibility == 'public'",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 45",
+        "persist-credentials: false",
+        "if: ${{ always() }}",
+        "retention-days: 14",
+        "bash scripts/run_native_uv_ci.sh",
+        UV_PIN,
+        "--require-hashes",
+    ):
+        assert required in job
+    assert "uv==latest" not in job and "uv-version" not in job
+    assert "run_native_unit_ci.sh" not in job
+    pip_job = workflow.split("  native-uv-bootstrap:\n", 1)[0]
+    assert "timeout-minutes: 60" in pip_job
+    assert pip_job.count("bash scripts/run_native_unit_ci.sh") == 1
+
+
+def test_native_uv_script_runs_unchanged_bootstrap_without_pip_or_gate():
+    script = (PROJECT_ROOT / "scripts" / "run_native_uv_ci.sh").read_text()
+    assert "uv venv --python" in script and "--seed" not in script
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert "-m pip" not in code and "ensurepip" not in code
+    assert "production_gate.py" not in script
+    assert script.count("NATIVE_UV_AUDIT_ACTIVE=1") == 2
+    assert "uv pip check --python" in script and "uv-verify" in script
+    assert "scripts/bootstrap_pyboy.py \\\n    --mode cython --build-evidence" in script
+    assert "uv 0.12.17" in script
+
+
+def _uv_records(uv, target):
+    return [
+        {"argv": [target, "-m", "pip", "--version"]},
+        {"argv": [target, "-m", "ensurepip", "--upgrade"]},
+        {"argv": [uv, "pip", "install", "--python", target, "--force-reinstall", "setuptools"]},
+        {"argv": [uv, "pip", "install", "--python", target, "--no-deps", "-e", "/repo"]},
+        {"argv": [uv, "pip", "install", "--python", target, "--no-build-isolation", "x"]},
+        {"argv": [uv, "pip", "check", "--python", target]},
+    ]
+
+
+def test_uv_audit_accepts_the_real_fallback_shape(native_ci):
+    assert (
+        native_ci.validate_uv_audit(_uv_records("/bin/uv", "/w/py"), uv="/bin/uv", target="/w/py")
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda r: [], "empty"),
+        (
+            lambda r: [{"argv": [r[0]["argv"][0], "-m", "pip", "install", "x"]}, *r],
+            "pip was executed",
+        ),
+        (
+            lambda r: [
+                {**x, "argv": [a.replace("/w/py", "/w/other") for a in x["argv"]]} for x in r
+            ],
+            "probe",
+        ),
+        (
+            lambda r: [{"argv": [a.replace("/bin/uv", "/evil/uv") for a in x["argv"]]} for x in r],
+            "unexpected uv",
+        ),
+        (lambda r: [r[0], *r[2:]], "probe"),
+        (lambda r: [r[1], r[0], *r[2:]], "probe order"),
+        (lambda r: r[:-1], "uv pip check"),
+        (lambda r: [r[0], r[1], r[2]], "editable"),
+    ],
+    ids=[
+        "empty",
+        "python-pip",
+        "wrong-target",
+        "wrong-uv",
+        "no-ensurepip",
+        "order",
+        "no-check",
+        "few-installs",
+    ],
+)
+def test_uv_audit_rejects_wrong_pip_target_and_incomplete_evidence(native_ci, mutate, expected):
+    problems = native_ci.validate_uv_audit(
+        mutate(_uv_records("/bin/uv", "/w/py")), uv="/bin/uv", target="/w/py"
+    )
+    assert any(expected in problem for problem in problems), problems
+
+
+def _uv_state(**changes):
+    state = {
+        "in_venv": True,
+        "target_python": "/w/py",
+        "pip_importable": False,
+        "pip_version": {"returncode": 1},
+        "ensurepip_version": {"returncode": 1},
+    }
+    return {**state, **changes}
+
+
+@pytest.mark.parametrize(
+    ("label", "changes", "expected"),
+    [
+        ("before", {"pip_importable": True}, "pip is present"),
+        ("after", {"pip_version": {"returncode": 0}}, "pip is present"),
+        ("faulted", {"ensurepip_version": {"returncode": 0}}, "ensurepip is still available"),
+        ("after", {"in_venv": False}, "not an isolated"),
+        ("after", {"target_python": "/other/py"}, "different target"),
+    ],
+    ids=["seeded-before", "seeded-after", "no-fault", "not-venv", "other-target"],
+)
+def test_uv_states_reject_seeded_or_unfaulted_environments(native_ci, label, changes, expected):
+    states = {name: _uv_state() for name in native_ci.UV_STATE_LABELS}
+    assert native_ci.validate_uv_states(states) == []
+    states[label] = _uv_state(**changes)
+    assert any(expected in problem for problem in native_ci.validate_uv_states(states))
+    assert any("missing" in p for p in native_ci.validate_uv_states({**states, "before": None}))
+
+
+def test_uv_instrument_faults_ensurepip_and_logs_argv_only_in_owned_env(native_ci, tmp_path):
+    import sys
+    import venv
+
+    output = tmp_path / "out"
+    (output / "evidence").mkdir(parents=True)
+    env_dir = output / "work" / "uvenv"
+    venv.create(env_dir, with_pip=False)
+    python = str(env_dir / "bin" / "python")
+    script = str(PROJECT_ROOT / "scripts" / "native_unit_ci.py")
+    run = lambda *args, **kw: subprocess.run(
+        [python, *args], capture_output=True, text=True, timeout=60, check=False, **kw
+    )
+    assert run(script, "uv-instrument", str(output)).returncode == 0
+    assert run("-m", "ensurepip", "--version").returncode != 0
+    assert run("-m", "pip", "--version").returncode != 0
+    quiet = {**os.environ, "SECRET_TOKEN": "hunter2"}
+    run("-c", "import subprocess; subprocess.run(['true'])", env=quiet)
+    assert not (output / "evidence" / "uv-audit.jsonl").exists()
+    active = {**quiet, "NATIVE_UV_AUDIT_ACTIVE": "1"}
+    run("-c", "import subprocess; subprocess.run(['true', 'marker'])", env=active)
+    log = (output / "evidence" / "uv-audit.jsonl").read_text()
+    assert '"marker"' in log and "hunter2" not in log and "SECRET_TOKEN" not in log
+    refused = subprocess.run(
+        [sys.executable, script, "uv-instrument", str(output)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert refused.returncode == 2

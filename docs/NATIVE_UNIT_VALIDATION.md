@@ -81,6 +81,48 @@ workflow definition nor passing controls close issue #138. Preserve the
 historical evidence and runtime pin; real-ROM re-qualification remains owned
 by #235, and full release qualification remains separate.
 
+## Pip-less uv bootstrap qualification (hosted job `native-uv-bootstrap`)
+
+The pip lane above is unchanged and still owns the full unit and five-repeat
+timing gate. It never exercises the bootstrap's uv fallback. A separate public
+standard-runner job, `native-uv-bootstrap`, declares `needs: native-unit` and
+runs `scripts/run_native_uv_ci.sh`. It does not repeat the full gate. If the
+pip job fails, is skipped, or is disabled, the uv job is skipped, which is not
+a pass.
+
+What it does, in order:
+
+1. Installs the pinned tool `uv==0.12.17` (hash-checked wheel
+   `sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5`)
+   into the hosted base environment only, never into the target environment.
+2. Creates a fresh no-seed uv environment and records that pip is absent.
+3. Injects a fault **inside that owned ephemeral environment only**: a `.pth`
+   line makes `python -m ensurepip` fail, plus a benign audit hook that logs
+   the argv of each subprocess to `evidence/uv-audit.jsonl` (no environment
+   or credentials are serialized). This **simulates a Python without
+   ensurepip**. It is not native platform absence and does not claim that any
+   supported platform lacks ensurepip.
+4. Runs the real, unchanged `scripts/bootstrap_pyboy.py --mode cython` build
+   and `--check` with no patched functions, fake installer, or substituted
+   return codes, so the bootstrap reaches its own uv fallback.
+5. Runs the native import and pinball proof, then re-checks that pip is still
+   absent, and validates the audit with a pure validator.
+
+Acceptance requires all of: pip absent before and after; the fault in place;
+a recorded `uv pip install --python <target>` and `uv pip check --python
+<target>` argv that resolve to the pinned uv binary and the owned target
+interpreter; no `-m pip` selection; the compiled native import and pinball
+proof; target executable, origin and build-input hashes; bounded raw logs and
+terminal codes; unchanged HEAD and a clean worktree at the end. The validator
+rejects wrong-pip, wrong-target, empty and seeded-environment evidence. The
+CLI command string alone is never treated as proof of selection.
+
+The job uploads its evidence with `if: always()` and 14-day retention, and is
+bounded to 45 minutes. A failed, skipped, disabled or preflight-blocked run is
+BLOCKED, not PASS. Until a hosted run of an approved head is read, this
+qualification is **unfinished**; authoring the job and passing the pure
+validator tests do not qualify the uv path.
+
 ## Historical native failure boundary
 
 Local native `85d66e784cad314f2aed44e2362cd914a6623e39` remains

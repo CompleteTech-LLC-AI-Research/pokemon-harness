@@ -8,8 +8,10 @@ production_gate.py owns test selection, timeouts, and the final tier verdict.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import importlib.machinery
+import importlib.util
 import json
 import multiprocessing
 import os
@@ -26,6 +28,35 @@ PINBALL_MODULES = (
     "pyboy.plugins.game_wrapper_pokemon_pinball",
     "pyboy.plugins.game_wrapper_pokemon_pinball_data",
 )
+UV_TOOL_VERSION = "0.12.17"
+UV_AUDIT_ENV = "NATIVE_UV_AUDIT_ACTIVE"
+UV_STATE_LABELS = ("before", "faulted", "after")
+UV_AUDIT_HOOK = """\
+import json
+import os
+import sys
+
+_LOG = {log!r}
+
+
+def _record(event, args):
+    if event != "subprocess.Popen" or os.environ.get({env!r}) != "1":
+        return
+    try:
+        argv = [str(item) for item in (args[1] or [])]
+        line = json.dumps({{"pid": os.getpid(), "executable": str(args[0]), "argv": argv}})
+        descriptor = os.open(_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(descriptor, (line + "\\n").encode())
+        finally:
+            os.close(descriptor)
+    except Exception:
+        pass
+
+
+sys.addaudithook(_record)
+"""
+UV_FAULT_PTH = "import sys; sys.modules['ensurepip'] = None\nimport native_uv_audit\n"
 UNSAFE_ENVIRONMENT = (
     "PYTHONHOME",
     "PYTHONPATH",
@@ -219,14 +250,213 @@ def verify(root: Path, output: Path) -> None:
         raise ValueError("; ".join(proof["problems"]))
 
 
+def uv_instrument(output: Path) -> None:
+    """Install the audit hook and the simulated ensurepip fault in the owned UV env only.
+
+    The fault only simulates a Python whose ensurepip is unavailable; it is not a
+    native platform absence. Nothing here alters the bootstrap under test.
+    """
+    output = output.resolve()
+    purelib = Path(sysconfig.get_path("purelib")).resolve()
+    if sys.prefix == sys.base_prefix or (output / "work") not in purelib.parents:
+        raise ValueError("refusing to instrument anything but the owned ephemeral UV environment")
+    log = output / "evidence" / "uv-audit.jsonl"
+    hook = UV_AUDIT_HOOK.format(log=str(log), env=UV_AUDIT_ENV)
+    with (purelib / "native_uv_audit.py").open("x", encoding="utf-8") as handle:
+        handle.write(hook)
+    with (purelib / "zz_native_uv_faults.pth").open("x", encoding="utf-8") as handle:
+        handle.write(UV_FAULT_PTH)
+
+
+def uv_state(output: Path, label: str) -> dict[str, Any]:
+    """Record whether pip and ensurepip are reachable from the target interpreter."""
+    state: dict[str, Any] = {
+        "label": label,
+        "target_python": os.path.abspath(sys.executable),
+        "in_venv": sys.prefix != sys.base_prefix,
+        "pip_importable": importlib.util.find_spec("pip") is not None,
+    }
+    for name, module in (("pip_version", "pip"), ("ensurepip_version", "ensurepip")):
+        result = subprocess.run(
+            [sys.executable, "-m", module, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        state[name] = {"returncode": result.returncode, "stderr_tail": result.stderr[-300:]}
+    _write_json(output / "evidence" / f"uv-state-{label}.json", state)
+    return state
+
+
+def validate_uv_states(states: dict[str, dict[str, Any]]) -> list[str]:
+    problems: list[str] = []
+    for label in UV_STATE_LABELS:
+        state = states.get(label)
+        if not isinstance(state, dict):
+            problems.append(f"missing {label} pip/ensurepip state")
+            continue
+        if not state.get("in_venv"):
+            problems.append(f"{label}: target is not an isolated environment")
+        if state.get("pip_importable") or state.get("pip_version", {}).get("returncode") == 0:
+            problems.append(f"{label}: pip is present in the UV environment")
+        if label != "before" and state.get("ensurepip_version", {}).get("returncode") == 0:
+            problems.append(
+                f"{label}: ensurepip is still available, so the uv fallback is unreachable"
+            )
+    if len({state.get("target_python") for state in states.values() if state}) > 1:
+        problems.append("states describe different target interpreters")
+    return problems
+
+
+def validate_uv_audit(records: list[dict[str, Any]], *, uv: str, target: str) -> list[str]:
+    """Reject audit evidence unless the real bootstrap selected uv for this target."""
+    if not records:
+        return ["audit log is empty"]
+    problems: list[str] = []
+    uv_real = os.path.realpath(uv)
+    target = os.path.abspath(target)
+    pip_probe = ensure_probe = first_install = None
+    installs = checks = 0
+    editable = unisolated = False
+    for index, record in enumerate(records):
+        argv = [str(item) for item in record.get("argv") or []]
+        if not argv:
+            continue
+        program, rest = argv[0], argv[1:]
+        if rest[:1] == ["-m"] and rest[1:2] == ["pip"] and rest[2:3] in (["install"], ["check"]):
+            problems.append(f"record {index}: pip was executed by the interpreter")
+        elif os.path.abspath(program) == target and rest == ["-m", "pip", "--version"]:
+            pip_probe = index if pip_probe is None else pip_probe
+        elif os.path.abspath(program) == target and rest[:2] == ["-m", "ensurepip"]:
+            ensure_probe = index if ensure_probe is None else ensure_probe
+        elif rest[:1] == ["pip"] and rest[1:2] in (["install"], ["check"]):
+            if os.path.realpath(program) != uv_real:
+                problems.append(f"record {index}: unexpected uv executable")
+            option = rest.index("--python") if "--python" in rest else -1
+            if option < 0 or option + 1 >= len(rest) or os.path.abspath(rest[option + 1]) != target:
+                problems.append(f"record {index}: uv does not target the owned interpreter")
+            if rest[1] == "install":
+                installs += 1
+                first_install = index if first_install is None else first_install
+                editable = editable or "-e" in rest
+                unisolated = unisolated or "--no-build-isolation" in rest
+            else:
+                checks += 1
+    if pip_probe is None or ensure_probe is None:
+        problems.append("bootstrap did not probe pip then ensurepip on the target interpreter")
+    if first_install is None or installs < 3 or not editable or not unisolated:
+        problems.append("bootstrap did not run the build, editable and native uv installs")
+    if checks < 1:
+        problems.append("bootstrap did not run uv pip check")
+    if None not in (pip_probe, ensure_probe, first_install) and not (
+        pip_probe < ensure_probe < first_install
+    ):
+        problems.append("probe order was not pip, ensurepip, then uv install")
+    return problems
+
+
+def _sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def uv_verify(root: Path, output: Path, uv: str | None) -> None:
+    """Combine state, audit and native proof into one verdict; BLOCKED/FAIL is never PASS."""
+    evidence = output / "evidence"
+    uv = uv or shutil.which("uv") or ""
+    target = os.path.abspath(sys.executable)
+    problems: list[str] = []
+    states = {}
+    for label in UV_STATE_LABELS:
+        path = evidence / f"uv-state-{label}.json"
+        states[label] = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    problems += validate_uv_states(states)
+    log = evidence / "uv-audit.jsonl"
+    records = []
+    if log.is_file():
+        for line in log.read_text(encoding="utf-8").splitlines():
+            records.append(json.loads(line))
+    if not uv:
+        problems.append("uv is not on PATH")
+    else:
+        problems += validate_uv_audit(records, uv=uv, target=target)
+        version = subprocess.run(
+            [uv, "--version"], capture_output=True, text=True, timeout=60, check=False
+        )
+        if version.stdout.split()[:2] != ["uv", UV_TOOL_VERSION]:
+            problems.append(f"uv version is not {UV_TOOL_VERSION}: {version.stdout.strip()}")
+        if Path(sys.prefix).resolve() in Path(uv).resolve().parents:
+            problems.append("uv was installed inside the target environment")
+        listing = subprocess.run(
+            [uv, "pip", "list", "--python", target, "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if listing.returncode:
+            problems.append("uv pip list failed")
+        elif "pip" in {item["name"].lower() for item in json.loads(listing.stdout)}:
+            problems.append("pip is installed according to uv pip list")
+        check = subprocess.run(
+            [uv, "pip", "check", "--python", target],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if check.returncode:
+            problems.append("final uv pip check failed")
+    proof_path = evidence / "pinball-native.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8")) if proof_path.is_file() else {}
+    if proof.get("status") != "PASS":
+        problems.append("native pinball import proof did not PASS")
+    inputs = {
+        name: _sha256(root / name)
+        for name in ("pyproject.toml", "uv.lock", "scripts/bootstrap_pyboy.py")
+    }
+    inputs["native-build.json"] = _sha256(evidence / "native-build.json")
+    inputs["uv-audit.jsonl"] = _sha256(log)
+    if not all(inputs.values()):
+        problems.append("a required input/evidence hash is missing")
+    _write_json(
+        evidence / "uv-qualification.json",
+        {
+            "schema_version": 1,
+            "scope": "pip-less-uv-native-bootstrap-qualification-not-full-unit-gate",
+            "simulation": "ensurepip unavailability is a fault injected only in the owned UV env",
+            "uv": uv,
+            "target_python": target,
+            "input_sha256": inputs,
+            "audit_records": len(records),
+            "status": "FAIL" if problems else "PASS",
+            "problems": problems,
+        },
+    )
+    if problems:
+        raise ValueError("; ".join(problems))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("prepare", "verify"))
+    parser.add_argument(
+        "operation", choices=("prepare", "verify", "uv-instrument", "uv-state", "uv-verify")
+    )
     parser.add_argument("output", type=Path)
+    parser.add_argument("--label", choices=UV_STATE_LABELS)
+    parser.add_argument("--uv")
     args = parser.parse_args(argv)
     try:
         if args.operation == "prepare":
             prepare(ROOT, args.output)
+        elif args.operation == "uv-instrument":
+            uv_instrument(args.output)
+        elif args.operation == "uv-state":
+            uv_state(args.output.resolve(), args.label or "before")
+        elif args.operation == "uv-verify":
+            uv_verify(ROOT, args.output.resolve(), args.uv)
         else:
             verify(ROOT, args.output.resolve())
     except (OSError, ValueError, KeyError, ImportError, subprocess.SubprocessError) as exc:

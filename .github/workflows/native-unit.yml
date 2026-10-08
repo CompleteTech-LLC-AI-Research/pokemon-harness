@@ -51,3 +51,53 @@ jobs:
           path: ${{ env.NATIVE_UNIT_OUTPUT }}/evidence/
           if-no-files-found: warn
           retention-days: 14
+
+  native-uv-bootstrap:
+    name: Native pip-less uv bootstrap qualification (Python 3.12)
+    # Match CI_POLICY.md: standard public hosted execution only, never paid runners.
+    # Runs after, never concurrently with, the full pip native job; a failed,
+    # skipped, or disabled predecessor leaves this job skipped, which is not a pass.
+    needs: native-unit
+    if: ${{ github.event.repository.private == false && github.event.repository.visibility == 'public' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHON: python
+      NATIVE_UNIT_OUTPUT: /tmp/pokered-native-uv-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential libsdl2-dev
+
+      - name: Install the pinned uv tool into the hosted base environment only
+        run: |
+          printf '%s\n' 'uv==0.12.17 --hash=sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5' > "$RUNNER_TEMP/uv-requirements.txt"
+          python -m pip install --require-hashes --only-binary :all: --requirement "$RUNNER_TEMP/uv-requirements.txt"
+          uv --version
+
+      - name: Check shell syntax
+        run: bash -n scripts/run_native_uv_ci.sh
+
+      - name: Qualify the unchanged native bootstrap through the pip-less uv path
+        run: bash scripts/run_native_uv_ci.sh
+
+      - name: Retain evidence even when prerequisites or qualification fail
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-uv-evidence-py312-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_UNIT_OUTPUT }}/evidence/
+          if-no-files-found: warn
+          retention-days: 14
