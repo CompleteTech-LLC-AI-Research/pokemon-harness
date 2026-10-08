@@ -371,6 +371,22 @@ BYPASS_SHAPES = (
     # runs the comparison first, but its `True` operand masks a false result,
     # so that operand cannot fail and neither can the assert.
     ("literal and nested or bypass", "assert True and (x != 1 or True)", False),
+    # A count that cannot be negative is a known tautology prefix too: it
+    # passes, then the nested `or` masks the comparison behind it.
+    ("count tautology and nested or bypass", "assert len(y) >= 0 and (x != 1 or True)", False),
+    (
+        "count tautologies and nested or bypass",
+        "assert len(y) > -1 and len(y) >= 0 and (x != 1 or True)",
+        False,
+    ),
+    (
+        "deadline guard count prefix and nested or bypass",
+        (
+            'assert len(record.get("errors", [])) >= 0 and '
+            '(record["termination"] != "cancelled_or_deadline" or True)'
+        ),
+        False,
+    ),
     # ...but not in a trailing position: the comparison is evaluated first.
     ("comparison and tautology", "assert x != 1 and (1 == 1)", True),
     # A preceding operand that could be falsy leaves the comparison reachable.
@@ -382,8 +398,9 @@ BYPASS_SHAPES = (
     # A lone call cannot short-circuit on its own, so this stays enforced.
     ("lone call operand", "assert x != 1 or len(y) > 0", True),
     # Tautological operands decide the `or` whatever the record says, so the
-    # comparison beside them is never evaluated. These are the shapes an
-    # earlier version of _may_bypass missed by not recursing into Compare.
+    # comparison beside them cannot fail: a later one is skipped and an earlier
+    # one runs with its false result masked. These are the shapes an earlier
+    # version of _may_bypass missed by not recursing into Compare.
     ("tautology len >= 0", "assert x != 1 or len(y) >= 0", False),
     ("tautology len > -1", "assert x != 1 or len(y) > -1", False),
     ("tautology len > -5", "assert x != 1 or len(y) > -5", False),

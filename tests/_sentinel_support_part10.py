@@ -18,8 +18,8 @@ def _may_bypass(expression):
     decides the assert on its own when the other operand is truthy. (A later
     comparison is skipped; an earlier one runs but its false result is
     masked.) The comparison node is still present, so a presence-only check --
-    and ``_is_enforced``, which only inspects ``try`` -- reports the contract
-    as intact.
+    and ``_is_enforced``, which decides handlers and reachability but not
+    operand values -- reports the contract as intact.
 
     A tautological operand decides it just as effectively as a bare ``True``,
     which is why the spelling of the bypass does not matter. Recursion covers
@@ -35,7 +35,8 @@ def _may_bypass(expression):
     then the assert itself fails, so nothing is hidden: a truthy literal --
     ``True and x != 1`` -- still evaluates the comparison and the assert can
     fail. Only a *nested* bypass inside an ``and`` operand that follows a
-    leading run of literal ``True`` operands is still reported.
+    leading run of known tautologies -- a literal ``True`` or a count such as
+    ``len(y) >= 0`` -- is still reported.
 
     A bare ``Compare`` operand does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
@@ -49,17 +50,18 @@ def _may_bypass(expression):
     if any(tautologies):
         if isinstance(expression.op, ast.Or):
             return True
-        # Under `and` a literal tautology skips nothing: Python continues past
-        # a truthy operand, so `True and <comparison>` evaluates the comparison
-        # (a falsy operand would fail the assert instead). Only a nested bypass
-        # can hide one, so the operands after a leading run of literal `True`
-        # operands are checked for that. `<comparison> and True` and
-        # `flag and True and <comparison>` stay enforced; a nested `or` bypass
-        # elsewhere under `and` was never reported and is left as it was.
+        # Under `and` a tautology skips nothing: Python continues past a truthy
+        # operand, so `True and <comparison>` evaluates the comparison (a falsy
+        # operand would fail the assert instead). Only a nested bypass can hide
+        # one, so the operands after a leading run of known tautologies -- a
+        # literal `True` or a count like `len(y) >= 0` -- are checked for that.
+        # `<comparison> and True` and `flag and True and <comparison>` stay
+        # enforced; a nested `or` bypass behind an unknown operand was never
+        # reported and is left as it was.
         return any(
             _may_bypass(operand)
             for position, operand in enumerate(operands)
-            if position and all(_is_literal_true(earlier) for earlier in operands[:position])
+            if position and all(tautologies[:position])
         )
     if isinstance(expression.op, ast.And):
         return False
