@@ -444,6 +444,7 @@ _GATE_CONTRACT = {
     "--repeat-timing": ["5"],
 }
 _GATE_RETAINED = ("--evidence-dir", "--raw-output-dir")
+_GATE_INVOCATION = ["run_logged", "unit-gate", "$native_python", "scripts/production_gate.py"]
 _GATE_FLAGS = "--runtime-mode cython --tier unit --tier timing --repeat-timing 5"
 _BOUNDARY_HEADING = "## Historical native failure boundary"
 _BOUNDARY_FACTS = (
@@ -461,21 +462,37 @@ _BOUNDARY_FACTS = (
 )
 
 
+def _control_operators(line: str) -> list[str]:
+    """Unquoted shell control operators; quotes stay on tokens so a quoted ';' is not one."""
+    lexer = shlex.shlex(line, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return [token for token in lexer if set(token) <= set(";&|()")]
+
+
 def _gate_problems(script: str) -> list[str]:
     """Check the one executable production_gate.py command; comment text never counts."""
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     joined = code.replace("\\\n", " ").splitlines()
     gate = "scripts/production_gate.py"
-    tokenized = (shlex.split(line, comments=True) for line in joined if gate in line)
-    commands = [words for words in tokenized if gate in words]
+    tokenized = ((line, shlex.split(line, comments=True)) for line in joined if gate in line)
+    commands = [(line, words) for line, words in tokenized if gate in words]
     if len(commands) != 1:
         return [f"expected one executable production_gate.py command, found {len(commands)}"]
-    words = commands[0]
+    line, words = commands[0]
 
     def values(option: str) -> list[str]:
         return [words[i + 1] for i, word in enumerate(words[:-1]) if word == option]
 
-    problems = [
+    problems = (
+        []
+        if words[: len(_GATE_INVOCATION)] == _GATE_INVOCATION
+        else [f"invocation is {words[:4]}, expected {_GATE_INVOCATION}"]
+    )
+    problems += [
+        f"control operator {op!r} lets options reach another command"
+        for op in _control_operators(line)
+    ]
+    problems += [
         f"{option} is {values(option)}, expected {expected}"
         for option, expected in _GATE_CONTRACT.items()
         if sorted(values(option)) != sorted(expected)
@@ -567,6 +584,98 @@ def test_native_ci_gate_contract_ignores_flags_present_only_in_a_comment():
     assert weakened != script
     assert _GATE_FLAGS in commented  # the earlier whole-script substring check accepted this
     assert _gate_problems(commented)
+
+
+_GATE_PREFIX = 'run_logged unit-gate "$native_python" scripts/production_gate.py'
+_GATE_TAIL = (
+    f'{_GATE_FLAGS} \\\n    --evidence-dir "$evidence/gate" --raw-output-dir "$evidence/raw"'
+)
+
+
+def _split_gate(script: str, between: str) -> str:
+    canonical = f"{_GATE_PREFIX} \\\n    {_GATE_TAIL}"
+    assert canonical in script
+    partial = "--runtime-mode=cython --tier=unit"
+    return script.replace(canonical, f"{_GATE_PREFIX} {partial} {between} \\\n    {_GATE_TAIL}")
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        pytest.param(";", id="semicolon"),
+        pytest.param("&&", id="and"),
+        pytest.param("||", id="or"),
+        pytest.param("|", id="pipe"),
+        pytest.param("&", id="background"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_options_delivered_to_another_command(operator):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = _split_gate(script, f"{operator} echo")
+    assert mutated != script
+    assert _GATE_FLAGS in mutated  # a whole-script or whole-line flag search still passes
+    assert _gate_problems(script) == []
+    problems = _gate_problems(mutated)
+    assert any(f"control operator {operator!r}" in problem for problem in problems)
+
+
+def test_native_ci_gate_contract_rejects_the_independent_semicolon_counterexample():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    counterexample = (
+        'run_logged unit-gate "$native_python" scripts/production_gate.py'
+        " --runtime-mode=cython --tier=unit ; echo \\\n"
+        f"    {_GATE_FLAGS} \\\n"
+        '    --evidence-dir "$evidence/gate" --raw-output-dir "$evidence/raw"\n'
+    )
+    mutated = script.replace(f"{_GATE_PREFIX} \\\n    {_GATE_TAIL}\n", counterexample)
+    assert mutated != script
+    assert _gate_problems(mutated)
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(lambda c: f"({c})", id="subshell"),
+        pytest.param(lambda c: f"echo \\\n{c}", id="echo-prefix"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_gate_not_run_as_a_plain_command(wrap):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    canonical = f"{_GATE_PREFIX} \\\n    {_GATE_TAIL}"
+    assert canonical in script
+    mutated = script.replace(canonical, wrap(canonical))
+    assert _gate_problems(mutated)
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        pytest.param("echo", id="echo"),
+        pytest.param("true", id="true"),
+        pytest.param('"$other_python"', id="other-interpreter"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_a_different_invoked_program(program):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = script.replace(
+        _GATE_PREFIX, f"run_logged unit-gate {program} scripts/production_gate.py"
+    )
+    assert mutated != script
+    assert _GATE_FLAGS in mutated  # every required option is still present as data
+    assert _gate_problems(script) == []
+    assert any("invocation is" in problem for problem in _gate_problems(mutated))
+
+
+def test_native_ci_gate_contract_allows_quoted_and_commented_operators():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    quoted = script.replace('"$evidence/gate"', '"$evidence/gate;&|()"')
+    commented = script.replace(
+        '--raw-output-dir "$evidence/raw"', '--raw-output-dir "$evidence/raw" # ; echo && x'
+    )
+    assert quoted != script
+    assert commented != script
+    assert _gate_problems(quoted) == []
+    assert _gate_problems(commented) == []
 
 
 @pytest.mark.parametrize(
