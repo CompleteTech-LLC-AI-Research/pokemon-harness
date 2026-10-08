@@ -14,10 +14,12 @@ def _may_bypass(expression):
     """Can a comparison nested in this expression still go unchecked?
 
     ``assert x != y or True`` and ``assert True or x != y`` both parse to a
-    ``BoolOp``, and both leave the comparison unchecked: the ``or`` decides the
-    assert on its own when the other operand is truthy. The comparison node is
-    still present, so a presence-only check -- and ``_is_enforced``, which only
-    inspects ``try`` -- reports the contract as intact.
+    ``BoolOp``, and in both the comparison can no longer fail: the ``or``
+    decides the assert on its own when the other operand is truthy. (A later
+    comparison is skipped; an earlier one runs but its false result is
+    masked.) The comparison node is still present, so a presence-only check --
+    and ``_is_enforced``, which only inspects ``try`` -- reports the contract
+    as intact.
 
     A tautological operand decides it just as effectively as a bare ``True``,
     which is why the spelling of the bypass does not matter. Recursion covers
@@ -26,13 +28,14 @@ def _may_bypass(expression):
     that was trivially true.
 
     The two operators are handled separately, because they bypass in opposite
-    conditions. Under ``or`` any deciding operand skips its sibling when
-    truthy, so every operand is a candidate. Under ``and`` a sibling is skipped
-    only when an earlier operand is *falsy*, and then the assert itself fails,
-    so nothing is hidden: a truthy literal -- ``True and x != 1`` -- still
-    evaluates the comparison and the assert can fail. Only a *nested* bypass
-    inside an ``and`` operand that follows a leading run of literal ``True``
-    operands is still reported.
+    conditions. Under ``or`` a truthy deciding operand settles the assert, so
+    every operand is a candidate: a later sibling is skipped (``True or x``)
+    and an earlier comparison runs but cannot fail (``x != 1 or True``). Under
+    ``and`` a sibling is skipped only when an earlier operand is *falsy*, and
+    then the assert itself fails, so nothing is hidden: a truthy literal --
+    ``True and x != 1`` -- still evaluates the comparison and the assert can
+    fail. Only a *nested* bypass inside an ``and`` operand that follows a
+    leading run of literal ``True`` operands is still reported.
 
     A bare ``Compare`` operand does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --

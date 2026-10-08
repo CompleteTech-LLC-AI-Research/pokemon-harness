@@ -368,7 +368,8 @@ BYPASS_SHAPES = (
     ("literal run and comparison", "assert True and True and x != 1", True),
     ("count tautology and comparison", "assert len(y) >= 0 and x != 1", True),
     # A nested bypass behind the leading literal is still one: the inner `or`
-    # decides that operand, so the comparison inside it never runs.
+    # runs the comparison first, but its `True` operand masks a false result,
+    # so that operand cannot fail and neither can the assert.
     ("literal and nested or bypass", "assert True and (x != 1 or True)", False),
     # ...but not in a trailing position: the comparison is evaluated first.
     ("comparison and tautology", "assert x != 1 and (1 == 1)", True),
