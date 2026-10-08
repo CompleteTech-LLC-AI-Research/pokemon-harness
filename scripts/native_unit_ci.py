@@ -301,6 +301,10 @@ def _code(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _process_id(value: object) -> bool:
+    return _code(value) and value > 0
+
+
 def _fingerprint(identity: dict[str, Any]) -> str:
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -366,9 +370,9 @@ def validate_uv_audit(
             isinstance(argv, list)
             and argv
             and all(isinstance(item, str) for item in argv)
-            and _code(record.get("pid"))
+            and _process_id(record.get("pid"))
             and isinstance(record.get("executable"), str)
-            and _code(record.get("ppid"))
+            and _process_id(record.get("ppid"))
         ):
             problems.append(f"record {index}: malformed audit record")
         elif record["executable"] != argv[0]:

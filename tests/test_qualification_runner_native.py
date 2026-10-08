@@ -902,3 +902,51 @@ def test_uv_instrument_records_pid_and_parent_on_posix_layouts(tmp_path):
     mine = [r for r in records if r["argv"][-1] == "marker"]
     assert len(mine) == 1 and mine[0]["pid"] == int(done.stdout)
     assert mine[0]["ppid"] == os.getpid() and mine[0]["executable"] == "true"
+
+
+def _identity(field, value, pids=None, index=None):
+    def apply(records):
+        hit = [
+            i
+            for i, x in enumerate(records)
+            if (index == i if index is not None else x[field] in pids)
+        ]
+        return [{**x, field: value} if i in hit else x for i, x in enumerate(records)]
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        _identity("pid", 0, {100}),
+        _identity("pid", 0, {200}),
+        _identity("pid", 0, {101}),
+        _identity("pid", 0, {201}),
+        _identity("ppid", 0, {50}),
+        _identity("ppid", 0, {200}),
+        _identity("pid", 0, index=0),
+        _identity("ppid", 0, index=6),
+        _identity("pid", -7, {100}),
+        _identity("ppid", -50, {50}),
+        _identity("pid", True, {100}),
+        _identity("ppid", False, {50}),
+    ],
+    ids=[
+        "zero-build-pid",
+        "zero-check-pid",
+        "zero-build-probe-child-pid",
+        "zero-check-probe-child-pid",
+        "zero-shell-parent",
+        "zero-parent-of-check-probe-child",
+        "zero-pid-single-install-record",
+        "zero-ppid-single-build-probe-record",
+        "negative-build-pid",
+        "negative-shell-parent",
+        "boolean-build-pid",
+        "boolean-shell-parent",
+    ],
+)
+def test_uv_audit_rejects_non_positive_process_identities(change):
+    problems = _audit(change)
+    assert any("malformed audit record" in problem for problem in problems), problems
