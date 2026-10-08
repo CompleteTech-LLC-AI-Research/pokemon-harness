@@ -561,3 +561,61 @@ def test_uv_command_listing_rejects_pip_and_missing_harness():
 
     assert any("pip is installed" in p for p in _commands(listing(["pip", "pokered-harness"])))
     assert any("harness distribution" in p for p in _commands(listing(["cython"])))
+
+
+def _kind_case(optional, change=None):
+    from tests._qualification_runner_support import uv_expected, uv_native_build
+
+    ci = _uv_ci()
+    expected = uv_expected(ci)
+    document = uv_native_build(expected, optional=optional)
+    if change is not None:
+        change(document["runtime_identity"]["modules"])
+    live = document["runtime_identity"]
+    return ci.validate_native_build(document, expected, live)
+
+
+@pytest.mark.parametrize("optional", ["source", "cython"])
+def test_native_build_accepts_optional_modules_as_source_or_compiled(optional):
+    assert _kind_case(optional) == []
+
+
+def _set(name, **changes):
+    def apply(modules):
+        modules[name] = {**modules[name], **changes}
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    ("optional", "change", "expected_text"),
+    [
+        ("source", _set("pyboy.utils", kind="source", artifact="u.py"), "pyboy.utils"),
+        ("cython", _set("pyboy.core.mb", kind="source", artifact="m.py"), "pyboy.core.mb"),
+        ("cython", _set("pyboy.pyboy", kind="unknown"), "pyboy.pyboy"),
+        ("source", _set("pyboy", kind="unknown"), "identity module pyboy is not"),
+        ("source", _set("pyboy.link", kind="other"), "pyboy.link"),
+        ("source", _set("pyboy", kind=None), "identity module pyboy is not"),
+        ("source", _set("pyboy.link", kind="cython"), "consistent kind"),
+        ("cython", _set("pyboy", kind="source"), "consistent kind"),
+        ("cython", _set("pyboy.utils", kind="cython", artifact="utils.py"), "pyboy.utils"),
+        ("source", _set("pyboy.link", sha256="0" * 64), "pyboy.link"),
+        ("cython", _set("pyboy.link", artifact=None), "pyboy.link"),
+    ],
+    ids=[
+        "required-source",
+        "required-source-compiled-optional",
+        "required-unknown",
+        "optional-unknown",
+        "optional-other",
+        "optional-missing-kind",
+        "compiled-kind-source-file",
+        "source-kind-compiled-file",
+        "required-compiled-kind-source-file",
+        "optional-hash-drift",
+        "optional-no-artifact",
+    ],
+)
+def test_native_build_rejects_unknown_or_inconsistent_module_kinds(optional, change, expected_text):
+    problems = _kind_case(optional, change)
+    assert any(expected_text in problem for problem in problems), problems

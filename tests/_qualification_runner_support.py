@@ -625,20 +625,22 @@ def uv_audit_records(uv, target, expected=None):
     return [{"pid": pid, "executable": argv[0], "argv": argv} for pid, argv in argvs]
 
 
-def uv_native_build(expected):
+def uv_native_build(expected, optional="source"):
     import importlib.machinery
 
     suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
     names = expected["runtime_modules"]
-    artifacts = {f"m{i}.so": f"{i:064x}" for i in range(len(names))}
-    modules = {}
-    for index, name in enumerate(names):
-        cython = name in expected["cython_modules"]
-        modules[name] = {
-            "kind": "cython" if cython else "source",
-            "sha256": f"{index:064x}",
-            "artifact": f"m{index}.so",
-        }
+    kinds = {
+        n: "cython" if n in expected["cython_modules"] or optional == "cython" else "source"
+        for n in names
+    }
+    suffixes = {"cython": suffix, "source": ".py"}
+    files = {n: f"m{i}{suffixes[kinds[n]]}" for i, n in enumerate(names)}
+    artifacts = {files[n]: f"{i:064x}" for i, n in enumerate(names)}
+    modules = {
+        n: {"kind": kinds[n], "sha256": f"{i:064x}", "artifact": files[n]}
+        for i, n in enumerate(names)
+    }
     identity = {
         "python": expected["python_version"],
         "version": expected["version"],

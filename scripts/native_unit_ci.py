@@ -502,12 +502,25 @@ def validate_native_build(
     if not isinstance(modules, dict) or set(modules) != set(expected["runtime_modules"]):
         problems.append("identity module set differs from the runtime modules")
         modules = {}
+    extension = re.compile(r"\.(cpython-[\w-]+|abi3)\.(so|pyd)$")
     for name, item in modules.items():
-        kind = "cython" if name in expected["cython_modules"] else "source"
-        ok = isinstance(item, dict) and item.get("kind") == kind and _hex64(item.get("sha256"))
-        if ok and artifacts.get(item.get("artifact")) != item["sha256"]:
+        required = name in expected["cython_modules"]
+        kind = item.get("kind") if isinstance(item, dict) else None
+        artifact = item.get("artifact") if isinstance(item, dict) else None
+        ok = isinstance(item, dict) and _hex64(item.get("sha256"))
+        if required:
+            ok = ok and kind == "cython"
+        else:
+            ok = ok and kind in ("source", "cython")
+        if ok and isinstance(artifact, str):
+            native = extension.search(artifact) is not None
+            ok = native if kind == "cython" else artifact.endswith(".py")
+        else:
             ok = False
-        need(ok, f"identity module {name} is not a bound {kind} artifact")
+        if ok and artifacts.get(artifact) != item["sha256"]:
+            ok = False
+        policy = "cython" if required else "source or cython"
+        need(ok, f"identity module {name} is not a bound {policy} artifact of consistent kind")
     if live_identity is not None:
         need(identity == live_identity, "build identity differs from the installed runtime")
     return problems
