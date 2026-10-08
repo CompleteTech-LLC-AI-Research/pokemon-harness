@@ -20,25 +20,45 @@ from tests._timed_menu_frame_bound_support import assert_not_deadline_truncated
 
 
 def test_trade_pair_deadline_is_read_through_the_injected_clock():
-    """The trade-pair helper must reach its frame bound, not a wall clock (#274).
+    """Pin the injected-clock seam of the trade-pair owner helper (#274).
 
     The rows above all run at `--frame-limit=4`, where the owner retires in
-    about a millisecond. A 3 s wall-clock deadline cannot fire in that time, so
-    on their own they pass whether or not the helper reads the injected clock --
-    which is how the #268 seam could be reverted with every row still green.
+    about a millisecond. A real 3 s deadline is not expected to fire in that
+    time, so on their own they pass whether or not the helper reads the
+    injected clock -- which is how the #268 seam could be reverted with every
+    row still green.
 
-    These two rows close that gap from both sides, and the pair is what pins
-    the seam rather than either row alone:
+    This row closes that gap with two contracts under a fake clock that
+    advances a fixed step per read, so the test decides how much of the 3 s
+    budget the owner consumes:
 
-    * A fast clock must reach the frame bound and terminate as ``frame_bound``.
-      The owner has spent none of its 3 s budget, so the deadline branch is not
-      what stopped it.
-    * A slow clock must instead be cut off by the deadline. Only a clock whose
-      reads the helper controls can consume 3 s of budget across four calls, so
-      this row can only truncate if the seam is wired through.
+    * A fast fake clock (step 0.0) consumes none of the budget, so the owner
+      must reach the frame bound and terminate as ``frame_bound`` with all
+      four calls; the deadline branch is not what stopped it.
+    * A slow fake clock (step 0.5 per read) consumes the 3 s budget within the
+      owner's reads, so the deadline wins before four calls complete and the
+      run terminates as ``cancelled_or_deadline``.
 
-    Reverting the helper to ``time.monotonic()`` makes the second row retire at
-    the frame bound like the first, and it fails.
+    What each half discriminates, per the recorded #274 mutation analysis (not
+    re-executed by this documentation-only change):
+
+    * A full, consistent reversion to real time -- the helper takes its
+      deadline base from ``time.monotonic()`` and no longer injects the clock --
+      leaves the fast half passing. The slow half is the one that fails: nothing
+      consumes the fake budget, so the run ends as ``frame_bound`` instead of
+      the asserted deadline termination.
+    * Reverting only the owner's clock argument while the helper still builds
+      deadlines from the fake clock mixes epochs: fake deadlines near the
+      clock's start value of 1000.0 (about 1003 s) meet real monotonic reads.
+      The recorded #274 mutation of exactly this kind showed setup failures in
+      both halves. That outcome assumes the host's real monotonic clock is
+      already past those fake deadlines, was not re-run here, and is recorded
+      for that one partial mutation only; it does not isolate the seam.
+
+    So the slow half is the discriminating assertion for the full reversion and
+    the fast half guards the frame-bound contract. A failure of either or both
+    halves is not, on its own, a diagnosis: the mixed-epoch explanation is
+    claimed only for the recorded partial mutation described above.
     """
     _session, fast_record, _goal, _done_at = run_authored_goal_owner(clock_step=0.0)
     assert fast_record["errors"] == []

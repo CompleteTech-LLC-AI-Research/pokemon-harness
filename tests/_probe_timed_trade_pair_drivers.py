@@ -89,16 +89,19 @@ def run_authored_goal_owner(
     # the trade-pair rows, so the owner must reach its frame bound rather than be
     # cut off by a wall clock (#252). `#255` added the `clock` seam for this; the
     # milestone and menu rows use it and this helper still did not. A step of 0
-    # models an arbitrarily fast host, so the counts hold on any machine.
+    # models an arbitrarily fast host, so under the fake clock the counts do
+    # not depend on host speed.
     #
     # On its own the seam above is not pinned by these rows: at the default
-    # `--frame-limit=4` the owner retires in about a millisecond, so a 3 s
-    # deadline can never fire and every row passes with or without the seam
-    # (#274). `clock_step` and `frame_limit` exist so a sentinel row can make
-    # the fake clock consume enough of the 3 s budget for the deadline branch to
-    # genuinely compete with the frame bound, which is the only way to prove the
-    # helper reads the injected clock. The trade-pair rows keep the defaults, so
-    # their counts are unchanged.
+    # `--frame-limit=4` the owner retires in about a millisecond, so a real 3 s
+    # deadline is not expected to fire and the rows pass with or without the
+    # seam (#274). `clock_step` and `frame_limit` exist so a sentinel row can
+    # make the fake clock consume enough of the 3 s budget for the deadline
+    # branch to genuinely compete with the frame bound. The #274 sentinel row
+    # uses `clock_step` (0.0 fast, 0.5 slow) at the default frame limit; that
+    # fake-clock contract is how it shows the helper reads the injected clock,
+    # not a claim that no other method could. The trade-pair rows keep the
+    # defaults, so their counts are unchanged.
     # `FakeClock` lives in the shared frame-bound support module (#262), not in
     # either test module, so importing it here cannot re-introduce a cycle
     # between this helper and the two timed-menu test modules.
