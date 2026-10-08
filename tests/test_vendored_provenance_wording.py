@@ -462,11 +462,17 @@ _BOUNDARY_FACTS = (
 )
 
 
+# Redirections are not control operators; any other character of a punctuation run is.
+_REDIRECTION = re.compile(r"&>>|&>|>>|>&|<&|<<|<>|>\||>|<")
+
+
 def _control_operators(line: str) -> list[str]:
     """Unquoted shell control operators; quotes stay on tokens so a quoted ';' is not one."""
     lexer = shlex.shlex(line, posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
-    return [token for token in lexer if set(token) <= set(";&|()")]
+    return [
+        token for token in lexer if set(token) <= set("();<>|&") and _REDIRECTION.sub("", token)
+    ]
 
 
 def _gate_problems(script: str) -> list[str]:
@@ -664,6 +670,32 @@ def test_native_ci_gate_contract_rejects_a_different_invoked_program(program):
     assert _GATE_FLAGS in mutated  # every required option is still present as data
     assert _gate_problems(script) == []
     assert any("invocation is" in problem for problem in _gate_problems(mutated))
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        pytest.param(";> /dev/null echo", id="semicolon-redirect"),
+        pytest.param(";>/dev/null echo", id="semicolon-redirect-nospace"),
+        pytest.param("|& echo", id="pipe-stderr"),
+    ],
+)
+def test_native_ci_gate_contract_rejects_operators_grouped_with_redirections(between):
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    mutated = _split_gate(script, between)
+    assert mutated != script
+    assert _GATE_FLAGS in mutated
+    assert _gate_problems(script) == []
+    assert any("control operator" in problem for problem in _gate_problems(mutated))
+
+
+def test_native_ci_gate_contract_allows_plain_redirections():
+    script = (PROJECT_ROOT / "scripts" / "run_native_unit_ci.sh").read_text()
+    tail = '--raw-output-dir "$evidence/raw"'
+    for redirect in ("> /dev/null", "2>&1", ">& /dev/null", "&> /dev/null"):
+        mutated = script.replace(tail, f"{tail} {redirect}")
+        assert mutated != script
+        assert _gate_problems(mutated) == [], redirect
 
 
 def test_native_ci_gate_contract_allows_quoted_and_commented_operators():
