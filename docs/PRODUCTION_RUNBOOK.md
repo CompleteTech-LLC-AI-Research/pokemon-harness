@@ -1821,7 +1821,11 @@ the real-ROM qualification is a separate requirement.
   (lineage from pinned processes, the job's sessions, the worker the guardian reported on its pipe),
   terminates them and records an adoption proof. Any other adopted child is listed as unattributed, is never
   signalled, and keeps the cleanup unproven (reservation and trees retained). An orphan that left the job's
-  session and whose parent died before the first sweep is unattributed.
+  session and whose parent died before the first sweep is unattributed. When the process's own cgroup is
+  delegated to the executing user (cgroup v2 with `cgroup.kill`), each job also gets its own cgroup that the
+  guardian joins before it starts the worker; membership survives `setsid` and re-parenting, so cleanup is
+  `cgroup.kill` plus the kernel's own `populated 0` reading. On a host without delegation (for example a
+  root-owned `0::/` cgroup) that layer is unavailable and only the adoption proof applies.
 - **Strict aggregation.** The parent re-reads the referenced complete gate report itself and re-derives
   tiers, rows and verdict from it; rows come from the producer's actual per-test terminal records (all games,
   ordered `listener`/`connector` roles, per repetition) carried through the gate with
@@ -1842,6 +1846,6 @@ the real-ROM qualification is a separate requirement.
 Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
 with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy and
 the 18 orientation fixtures are not provided by this change. Also not implemented: a private copy of a
-writable base interpreter prefix, cgroup-level kernel ownership of every descendant, pinning the runtime
-manifest in the plan, and arbitration between the children's row admission. The authored controls drive real child processes
+writable base interpreter prefix, cgroup ownership on hosts without delegation, pinning the runtime manifest
+in the plan, and arbitration between the children's row admission. The authored controls drive real child processes
 but never run a gate or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.

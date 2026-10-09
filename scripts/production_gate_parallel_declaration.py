@@ -34,7 +34,10 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
             "owned process trees: authenticated guardian, parent status-pipe absence proof, "
             "pidfd-verified signals, parent-death signals, proof before any release or removal"
         ),
-        "orchestrator subreaper adoption with kernel-attributed pidfd cleanup and an adoption proof",
+        (
+            "orchestrator subreaper adoption with kernel-attributed pidfd cleanup and an adoption "
+            "proof; a delegated per-job cgroup (kill plus populated-0 proof) where the host has one"
+        ),
         "completed failures harvested before cancellation; partial evidence recovered and parsed",
         "a capacity loss reported by one child marks the one budget lost and cancels the siblings",
         (
@@ -49,7 +52,7 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         "nothing in this candidate has been executed; authored controls are not gameplay evidence",
         (
             "not implemented: private copy of a writable base interpreter prefix, cgroup ownership "
-            "of descendants, runtime manifest pinned in the plan, arbitration between child rows"
+            "without host delegation, runtime manifest pinned in the plan, arbitration of child rows"
         ),
         "release status remains PARTIAL",
     ],
