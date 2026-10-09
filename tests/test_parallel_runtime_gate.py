@@ -6,9 +6,9 @@ authored deterministic workers: they never run a gate, an emulator or a ROM, so 
 is gameplay, real-ROM or performance evidence and none of it closes the full dual-runtime run.
 """
 
+import contextlib
 import json
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -23,6 +23,12 @@ from scripts.production_gate_parallel import (
     run_parallel_plan,
 )
 from scripts.production_gate_parallel_processes import read_stat
+from tests._parallel_runtime_orphan_support import (
+    OBSERVATION,
+    SENTINEL_ARGV,
+    Survivor,
+    stop_owned_child,
+)
 from tests._parallel_runtime_report_support import make_plan
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,31 +55,9 @@ if name == "kill_guardian_orphan":
     time.sleep(0.3)
     os._exit(0)
 if name == "kill_guardian_observed_orphan":
-    import signal as _signal, subprocess as _subprocess
-    orphan = _subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
-                               start_new_session=True)
-    open(os.path.join(job_root, "orphan.pid"), "w").write(str(orphan.pid))
-    with open("/proc/%d/stat" % os.getppid()) as handle:
-        orchestrator = int(handle.read().rsplit(")", 1)[1].split()[1])
-    def pinned():
-        try:
-            names = os.listdir("/proc/%d/fdinfo" % orchestrator)
-        except OSError:
-            return False
-        for fd in names:
-            try:
-                with open("/proc/%d/fdinfo/%s" % (orchestrator, fd)) as info:
-                    if ("Pid:\t%d\n" % orphan.pid) in info.read():
-                        return True
-            except OSError:
-                continue
-        return False
-    give_up = time.time() + 20
-    while time.time() < give_up and not pinned():
-        time.sleep(0.02)
-    os.kill(os.getppid(), _signal.SIGKILL)
-    time.sleep(0.3)
-    os._exit(0)
+    sys.path.insert(0, repo)
+    from tests._parallel_runtime_orphan_support import pin_handshake_then_kill_guardian
+    pin_handshake_then_kill_guardian(job_root)
 if name == "arbiter_loss":
     sys.path.insert(0, repo)
     from scripts.gate_capacity_arbiter import ArbiterClient
@@ -570,19 +554,31 @@ def test_a_killed_guardian_is_contained_by_orchestrator_adoption_with_a_proven_c
 def test_an_orphan_pinned_before_its_guardian_died_is_removed_by_pidfd_with_a_proven_cleanup(
     tmp_path,
 ):
-    """Deterministic: the worker waits until the orchestrator holds a pidfd for its detached
-    grandchild (read from the orchestrator's own fdinfo), then SIGKILLs the guardian."""
+    """Deterministic and DISTINCT from the strict test above: the worker kills the guardian only
+    after recording kernel evidence that the orchestrator holds a pidfd for its detached
+    grandchild.  Without that evidence this fails as an unmet precondition, not as containment."""
 
-    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-    time.sleep(0.05)  # strictly earlier than any guardian start tick (10 ms granularity)
-    try:
+    sentinel, survivor = subprocess.Popen(SENTINEL_ARGV), Survivor()
+    with contextlib.ExitStack() as cleanup:  # both are always attempted, newest first
+        cleanup.callback(stop_owned_child, sentinel)
+        cleanup.callback(survivor.remove)
+        time.sleep(0.05)  # strictly earlier than any guardian start tick (10 ms granularity)
         budget = PairBudget(2)
         plan, root, report = run(
-            tmp_path, {"source": "kill_guardian_observed_orphan", "cython": "slow_pass:30"},
+            tmp_path,
+            {"source": "kill_guardian_observed_orphan", "cython": "slow_pass:30"},
             budget=budget,
         )
         pid_file = next((root / plan.run_id).glob("*/orphan.pid"))
-        assert not _alive(int(pid_file.read_text())), "a pinned orphan outlived the run"
+        orphan = int(pid_file.read_text())
+        held = survivor.capture(orphan)
+        recorded = pid_file.parent / OBSERVATION
+        assert recorded.exists(), "no pin evidence was recorded: precondition unmet"
+        seen = json.loads(recorded.read_text())
+        assert seen["pinned"] and seen["guardian_alive"], f"precondition unmet, not evidence: {seen}"
+        assert seen["orchestrator_pid"] == os.getpid() and seen["orphan_pid"] == orphan
+        assert seen["fdinfo_line"] == f"Pid:\t{orphan}" and seen["orphan_start"]
+        assert held == "gone", "a pinned orphan outlived the run"
         adoption = report["cleanup"][pid_file.parent.name]["process_tree"]["adoption"]
         assert states(report)["source"] == "failed" and report["overall"] == "FAIL"
         assert adoption["proof"] is True and adoption["root_gone"] is True
@@ -590,55 +586,36 @@ def test_an_orphan_pinned_before_its_guardian_died_is_removed_by_pidfd_with_a_pr
         assert not any("cleanup unproven" in item for item in report["orchestration_problems"])
         assert budget.reserved_total == 0, "a proven cleanup releases the reservation"
         assert sentinel.poll() is None, "an unrelated child of the orchestrator was signalled"
-    finally:
-        sentinel.kill()
-        sentinel.wait()
-
-
-def _remove_survivor(pid, start):
-    """The test's own cleanup of an orphan the project did not attribute: by pidfd, only the very
-    instance first seen.  This outer cleanup is never project proof."""
-
-    try:
-        descriptor = os.pidfd_open(pid)
-    except OSError:
-        return
-    try:
-        if (read_stat(pid) or (None,))[0] == start:
-            signal.pidfd_send_signal(descriptor, signal.SIGKILL)
-            os.waitid(os.P_PIDFD, descriptor, os.WEXITED)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
 
 
 def test_a_killed_guardians_orphan_never_gets_a_false_proof_whatever_the_host_can_attribute(
     tmp_path,
 ):
-    """The strict test above, asserting only what each kernel fact supports (UNPROVEN gap).
+    """Fail-closed safety evidence, DISTINCT from the strict test above and NOT its fulfilment.
 
-    A detached grandchild with its own session that was not pinned before its guardian was
-    SIGKILLed can be attributed to the job only through a joined job cgroup.  If the orphan is gone
-    the cleanup must be proven; if it is alive the project must have listed it as unattributed,
-    never signalled it, withheld the proof and kept the pair.  Any survivor is removed by the test.
+    The strict test requires the orphan to be removed.  This one asserts only what each kernel
+    fact supports (an UNPROVEN gap, not a containment claim): a detached grandchild with its own
+    session that was not pinned before its guardian was SIGKILLed can be attributed to the job only
+    through a joined job cgroup.  If it is gone the cleanup must be proven; if it is alive the
+    project must have listed it as unattributed, never signalled it, withheld the proof and kept
+    the pair.  The test then removes any survivor itself (bounded, held pidfd): outer cleanup.
     """
 
-    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-    time.sleep(0.05)  # strictly earlier than any guardian start tick (10 ms granularity)
-    survivor = None
-    try:
+    sentinel, survivor = subprocess.Popen(SENTINEL_ARGV), Survivor()
+    with contextlib.ExitStack() as cleanup:  # both are always attempted, newest first
+        cleanup.callback(stop_owned_child, sentinel)
+        cleanup.callback(survivor.remove)
+        time.sleep(0.05)  # strictly earlier than any guardian start tick (10 ms granularity)
         budget = PairBudget(2)
         plan, root, report = run(
             tmp_path, {"source": "kill_guardian_orphan", "cython": "slow_pass:30"}, budget=budget
         )
         pid_file = next((root / plan.run_id).glob("*/orphan.pid"))
         orphan = int(pid_file.read_text())
-        stat = read_stat(orphan)
-        survivor = (orphan, stat[0]) if stat is not None and stat[2] != "Z" else None
+        alive = survivor.capture(orphan) == "held"
         adoption = report["cleanup"][pid_file.parent.name]["process_tree"]["adoption"]
         assert states(report)["source"] == "failed" and report["overall"] == "FAIL"
-        if survivor is not None:  # no kernel fact tied it to the job: reported, not signalled
+        if alive:  # no kernel fact tied it to the job: reported, not signalled
             assert orphan in adoption["unattributed"] and adoption["proof"] is False
             assert adoption["cgroup"]["joined"] is False, "a joined cgroup must have removed it"
             assert any("cleanup unproven" in item for item in report["orchestration_problems"])
@@ -647,11 +624,6 @@ def test_a_killed_guardians_orphan_never_gets_a_false_proof_whatever_the_host_ca
             assert adoption["proof"] is True and adoption["unattributed"] == []
             assert budget.reserved_total == 0
         assert sentinel.poll() is None, "an unrelated child of the orchestrator was signalled"
-    finally:
-        sentinel.kill()
-        sentinel.wait()
-        if survivor is not None:
-            _remove_survivor(*survivor)
 
 
 def test_failed_and_interrupted_jobs_keep_their_temp_trees_and_recover_partial_evidence(tmp_path):
