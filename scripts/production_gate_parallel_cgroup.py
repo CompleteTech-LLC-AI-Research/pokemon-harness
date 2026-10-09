@@ -136,4 +136,32 @@ class JobCgroup:
                 pass
 
 
-__all__ = ("JobCgroup", "own_cgroup_path")
+def kernel_ownership(
+    required: bool, *, create: Callable[[str], JobCgroup] | None = None
+) -> dict[str, object]:
+    """Whether whole-tree kernel ownership (a delegated per-job cgroup) can be established here.
+
+    One empty probe cgroup is created and removed.  ``admitted`` is False only when ownership is
+    required and unavailable: the run is then refused BEFORE any child exists.  A run that is not
+    required to be qualified proceeds on adoption and retention evidence alone and is labelled
+    unqualified; neither outcome ever claims full #107 acceptance.
+    """
+
+    probe = (create or JobCgroup.create)(f"pokered-probe-{os.getpid()}")
+    qualified = probe.available
+    if qualified:
+        probe.remove()
+    return {
+        "required": required,
+        "qualified": qualified,
+        "admitted": qualified or not required,
+        "reason": "" if qualified else probe.reason,
+        "qualification": (
+            "kernel ownership available; full #107 acceptance is not claimed"
+            if qualified
+            else "UNQUALIFIED_COMPATIBILITY: no kernel ownership, retention evidence only"
+        ),
+    }
+
+
+__all__ = ("JobCgroup", "kernel_ownership", "own_cgroup_path")

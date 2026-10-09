@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.gate_capacity_arbiter import ArbiterClient, ArbiterError
 from scripts.gate_capacity_policy import (
     _PRESSURE_METRIC,
     LIFECYCLE_STATES,
@@ -60,8 +61,12 @@ class CapacityAdmission:
         clock: Any | None = None,
         availability: Any | None = None,
         deadline_seconds: float | None = None,
+        arbiter: ArbiterClient | None = None,
     ) -> None:
         self.policy = policy
+        # In a concurrent job the parent arbiter is the live book: a slot exists only with its grant.
+        # None (ordinary standalone use) leaves every decision exactly as it was.
+        self.arbiter = arbiter
         self.max_concurrent_pairs = policy.max_concurrent_pairs
         self.deadline_seconds = (
             policy.admission_deadline_seconds if deadline_seconds is None else deadline_seconds
@@ -107,6 +112,20 @@ class CapacityAdmission:
         self.decisions.append(decision)
         return decision
 
+    def _grant(self, pair_id: str) -> tuple[str, str]:
+        """("granted" | "denied" | "closed", reason) from the live arbiter, or granted without one."""
+
+        if self.arbiter is None:
+            return "granted", ""
+        return self.arbiter.reserve(pair_id)
+
+    def _report(self, kind: str, pair_id: str, reason: str) -> None:
+        if self.arbiter is not None:
+            try:
+                self.arbiter.event(kind, pair_id, reason)
+            except ArbiterError:
+                pass  # the client latched closed: admission stays closed for good
+
     def _expire(self, pair_id: str, reason: str, now: float) -> AdmissionDecision:
         """Record a terminal expiry and forget the pair's waiting state."""
 
@@ -114,6 +133,7 @@ class CapacityAdmission:
         self.waiting_since.pop(pair_id, None)
         if pair_id in self.queued:
             self.queued.remove(pair_id)
+        self._report("expired", pair_id, reason)
         return self._record(
             AdmissionDecision(
                 pair_id,
@@ -140,6 +160,7 @@ class CapacityAdmission:
         self.waiting_since.pop(pair_id, None)
         if pair_id in self.queued:
             self.queued.remove(pair_id)
+        self._report("blocked", pair_id, reason)
         return self._record(
             AdmissionDecision(
                 pair_id,
@@ -168,6 +189,10 @@ class CapacityAdmission:
             # A row blocked before dispatch stays terminal for the same reason:
             # a retry must not turn an unavailable-capacity block into a pass.
             return self.block(pair_id, "capacity was unavailable when the row was planned")
+        if self.arbiter is not None and self.arbiter.closed_reason and pair_id not in self.active:
+            return self.block(
+                pair_id, f"live arbiter closed admission: {self.arbiter.closed_reason}"
+            )
         if pair_id in self.active:
             return self._record(
                 AdmissionDecision(
@@ -189,19 +214,24 @@ class CapacityAdmission:
                 now,
             )
         if status == "ok" and len(self.active) < self.max_concurrent_pairs:
-            decision = AdmissionDecision(
-                pair_id,
-                "ok",
-                f"slot {len(self.active) + 1}/{self.max_concurrent_pairs} admitted",
-                self._next_sequence(),
-                now,
-                owner=True,
-            )
-            self.active[pair_id] = decision
-            self.waiting_since.pop(pair_id, None)
-            if pair_id in self.queued:
-                self.queued.remove(pair_id)
-            return self._record(decision)
+            verdict, why = self._grant(pair_id)
+            if verdict == "closed":
+                return self.block(pair_id, f"live arbiter closed admission: {why}")
+            if verdict == "granted":
+                decision = AdmissionDecision(
+                    pair_id,
+                    "ok",
+                    f"slot {len(self.active) + 1}/{self.max_concurrent_pairs} admitted",
+                    self._next_sequence(),
+                    now,
+                    owner=True,
+                )
+                self.active[pair_id] = decision
+                self.waiting_since.pop(pair_id, None)
+                if pair_id in self.queued:
+                    self.queued.remove(pair_id)
+                return self._record(decision)
+            status, reason = "arbiter", f"the live arbiter denied the slot: {why}"
 
         self.waiting_since.setdefault(pair_id, now)
         if pair_id not in self.queued:
@@ -279,6 +309,7 @@ class CapacityAdmission:
         if pair_id in self.queued:
             self.queued.remove(pair_id)
         self._expired.add(pair_id)
+        self._report("abandoned", pair_id, reason)
         return self._record(
             AdmissionDecision(pair_id, status, reason, self._next_sequence(), now, owner=False)
         )
@@ -286,7 +317,12 @@ class CapacityAdmission:
     def release(self, pair_id: str) -> AdmissionDecision | None:
         """Release a slot and promote the next queued pair, if any."""
 
-        self.active.pop(pair_id, None)
+        was_active = self.active.pop(pair_id, None) is not None
+        if was_active and self.arbiter is not None:
+            try:
+                self.arbiter.release(pair_id)
+            except ArbiterError:
+                pass  # latched closed: the waiters below are refused by the closed check
         now = self._clock()
         while self.queued:
             status, _reason = self._availability_status()
@@ -301,6 +337,14 @@ class CapacityAdmission:
                     f"admission deadline {self.deadline_seconds:g}s exceeded while queued",
                     now,
                 )
+                continue
+            verdict, why = self._grant(candidate)
+            if verdict == "denied":
+                self.queued.insert(0, candidate)
+                self.waiting_since[candidate] = waited_since
+                return None
+            if verdict == "closed":
+                self._expire(candidate, f"live arbiter closed admission: {why}", now)
                 continue
             decision = AdmissionDecision(
                 candidate,
@@ -452,6 +496,7 @@ class CapacitySession:
             policy,
             clock=self.clock,
             availability=self._availability,
+            arbiter=ArbiterClient.from_environment(),
         )
         self.availability_status = "unknown"
         self.availability_reasons: list[str] = []

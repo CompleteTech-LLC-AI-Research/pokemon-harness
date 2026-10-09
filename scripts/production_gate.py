@@ -219,6 +219,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--parallel-allow-unqualified",
+        action="store_true",
+        help=(
+            "with --parallel-runtimes, run even without kernel ownership of each job's whole "
+            "process tree (a delegated per-job cgroup); the report is labelled "
+            "UNQUALIFIED_COMPATIBILITY and never claims full acceptance"
+        ),
+    )
+    parser.add_argument(
         "--parallel-compare-to",
         type=Path,
         help=(
@@ -249,10 +258,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         args.parallel_run_root is not None
         or args.parallel_serial
+        or args.parallel_allow_unqualified
         or args.parallel_compare_to is not None
     ) and not args.parallel_runtimes:
         parser.error(
-            "--parallel-run-root/--parallel-serial/--parallel-compare-to require --parallel-runtimes"
+            "--parallel-run-root/--parallel-serial/--parallel-allow-unqualified/"
+            "--parallel-compare-to require --parallel-runtimes"
         )
     if args.parallel_runtimes and (
         args.raw_output_dir is not None or args.evidence_dir is not None

@@ -12,7 +12,6 @@ identity, structured rows and timestamps match the frozen plan.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -28,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.production_gate_parallel_arbiter import ArbiterHub
 from scripts.production_gate_parallel_artifacts import (
     TERMINAL_ARTIFACT_NAME,
     aggregate_outcomes,
@@ -47,7 +47,7 @@ from scripts.production_gate_parallel_capacity import (
     require_parallel_capacity,
     write_pinned_policy,
 )
-from scripts.production_gate_parallel_cgroup import JobCgroup
+from scripts.production_gate_parallel_cgroup import JobCgroup, kernel_ownership
 from scripts.production_gate_parallel_declaration import COVERAGE_DECLARATION
 from scripts.production_gate_parallel_identity import (
     expected_identity,
@@ -143,6 +143,7 @@ def job_environment(
     port_range: tuple[int, int] | None = None,
     deadline_epoch: float | None = None,
     handoff: str | None = None,
+    arbiter_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build an isolated environment: private writers, one thread per library, job token."""
 
@@ -158,6 +159,7 @@ def job_environment(
         env["POKERED_PARALLEL_DEADLINE_EPOCH"] = repr(deadline_epoch)
     if handoff:
         env[HANDOFF_ENV] = handoff
+    env.update(arbiter_env or {})
     return env
 
 
@@ -366,6 +368,7 @@ def run_parallel_plan(
     wall_clock: Callable[[], datetime] = _wall_now,
     adopt_orphans: bool = True,
     use_cgroup: bool = True,
+    require_kernel_ownership: bool = False,
 ) -> dict[str, Any]:
     """Dispatch every planned job (phase by phase) and return the retained aggregate report."""
 
@@ -374,6 +377,7 @@ def run_parallel_plan(
             plan,
             adoption=adoption,
             use_cgroup=use_cgroup,
+            require_kernel_ownership=require_kernel_ownership,
             run_root=run_root,
             project_root=project_root,
             budget=budget,
@@ -398,6 +402,7 @@ def _run_plan(
     *,
     adoption: OrchestratorAdoption,
     use_cgroup: bool,
+    require_kernel_ownership: bool,
     run_root: Path,
     project_root: Path,
     budget: PairBudget,
@@ -429,6 +434,13 @@ def _run_plan(
     ranges = assign_port_ranges(list(phase_of))
     problems.extend(port_range_problems(ranges))
     handoffs = HandoffRegistry()
+
+    def signal_guardians(_reason: str) -> None:
+        for item in tuple(running):  # the live arbiter lost: every owned sibling is told at once
+            item.owned.signal_root(signal.SIGTERM)
+
+    hub = ArbiterHub(budget.total_pairs, on_loss=signal_guardians)
+    ownership = kernel_ownership(require_kernel_ownership)
 
     def close_handoff(job_id: str) -> dict[str, Any] | None:
         ledger = handoffs.close(job_id)
@@ -501,10 +513,12 @@ def _run_plan(
         guardian, guardian_problems = read_guardian_receipt(
             item.receipt, item.secret, item.process.pid, item.owned.root_start
         )
+        ledger = hub.unregister(item.job_id)
         cleanup[item.job_id] = {
             "process_tree": receipt,
             "guardian": guardian or {},
             "listener_handoff": close_handoff(item.job_id),
+            "arbiter": ledger,
         }
         ports_seen[item.job_id] = set(item.owned.ports)
         worker_pid = guardian.get("worker_pid") if guardian else None
@@ -524,10 +538,23 @@ def _run_plan(
             receipt["proof"] = False
         view.close()
         lost = child_capacity_loss(outcome.get("capacity"))
+        if not lost and not (guardian and guardian.get("phase") == "final"):
+            lost = "the job's guardian was lost"
+        if (
+            capacity_policy_text is not None
+            and outcome["state"] == "passed"
+            and ledger
+            and (not ledger["hello"] or ledger["unreleased"])
+        ):
+            outcome["state"] = "failed"
+            outcome["artifact_problems"].append(
+                "the child had no live arbiter session or ended holding reservations"
+            )
         if lost:
             outcome["state"] = "failed"
-            outcome["artifact_problems"].append(f"the child reported a capacity loss: {lost}")
+            outcome["artifact_problems"].append(f"the child reported a loss: {lost}")
             budget.mark_lost(f"{item.job_id}: {lost}")
+            hub.lose(f"{item.job_id}: {lost}")
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
         running.remove(item)
@@ -575,6 +602,7 @@ def _run_plan(
             "process_tree": receipt,
             "guardian": guardian or {},
             "listener_handoff": close_handoff(item.job_id),
+            "arbiter": hub.unregister(item.job_id),
         }
         ports_seen[item.job_id] = set(item.owned.ports)
 
@@ -619,6 +647,7 @@ def _run_plan(
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
             launched = wall_clock()
             handoff = handoffs.open(job_id, *ranges[job_id])
+            arbiter_env = hub.register(job_id, job["pairs"], job.get("policy_sha256", ""))
             job_cgroup = (
                 JobCgroup.create(f"pokered-{body['run_id'][:12]}-{job_id}")
                 if use_cgroup
@@ -638,6 +667,7 @@ def _run_plan(
                     port_range=ranges[job_id],
                     deadline_epoch=launched.timestamp() + float(job["deadline_seconds"]),
                     handoff=handoff,
+                    arbiter_env=arbiter_env,
                 ),
                 stdin=subprocess.DEVNULL,
                 stdout=handles[0],
@@ -646,6 +676,7 @@ def _run_plan(
             )
         except (OSError, CapacityError) as exc:
             close_handoff(job_id)
+            hub.unregister(job_id)
             job_cgroup.remove()
             for handle in handles:
                 handle.close()
@@ -684,6 +715,11 @@ def _run_plan(
 
     def poll() -> None:
         while running:
+            hub.check_leases()
+            if hub.closed_reason:
+                budget.mark_lost(hub.closed_reason)
+                cancel(f"live arbiter closed admission: {hub.closed_reason}")
+                break
             harvest()
             if not running:
                 break
@@ -693,6 +729,7 @@ def _run_plan(
             reason = live.check()
             if reason:
                 budget.mark_lost(reason)
+                hub.lose(f"capacity loss: {reason}")
                 cancel(f"capacity loss: {reason}")
                 break
             for item in list(running):
@@ -734,6 +771,13 @@ def _run_plan(
 
     try:
         _write_plan_file(run_root, plan)
+        if ownership["admitted"]:
+            hub.start()
+        else:
+            cancel_reason = (
+                f"refused before any child: kernel ownership is required ({ownership['reason']})"
+            )
+            problems.append(cancel_reason)
         previous: list[dict[str, Any]] = []
         for index, phase in enumerate(phase_names(body)):
             jobs = jobs_in_phase(body, phase)
@@ -779,6 +823,7 @@ def _run_plan(
         if running:
             cancel(cancel_reason or "orchestrator exit")
         handoffs.close_all()
+        hub.stop()
         for job_id in phase_of:
             if job_id not in outcomes:
                 settle(job_id, "not_started", f"not started: {cancel_reason or 'no dispatch'}")
@@ -829,6 +874,7 @@ def _run_plan(
             load=(load_before, os.getloadavg() if hasattr(os, "getloadavg") else ()),
         )
     )
+    report["kernel_ownership"] = ownership
     return report
 
 
@@ -868,42 +914,6 @@ def _report_extras(
         "coverage_declaration": COVERAGE_DECLARATION,
         **({"overall": "FAIL"} if problems else {}),
     }
-
-
-def write_report(run_root: Path, report: Mapping[str, Any]) -> Path:
-    """Write the single published aggregate next to the plan, never overwriting."""
-
-    path = run_root / str(report["run_id"]) / "parallel-report.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    return path
-
-
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def render_report_text(report: Mapping[str, Any]) -> str:
-    lines = [
-        f"parallel runtime gate run {report.get('run_id')} plan {str(report.get('plan_sha256'))[:12]}",
-        (
-            f"commit {report.get('commit')} elapsed {report.get('elapsed_seconds')}s "
-            f"mode {report.get('execution_mode')}"
-        ),
-    ]
-    for job in report.get("jobs", []):
-        lines.append(
-            f"  {job.get('job_id')} ({job.get('mode')}): {job.get('state')} "
-            f"exit={job.get('child_exit_status')}"
-        )
-        lines.extend(f"    {item}" for item in job.get("artifact_problems", [])[:3])
-    lines.extend(f"problem: {item}" for item in report.get("problems", []))
-    lines.extend(f"orchestration: {item}" for item in report.get("orchestration_problems", []))
-    lines.extend(f"limitation: {item}" for item in report.get("limitations", []))
-    lines.append(f"overall: {report.get('overall')}")
-    return "\n".join(lines)
 
 
 def terminal_artifact_path(tree: Mapping[str, Path]) -> Path:

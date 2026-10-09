@@ -6,7 +6,7 @@ membership reader and the kill/empty proof are driven through their injectable r
 
 from pathlib import Path
 
-from scripts.production_gate_parallel_cgroup import JobCgroup, own_cgroup_path
+from scripts.production_gate_parallel_cgroup import JobCgroup, kernel_ownership, own_cgroup_path
 
 
 def hierarchy(tmp_path):
@@ -79,3 +79,22 @@ def test_kill_is_proven_only_when_the_kernel_reports_the_group_empty(tmp_path):
     events.write_text("populated 0\nfrozen 0\n", encoding="ascii")
     assert group.kill(clock=Clock(), sleeper=lambda _s: None) is True
     assert JobCgroup(None).kill() is False and not JobCgroup(None).contains(1)
+
+
+def test_kernel_ownership_is_required_or_explicitly_unqualified(tmp_path):
+    root = hierarchy(tmp_path)
+
+    def available(name):
+        return JobCgroup.create(name, root=root, own="/user.slice/session", required=())
+
+    def missing(name):
+        return JobCgroup(None, "this process's cgroup is not delegated to the executing user")
+
+    ready = kernel_ownership(True, create=available)
+    assert ready["qualified"] and ready["admitted"] and "not claimed" in ready["qualification"]
+    assert not list((root / "user.slice" / "session").glob("pokered-probe-*")), "probe removed"
+    refused = kernel_ownership(True, create=missing)
+    assert not refused["qualified"] and not refused["admitted"] and refused["reason"]
+    permitted = kernel_ownership(False, create=missing)
+    assert not permitted["qualified"] and permitted["admitted"]
+    assert permitted["qualification"].startswith("UNQUALIFIED_COMPATIBILITY")

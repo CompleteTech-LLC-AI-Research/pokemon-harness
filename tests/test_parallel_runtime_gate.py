@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -23,9 +24,12 @@ from scripts.production_gate_parallel import (
 from scripts.production_gate_parallel_processes import read_stat
 from tests._parallel_runtime_report_support import make_plan
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 FAKE_WORKER = r"""
 import json, os, sys, time
 plan_path, job_id, job_root, scenario = sys.argv[1:5]
+repo = sys.argv[5] if len(sys.argv) > 5 else ""
 name, _, argument = scenario.partition(":")
 plan = json.load(open(plan_path))
 job = next(item for item in plan["jobs"] if item["job_id"] == job_id)
@@ -43,6 +47,13 @@ if name == "kill_guardian_orphan":
     os.kill(os.getppid(), _signal.SIGKILL)
     time.sleep(0.3)
     os._exit(0)
+if name == "arbiter_loss":
+    sys.path.insert(0, repo)
+    from scripts.gate_capacity_arbiter import ArbiterClient
+    client = ArbiterClient.from_environment()
+    client.reserve("pair-1")
+    client.event("capacity_loss", "pair-1", "memory pressure observed by the child")
+    time.sleep(30)
 if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
@@ -150,7 +161,15 @@ def run(tmp_path, scenarios, plan=None, budget=None, **kwargs):
         mode = selected_plan.job(job_id)["mode"]
         executable = "/nonexistent/python" if scenarios[mode] == "nostart" else sys.executable
         plan_file = str(tree["root"].parent / "plan.json")
-        return [executable, str(script), plan_file, job_id, str(tree["root"]), scenarios[mode]]
+        return [
+            executable,
+            str(script),
+            plan_file,
+            job_id,
+            str(tree["root"]),
+            scenarios[mode],
+            str(REPO_ROOT),
+        ]
 
     environment = {"PATH": os.environ.get("PATH", ""), "POKERED_TEST_SECRET": "leak"}
     kwargs.setdefault("grace_seconds", 0.5)
@@ -461,12 +480,12 @@ def test_a_guardian_killed_from_outside_keeps_the_reservation_and_fails_the_run(
     budget = PairBudget(2)
     _, _, report = run(
         tmp_path,
-        {"source": "kill_guardian", "cython": "pass"},
+        {"source": "kill_guardian", "cython": "slow_pass:30"},
         budget=budget,
         adopt_orphans=False,  # adoption and cgroup off is the unproven case; defaults are next test
         use_cgroup=False,
     )
-    assert states(report) == {"source": "failed", "cython": "passed"}
+    assert states(report) == {"source": "failed", "cython": "interrupted"}
     assert budget.reserved_total == 1, "a reservation was released without a proven cleanup"
     assert any("cleanup unproven" in item for item in report["orchestration_problems"])
     assert report["overall"] == "FAIL"
@@ -483,7 +502,7 @@ def test_a_killed_guardian_is_contained_by_orchestrator_adoption_with_a_proven_c
     try:
         budget = PairBudget(2)
         plan, root, report = run(
-            tmp_path, {"source": "kill_guardian_orphan", "cython": "pass"}, budget=budget
+            tmp_path, {"source": "kill_guardian_orphan", "cython": "slow_pass:30"}, budget=budget
         )
         pid_files = list((root / plan.run_id).glob("*/orphan.pid"))
         assert pid_files, "the scenario never started its detached grandchild"
@@ -529,3 +548,52 @@ def test_a_capacity_loss_reported_by_one_child_cancels_the_other_and_marks_the_b
     assert "capacity loss reported by" in report["cancellation"]
     assert budget.lost_reason and "memory pressure" in budget.lost_reason
     assert report["overall"] == "FAIL"
+
+
+def test_a_loss_reported_over_the_live_arbiter_cancels_every_owned_sibling_immediately(tmp_path):
+    budget = PairBudget(2)
+    _, _, report = run(
+        tmp_path, {"source": "arbiter_loss", "cython": "slow_pass:30"}, budget=budget
+    )
+    assert "live arbiter closed admission" in report["cancellation"]
+    assert all(job["state"] != "passed" for job in report["jobs"]) and report["overall"] == "FAIL"
+    assert budget.lost_reason and "memory pressure" in budget.lost_reason
+    assert report["elapsed_seconds"] < 20, "the sibling was told at once, not at its own deadline"
+    ledger = report["cleanup"]["source-job"]["arbiter"]
+    assert ledger["hello"] is True and ledger["events"][0]["kind"] == "capacity_loss"
+
+
+UNAVAILABLE = {
+    "required": True,
+    "qualified": False,
+    "admitted": False,
+    "reason": "this process's cgroup is not delegated to the executing user",
+    "qualification": "UNQUALIFIED_COMPATIBILITY: no kernel ownership, retention evidence only",
+}
+
+
+def test_kernel_ownership_is_required_before_any_child_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "scripts.production_gate_parallel.kernel_ownership", lambda required: UNAVAILABLE
+    )
+    plan, root, report = run(
+        tmp_path, {"source": "pass", "cython": "pass"}, require_kernel_ownership=True
+    )
+    assert {job["state"] for job in report["jobs"]} == {"not_started"} and report[
+        "overall"
+    ] == "FAIL"
+    assert "kernel ownership is required" in report["cancellation"]
+    assert not (root / plan.run_id / "source-job").exists(), "no job tree, hence no child, was made"
+    assert report["kernel_ownership"]["qualified"] is False
+
+
+def test_an_explicitly_unqualified_run_proceeds_but_is_labelled_and_never_accepted(
+    tmp_path, monkeypatch
+):
+    permitted = {**UNAVAILABLE, "required": False, "admitted": True}
+    monkeypatch.setattr(
+        "scripts.production_gate_parallel.kernel_ownership", lambda required: permitted
+    )
+    _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"})
+    assert states(report) == {"source": "passed", "cython": "passed"}
+    assert report["kernel_ownership"]["qualification"].startswith("UNQUALIFIED_COMPATIBILITY")

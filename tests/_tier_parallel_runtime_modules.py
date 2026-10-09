@@ -1,6 +1,7 @@
 """Test modules of the concurrent runtime gate (#107), kept out of the 999-line registry."""
 
 PARALLEL_RUNTIME_PARTS = (
+    "arbiter",
     "artifacts",
     "capacity",
     "cgroup",

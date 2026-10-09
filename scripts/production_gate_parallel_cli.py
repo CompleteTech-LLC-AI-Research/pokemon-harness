@@ -22,10 +22,7 @@ from scripts.production_gate_parallel import (
     INPUT_FILES,
     Measurer,
     default_worker_argv,
-    file_sha256,
-    render_report_text,
     run_parallel_plan,
-    write_report,
 )
 from scripts.production_gate_parallel_capacity import (
     LiveCapacity,
@@ -41,6 +38,7 @@ from scripts.production_gate_parallel_isolation import (
 )
 from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan, cli_deadlines
 from scripts.production_gate_parallel_processes import interrupt_on_signals
+from scripts.production_gate_parallel_report import file_sha256, render_report_text, write_report
 from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes, runtime_digest
 from scripts.production_gate_parallel_validation import loads_strict
 
@@ -295,6 +293,7 @@ def run_parallel_cli(
             serial=bool(getattr(args, "parallel_serial", False)),
             measure=measure,
             capacity_policy_text=capacity_policy_path.read_text(encoding="utf-8"),
+            require_kernel_ownership=not getattr(args, "parallel_allow_unqualified", False),
         )
     report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}
     if any("cleanup unproven" in item for item in report.get("orchestration_problems", [])):
