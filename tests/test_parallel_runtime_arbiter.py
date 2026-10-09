@@ -234,36 +234,24 @@ def test_an_arbiter_that_stops_serving_is_a_loss_for_everyone(hub):
     assert "stopped serving" in hub.closed_reason and len(hub.lost) == 1
 
 
-def test_the_hello_binds_the_digest_of_the_policy_bytes_the_gate_actually_loaded(hub, tmp_path):
-    policy = tmp_path / "capacity-policy.json"
-    policy.write_text('{"max_concurrent_pairs": 1}', encoding="utf-8")
-    loaded = wire.policy_file_digest(policy)
-    assert (
-        loaded is not None and len(loaded) == 64 and wire.policy_file_digest(tmp_path / "x") is None
-    )
-    env = hub.register("source-job", 1, loaded)
-    other = hub.register("cython-job", 1, "c" * 64)
-    good = ArbiterClient.from_environment(env, policy=loaded)
-    assert good is not None and not good.closed_reason
-    forged = ArbiterClient.from_environment(other, policy=loaded)
-    assert forged is not None and forged.closed_reason and "plan-pinned" in hub.closed_reason
+def test_an_enrolled_real_session_joins_the_live_book_and_reports_a_lost_observation(hub, tmp_path):
+    """V10 control revised in V11: the session no longer connects by itself; the production entry
+    enrols it explicitly (the observed behaviour - joining the book and reporting loss - is kept)."""
 
-
-def test_a_real_session_in_a_concurrent_job_joins_the_live_book_and_reports_a_lost_observation(
-    hub, tmp_path, monkeypatch
-):
     from scripts import gate_capacity
+    from scripts.gate_capacity_arbiter import ARBITER_ENV_NAMES, enroll_production
     from tests._gate_capacity_support import SequenceSampler, make_facts, make_policy
 
-    for name, value in hub.register("source-job", 1, PIN).items():
-        monkeypatch.setenv(name, value)
+    environment = dict(hub.register("source-job", 1, PIN))
     session = gate_capacity.CapacitySession(
         make_policy(max_concurrent_pairs=1),
         repo_root=tmp_path,
         sampler=SequenceSampler([make_facts(), make_facts(psi_cpu_some_avg300=100)]),
-        policy_sha256=PIN,
     )
-    assert session.admission.arbiter is not None and not session.admission.arbiter.closed_reason
+    assert session.admission.arbiter is None, "a session never connects by itself"
+    client = enroll_production(session, policy_sha256=PIN, environ=environment)
+    assert client is session.admission.arbiter and not client.closed_reason
+    assert not [name for name in ARBITER_ENV_NAMES if name in environment]
     session.observe()
     assert session.availability_status == "ok" and not hub.closed_reason
     session.observe()
@@ -271,19 +259,19 @@ def test_a_real_session_in_a_concurrent_job_joins_the_live_book_and_reports_a_lo
     assert hub.closed_reason and len(hub.lost) == 1, "the lost observation reached the live book"
 
 
-def test_a_session_whose_policy_digest_differs_from_the_plan_pin_closes_admission(
-    hub, tmp_path, monkeypatch
+def test_an_enrolled_session_whose_parsed_digest_differs_from_the_plan_pin_closes_admission(
+    hub, tmp_path
 ):
     from scripts import gate_capacity
+    from scripts.gate_capacity_arbiter import enroll_production
     from tests._gate_capacity_support import SequenceSampler, make_facts, make_policy
 
-    for name, value in hub.register("source-job", 1, PIN).items():
-        monkeypatch.setenv(name, value)
+    environment = dict(hub.register("source-job", 1, PIN))
     session = gate_capacity.CapacitySession(
         make_policy(max_concurrent_pairs=1),
         repo_root=tmp_path,
         sampler=SequenceSampler([make_facts()]),
-        policy_sha256="b" * 64,
     )
+    enroll_production(session, policy_sha256="b" * 64, environ=environment)
     assert session.admission.arbiter.closed_reason and "plan-pinned" in hub.closed_reason
     assert session.admission.admit("a").status == "blocked"

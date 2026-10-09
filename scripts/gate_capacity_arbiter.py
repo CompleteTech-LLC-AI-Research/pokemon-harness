@@ -20,13 +20,14 @@ import json
 import os
 import socket
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 ENV_NAME = "POKERED_ARBITER_NAME"
 ENV_KEY = "POKERED_ARBITER_KEY"
 ENV_JOB = "POKERED_ARBITER_JOB"
 ENV_POLICY = "POKERED_ARBITER_POLICY"
+ARBITER_ENV_NAMES = (ENV_NAME, ENV_KEY, ENV_JOB, ENV_POLICY)
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 2048
 MAX_TEXT = 200
@@ -78,16 +79,6 @@ def unseal(key: bytes, data: bytes) -> dict[str, Any]:
     if not isinstance(mac, str) or not hmac.compare_digest(mac, sign(key, body)):
         raise ArbiterError("message is not authenticated by the job key")
     return body
-
-
-def policy_file_digest(path: object) -> str | None:
-    """sha256 of the capacity policy file this process loaded, or None when it cannot be read."""
-
-    try:
-        with open(str(path), "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()
-    except OSError:
-        return None
 
 
 def clip(value: object) -> str:
@@ -214,7 +205,34 @@ class ArbiterClient:
         self._conn.close()
 
 
+def enroll_production(
+    session: Any, *, policy_sha256: str | None, environ: MutableMapping[str, str] | None = None
+) -> ArbiterClient | None:
+    """Explicit production enrolment of a gate's capacity session in the parent's live book.
+
+    Only the production entry point calls this, with the digest of the policy bytes it parsed.  It
+    reads the job identity and key from the environment ONCE, binds that digest, connects, attaches
+    the client to the session's admission controller and REMOVES the credentials from the
+    environment so no child process (pytest, matrix workers) can inherit them.  Outside a concurrent
+    job it returns None; inside one a missing digest or any failure raises, so the gate never runs
+    un-enrolled.  A session built anywhere else (a synthetic control, a unit test) never connects.
+    """
+
+    source = os.environ if environ is None else environ
+    try:
+        if source.get(ENV_NAME) and not policy_sha256:
+            raise ArbiterError("a concurrent job needs the digest of the policy bytes it parsed")
+        client = ArbiterClient.from_environment(source, policy=policy_sha256)
+    finally:
+        for name in ARBITER_ENV_NAMES:
+            source.pop(name, None)
+    if client is not None:
+        session.admission.arbiter = client
+    return client
+
+
 __all__ = (
+    "ARBITER_ENV_NAMES",
     "ENV_JOB",
     "ENV_KEY",
     "ENV_NAME",
@@ -223,7 +241,6 @@ __all__ = (
     "ArbiterClient",
     "ArbiterError",
     "peek",
-    "policy_file_digest",
     "seal",
     "sign",
     "unseal",

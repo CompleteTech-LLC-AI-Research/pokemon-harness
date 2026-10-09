@@ -314,7 +314,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.capacity_policy is not None:
         capacity_path = _path_from_project_root(project_root, args.capacity_policy)
-        policy, policy_error = gate_capacity.load_capacity_policy(capacity_path)
+        policy, policy_error, policy_digest = gate_capacity.load_capacity_policy_captured(
+            capacity_path
+        )
         if policy is None:
             capacity_payload = gate_capacity.unavailable_capacity(
                 f"capacity policy blocked: {policy_error}"
@@ -322,16 +324,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             capacity_payload["status"] = "blocked"
             configuration_problems.append(f"capacity policy blocked: {policy_error}")
         else:
-            # A concurrent job's parent compares this with the plan-pinned policy digest.
-            session_options: dict[str, object] = {
-                "policy_sha256": policy_file_digest(capacity_path)
-            }
+            session_options: dict[str, object] = {}
             if args.parallel_runtimes and args.parallel_run_root is not None:
                 # Sample the filesystem the concurrent run actually consumes.
                 session_options["temp_root"] = args.parallel_run_root.expanduser().resolve()
             capacity_session = gate_capacity.CapacitySession(
                 policy, repo_root=project_root, **session_options
             )
+            # A concurrent job enrols here, bound to the digest of the bytes just parsed.
+            enroll_production(capacity_session, policy_sha256=policy_digest)
             loaded_policy, loaded_policy_path = policy, capacity_path
 
     early_smoke = not (args.unit_only or args.tier or args.smoke_only)
@@ -648,7 +649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 # The split modules' names are re-exported verbatim so the gate's module surface
 # (and every ``gate.<name>`` monkeypatch target the gate tests rely on) is unchanged.
-from scripts.gate_capacity_arbiter import policy_file_digest
+from scripts.gate_capacity_arbiter import enroll_production
 from scripts.production_gate_assets import (
     _path_from_env,  # noqa: F401  (retained facade attribute: gate._path_from_env)
     _path_from_project_root,

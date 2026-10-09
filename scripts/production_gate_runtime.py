@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 
 # Direct names this module calls; cyclic back-edges go through _entry.
+from scripts.gate_capacity_arbiter import ARBITER_ENV_NAMES
 from scripts.production_gate_assets import (
     parse_expected_pyboy_revision,
     parse_expected_pyboy_version,
@@ -54,6 +55,8 @@ def build_test_environment(
         raise ValueError(f"unsupported runtime mode: {runtime_mode!r}")
 
     environment = {key: value for key, value in os.environ.items()}
+    for name in ARBITER_ENV_NAMES:  # job credentials are for the gate process only
+        environment.pop(name, None)
     environment["POKERED_ROM_ROOT"] = str(rom_root)
     environment["POKERED_FIXTURE_ROOT"] = str(fixture_root)
     environment["PYTHONUNBUFFERED"] = "1"

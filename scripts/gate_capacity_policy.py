@@ -9,6 +9,7 @@ unaffected.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import math
@@ -218,6 +219,42 @@ def load_capacity_policy(path: str | Path) -> tuple[CapacityPolicy | None, str |
     if problems:
         return None, "capacity policy is invalid: " + "; ".join(problems)
     return policy, None
+
+
+def load_capacity_policy_captured(
+    path: str | Path,
+) -> tuple[CapacityPolicy | None, str | None, str | None]:
+    """Read the policy file ONCE, then hash and parse those same captured bytes.
+
+    Returns ``(policy, error, sha256)``.  The digest is that of the bytes that were parsed, so it is
+    loaded-byte evidence; a digest of a pathname read again later is not.  The schema is checked
+    explicitly (a JSON object, then field types, then the policy invariants) and nothing raises.
+    """
+
+    policy_path = Path(path)
+    try:
+        data = policy_path.read_bytes()
+    except FileNotFoundError:
+        return None, f"capacity policy not found: {policy_path}", None
+    except OSError as exc:
+        return None, f"cannot read capacity policy: {exc}", None
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        return None, f"cannot decode capacity policy: {exc}", digest
+    except (json.JSONDecodeError, RecursionError) as exc:
+        return None, f"capacity policy is not valid JSON: {exc}", digest
+    if not isinstance(document, dict):
+        return None, "capacity policy must be a JSON object", digest
+    try:
+        policy = capacity_policy_from_dict(document)
+    except (TypeError, ValueError, KeyError) as exc:
+        return None, str(exc), digest
+    problems = validate_policy(policy)
+    if problems:
+        return None, "capacity policy is invalid: " + "; ".join(problems), digest
+    return policy, None, digest
 
 
 def facts_to_dict(facts: Any) -> dict[str, Any]:
