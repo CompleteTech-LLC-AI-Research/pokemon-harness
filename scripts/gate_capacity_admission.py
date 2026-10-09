@@ -119,6 +119,11 @@ class CapacityAdmission:
             return "granted", ""
         return self.arbiter.reserve(pair_id)
 
+    def report_loss(self, reason: str) -> None:
+        """Tell the live arbiter that this child's own capacity observation was lost."""
+
+        self._report("capacity_loss", "", reason)
+
     def _report(self, kind: str, pair_id: str, reason: str) -> None:
         if self.arbiter is not None:
             try:
@@ -753,6 +758,15 @@ class CapacitySession:
         return sample
 
     def _apply_sample(self, sample: CapacitySample) -> None:
+        before = self.availability_status
+        self._apply_sample_state(sample)
+        if before == "ok" and self.availability_status != "ok":
+            # Capacity this child saw healthy is gone: the one live book must hear it at once.
+            self.admission.report_loss(
+                "; ".join(self.availability_reasons) or self.availability_status
+            )
+
+    def _apply_sample_state(self, sample: CapacitySample) -> None:
         if (
             sample.status == "ok"
             and self.clock() - sample.monotonic_seconds >= self.policy.admission_deadline_seconds

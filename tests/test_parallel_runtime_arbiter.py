@@ -195,3 +195,11 @@ def test_without_an_arbiter_the_controller_behaves_exactly_as_before():
     admission = CapacityAdmission(POLICY)
     assert [admission.admit(name).status for name in ("a", "b", "c")] == ["ok", "ok", "queued"]
     assert admission.release("a").promoted
+
+
+def test_a_loss_of_the_childs_own_capacity_observation_reaches_the_live_book_at_once(hub):
+    sibling = connect(hub, "cython-job", 1)
+    admission = CapacityAdmission(POLICY, arbiter=connect(hub, "source-job", 1))
+    admission.report_loss("memory pressure rose above the policy")
+    assert "memory pressure" in hub.closed_reason and len(hub.lost) == 1
+    assert sibling.reserve("p")[0] == "closed", "the sibling's admission closed at once"
