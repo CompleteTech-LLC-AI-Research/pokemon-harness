@@ -29,6 +29,10 @@ plan = json.load(open(plan_path))
 job = next(item for item in plan["jobs"] if item["job_id"] == job_id)
 mode = job["mode"]
 started = time.time()
+if name == "kill_guardian":
+    import signal as _signal
+    os.kill(os.getppid(), _signal.SIGKILL)
+    time.sleep(0.3)
 if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
@@ -428,3 +432,12 @@ def test_with_the_early_smoke_all_four_jobs_run_in_phase_order_and_are_retained(
         "source-job",
         "cython-job",
     ]
+
+
+def test_a_guardian_killed_from_outside_keeps_the_reservation_and_fails_the_run(tmp_path):
+    budget = PairBudget(2)
+    _, _, report = run(tmp_path, {"source": "kill_guardian", "cython": "pass"}, budget=budget)
+    assert states(report) == {"source": "failed", "cython": "passed"}
+    assert budget.reserved_total == 1, "a reservation was released without a proven cleanup"
+    assert any("cleanup unproven" in item for item in report["orchestration_problems"])
+    assert report["overall"] == "FAIL"
