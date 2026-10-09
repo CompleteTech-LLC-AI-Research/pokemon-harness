@@ -47,6 +47,8 @@ from scripts.production_gate_parallel_capacity import (
     require_parallel_capacity,
     write_pinned_policy,
 )
+from scripts.production_gate_parallel_cgroup import JobCgroup
+from scripts.production_gate_parallel_declaration import COVERAGE_DECLARATION
 from scripts.production_gate_parallel_identity import (
     expected_identity,
     identity_differences,
@@ -109,60 +111,6 @@ LIMITATIONS = (
     ),
     "none of this source has been executed: new and updated controls await a Sol-admitted batch",
 )
-
-
-COVERAGE_DECLARATION = {
-    "implemented": [
-        "opt-in --parallel-runtimes with sequential execution as the unchanged default",
-        (
-            "immutable frozen plan: run/commit/per-runtime build/input/asset identities, the "
-            "complete collected selection, derived finite deadlines, fail_fast and one capacity budget"
-        ),
-        (
-            "private immutable snapshot (own git repository) of the checkout and ROM/fixtures with "
-            "a real write-denial probe; verifiable equivalent-root provenance for the native guard"
-        ),
-        (
-            "private frozen copy of the interpreter environment with kernel-checked protection of "
-            "the base interpreter, stdlib and mapped libraries (a writable base refuses the run)"
-        ),
-        (
-            "owner-held listening sockets handed to the production listeners with validation and "
-            "acknowledgment; the effective child policy digests frozen in the plan"
-        ),
-        "phases: both additional smokes complete before any selected-tier job; both retained",
-        (
-            "rows from the producer's actual per-test terminal records, re-derived by the parent "
-            "from the verified gate report; independently measured identities; bounded total JSON"
-        ),
-        (
-            "capacity: the one global policy partitioned into per-child policies, session sampling "
-            "of the run filesystem under background monitoring, fail-closed admission and loss"
-        ),
-        (
-            "owned process trees: authenticated guardian, parent status-pipe absence proof, "
-            "pidfd-verified signals, parent-death signals, proof before any release or removal"
-        ),
-        "orchestrator subreaper adoption with kernel-attributed pidfd cleanup and an adoption proof",
-        "completed failures harvested before cancellation; partial evidence recovered and parsed",
-        "a capacity loss reported by one child marks the one budget lost and cancels the siblings",
-        (
-            "production comparison of two re-validated bundles on parent-observed serial and "
-            "concurrent intervals, resource traces and lifecycle proofs"
-        ),
-    ],
-    "exclusions": [
-        "full real-ROM dual-runtime run over the six tiers (#107.5) is NOT done",
-        "elapsed-time comparison against sequential execution on equivalent conditions is NOT done",
-        "operator allocation (#85/#86), #106 policy and the 18 orientation fixtures are unmet",
-        "nothing in this candidate has been executed; authored controls are not gameplay evidence",
-        (
-            "not implemented: private copy of a writable base interpreter prefix, cgroup ownership "
-            "of descendants, runtime manifest pinned in the plan, arbitration between child rows"
-        ),
-        "release status remains PARTIAL",
-    ],
-}
 
 
 def _wall_now() -> datetime:
@@ -417,6 +365,7 @@ def run_parallel_plan(
     sleeper: Callable[[float], None] = time.sleep,
     wall_clock: Callable[[], datetime] = _wall_now,
     adopt_orphans: bool = True,
+    use_cgroup: bool = True,
 ) -> dict[str, Any]:
     """Dispatch every planned job (phase by phase) and return the retained aggregate report."""
 
@@ -424,6 +373,7 @@ def run_parallel_plan(
         return _run_plan(
             plan,
             adoption=adoption,
+            use_cgroup=use_cgroup,
             run_root=run_root,
             project_root=project_root,
             budget=budget,
@@ -447,6 +397,7 @@ def _run_plan(
     plan: ParallelPlan,
     *,
     adoption: OrchestratorAdoption,
+    use_cgroup: bool,
     run_root: Path,
     project_root: Path,
     budget: PairBudget,
@@ -667,10 +618,16 @@ def _run_plan(
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
             launched = wall_clock()
             handoff = handoffs.open(job_id, *ranges[job_id])
+            job_cgroup = (
+                JobCgroup.create(f"pokered-{body['run_id'][:12]}-{job_id}")
+                if use_cgroup
+                else JobCgroup(None, "disabled by the caller")
+            )
             process, secret = launch_guardian(
                 receipt_path,
                 grace_seconds,
                 worker_argv,
+                cgroup=str(job_cgroup.path) if job_cgroup.available else "",
                 cwd=project_root,
                 env=job_environment(
                     tree,
@@ -710,6 +667,7 @@ def _run_plan(
                     adoption=adoption,
                     status=process.guardian_status,  # type: ignore[attr-defined]
                     known_children=lambda: {i.process.pid for i in running},
+                    cgroup=job_cgroup,
                 ),
                 launched,
                 receipt_path,

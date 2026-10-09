@@ -462,7 +462,8 @@ def test_a_guardian_killed_from_outside_keeps_the_reservation_and_fails_the_run(
         tmp_path,
         {"source": "kill_guardian", "cython": "pass"},
         budget=budget,
-        adopt_orphans=False,  # v8: adoption off is the unproven case; the default is the next test
+        adopt_orphans=False,  # adoption and cgroup off is the unproven case; defaults are next test
+        use_cgroup=False,
     )
     assert states(report) == {"source": "failed", "cython": "passed"}
     assert budget.reserved_total == 1, "a reservation was released without a proven cleanup"

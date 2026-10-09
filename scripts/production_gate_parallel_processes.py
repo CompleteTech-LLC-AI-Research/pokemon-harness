@@ -41,6 +41,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
 
+from scripts.production_gate_parallel_cgroup import JobCgroup
 from scripts.production_gate_parallel_validation import loads_strict
 
 JOB_TOKEN_ENV = "POKERED_PARALLEL_JOB_TOKEN"
@@ -217,8 +218,11 @@ class OwnedTree:
         adoption: OrchestratorAdoption | None = None,
         status: GuardianStatus | None = None,
         known_children: Callable[[], set[int]] = set,
+        cgroup: JobCgroup | None = None,
     ) -> None:
         self.root_pid = root_pid
+        self.cgroup = cgroup
+        self.cgroup_joined = False
         self._known_children = known_children
         self.adoption = adoption
         self.status = status
@@ -281,6 +285,8 @@ class OwnedTree:
         if not self.contained or (not force and now - self._last < self._observe_seconds):
             return
         self._last = now
+        if self.cgroup is not None and not self.cgroup_joined:
+            self.cgroup_joined = self.cgroup.contains(self.root_pid)
         frontier = sorted(self._alive_set())
         while frontier:
             parent = frontier.pop()
@@ -347,8 +353,10 @@ class OwnedTree:
             if again is None or again[0] != stat[0]:
                 os.close(descriptor)
                 continue
-            mine = read_session(pid) in sessions or (
-                worker is not None and (pid, stat[0]) == worker
+            mine = (
+                read_session(pid) in sessions
+                or (worker is not None and (pid, stat[0]) == worker)
+                or (self.cgroup_joined and self.cgroup is not None and self.cgroup.contains(pid))
             )
             if mine:
                 self._entries[pid] = (descriptor, stat[0])
@@ -416,6 +424,11 @@ class OwnedTree:
             limit = clock() + max(grace_seconds, 1.0)
             while self._alive_set() and clock() < limit:
                 sleeper(0.02)
+        emptied = False
+        if self.cgroup is not None and self.cgroup_joined:
+            emptied = self.cgroup.kill(clock=clock, sleeper=sleeper)
+            if emptied:
+                self.pin_new()
         self._reap_orphans()
         remaining = sorted(self._alive_set())
         surviving = sorted(self.current_ports())
@@ -428,14 +441,26 @@ class OwnedTree:
             "root_gone": root_gone,
             "orphans_pinned": self.orphans_pinned,
             "unattributed": sorted(self.unattributed),
+            "cgroup": {
+                "configured": self.cgroup is not None,
+                "available": bool(self.cgroup is not None and self.cgroup.available),
+                "reason": self.cgroup.reason if self.cgroup is not None else "not configured",
+                "joined": self.cgroup_joined,
+                "emptied": emptied,
+            },
         }
         adoption["proof"] = bool(
-            adoption["at_launch"]
-            and adoption["at_proof"]
-            and root_gone
-            and not self.unattributed
-            and not remaining
+            (emptied and not remaining)
+            or (
+                adoption["at_launch"]
+                and adoption["at_proof"]
+                and root_gone
+                and not self.unattributed
+                and not remaining
+            )
         )
+        if emptied and self.cgroup is not None:
+            self.cgroup.remove()
         receipt = {
             "tracked": len(self._entries),
             "adopted_total": self.adopted_total,
@@ -490,6 +515,8 @@ import ctypes, hashlib, hmac, json, os, resource, subprocess, time
 
 receipt_path, grace = sys.argv[1], float(sys.argv[2])
 secret_fd, status_fd, argv = int(sys.argv[3]), int(sys.argv[4]), sys.argv[6:]
+cgroup = sys.argv[5][9:] if sys.argv[5].startswith("--cgroup=") else ""
+cgroup_error = ""
 parent = os.getppid()
 secret = bytes.fromhex(os.read(secret_fd, 256).decode())
 os.close(secret_fd)
@@ -518,6 +545,7 @@ def write(body):
 
 def final(**fields):
     base = {"phase": "final", "contained": True, "worker_pid": None, "worker_status": None,
+            "cgroup": cgroup, "cgroup_error": cgroup_error,
             "worker_pgid": None, "stopped_by_signal": stopped[0] if stopped else None,
             "adopted": [], "killed": [], "remaining": [], "proof": True}
     write(dict(base, **fields))
@@ -530,7 +558,13 @@ if os.getppid() != parent:
 if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
     final(contained=False, proof=False, reason="subreaper could not be established")
     sys.exit(70)
-write({"phase": "ready"})  # handlers and subreaper are in place: a stop signal is now handled
+if cgroup:
+    try:
+        with open(cgroup + "/cgroup.procs", "w") as handle:
+            handle.write(str(me))
+    except OSError as exc:
+        cgroup_error = type(exc).__name__
+write({"phase": "ready", "cgroup": cgroup, "cgroup_error": cgroup_error})  # handlers and subreaper are in place
 note(b"R")
 if stopped:
     final(never_started=True)
@@ -686,7 +720,12 @@ class GuardianStatus:
 
 
 def launch_guardian(
-    receipt_path: Path, grace_seconds: float, worker_argv: list[str], **popen_kwargs: Any
+    receipt_path: Path,
+    grace_seconds: float,
+    worker_argv: list[str],
+    *,
+    cgroup: str = "",
+    **popen_kwargs: Any,
 ) -> tuple[subprocess.Popen[Any], bytes]:
     """Start the guardian; the HMAC key and the status pipe never reach the worker."""
 
@@ -706,7 +745,7 @@ def launch_guardian(
                 str(grace_seconds),
                 str(secret_read),
                 str(status_write),
-                "--",
+                f"--cgroup={cgroup}",
                 *worker_argv,
             ],
             pass_fds=(secret_read, status_write),
