@@ -247,3 +247,43 @@ def test_the_hello_binds_the_digest_of_the_policy_bytes_the_gate_actually_loaded
     assert good is not None and not good.closed_reason
     forged = ArbiterClient.from_environment(other, policy=loaded)
     assert forged is not None and forged.closed_reason and "plan-pinned" in hub.closed_reason
+
+
+def test_a_real_session_in_a_concurrent_job_joins_the_live_book_and_reports_a_lost_observation(
+    hub, tmp_path, monkeypatch
+):
+    from scripts import gate_capacity
+    from tests._gate_capacity_support import SequenceSampler, make_facts, make_policy
+
+    for name, value in hub.register("source-job", 1, PIN).items():
+        monkeypatch.setenv(name, value)
+    session = gate_capacity.CapacitySession(
+        make_policy(max_concurrent_pairs=1),
+        repo_root=tmp_path,
+        sampler=SequenceSampler([make_facts(), make_facts(psi_cpu_some_avg300=100)]),
+        policy_sha256=PIN,
+    )
+    assert session.admission.arbiter is not None and not session.admission.arbiter.closed_reason
+    session.observe()
+    assert session.availability_status == "ok" and not hub.closed_reason
+    session.observe()
+    assert session.availability_status != "ok"
+    assert hub.closed_reason and len(hub.lost) == 1, "the lost observation reached the live book"
+
+
+def test_a_session_whose_policy_digest_differs_from_the_plan_pin_closes_admission(
+    hub, tmp_path, monkeypatch
+):
+    from scripts import gate_capacity
+    from tests._gate_capacity_support import SequenceSampler, make_facts, make_policy
+
+    for name, value in hub.register("source-job", 1, PIN).items():
+        monkeypatch.setenv(name, value)
+    session = gate_capacity.CapacitySession(
+        make_policy(max_concurrent_pairs=1),
+        repo_root=tmp_path,
+        sampler=SequenceSampler([make_facts()]),
+        policy_sha256="b" * 64,
+    )
+    assert session.admission.arbiter.closed_reason and "plan-pinned" in hub.closed_reason
+    assert session.admission.admit("a").status == "blocked"
