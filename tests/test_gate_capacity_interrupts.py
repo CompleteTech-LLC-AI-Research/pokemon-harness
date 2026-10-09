@@ -597,8 +597,9 @@ def _native_none_signal(monkeypatch):
     def fake_signal(signum, handler):
         calls.append((signum, handler))
         if handler is None:
-            raise TypeError("signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object")
-        return None
+            raise TypeError(
+                "signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object"
+            )
 
     stub = types.SimpleNamespace(
         SIGINT=signal.SIGINT, signal=fake_signal, getsignal=lambda _signum: None

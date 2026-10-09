@@ -343,7 +343,9 @@ def run_tier(
     finalization_guard = _defer_sigint_while_finalizing()
     try:
         if omitted_failures:
-            iteration_failures.append(f"[...{omitted_failures} additional failure entries omitted...]")
+            iteration_failures.append(
+                f"[...{omitted_failures} additional failure entries omitted...]"
+            )
         if failed_output:
             output_tail = failed_output
 
@@ -355,12 +357,15 @@ def run_tier(
             status = "FAIL"
         elif aggregate.total == 0:
             status = "FAIL"
-            output_tail = f"pytest selected no tests for marker expression {TIER_EXPRESSIONS[name]!r}"
+            output_tail = (
+                f"pytest selected no tests for marker expression {TIER_EXPRESSIONS[name]!r}"
+            )
         elif required and aggregate.skipped:
             status = "FAIL"
             output_tail = (
                 f"required tier produced {aggregate.skipped} skip(s); "
-                "missing/unsupported coverage is not accepted in the production gate\n" + output_tail
+                "missing/unsupported coverage is not accepted in the production gate\n"
+                + output_tail
             )
         elif aggregate.skipped:
             # Optional coverage may be unavailable on a BYO-ROM machine, but a
