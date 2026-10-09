@@ -866,8 +866,10 @@ def source_mutant(monkeypatch, target, name: str, anchor: str, replacement: str)
     exec(compile(text, f"<mutant {name}>", "exec"), vars(module), scope)  # noqa: S102
     mutant = scope[name] if is_module else scope["_Holder"].__dict__[name]
     assert mutant is not original and mutant.__code__.co_code != original.__code__.co_code
-    with monkeypatch.context() as patch:
-        patch.setattr(target, name, mutant)
-        assert getattr(target, name) is mutant
-        yield original
-    assert getattr(target, name) is original
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(target, name, mutant)
+            assert getattr(target, name) is mutant
+            yield original
+    finally:
+        assert getattr(target, name) is original

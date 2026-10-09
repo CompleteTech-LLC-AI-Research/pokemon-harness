@@ -602,6 +602,62 @@ def _assert_battle_routes_through_seams() -> None:
     assert "announce_sync(sync_id=14)" not in source and "cooperative_sync(sync_id=15" not in source
 
 
+class _RecordedSeams(_BattleHarness):
+    """Actual ``_battle`` on the stub peer; each seam records itself, then runs the ORIGINAL helper."""
+
+    def _battle_turn_barrier_loop(self):
+        self.events.append(("seam", "loop", self.battle_turn_announced))
+        _PeerDriveBattleMixin._battle_turn_barrier_loop(self)
+        self.events.append(
+            ("seam", "loop-done", self.battle_turn_announced, self.peer_battle_turn_ready)
+        )
+
+    def _battle_turn_post_barrier(self):
+        self.events.append(
+            ("seam", "post", self.battle_turn_announced, self.peer_battle_turn_ready)
+        )
+        _PeerDriveBattleMixin._battle_turn_post_barrier(self)
+        self.events.append(("seam", "post-done"))
+
+    def peer_shutdown_sync(self, *, ready_sync_id, **_kwargs):
+        self.events.append(("shutdown", ready_sync_id))
+
+
+def _assert_real_battle_delegates(monkeypatch, which: str) -> None:
+    """Run the real ``_battle`` (stub peer, no network or ROM): recorded calls prove delegation."""
+    assert (
+        _RecordedSeams._battle_turn_barrier_loop
+        is not _PeerDriveBattleMixin._battle_turn_barrier_loop
+    )
+    _patch_sync_boundary(monkeypatch)
+    harness = _RecordedSeams(settle_after_step=True, peer_marker=True)
+    harness._battle()
+    events = harness.events
+    marks = [
+        ("seam", "loop", False),
+        ("seam", "loop-done", True, True),
+        ("seam", "post", True, True),
+        ("sync", 15),
+        ("shutdown", 21),
+        ("seam", "post-done"),
+    ]
+    at = [events.index(mark) for mark in marks]
+    assert at == sorted(at) and len(set(at)) == len(marks)
+    assert ("sync", 15) not in events[: at[2]]
+    assert harness.backend.announced.count(14) == 1 and harness.backend.polled.count(14) == 1
+    assert (harness.battle_turn_announced, harness.peer_battle_turn_ready) == (True, True)
+    if which == "loop":
+        inside = events[at[0] + 1 : at[1]]
+        assert inside.count(("step", 20)) == 1 and ("sync", 15) not in inside
+    else:
+        inside = events[at[2] + 1 : at[5]]
+        assert inside[0] == ("sync", 15) and inside[-1] == ("shutdown", 21)
+        assert [e for e in inside if e[0] in ("sync", "shutdown")] == [
+            ("sync", 15),
+            ("shutdown", 21),
+        ]
+
+
 _LOOP_CASES = (
     (
         "ordinary-turn-announces-then-polls",
@@ -642,10 +698,11 @@ _LOOP_CASES = (
 @pytest.mark.parametrize("case", _LOOP_CASES, ids=[case[0] for case in _LOOP_CASES])
 def test_tcp_battle_turn_barrier_loop(case, monkeypatch) -> None:
     name, kinds, ends, polls, announces, polled, steps, announced, ready, logs = case
-    clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(battle_driver, "time", SimpleNamespace(monotonic=lambda: clock.now))
     if name == _LOOP_CASES[0][0]:
         _assert_battle_routes_through_seams()
+        _assert_real_battle_delegates(monkeypatch, "loop")
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(battle_driver, "time", SimpleNamespace(monotonic=lambda: clock.now))
     peer = _SeamPeer(clock, kinds, ends, polls)
     peer._battle_turn_barrier_loop()
     kinds_called = [call[0] for call in peer.calls]
@@ -667,10 +724,11 @@ _POST_CASES = (
 
 @pytest.mark.parametrize("case", _POST_CASES)
 def test_tcp_battle_turn_post_barrier(case, monkeypatch) -> None:
-    clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(battle_driver, "time", SimpleNamespace(monotonic=lambda: clock.now))
     if case == _POST_CASES[0]:
         _assert_battle_routes_through_seams()
+        _assert_real_battle_delegates(monkeypatch, "post")
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(battle_driver, "time", SimpleNamespace(monotonic=lambda: clock.now))
     peer = _SeamPeer(clock, deadline=10_000.0, boom=case == _POST_CASES[1])
     peer.battle_turn_announced = case != _POST_CASES[2]
     peer._battle_turn_post_barrier()
