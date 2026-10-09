@@ -291,17 +291,35 @@ def test_capacity_loss_or_an_unknown_quota_cancels_running_jobs_and_marks_the_bu
     tmp_path, probe_value
 ):
     budget = PairBudget(2)
+    readings = iter([8, 8])  # the two admissions see full capacity; every later poll sees the loss
     _, _, report = run(
         tmp_path,
         {"source": "hang", "cython": "hang"},
         budget=budget,
-        capacity_probe=lambda: probe_value,
+        capacity_probe=lambda: next(readings, probe_value),
     )
     assert states(report) == {"source": "interrupted", "cython": "interrupted"}
     assert "capacity loss" in report["cancellation"]
     assert budget.lost_reason
     assert report["overall"] == "FAIL"
     assert budget.reserved_total == 0
+
+
+@pytest.mark.parametrize("probe_value", [1, 0, None])
+def test_insufficient_or_unknown_initial_capacity_refuses_dispatch_before_any_process(
+    tmp_path, probe_value
+):
+    budget = PairBudget(2)
+    plan, root, report = run(
+        tmp_path,
+        {"source": "pass", "cython": "pass"},
+        budget=budget,
+        capacity_probe=lambda: probe_value,
+    )
+    assert states(report) == {"source": "not_started", "cython": "not_started"}
+    assert any("refused before dispatch" in job["reason"] for job in report["jobs"])
+    assert report["overall"] == "FAIL" and budget.reserved_total == 0
+    assert not (root / plan.run_id / "source-job").exists()
 
 
 def test_parallel_dispatch_is_refused_before_any_process_when_the_budget_disagrees(tmp_path):

@@ -551,6 +551,7 @@ def run_parallel_plan(
                 live.release(job["job_id"])
                 settle(job["job_id"], "not_started", f"refused before dispatch: {exc}")
             cancel_reason = cancel_reason or f"capacity refused: {exc}"
+            problems.append(f"capacity refused before dispatch: {exc}")
             return False
         return True
 
