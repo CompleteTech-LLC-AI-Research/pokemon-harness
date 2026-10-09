@@ -311,14 +311,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             capacity_payload["status"] = "blocked"
             configuration_problems.append(f"capacity policy blocked: {policy_error}")
         else:
+            session_options: dict[str, object] = {}
+            if args.parallel_runtimes and args.parallel_run_root is not None:
+                # Sample the filesystem the concurrent run actually consumes.
+                session_options["temp_root"] = args.parallel_run_root.expanduser().resolve()
             capacity_session = gate_capacity.CapacitySession(
-                policy,
-                repo_root=project_root,
-                temp_root=(
-                    args.parallel_run_root.expanduser().resolve()
-                    if args.parallel_runtimes and args.parallel_run_root is not None
-                    else None
-                ),
+                policy, repo_root=project_root, **session_options
             )
             loaded_policy, loaded_policy_path = policy, capacity_path
 

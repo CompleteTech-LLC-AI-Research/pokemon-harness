@@ -333,7 +333,8 @@ def _safe_tier(
             case.output_tail, roots, replacements=replacements
         )
         data["case_results"].append(safe_case)
-    if tier.test_records:
+    recorded = getattr(tier, "test_records", None)
+    if recorded:
         data["test_records"] = [
             {
                 "iteration": record["iteration"],
@@ -344,7 +345,7 @@ def _safe_tier(
                 "when": record["when"],
                 "was_xfail": record["was_xfail"],
             }
-            for record in tier.test_records
+            for record in recorded
         ]
     else:
         data.pop("test_records", None)

@@ -270,7 +270,8 @@ def run_tier(
             problems.extend(_required_nodeid_problems(report.nodeids, required_nodeids))
             current_nodeids = set(report.nodeids)
             test_records.extend(
-                {"iteration": iteration, **record} for record in report.terminal_records
+                {"iteration": iteration, **record}
+                for record in getattr(report, "terminal_records", ())
             )
             if baseline_nodeids is None:
                 baseline_nodeids = current_nodeids
