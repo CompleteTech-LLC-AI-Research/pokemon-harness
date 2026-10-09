@@ -756,6 +756,8 @@ def _run_plan(
 
     def admit(batch: Sequence[Mapping[str, Any]]) -> bool:
         nonlocal cancel_reason
+        if hub.closed_reason:
+            budget.mark_lost(hub.closed_reason)  # a closed arbiter closes dispatch as well
         try:
             require_parallel_capacity(plan, budget)
             for job in batch:
