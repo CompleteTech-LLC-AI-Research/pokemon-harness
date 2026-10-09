@@ -519,7 +519,9 @@ def _run_plan(
         guardian, guardian_problems = read_guardian_receipt(
             item.receipt, item.secret, item.process.pid, item.owned.root_start
         )
-        ledger = hub.unregister(item.job_id)
+        view = item.process.guardian_status  # type: ignore[attr-defined]
+        proven = cleanup_proven(receipt, guardian, view)
+        ledger = hub.unregister(item.job_id, cleanup_proven=proven)
         cleanup[item.job_id] = {
             "process_tree": receipt,
             "guardian": guardian or {},
@@ -539,8 +541,7 @@ def _run_plan(
             )
         if guardian and guardian.get("start_error"):
             outcome["reason"] = f"could not start: {guardian['start_error']}"
-        view = item.process.guardian_status  # type: ignore[attr-defined]
-        if not cleanup_proven(receipt, guardian, view):
+        if not proven:
             receipt["proof"] = False
         view.close()
         lost = child_capacity_loss(outcome.get("capacity"))
@@ -608,7 +609,7 @@ def _run_plan(
             "process_tree": receipt,
             "guardian": guardian or {},
             "listener_handoff": close_handoff(item.job_id),
-            "arbiter": hub.unregister(item.job_id),
+            "arbiter": hub.unregister(item.job_id, cleanup_proven=receipt["proof"] is True),
         }
         ports_seen[item.job_id] = set(item.owned.ports)
 

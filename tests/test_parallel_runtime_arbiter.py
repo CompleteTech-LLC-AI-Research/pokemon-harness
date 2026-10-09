@@ -208,21 +208,45 @@ def test_a_loss_of_the_childs_own_capacity_observation_reaches_the_live_book_at_
 def test_a_child_that_drops_its_connection_while_holding_reservations_is_reported_not_forgotten(
     hub,
 ):
+    """V10 control revised in V11: it used to expect the slot to be handed back at once; a drop is a
+    lost arbiter, so it must close admission for everyone and keep the reservation as evidence."""
+
     client = connect(hub, "source-job", 1)
+    sibling = connect(hub, "cython-job", 1)
     assert client.reserve("p")[0] == "granted"
     client._conn.close()  # the gate died without a bye
     deadline = time.monotonic() + 3.0
-    ledger = None
-    while time.monotonic() < deadline:
-        with hub._lock:
-            if hub._jobs["source-job"].dropped:
-                break
+    while time.monotonic() < deadline and not hub.closed_reason:
         time.sleep(0.02)
-    ledger = hub.unregister("source-job")
-    assert ledger["dropped"] is True and ledger["unreleased"] == ["p"]
-    assert connect(hub, "cython-job", 1).reserve("q")[0] == "granted", (
-        "the dropped slot was returned"
+    assert "connection dropped" in hub.closed_reason and len(hub.lost) == 1
+    with hub._lock:
+        assert hub._jobs["source-job"].active == {"p"}, "outstanding reservation evidence is kept"
+    assert sibling.reserve("q")[0] == "closed", (
+        "no job is authorised from a disconnected job's state"
     )
+    ledger = hub.unregister("source-job", cleanup_proven=False)
+    assert ledger["dropped"] is True and ledger["unreleased"] == ["p"]
+    assert ledger["retained_unproven"] == ["p"] and hub.retained() == {"source-job": ["p"]}
+    assert hub.confirm_cleanup("source-job") == ["p"] and hub.retained() == {}
+
+
+def test_reservations_of_a_retired_job_are_freed_only_by_proven_cleanup(hub):
+    client = connect(hub, "source-job", 1)
+    assert client.reserve("p")[0] == "granted"
+    ledger = hub.unregister("source-job", cleanup_proven=True)
+    assert (
+        ledger["unreleased"] == ["p"] and ledger["retained_unproven"] == [] and hub.retained() == {}
+    )
+    other = connect(hub, "cython-job", 2)
+    third = hub.unregister("cython-job", cleanup_proven=False)
+    assert third["retained_unproven"] == [] and other is not None
+    held = connect(hub, "a-job", 1)
+    assert held.reserve("x")[0] == "granted"
+    hub.unregister("a-job", cleanup_proven=False)
+    fresh = connect(hub, "b-job", 2)
+    assert fresh.reserve("y")[0] == "granted"
+    verdict, reason = fresh.reserve("z")
+    assert verdict == "denied" and "global" in reason, "the retained reservation still counts"
 
 
 def test_an_arbiter_that_stops_serving_is_a_loss_for_everyone(hub):

@@ -58,6 +58,13 @@ if name == "tamper_policy":
     with open(os.path.join(job_root, "capacity-policy.json"), "a") as handle:
         handle.write(" ")
     time.sleep(30)
+if name == "drop_arbiter":
+    sys.path.insert(0, repo)
+    from scripts.gate_capacity_arbiter import ArbiterClient
+    client = ArbiterClient.from_environment()
+    client.reserve("pair-1")
+    client._conn.close()
+    time.sleep(30)
 if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
@@ -647,3 +654,17 @@ def test_required_kernel_ownership_refuses_every_job_whose_cgroup_cannot_be_crea
     assert not list((root / plan.run_id).glob("*/guardian.json")), "no guardian, hence no worker"
     assert report["kernel_ownership"]["qualified_final"] is False
     assert budget.reserved_total == 0
+
+
+def test_a_dropped_arbiter_connection_cancels_the_owned_sibling_and_keeps_the_reservation_evidence(
+    tmp_path,
+):
+    budget = PairBudget(2)
+    _, _, report = run(
+        tmp_path, {"source": "drop_arbiter", "cython": "slow_pass:30"}, budget=budget
+    )
+    assert "connection dropped" in report["cancellation"]
+    assert all(job["state"] != "passed" for job in report["jobs"]) and report["overall"] == "FAIL"
+    ledger = report["cleanup"]["source-job"]["arbiter"]
+    assert ledger["dropped"] is True and ledger["unreleased"] == ["pair-1"]
+    assert report["elapsed_seconds"] < 20

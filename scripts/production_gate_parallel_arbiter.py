@@ -42,8 +42,8 @@ _SOCKET = socket.socket
 
 
 class _Job:
-    def __init__(self, key: bytes, pairs: int, policy: str, clock: float) -> None:
-        self.key, self.pairs, self.policy = key, pairs, policy
+    def __init__(self, job_id: str, key: bytes, pairs: int, policy: str, clock: float) -> None:
+        self.job_id, self.key, self.pairs, self.policy = job_id, key, pairs, policy
         self.active: set[str] = set()
         self.grants = self.denials = self.releases = self.stray_releases = self.violations = 0
         self.events: deque[dict[str, str]] = deque(maxlen=MAX_EVENTS)
@@ -68,6 +68,8 @@ class ArbiterHub:
         self.on_loss, self.lease_seconds, self._clock = on_loss, lease_seconds, clock
         self.closed_reason = ""
         self._jobs: dict[str, _Job] = {}
+        # Reservations of a retired job whose cleanup was not proved: still counted, never forgotten.
+        self._retained: dict[str, list[str]] = {}
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._server: socket.socket | None = None
@@ -95,15 +97,23 @@ class ArbiterHub:
 
         key = os.urandom(32)
         with self._lock:
-            self._jobs[job_id] = _Job(key, pairs, policy, self._clock())
+            self._jobs[job_id] = _Job(job_id, key, pairs, policy, self._clock())
         return {ENV_NAME: self.name, ENV_KEY: key.hex(), ENV_JOB: job_id, ENV_POLICY: policy}
 
-    def unregister(self, job_id: str) -> dict[str, Any] | None:
+    def unregister(self, job_id: str, *, cleanup_proven: bool = False) -> dict[str, Any] | None:
+        """Retire a job.  Its outstanding reservations are freed only when its cleanup was PROVED;
+        otherwise they stay counted against the one budget as ``retained_unproven`` evidence."""
+
         with self._lock:
             job = self._jobs.pop(job_id, None)
-        if job is None:
-            return None
+            if job is None:
+                return None
+            held = sorted({*job.active, *job.dropped_holding})
+            if held and not cleanup_proven:
+                self._retained[job_id] = held
         return {
+            "cleanup_proven": cleanup_proven,
+            "retained_unproven": held if held and not cleanup_proven else [],
             "hello": job.hello,
             "finished": job.finished,
             "dropped": job.dropped,
@@ -113,9 +123,19 @@ class ArbiterHub:
             "releases": job.releases,
             "stray_releases": job.stray_releases,
             "violations": job.violations,
-            "unreleased": sorted({*job.active, *job.dropped_holding}),
+            "unreleased": held,
             "events": list(job.events),
         }
+
+    def retained(self) -> dict[str, list[str]]:
+        with self._lock:
+            return {job_id: list(pairs) for job_id, pairs in self._retained.items()}
+
+    def confirm_cleanup(self, job_id: str) -> list[str]:
+        """The owner has now proved the retired job's processes gone: free what it still held."""
+
+        with self._lock:
+            return self._retained.pop(job_id, [])
 
     def lose(self, reason: str) -> None:
         """Close admission for every job at once and tell the owner (idempotent, first reason wins)."""
@@ -182,8 +202,14 @@ class ArbiterHub:
                 if job is not None and not job.finished:
                     with self._lock:
                         job.dropped = True
-                        job.dropped_holding = sorted(job.active)
-                        job.active.clear()
+                        job.dropped_holding = sorted(job.active)  # evidence; `active` is KEPT
+                        held = len(job.active)
+                        registered = self._jobs.get(job.job_id) is job
+                    if registered:  # a drop the owner did not cause is a lost arbiter for everyone
+                        self.lose(
+                            f"{job.job_id}: the child arbiter connection dropped while holding "
+                            f"{held} reservation(s)"
+                        )
 
     def _handle(
         self, conn: socket.socket, data: bytes, job: _Job | None, last_seq: int, pid: int
@@ -233,7 +259,8 @@ class ArbiterHub:
         if len(job.active) >= job.pairs:
             job.denials += 1
             return "denied", "the job's share is fully reserved"
-        if sum(len(j.active) for j in self._jobs.values()) >= self.total:
+        held_total = sum(len(j.active) for j in self._jobs.values())
+        if held_total + sum(len(v) for v in self._retained.values()) >= self.total:
             job.denials += 1
             return "denied", "the single global pair budget is fully reserved"
         job.active.add(pair)
