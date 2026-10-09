@@ -659,7 +659,10 @@ def _run_plan(
     def cancel(reason: str) -> None:
         nonlocal cancel_reason
         cancel_reason = cancel_reason or reason
-        deadline = clock() + body["deadlines"]["cleanup_seconds"]
+        deadline = min(
+            [clock() + body["deadlines"]["cleanup_seconds"]]
+            + [item.cleanup_deadline for item in running if item.cleanup_deadline is not None]
+        )
         prepare_stops(
             running, hub, deadline, grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
         )

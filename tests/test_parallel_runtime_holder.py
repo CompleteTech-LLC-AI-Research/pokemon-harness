@@ -577,3 +577,32 @@ if name == "nested_subreaper_orphan":
         assert [child["pid"], child["start"]] in holder["adopted"]
         assert holder["adopted"] == holder["reaped"]
         assert budget.reserved_total == 0 and sentinel.poll() is None
+
+
+def test_a_second_stop_request_cannot_extend_an_existing_cleanup_deadline():
+    from types import SimpleNamespace
+
+    from scripts.production_gate_parallel_stopping import prepare_stops
+    from tests._parallel_runtime_holder_kernel import Clock
+
+    clock = Clock()
+    clock.now = 0.2
+    item = SimpleNamespace(
+        job_id="already-stopping",
+        cleanup_deadline=0.25,
+        stop_requested=True,
+        process=SimpleNamespace(
+            poll=lambda: None,
+            guardian_status=SimpleNamespace(drain=lambda: None, ready=False, eof=False),
+        ),
+        owned=SimpleNamespace(signal_root=lambda sig: None),
+    )
+    prepare_stops(
+        [item],
+        SimpleNamespace(expect_drop=lambda job: None),
+        10.0,
+        grace_seconds=5,
+        clock=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+    assert item.cleanup_deadline == 0.25 and clock.now == pytest.approx(0.25)

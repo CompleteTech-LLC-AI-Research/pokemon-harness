@@ -16,11 +16,14 @@ def prepare_stops(
 
     pending = []
     for item in tuple(items):
-        item.cleanup_deadline = deadline
+        item.cleanup_deadline = (
+            min(item.cleanup_deadline, deadline) if item.cleanup_deadline is not None else deadline
+        )
         if item.process.poll() is None:
             item.stop_requested = True
             hub.expect_drop(item.job_id)
             pending.append(item)
+    deadline = min([deadline] + [item.cleanup_deadline for item in pending])
     ready_limit = min(deadline, clock() + grace_seconds + 2.0)
     while pending:
         for item in pending[:]:
