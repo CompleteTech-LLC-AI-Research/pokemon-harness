@@ -156,8 +156,10 @@ COVERAGE_DECLARATION = {
         "elapsed-time comparison against sequential execution on equivalent conditions is NOT done",
         "operator allocation (#85/#86), #106 policy and the 18 orientation fixtures are unmet",
         "nothing in this candidate has been executed; authored controls are not gameplay evidence",
-        "not implemented: private copy of a writable base interpreter prefix, cgroup ownership of "
-        "descendants, runtime manifest pinned in the plan, arbitration between child row admissions",
+        (
+            "not implemented: private copy of a writable base interpreter prefix, cgroup ownership "
+            "of descendants, runtime manifest pinned in the plan, arbitration between child rows"
+        ),
         "release status remains PARTIAL",
     ],
 }
