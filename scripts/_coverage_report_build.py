@@ -184,12 +184,21 @@ def _evaluate_case(
                 f"PyBoy revision {actual_revision!r} does not match pinned {expected_revision!r}",
             )
     expected_version = policy.get("expected_pyboy_version")
-    actual_version = identity.get("pyboy_version")
-    if expected_version and actual_version and actual_version != expected_version:
-        return (
-            "mismatched",
-            f"PyBoy version {actual_version!r} does not match pinned {expected_version!r}",
-        )
+    if expected_version:
+        actual_version = identity.get("pyboy_version")
+        blank = isinstance(actual_version, str) and not actual_version.strip()
+        if actual_version is None or blank:
+            return "unidentified", "PyBoy version unavailable for the declared runtime"
+        if not isinstance(actual_version, str):
+            return (
+                "mismatched",
+                f"PyBoy version {actual_version!r} is not a string; pinned {expected_version!r}",
+            )
+        if actual_version != expected_version:
+            return (
+                "mismatched",
+                f"PyBoy version {actual_version!r} does not match pinned {expected_version!r}",
+            )
     result_commit = record.commit or (results.commit if results else None)
     if not result_commit:
         return (
