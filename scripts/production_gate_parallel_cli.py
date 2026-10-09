@@ -28,6 +28,7 @@ from scripts.production_gate_parallel_capacity import (
     LiveCapacity,
     PairBudget,
     capacity_loss_probe,
+    capture_policy,
 )
 from scripts.production_gate_parallel_cgroup import kernel_ownership
 from scripts.production_gate_parallel_comparison import compare_bundles
@@ -39,7 +40,7 @@ from scripts.production_gate_parallel_isolation import (
 )
 from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan, cli_deadlines
 from scripts.production_gate_parallel_processes import interrupt_on_signals
-from scripts.production_gate_parallel_report import file_sha256, render_report_text, write_report
+from scripts.production_gate_parallel_report import render_report_text, write_report
 from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes, runtime_digest
 from scripts.production_gate_parallel_validation import loads_strict
 
@@ -120,6 +121,7 @@ def run_parallel_cli(
     capacity_session: Any | None = None,
     explicit_matrix_workers: bool = False,
     expected_sha1: Mapping[Path, str] | None = None,
+    capacity_policy_sha256: str | None = None,
 ) -> int:
     """Run the opt-in concurrent mode; every refusal is explicit and non-zero."""
 
@@ -139,6 +141,10 @@ def run_parallel_cli(
         )
         return 2
     problems = list(configuration_problems)
+    policy_text, policy_sha256, policy_problems = capture_policy(
+        capacity_policy_path, capacity_policy_sha256
+    )
+    problems.extend(policy_problems)
     _head, _clean, commit_problems = measure_commit(project_root)
     problems.extend(commit_problems)
     run_root = args.parallel_run_root.expanduser().resolve()
@@ -240,8 +246,8 @@ def run_parallel_cli(
                         args, frozen, effective, CLEANUP_SECONDS, tuple(selected)
                     ),
                     total_pairs=total if type(total) is int else 0,
-                    policy_digest=file_sha256(capacity_policy_path),
-                    capacity_policy_text=capacity_policy_path.read_text(encoding="utf-8"),
+                    policy_digest=policy_sha256,
+                    capacity_policy_text=policy_text,
                     runtime_inputs={
                         mode: runtime_digest(
                             Path(info["manifest"]["private_prefix"]), Path(snapshot["checkout"])
@@ -302,7 +308,7 @@ def run_parallel_cli(
             interrupt=interrupt,
             serial=bool(getattr(args, "parallel_serial", False)),
             measure=measure,
-            capacity_policy_text=capacity_policy_path.read_text(encoding="utf-8"),
+            capacity_policy_text=policy_text,
             require_kernel_ownership=not getattr(args, "parallel_allow_unqualified", False),
         )
     report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}

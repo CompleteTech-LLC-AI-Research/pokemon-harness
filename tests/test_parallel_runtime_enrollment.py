@@ -135,3 +135,27 @@ def test_a_missing_policy_has_no_digest_and_the_valid_one_matches_the_original_l
     original, original_error = gate_capacity.load_capacity_policy(path)
     captured, error, _digest = gate_capacity.load_capacity_policy_captured(path)
     assert original_error is None and error is None and original == captured
+
+
+def test_the_parallel_producer_captures_the_policy_once_and_refuses_a_file_that_changed(
+    tmp_path, monkeypatch
+):
+    from scripts.production_gate_parallel_capacity import capture_policy
+
+    path = tmp_path / "policy.json"
+    data = policy_bytes() + b"\r\n"  # newline bytes must reach the plan exactly as the gate parsed
+    path.write_bytes(data)
+    parsed = hashlib.sha256(data).hexdigest()
+    reads = []
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (reads.append(self), real(self))[1])
+    text, digest, problems = capture_policy(path, parsed)
+    assert problems == [] and digest == parsed and text.encode() == data and len(reads) == 1
+    path.write_bytes(policy_bytes() + b" ")  # the file changed after the gate parsed it
+    text, digest, problems = capture_policy(path, parsed)
+    assert text == "" and digest != parsed and "changed after the gate parsed it" in problems[0]
+    assert capture_policy(path, None)[2] == [], "with no parsed digest there is nothing to compare"
+    path.write_bytes(b"\xff\xfe")
+    assert "cannot be captured" in capture_policy(path, None)[2][0]
+    missing = capture_policy(tmp_path / "absent.json", None)
+    assert missing[0] == "" and "cannot be captured" in missing[2][0]

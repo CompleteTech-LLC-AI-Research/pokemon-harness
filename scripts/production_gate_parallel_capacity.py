@@ -107,6 +107,24 @@ def policy_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def capture_policy(path: Path, parsed_sha256: str | None) -> tuple[str, str, list[str]]:
+    """Read the policy file ONCE: (text, sha256 of those exact bytes, problems).
+
+    The plan pin, the per-job policies and the orchestrator all use this one capture; when the gate
+    parsed the file first, these must be the very bytes it parsed (``parsed_sha256``) or it refuses.
+    """
+
+    try:
+        data = path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", "", [f"the capacity policy cannot be captured: {type(exc).__name__}"]
+    digest = hashlib.sha256(data).hexdigest()
+    if parsed_sha256 is not None and digest != parsed_sha256:
+        return "", digest, ["the capacity policy changed after the gate parsed it"]
+    return text, digest, []
+
+
 def write_pinned_policy(path: Path, global_text: str, pairs: int, pinned: str | None) -> str:
     """Derive the job's policy, refuse it unless it equals the plan's pin, write and re-prove it."""
 

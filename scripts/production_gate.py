@@ -309,6 +309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     capacity_session = None
     loaded_policy = None
     loaded_policy_path = None
+    loaded_policy_sha256: str | None = None
     capacity_payload = gate_capacity.unavailable_capacity(
         "no --capacity-policy supplied; capacity admission is not enforced"
     )
@@ -334,6 +335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # A concurrent job enrols here, bound to the digest of the bytes just parsed.
             enroll_production(capacity_session, policy_sha256=policy_digest)
             loaded_policy, loaded_policy_path = policy, capacity_path
+            loaded_policy_sha256 = policy_digest
 
     early_smoke = not (args.unit_only or args.tier or args.smoke_only)
     fail_fast = early_smoke if args.fail_fast is None else args.fail_fast
@@ -359,6 +361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             configuration_problems=configuration_problems,
             capacity_policy=loaded_policy,
             capacity_policy_path=loaded_policy_path,
+            capacity_policy_sha256=loaded_policy_sha256,
             selected=selected,
             early_smoke=early_smoke,
             fail_fast=fail_fast,
