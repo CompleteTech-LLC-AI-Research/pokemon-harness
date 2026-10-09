@@ -48,6 +48,7 @@ class _Job:
         self.grants = self.denials = self.releases = self.stray_releases = self.violations = 0
         self.events: deque[dict[str, str]] = deque(maxlen=MAX_EVENTS)
         self.hello = self.finished = self.dropped = False
+        self.dropped_holding: list[str] = []
         self.last_seen = clock
         self.peer_pid: int | None = None
 
@@ -112,7 +113,7 @@ class ArbiterHub:
             "releases": job.releases,
             "stray_releases": job.stray_releases,
             "violations": job.violations,
-            "unreleased": sorted(job.active),
+            "unreleased": sorted({*job.active, *job.dropped_holding}),
             "events": list(job.events),
         }
 
@@ -179,6 +180,7 @@ class ArbiterHub:
                 if job is not None and not job.finished:
                     with self._lock:
                         job.dropped = True
+                        job.dropped_holding = sorted(job.active)
                         job.active.clear()
 
     def _handle(

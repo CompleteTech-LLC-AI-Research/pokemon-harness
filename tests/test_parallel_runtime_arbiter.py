@@ -203,3 +203,23 @@ def test_a_loss_of_the_childs_own_capacity_observation_reaches_the_live_book_at_
     admission.report_loss("memory pressure rose above the policy")
     assert "memory pressure" in hub.closed_reason and len(hub.lost) == 1
     assert sibling.reserve("p")[0] == "closed", "the sibling's admission closed at once"
+
+
+def test_a_child_that_drops_its_connection_while_holding_reservations_is_reported_not_forgotten(
+    hub,
+):
+    client = connect(hub, "source-job", 1)
+    assert client.reserve("p")[0] == "granted"
+    client._conn.close()  # the gate died without a bye
+    deadline = time.monotonic() + 3.0
+    ledger = None
+    while time.monotonic() < deadline:
+        with hub._lock:
+            if hub._jobs["source-job"].dropped:
+                break
+        time.sleep(0.02)
+    ledger = hub.unregister("source-job")
+    assert ledger["dropped"] is True and ledger["unreleased"] == ["p"]
+    assert connect(hub, "cython-job", 1).reserve("q")[0] == "granted", (
+        "the dropped slot was returned"
+    )
