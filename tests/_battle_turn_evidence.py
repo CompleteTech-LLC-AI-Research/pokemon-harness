@@ -55,6 +55,37 @@ EVIDENCE_EVENTS = (
     "ReturnToCableClubRoom",
 )
 
+# Verified KO-return and terminal continuation hooks: (event, SYM label, offset,
+# {red/blue | yellow: (address, signature hex)}).  All sit in ROM bank 0x0F.
+_CONTINUATION_PINS = (
+    (
+        "player_action_ko_return",
+        "MirrorMoveCheck.notDone",
+        15,
+        {"red": (0x57C8, "21e6cf2a46b0c8cdb662"), "yellow": (0x593A, "21e5cf2a46b0c8cd2864")},
+    ),
+    (
+        "enemy_action_ko_return",
+        "EnemyCheckIfMirrorMoveEffect.handleExplosionMiss",
+        15,
+        {"red": (0x684D, "2115d02a46b0c8cdb662"), "yellow": (0x69D3, "2114d02a46b0c8cd2864")},
+    ),
+    (
+        "terminal_victory",
+        "TrainerBattleVictory",
+        3,
+        {"red": (0x4699, "06fcfa5cd0a72002"), "yellow": (0x46BB, "06fcfa5bd0a72002")},
+    ),
+    (
+        "terminal_blackout",
+        "HandlePlayerBlackOut",
+        0,
+        {"red": (0x4837, "fa2bd1fe042824fa59d0"), "yellow": (0x489C, "fa2ad1fe042824fa58d0")},
+    ),
+)
+_KO_HOOKS = ("player_action_ko_return", "enemy_action_ko_return")
+_TERMINAL_HOOKS = ("terminal_victory", "terminal_blackout")
+
 _BATTLE_MEMORY = (
     "wPlayerMonNumber",
     "wEnemyMonPartyPos",
@@ -506,6 +537,7 @@ class BattleTurnObserver:
         self.pending = {"local": None, "enemy": None}
         self.pp_entries = 0
         self.faint_seen = False
+        self.ko_completed = False
         self._selected_slot = None
 
         # Resolve all data symbols before a caller installs the first hook.
@@ -632,6 +664,12 @@ class BattleTurnObserver:
             self.pending_exchange_ordinal = None
             self._capture_exchange(exchange_ordinal=ordinal)
             return
+        if name in _KO_HOOKS:
+            self._ko_return(name)
+            return
+        if name in _TERMINAL_HOOKS:
+            self._terminal_hook(name)
+            return
         if self.exchange is None or self.turn is not None:
             if name == "EndOfBattle":
                 self._record_terminal()
@@ -710,6 +748,40 @@ class BattleTurnObserver:
             if self.turn is None:
                 self._capture_turn(boundary=name)
             return
+
+    def _ko_return(self, name: str) -> None:
+        """KO action completion; a visit with a nonzero target HP is ignored."""
+        if self.exchange is None or self.turn is not None:
+            return
+        side = "local" if name.startswith("player") else "enemy"
+        if _read(self.session, "wEnemyMonHP" if side == "local" else "wBattleMonHP", 2) != [0, 0]:
+            return
+        action = self.actions[side]
+        if _read(self.session, "hWhoseTurn") != (0 if side == "local" else 1):
+            raise ValueError("KO completion turn mismatch")
+        if self.ko_completed:
+            raise ValueError("KO completion repeated")
+        if self.pending[side] is not None:
+            raise ValueError("KO completion with pending damage application")
+        if not action["damage_done"]:
+            raise ValueError("KO completion without damage application")
+        if _read(self.session, "wMoveMissed") or any(
+            sample["move_missed"] for sample in action["damage_samples"]
+        ):
+            raise ValueError("KO completion contradicts miss flag")
+        action["done"] = True
+        self.ko_completed = True
+
+    def _terminal_hook(self, name: str) -> None:
+        """Settle at the first valid terminal branch; pre-exchange/duplicate visits are inert."""
+        if self.exchange is None or self.baseline is None or self.turn is not None:
+            return
+        if not all(
+            action["done"] or action["skip_reason"] == "opponent_fainted"
+            for action in self.actions.values()
+        ):
+            raise ValueError("terminal branch before settled action evidence")
+        self._capture_turn(boundary=name)
 
     def _record_terminal(self) -> None:
         result = _integer(_read(self.session, "wBattleResult"), 0, 255, "battle result")
@@ -794,6 +866,20 @@ def continuation_locations(session: Any, version: str) -> tuple[tuple[str, int, 
         if actual != signature:
             raise ValueError(f"{side} paralysis branch bytes mismatch")
         locations.append((f"{side}_fully_paralyzed", branch_bank, branch - 6))
+    for name, label, offset, pinned in _CONTINUATION_PINS:
+        address, signature = pinned["yellow" if version == "yellow" else "red"]
+        hook_bank, base = session.symbols.bank_addr(label)
+        if hook_bank != 15:
+            raise ValueError(f"{name} bank mismatch")
+        if base + offset != address:
+            raise ValueError(f"{name} address mismatch")
+        expected = bytes.fromhex(signature)
+        actual = bytes(
+            int(session._pyboy.memory[hook_bank, address + i]) for i in range(len(expected))
+        )
+        if actual != expected:
+            raise ValueError(f"{name} signature bytes mismatch")
+        locations.append((name, hook_bank, address))
     return tuple(locations)
 
 
@@ -810,11 +896,30 @@ def install_continuation_hooks(
     return owned
 
 
+def battle_evidence_ready(row: Any) -> bool:
+    """A settled snapshot; a KO also needs EndOfBattle and a cleaned-up room."""
+    if not isinstance(row, dict) or row.get("unsupported_reason") or row.get("settled") is not True:
+        return False
+    turn = row.get("turn")
+    sides = [turn.get(side) for side in ("local", "enemy")] if isinstance(turn, dict) else []
+    knocked_out = isinstance(turn, dict) and turn.get("outcome") == "ko"
+    if not knocked_out and not any(isinstance(mon, dict) and mon.get("hp") == 0 for mon in sides):
+        return True
+    terminal, cleanup = row.get("terminal"), row.get("cleanup")
+    return (
+        isinstance(terminal, dict)
+        and terminal.get("boundary") == "EndOfBattle"
+        and isinstance(cleanup, dict)
+        and cleanup.get("is_in_battle") == 0
+    )
+
+
 __all__ = [
     "EVIDENCE_EVENTS",
     "SCHEMA_VERSION",
     "BattleTurnObserver",
     "adjudicate_pair",
+    "battle_evidence_ready",
     "choose_supported_battle_move",
     "continuation_locations",
     "install_continuation_hooks",

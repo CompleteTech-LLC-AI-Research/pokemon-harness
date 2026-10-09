@@ -487,3 +487,260 @@ assert asset_reads == []
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+# --- #595: production battle-turn barrier seams (N6) ---------------------------------------
+
+
+def _row_kind(kind):
+    if kind is None:
+        return None
+    ko = {"outcome": "ko", "local": {"hp": 5}, "enemy": {"hp": 0}}
+    live = {"outcome": "settled", "local": {"hp": 5}, "enemy": {"hp": 5}}
+    end = {"boundary": "EndOfBattle"}
+    base = {"settled": True, "unsupported_reason": None, "terminal": None, "cleanup": None}
+    return {
+        "U": {"settled": False, "unsupported_reason": None, "turn": None},
+        "E": {
+            "settled": False,
+            "unsupported_reason": "battle observation X: ValueError: e",
+            "turn": None,
+        },
+        "NK": {**base, "turn": live},
+        "KP": {**base, "turn": ko, "terminal": end},
+        "KR": {**base, "turn": ko, "terminal": end, "cleanup": {"is_in_battle": 0}},
+        "KC": {**base, "turn": ko, "terminal": end, "cleanup": {"is_in_battle": 2}},
+    }[kind]
+
+
+class _SeamPeer(_PeerDriveBattleMixin):
+    """The actual battle mixin with recorded collaborators and a fake monotonic clock."""
+
+    def __init__(self, clock, kinds=(), ends=(0,), polls=(), deadline=140.0, boom=False):
+        self.clock, self.calls, self.iteration, self.boom = clock, [], 0, boom
+        self.kinds, self.ends, self.polls, self.deadline = (
+            list(kinds),
+            list(ends),
+            list(polls),
+            deadline,
+        )
+        self.battle_turn_announced = self.peer_battle_turn_ready = False
+        self.drive_status = self.drive_error = None
+        self.counters = defaultdict(lambda: [0, 0])
+        self.counters["EndOfBattle"][0] = self._at(self.ends)
+        observed = bool(self.kinds) and self.kinds[0] is not None
+        self.battle_observer = (
+            SimpleNamespace(snapshot=lambda: _row_kind(self._at(self.kinds))) if observed else None
+        )
+        self.link = SimpleNamespace(
+            _network_backend=SimpleNamespace(
+                announce_sync=lambda sync_id: self.calls.append(("announce", sync_id)),
+                poll_peer_sync=self._poll,
+            )
+        )
+        self.session = SimpleNamespace(step=self._step, press=self._press)
+
+    def _at(self, values):
+        return values[min(self.iteration, len(values) - 1)]
+
+    def _poll(self, sync_id):
+        self.calls.append(("poll", sync_id))
+        return self.polls.pop(0) if self.polls else False
+
+    def _step(self, frames):
+        self.calls.append(("step", frames))
+        self.clock.now += 1.0
+        self.iteration += 1
+        self.counters["EndOfBattle"][0] = self._at(self.ends)
+
+    def _press(self, key, duration):
+        self.calls.append(("press", key, duration))
+
+    def cooperative_sync(self, sync_id, timeout):
+        self.calls.append(("sync", sync_id, timeout))
+        if self.boom:
+            raise RuntimeError("boom")
+
+    def peer_shutdown_sync(self, ready_sync_id):
+        self.calls.append(("shutdown", ready_sync_id))
+
+    def log(self, message):
+        self.calls.append(("log", message))
+
+    def shot(self, name):
+        self.calls.append(("shot", name))
+
+    def state_snapshot(self):
+        return "state"
+
+    def cpu_snapshot(self):
+        return "cpu"
+
+    def backend_snapshot(self):
+        return "backend"
+
+
+def _assert_battle_routes_through_seams() -> None:
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(_PeerDriveBattleMixin._battle))
+    calls = sorted(
+        (node.lineno, node.func.attr)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr in ("_battle_turn_barrier_loop", "_battle_turn_post_barrier")
+    )
+    assert [name for _line, name in calls] == [
+        "_battle_turn_barrier_loop",
+        "_battle_turn_post_barrier",
+    ]
+    assert "announce_sync(sync_id=14)" not in source and "cooperative_sync(sync_id=15" not in source
+
+
+class _RecordedSeams(_BattleHarness):
+    """Actual ``_battle`` on the stub peer; each seam records itself, then runs the ORIGINAL helper."""
+
+    def _battle_turn_barrier_loop(self):
+        self.events.append(("seam", "loop", self.battle_turn_announced))
+        _PeerDriveBattleMixin._battle_turn_barrier_loop(self)
+        self.events.append(
+            ("seam", "loop-done", self.battle_turn_announced, self.peer_battle_turn_ready)
+        )
+
+    def _battle_turn_post_barrier(self):
+        self.events.append(
+            ("seam", "post", self.battle_turn_announced, self.peer_battle_turn_ready)
+        )
+        _PeerDriveBattleMixin._battle_turn_post_barrier(self)
+        self.events.append(("seam", "post-done"))
+
+    def peer_shutdown_sync(self, *, ready_sync_id, **_kwargs):
+        self.events.append(("shutdown", ready_sync_id))
+
+
+def _assert_real_battle_delegates(monkeypatch, which: str) -> None:
+    """Run the real ``_battle`` (stub peer, no network or ROM): recorded calls prove delegation."""
+    assert (
+        _RecordedSeams._battle_turn_barrier_loop
+        is not _PeerDriveBattleMixin._battle_turn_barrier_loop
+    )
+    _patch_sync_boundary(monkeypatch)
+    harness = _RecordedSeams(settle_after_step=True, peer_marker=True)
+    harness._battle()
+    events = harness.events
+    marks = [
+        ("seam", "loop", False),
+        ("seam", "loop-done", True, True),
+        ("seam", "post", True, True),
+        ("sync", 15),
+        ("shutdown", 21),
+        ("seam", "post-done"),
+    ]
+    at = [events.index(mark) for mark in marks]
+    assert at == sorted(at) and len(set(at)) == len(marks)
+    assert ("sync", 15) not in events[: at[2]]
+    assert harness.backend.announced.count(14) == 1 and harness.backend.polled.count(14) == 1
+    assert (harness.battle_turn_announced, harness.peer_battle_turn_ready) == (True, True)
+    if which == "loop":
+        inside = events[at[0] + 1 : at[1]]
+        assert inside.count(("step", 20)) == 1 and ("sync", 15) not in inside
+    else:
+        inside = events[at[2] + 1 : at[5]]
+        assert inside[0] == ("sync", 15) and inside[-1] == ("shutdown", 21)
+        assert [e for e in inside if e[0] in ("sync", "shutdown")] == [
+            ("sync", 15),
+            ("shutdown", 21),
+        ]
+
+
+_LOOP_CASES = (
+    (
+        "ordinary-turn-announces-then-polls",
+        ("U", "U", "NK"),
+        (0,),
+        (False, True),
+        1,
+        2,
+        3,
+        True,
+        True,
+        0,
+    ),
+    ("fully-ready-ko-first-iteration-end-positive", ("KR",), (1,), (True,), 1, 1, 0, True, True, 0),
+    ("ready-ko-peer-ready-third-poll", ("KR",), (1,), (False, False, True), 1, 3, 2, True, True, 0),
+    (
+        "ko-cleanup-arrives-then-announces",
+        ("U", "KP", "KP", "KR"),
+        (0, 1),
+        (True,),
+        1,
+        1,
+        3,
+        True,
+        True,
+        0,
+    ),
+    ("ko-cleanup-never", ("KP",), (1,), (), 0, 0, 40, False, False, 2),
+    ("ko-peer-never-ready", ("KR",), (1,), (False,) * 40, 1, 40, 40, True, False, 2),
+    ("ko-incomplete-cleanup-in-battle", ("KC",), (1,), (), 0, 0, 40, False, False, 2),
+    ("observer-error-with-end-positive", ("E",), (1,), (), 0, 0, 0, False, False, 0),
+    ("no-observer-end-positive", (None,), (1,), (), 0, 0, 0, False, False, 0),
+    ("unsettled-end-positive", ("U",), (1,), (), 0, 0, 0, False, False, 0),
+    ("nonko-settled-end-positive-announces", ("NK",), (1,), (False, True), 1, 2, 1, True, True, 0),
+)
+
+
+@pytest.mark.parametrize("case", _LOOP_CASES, ids=[case[0] for case in _LOOP_CASES])
+def test_tcp_battle_turn_barrier_loop(case, monkeypatch) -> None:
+    name, kinds, ends, polls, announces, polled, steps, announced, ready, logs = case
+    if name == _LOOP_CASES[0][0]:
+        _assert_battle_routes_through_seams()
+        _assert_real_battle_delegates(monkeypatch, "loop")
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(battle_driver, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    peer = _SeamPeer(clock, kinds, ends, polls)
+    peer._battle_turn_barrier_loop()
+    kinds_called = [call[0] for call in peer.calls]
+    assert kinds_called.count("announce") == announces
+    assert kinds_called.count("poll") == polled
+    assert kinds_called.count("step") == steps
+    assert (peer.battle_turn_announced, peer.peer_battle_turn_ready) == (announced, ready)
+    progress = [c for c in peer.calls if c[0] == "log" and c[1].startswith("battle progress:")]
+    assert len(progress) == logs
+    assert all(call[1] == 14 for call in peer.calls if call[0] in ("announce", "poll"))
+
+
+_POST_CASES = (
+    "post-barrier-announced-order",
+    "post-barrier-sync15-raises-still-drains",
+    "post-barrier-not-announced-skips-all",
+)
+
+
+@pytest.mark.parametrize("case", _POST_CASES)
+def test_tcp_battle_turn_post_barrier(case, monkeypatch) -> None:
+    if case == _POST_CASES[0]:
+        _assert_battle_routes_through_seams()
+        _assert_real_battle_delegates(monkeypatch, "post")
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(battle_driver, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    peer = _SeamPeer(clock, deadline=10_000.0, boom=case == _POST_CASES[1])
+    peer.battle_turn_announced = case != _POST_CASES[2]
+    peer._battle_turn_post_barrier()
+    calls = [call for call in peer.calls if call[0] != "log"]
+    logs = [call[1] for call in peer.calls if call[0] == "log"]
+    if case == _POST_CASES[2]:
+        assert calls == []
+        assert len(logs) == 1 and logs[0].startswith("peer battle turn completion not observed")
+        return
+    shot = [] if case == _POST_CASES[1] else [("shot", "06_battle_synced")]
+    drain = [("press", "a", 4), ("step", 20)] * 10
+    assert calls == [("sync", 15, 120.0), *shot, *drain, ("shutdown", 21)]
+    assert "sync: post-battle shutdown drain" in logs
+    expected = ("error", "RuntimeError: boom") if case == _POST_CASES[1] else (None, None)
+    assert (peer.drive_status, peer.drive_error) == expected

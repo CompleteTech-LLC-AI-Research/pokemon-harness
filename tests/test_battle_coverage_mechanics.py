@@ -269,3 +269,73 @@ def test_catalog_invalid_role_makes_mechanics_case_untested(catalog: dict) -> No
     assert report["dimensions"]["expanded_mechanics"]["status"] == "INCOMPLETE"
     assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
     assert report["move_effects"]["tested"] == 0
+
+
+_VERSION_ABSENT = object()
+
+# Each case replaces ONE runtime block's ``pyboy_version`` in an otherwise valid
+# document: both runtimes carry the pinned revision, commit, collection and hashes.
+# Absence (key missing, None, empty, blank) is "unidentified"; a present but wrong
+# or wrongly typed value is "mismatched". The catalog policy pins version "2.7.0".
+_PINNED_VERSION_REJECTIONS = [
+    pytest.param(_VERSION_ABSENT, "unidentified", "version unavailable", id="absent-key"),
+    pytest.param(None, "unidentified", "version unavailable", id="none"),
+    pytest.param("", "unidentified", "version unavailable", id="empty"),
+    pytest.param("   ", "unidentified", "version unavailable", id="blank"),
+    pytest.param(True, "mismatched", "is not a string", id="bool"),
+    pytest.param(2.7, "mismatched", "is not a string", id="number"),
+    pytest.param(["2.7.0"], "mismatched", "is not a string", id="list"),
+    pytest.param({"version": "2.7.0"}, "mismatched", "is not a string", id="dict"),
+    pytest.param("2.6.9", "mismatched", "does not match pinned", id="wrong-nonempty"),
+    pytest.param("2.7.0 ", "mismatched", "does not match pinned", id="padded-near-match"),
+]
+
+
+def _with_runtime_pyboy_version(document: dict, runtime: str, version: object) -> dict:
+    blocks = [block for block in document["runtimes"] if block["mode"] == runtime]
+    assert len(blocks) == 1
+    if version is _VERSION_ABSENT:
+        del blocks[0]["runtime"]["pyboy_version"]
+    else:
+        blocks[0]["runtime"]["pyboy_version"] = version
+    return document
+
+
+def test_valid_pinned_pyboy_version_promotes_only_the_synthetic_effect_zero_cell(
+    catalog: dict,
+) -> None:
+    pinned = catalog["coverage"]["evidence_policy"]["expected_pyboy_version"]
+    document = _mechanics_document(catalog)
+    assert {block["runtime"]["pyboy_version"] for block in document["runtimes"]} == {pinned}
+
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    for runtime in ("source", "cython"):
+        assert _mechanics_status(catalog, report, runtime)["status"] == "tested"
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 1
+    assert report["dimensions"]["expanded_mechanics"]["planned_unverified"] == 67
+
+
+@pytest.mark.parametrize("runtime", ["source", "cython"])
+@pytest.mark.parametrize(("version", "status", "reason_fragment"), _PINNED_VERSION_REJECTIONS)
+def test_pinned_pyboy_version_must_be_present_and_exact_for_each_runtime(
+    catalog: dict, runtime: str, version: object, status: str, reason_fragment: str
+) -> None:
+    other = "cython" if runtime == "source" else "source"
+    document = _with_runtime_pyboy_version(_mechanics_document(catalog), runtime, version)
+
+    results = coverage.result_set_from_document(document)
+    report = coverage.build_report(catalog, results, expected_commit="a" * 40)
+
+    rejected = _mechanics_status(catalog, report, runtime)
+    assert rejected["status"] == status
+    assert reason_fragment in rejected["reason"]
+    # The other runtime keeps its valid pinned identity, so only this runtime is rejected.
+    assert _mechanics_status(catalog, report, other)["status"] == "tested"
+    # One rejected runtime denies the whole family tested credit.
+    assert report["dimensions"]["expanded_mechanics"]["tested"] == 0
+    assert report["dimensions"]["expanded_mechanics"]["status"] != "COMPLETE"
+    verified = coverage._verified_mechanics_case_ids(report["cases"])
+    effect_zero = [f for f in report["move_effects"]["families"] if f["effect_id"] == 0]
+    assert not coverage._family_is_verified(effect_zero[0], verified)
