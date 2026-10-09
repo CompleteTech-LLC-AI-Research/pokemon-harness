@@ -223,3 +223,12 @@ def test_a_child_that_drops_its_connection_while_holding_reservations_is_reporte
     assert connect(hub, "cython-job", 1).reserve("q")[0] == "granted", (
         "the dropped slot was returned"
     )
+
+
+def test_an_arbiter_that_stops_serving_is_a_loss_for_everyone(hub):
+    hub._server.close()  # the serving thread's accept now fails and it ends
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and hub._thread.is_alive():
+        time.sleep(0.02)
+    hub.check_leases()
+    assert "stopped serving" in hub.closed_reason and len(hub.lost) == 1

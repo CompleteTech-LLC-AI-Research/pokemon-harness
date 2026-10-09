@@ -127,6 +127,8 @@ class ArbiterHub:
             self.on_loss(self.closed_reason)
 
     def check_leases(self) -> None:
+        if self._thread is not None and not self._thread.is_alive() and not self._stopping.is_set():
+            self.lose("the parent arbiter stopped serving")
         now = self._clock()
         with self._lock:
             silent = [

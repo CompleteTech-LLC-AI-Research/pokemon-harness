@@ -44,6 +44,7 @@ from scripts.production_gate_parallel_capacity import (
     affinity_pairs,
     capacity_loss_probe,
     child_capacity_loss,
+    policy_file_problem,
     require_parallel_capacity,
     write_pinned_policy,
 )
@@ -716,6 +717,10 @@ def _run_plan(
     def poll() -> None:
         while running:
             hub.check_leases()
+            for item in tuple(running):  # a policy that is no longer the plan-pinned one is a loss
+                pin = plan.job(item.job_id).get("policy_sha256")
+                if pin and policy_file_problem(item.tree["root"] / "capacity-policy.json", pin):
+                    hub.lose(f"{item.job_id}: the child capacity policy changed during the run")
             if hub.closed_reason:
                 budget.mark_lost(hub.closed_reason)
                 cancel(f"live arbiter closed admission: {hub.closed_reason}")

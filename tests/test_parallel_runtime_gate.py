@@ -54,6 +54,10 @@ if name == "arbiter_loss":
     client.reserve("pair-1")
     client.event("capacity_loss", "pair-1", "memory pressure observed by the child")
     time.sleep(30)
+if name == "tamper_policy":
+    with open(os.path.join(job_root, "capacity-policy.json"), "a") as handle:
+        handle.write(" ")
+    time.sleep(30)
 if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
@@ -597,3 +601,19 @@ def test_an_explicitly_unqualified_run_proceeds_but_is_labelled_and_never_accept
     _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"})
     assert states(report) == {"source": "passed", "cython": "passed"}
     assert report["kernel_ownership"]["qualification"].startswith("UNQUALIFIED_COMPATIBILITY")
+
+
+POLICY_TEXT = json.dumps({"max_concurrent_pairs": 2, "memory_floor_bytes": 1})
+
+
+def test_a_child_policy_that_stops_being_the_plan_pinned_one_closes_admission_and_cancels(tmp_path):
+    plan = make_plan(capacity_policy_text=POLICY_TEXT)
+    _, _, report = run(
+        tmp_path,
+        {"source": "tamper_policy", "cython": "slow_pass:30"},
+        plan=plan,
+        capacity_policy_text=POLICY_TEXT,
+    )
+    assert "child capacity policy changed" in report["cancellation"]
+    assert all(job["state"] != "passed" for job in report["jobs"])
+    assert report["elapsed_seconds"] < 20
