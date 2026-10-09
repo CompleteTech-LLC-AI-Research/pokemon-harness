@@ -10,7 +10,10 @@ from scripts.production_gate_parallel_capacity import (
     PairBudget,
     capacity_loss_probe,
     derive_job_policy,
+    policy_digest,
+    policy_file_problem,
     require_parallel_capacity,
+    write_pinned_policy,
 )
 from tests._parallel_runtime_report_support import make_plan
 
@@ -136,3 +139,24 @@ def test_each_child_gets_its_partition_of_the_one_global_policy():
         derive_job_policy("[1]", 1)
     with pytest.raises(CapacityError):
         derive_job_policy("{" * 100000, 1)
+
+
+GLOBAL_POLICY = json.dumps({"max_concurrent_pairs": 4, "memory_floor_bytes": 1})
+
+
+def test_the_effective_child_policy_is_pinned_before_dispatch_and_proven_on_disk(tmp_path):
+    expected = policy_digest(derive_job_policy(GLOBAL_POLICY, 2))
+    target = tmp_path / "capacity-policy.json"
+    assert write_pinned_policy(target, GLOBAL_POLICY, 2, expected) == expected
+    assert policy_file_problem(target, expected) == ""
+    target.write_text(target.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    assert "not the plan-pinned policy" in policy_file_problem(target, expected)
+    assert "cannot be read" in policy_file_problem(tmp_path / "absent.json", expected)
+
+
+def test_a_derived_policy_that_differs_from_the_plan_pin_is_refused_before_it_is_written(tmp_path):
+    target = tmp_path / "capacity-policy.json"
+    wrong = policy_digest(derive_job_policy(GLOBAL_POLICY, 3))
+    with pytest.raises(CapacityError, match="differs from the digest the plan pinned"):
+        write_pinned_policy(target, GLOBAL_POLICY, 2, wrong)
+    assert not target.exists()

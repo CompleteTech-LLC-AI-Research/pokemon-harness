@@ -102,16 +102,6 @@ def children_of(pid: int) -> list[int] | None:
     return found
 
 
-def environ_has_token(pid: int, token: str) -> bool:
-    """Attribution label only, and only ever asked about a process that is already our own child."""
-
-    try:
-        data = Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return False
-    return f"{JOB_TOKEN_ENV}={token}".encode() in data.split(b"\0")
-
-
 class OrchestratorAdoption:
     """The orchestrator itself is a child subreaper while it runs jobs.
 
@@ -315,10 +305,11 @@ class OwnedTree:
     def pin_orphans(self) -> None:
         """Pin what the kernel re-parented to this orchestrator and belongs to this job.
 
-        Ownership is "our own child, pinned by pidfd after its start time was re-read"; the job
-        session, the worker the guardian reported over the status pipe, or the job token only
-        label which job an orphan came from.  Children that cannot be attributed are listed and
-        never signalled.
+        Ownership is kernel-held: "our own child, pinned by pidfd after its start time was
+        re-read" AND either in a session this job's guardian or worker leads, or the very worker
+        (pid, start) the guardian reported over its status pipe.  No environment is read and the
+        job token is not consulted.  Any other child is listed as unattributed, never signalled,
+        and keeps the cleanup proof from being claimed (bounded UNPROVEN retention).
         """
 
         adoption = self.adoption
@@ -356,10 +347,8 @@ class OwnedTree:
             if again is None or again[0] != stat[0]:
                 os.close(descriptor)
                 continue
-            mine = (
-                read_session(pid) in sessions
-                or (worker is not None and (pid, stat[0]) == worker)
-                or environ_has_token(pid, self.token)
+            mine = read_session(pid) in sessions or (
+                worker is not None and (pid, stat[0]) == worker
             )
             if mine:
                 self._entries[pid] = (descriptor, stat[0])

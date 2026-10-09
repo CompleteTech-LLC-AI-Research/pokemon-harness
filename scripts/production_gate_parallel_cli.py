@@ -216,6 +216,7 @@ def run_parallel_cli(
                     ),
                     total_pairs=total if type(total) is int else 0,
                     policy_digest=file_sha256(capacity_policy_path),
+                    capacity_policy_text=capacity_policy_path.read_text(encoding="utf-8"),
                     early_smoke=early_smoke,
                     fail_fast=fail_fast,
                     matrix_workers=args.matrix_workers if explicit_matrix_workers else None,

@@ -357,6 +357,16 @@ def test_orchestrator_adoption_sets_reads_back_and_restores_the_subreaper_flag()
         assert not disabled.active and not disabled.verify()
 
 
+class _Reported:
+    """What a guardian reports over its status pipe about the worker it spawned."""
+
+    def __init__(self, pid):
+        self.worker = (pid, read_stat(pid)[0])
+
+    def drain(self):
+        return None
+
+
 def test_an_orphan_reparented_to_the_orchestrator_is_pinned_terminated_and_proven(tmp_path):
     script = (
         "import os, subprocess, sys\n"
@@ -377,7 +387,7 @@ def test_an_orphan_reparented_to_the_orchestrator_is_pinned_terminated_and_prove
         end = time.monotonic() + 10
         while time.monotonic() < end and (read_stat(guardian.pid) or (0, 0, "?"))[2] != "Z":
             time.sleep(0.02)
-        tree = OwnedTree(guardian.pid, "tok-adopt", adoption=adoption)
+        tree = OwnedTree(guardian.pid, "tok-adopt", adoption=adoption, status=_Reported(orphan))
         try:
             receipt = tree.terminate(grace_seconds=1.0)
         finally:
@@ -395,3 +405,26 @@ def test_cleanup_is_unproven_when_adoption_was_not_active_at_launch(tmp_path):
     assert cleanup_proven(receipt, None, None) is False
     receipt["adoption"]["proof"] = True
     assert cleanup_proven(receipt, None, None) is True
+
+
+def test_an_unattributed_child_with_the_job_token_is_never_signalled_and_blocks_the_proof():
+    with OrchestratorAdoption() as adoption:
+        guardian = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        outsider = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            env={**os.environ, JOB_TOKEN_ENV: "tok-outsider"},
+        )
+        end = time.monotonic() + 10
+        while time.monotonic() < end and (read_stat(guardian.pid) or (0, 0, "?"))[2] != "Z":
+            time.sleep(0.02)
+        tree = OwnedTree(guardian.pid, "tok-outsider", adoption=adoption)
+        try:
+            receipt = tree.terminate(grace_seconds=0.3)
+            untouched = outsider.poll() is None
+        finally:
+            guardian.wait()
+            outsider.kill()
+            outsider.wait()
+    assert untouched, "a child that is not kernel-attributed to the job must never be signalled"
+    assert receipt["adoption"]["unattributed"] == [outsider.pid]
+    assert receipt["adoption"]["proof"] is False and cleanup_proven(receipt, None, None) is False

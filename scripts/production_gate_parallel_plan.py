@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from scripts.production_gate_model import DEFAULT_TIERS, RUNTIME_MODES, TIER_EXPRESSIONS
+from scripts.production_gate_parallel_capacity import derive_job_policy, policy_digest
 from scripts.production_gate_parallel_validation import (
     guarded,
     is_positive_number,
@@ -56,7 +57,17 @@ PLAN_KEYS = frozenset(
     }
 )
 JOB_KEYS = frozenset(
-    {"deadline_seconds", "job_id", "mode", "pairs", "phase", "steps", "tiers", "timing_rep_ids"}
+    {
+        "deadline_seconds",
+        "job_id",
+        "mode",
+        "pairs",
+        "phase",
+        "policy_sha256",
+        "steps",
+        "tiers",
+        "timing_rep_ids",
+    }
 )
 DEADLINE_KEYS = frozenset(
     {
@@ -190,6 +201,8 @@ def _validate_job(index: int, job: object, plan: Mapping[str, Any]) -> list[str]
     pairs = job["pairs"]
     if not _is_int(pairs) or pairs < 1:
         problems.append(f"{label}: pairs must be a positive integer")
+    if "policy_sha256" in job and not SHA256_RE.match(str(job["policy_sha256"])):
+        problems.append(f"{label}: policy_sha256 must be a lowercase sha256")
     if job["timing_rep_ids"] != expected_reps:
         problems.append(f"{label}: timing_rep_ids must match the declared repetitions")
     if not isinstance(job["steps"], list) or job["steps"] != expected:
@@ -337,6 +350,10 @@ def load_plan(text: str) -> ParallelPlan:
     return ParallelPlan(text=text, digest=str(body["plan_sha256"]))
 
 
+def policy_digest_of(capacity_policy_text: str, pairs: int) -> str:
+    return policy_digest(derive_job_policy(capacity_policy_text, pairs))
+
+
 def build_parallel_plan(
     *,
     commit: str,
@@ -354,6 +371,7 @@ def build_parallel_plan(
     total_pairs: int,
     pairs_per_job: Mapping[str, int] | None = None,
     policy_digest: str,
+    capacity_policy_text: str | None = None,
     early_smoke: bool,
     fail_fast: bool,
     require_row_ids: bool = True,
@@ -398,18 +416,20 @@ def build_parallel_plan(
                 steps = [{"mode": mode, "tier": tier, "role": "selected-tier"} for tier in tiers]
                 job_tiers = list(tiers)
                 reps = timing_rep_ids(repetitions) if "timing" in tiers else []
-            jobs.append(
-                {
-                    "job_id": job_id_for(mode, phase),
-                    "mode": mode,
-                    "phase": phase,
-                    "tiers": job_tiers,
-                    "steps": steps,
-                    "deadline_seconds": derive_job_deadline(deadlines, steps, repetitions),
-                    "pairs": shares[mode],
-                    "timing_rep_ids": reps,
-                }
-            )
+            job = {
+                "job_id": job_id_for(mode, phase),
+                "mode": mode,
+                "phase": phase,
+                "tiers": job_tiers,
+                "steps": steps,
+                "deadline_seconds": derive_job_deadline(deadlines, steps, repetitions),
+                "pairs": shares[mode],
+                "timing_rep_ids": reps,
+            }
+            if capacity_policy_text is not None:
+                # The effective child policy is derived and pinned before anything is dispatched.
+                job["policy_sha256"] = policy_digest_of(capacity_policy_text, shares[mode])
+            jobs.append(job)
     body: dict[str, Any] = {
         "schema_version": PLAN_SCHEMA_VERSION,
         "run_id": run_id or uuid.uuid4().hex,

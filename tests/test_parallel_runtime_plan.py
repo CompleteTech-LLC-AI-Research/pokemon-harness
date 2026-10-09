@@ -222,3 +222,22 @@ def test_cli_deadlines_use_effective_workers_the_aggregate_override_and_one_prob
         cli_deadlines(base, required, 1, 60.0, ("a", "b", "c"))["preflight_seconds"]
         > cli_deadlines(base, required, 1, 60.0, ("a",))["preflight_seconds"]
     )
+
+
+POLICY_TEXT = json.dumps({"max_concurrent_pairs": 4, "memory_floor_bytes": 1})
+
+
+def test_every_job_pins_the_digest_of_its_derived_child_capacity_policy():
+    from scripts.production_gate_parallel_capacity import derive_job_policy, policy_digest
+
+    body = make_plan(capacity_policy_text=POLICY_TEXT, total_pairs=4).as_dict()
+    for job in body["jobs"]:
+        expected = policy_digest(derive_job_policy(POLICY_TEXT, job["pairs"]))
+        assert job["policy_sha256"] == expected
+    assert "policy_sha256" not in make_plan().as_dict()["jobs"][0], "pinning is opt-in per plan"
+
+
+def test_a_malformed_child_policy_pin_is_refused_by_the_plan_validator():
+    body = json.loads(make_plan(capacity_policy_text=POLICY_TEXT, total_pairs=4).text)
+    body["jobs"][0]["policy_sha256"] = "not-a-digest"
+    assert any("policy_sha256" in item for item in validate_plan_body(body))

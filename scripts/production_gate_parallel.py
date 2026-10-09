@@ -43,8 +43,8 @@ from scripts.production_gate_parallel_capacity import (
     PairBudget,
     affinity_pairs,
     capacity_loss_probe,
-    derive_job_policy,
     require_parallel_capacity,
+    write_pinned_policy,
 )
 from scripts.production_gate_parallel_identity import (
     expected_identity,
@@ -634,8 +634,11 @@ def _run_plan(
             token = f"{body['run_id']}:{job_id}:{uuid.uuid4().hex}"
             receipt_path = tree["root"] / "guardian.json"
             if capacity_policy_text is not None:
-                (tree["root"] / "capacity-policy.json").write_text(
-                    derive_job_policy(capacity_policy_text, job["pairs"]), encoding="utf-8"
+                write_pinned_policy(
+                    tree["root"] / "capacity-policy.json",
+                    capacity_policy_text,
+                    job["pairs"],
+                    job.get("policy_sha256"),
                 )
             worker_argv = list(worker_argv_factory(plan, job_id, tree, project_root))
             handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115

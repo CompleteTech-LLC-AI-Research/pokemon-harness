@@ -26,6 +26,7 @@ from scripts.production_gate_parallel_artifacts import (
     ARTIFACT_SCHEMA_VERSION,
     TERMINAL_ARTIFACT_NAME,
 )
+from scripts.production_gate_parallel_capacity import policy_file_problem
 from scripts.production_gate_parallel_identity import IDENTITY_KEYS, measure_identity
 from scripts.production_gate_parallel_plan import PlanError, load_plan
 from scripts.production_gate_parallel_processes import JOB_TOKEN_ENV
@@ -210,6 +211,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.rom_root is None or args.fixture_root is None:
         print("worker refused: ROM and fixture roots must be explicit", file=sys.stderr)
         return 3
+    pinned = job.get("policy_sha256")
+    if args.capacity_policy is not None and pinned is not None:
+        problem = policy_file_problem(args.capacity_policy, pinned)
+        if problem:
+            print(f"worker refused: {problem}", file=sys.stderr)
+            return 3
     body = plan.as_dict()
 
     def measure() -> tuple[dict[str, Any], list[str]]:

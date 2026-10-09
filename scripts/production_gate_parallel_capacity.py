@@ -9,11 +9,13 @@ all fail closed and are recorded as observations.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from scripts.production_gate_parallel_validation import loads_strict
@@ -80,6 +82,35 @@ def derive_job_policy(global_text: str, pairs: int) -> str:
         raise CapacityError("a job share must be a positive integer within the global total")
     body["max_concurrent_pairs"] = pairs
     return json.dumps(body, sort_keys=True, indent=2) + "\n"
+
+
+def policy_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def write_pinned_policy(path: Path, global_text: str, pairs: int, pinned: str | None) -> str:
+    """Derive the job's policy, refuse it unless it equals the plan's pin, write and re-prove it."""
+
+    text = derive_job_policy(global_text, pairs)
+    digest = policy_digest(text)
+    if pinned is not None and digest != pinned:
+        raise CapacityError(
+            "the derived child capacity policy differs from the digest the plan pinned"
+        )
+    path.write_text(text, encoding="utf-8")
+    if policy_digest(path.read_text(encoding="utf-8")) != digest:
+        raise CapacityError("the child capacity policy changed on disk before dispatch")
+    return digest
+
+
+def policy_file_problem(path: Path, pinned: str) -> str:
+    """Empty when the file the child will load carries exactly the plan-pinned bytes."""
+
+    try:
+        actual = policy_digest(path.read_text(encoding="utf-8"))
+    except OSError:
+        return "the child capacity policy cannot be read"
+    return "" if actual == pinned else "the child capacity policy is not the plan-pinned policy"
 
 
 def affinity_pairs() -> int:
