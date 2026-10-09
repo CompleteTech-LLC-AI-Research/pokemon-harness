@@ -7,6 +7,7 @@ from the parent-observed intervals; it is not the real-ROM six-tier comparison.
 """
 
 import copy
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -43,7 +44,12 @@ def bundle(mode, intervals, *, run_id, **plan_overrides):
         outcomes.append(record)
         cleanup[job["job_id"]] = {
             "process_tree": {"proof": True, "contained": True},
-            "guardian": {"phase": "final", "proof": True, "contained": True},
+            "guardian": {
+                "phase": "final",
+                "proof": True,
+                "contained": True,
+                "rusage": {"utime": 4.0, "stime": 1.0, "maxrss_kb": 250000},
+            },
         }
     report = aggregate_outcomes(plan, outcomes)
     report.update(
@@ -191,3 +197,56 @@ def test_the_equivalence_digest_ignores_only_run_identity_and_time():
     b = make_plan(run_id="2" * 32, created_utc="2026-10-09T01:00:00+00:00").as_dict()
     assert equivalence_digest(a) == equivalence_digest(b)
     assert equivalence_digest(a) != equivalence_digest(make_plan(fail_fast=True).as_dict())
+
+
+def test_measured_resources_allocation_and_cumulative_deadlines_are_reported():
+    result = compare_bundles(*pair())
+    assert result["status"] == "COMPARED"
+    assert result["measured_resources"]["concurrent"] == {
+        "cpu_seconds": 10.0,
+        "max_rss_kb": 250000.0,
+    }
+    assert result["measured_resources"]["serial"] == result["measured_resources"]["concurrent"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "needle"),
+    [
+        (
+            lambda c, s: c["cleanup"]["source-job"]["guardian"].pop("rusage"),
+            "no measured resource usage",
+        ),
+        (
+            lambda c, s: s["cleanup"]["cython-job"]["guardian"]["rusage"].update(utime=-1.0),
+            "no measured resource usage",
+        ),
+        (
+            lambda c, s: s["cleanup"]["cython-job"]["guardian"]["rusage"].update(utime=900.0),
+            "very different CPU time",
+        ),
+    ],
+)
+def test_missing_negative_or_wildly_different_measurements_are_refused(mutate, needle):
+    concurrent, serial = pair()
+    mutate(concurrent, serial)
+    refused(concurrent, serial, needle)
+
+
+def test_a_run_past_its_cumulative_deadline_is_refused():
+    slow = [(0, 500), (500.5, 1000)]
+    refused(
+        bundle("concurrent", CONCURRENT, run_id="1" * 32),
+        bundle("serial", slow, run_id="2" * 32),
+        "ran past its derived deadline",
+    )
+
+
+def test_a_phase_that_allocates_more_pairs_than_the_single_budget_is_refused():
+    concurrent, serial = pair()
+    for bundle_report in (concurrent, serial):
+        plan = json.loads(bundle_report["plan"])
+        for job in plan["jobs"]:
+            job["pairs"] = 2
+        bundle_report["plan"] = json.dumps(plan)
+    result = compare_bundles(concurrent, serial)
+    assert result["status"] == "REFUSED"

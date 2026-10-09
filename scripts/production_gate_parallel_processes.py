@@ -486,7 +486,7 @@ import signal, sys
 stopped = []
 for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(number, lambda signum, frame: stopped.append(signum))
-import ctypes, hashlib, hmac, json, os, subprocess, time
+import ctypes, hashlib, hmac, json, os, resource, subprocess, time
 
 receipt_path, grace = sys.argv[1], float(sys.argv[2])
 secret_fd, status_fd, argv = int(sys.argv[3]), int(sys.argv[4]), sys.argv[6:]
@@ -623,10 +623,13 @@ while True:
             pass
     time.sleep(0.05)
 reap()
+done = resource.getrusage(resource.RUSAGE_CHILDREN)
+usage = {"utime": done.ru_utime, "stime": done.ru_stime, "maxrss_kb": done.ru_maxrss,
+         "majflt": done.ru_majflt, "nvcsw": done.ru_nvcsw, "nivcsw": done.ru_nivcsw}
 adopted.discard(worker.pid)
 final(worker_pid=worker.pid, worker_status=status, worker_pgid=worker_pgid,
       adopted=sorted(adopted), killed=sorted(killed), remaining=sorted(remaining),
-      proof=not remaining)
+      proof=not remaining, rusage=usage)
 if stopped:
     sys.exit(128 + stopped[0])
 sys.exit(status if status >= 0 else 128 - status)

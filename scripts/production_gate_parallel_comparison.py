@@ -31,6 +31,10 @@ from scripts.production_gate_parallel_validation import (
 
 VOLATILE_PLAN_KEYS = ("created_utc", "plan_sha256", "run_id")
 INTERVAL_EPSILON_SECONDS = 0.05
+CPU_EQUIVALENCE_FACTOR = (
+    4.0  # a declared estimate reported beside the measurements, not a qualification
+)
+RUSAGE_KEYS = ("utime", "stime")
 
 
 def equivalence_digest(plan_body: Mapping[str, Any]) -> str:
@@ -89,6 +93,69 @@ def _resource_problems(label: str, report: Mapping[str, Any]) -> list[str]:
         problems.append(f"{label}: capacity observations are missing")
     elif any(o.get("event") == "loss" for o in observations):
         problems.append(f"{label}: capacity was lost during the run")
+    return problems
+
+
+def _usage_of(report: Mapping[str, Any], job_id: str) -> object:
+    cleanup = report.get("cleanup")
+    entry = cleanup.get(job_id) if isinstance(cleanup, dict) else None
+    guardian = entry.get("guardian") if isinstance(entry, dict) else None
+    return guardian.get("rusage") if isinstance(guardian, dict) else None
+
+
+def _measured(label: str, report: Mapping[str, Any]) -> tuple[list[str], dict[str, float]]:
+    """CPU seconds and peak RSS measured by each job's authenticated guardian (wait4 rusage)."""
+
+    problems: list[str] = []
+    cpu, rss = 0.0, 0.0
+    for job in report["jobs"]:
+        usage = _usage_of(report, str(job.get("job_id")))
+        if (
+            not isinstance(usage, dict)
+            or not all(is_finite_number(usage.get(k)) and usage[k] >= 0 for k in RUSAGE_KEYS)
+            or not is_positive_number(usage.get("maxrss_kb"))
+        ):
+            problems.append(f"{label}: {job.get('job_id')} has no measured resource usage")
+            continue
+        cpu += float(usage["utime"]) + float(usage["stime"])
+        rss = max(rss, float(usage["maxrss_kb"]))
+    return problems, {"cpu_seconds": cpu, "max_rss_kb": rss}
+
+
+def _allocation_problems(label: str, plan: Any, mode: str) -> list[str]:
+    """Jobs that run together must fit the ONE total pair budget the plan declares."""
+
+    body = plan.as_dict()
+    total = body["capacity"]["total_pairs"]
+    by_phase: dict[str, list[int]] = {}
+    for job in body["jobs"]:
+        by_phase.setdefault(job["phase"], []).append(job["pairs"])
+    problems = []
+    for phase, shares in by_phase.items():
+        need = max(shares) if mode == "serial" else sum(shares)
+        if need > total:
+            problems.append(f"{label}: the {phase} phase allocates {need} pairs of a total {total}")
+    return problems
+
+
+def _deadline_problems(label: str, report: Mapping[str, Any], plan: Any, mode: str) -> list[str]:
+    """Every job within its own derived deadline, and the whole run within the cumulative limit."""
+
+    body = plan.as_dict()
+    planned = {job["job_id"]: job for job in body["jobs"]}
+    problems: list[str] = []
+    for job in report["jobs"]:
+        window = _interval(job)
+        deadline = planned[str(job.get("job_id"))]["deadline_seconds"]
+        if window and (window[1] - window[0]).total_seconds() > deadline + CLOCK_SKEW_SECONDS:
+            problems.append(f"{label}: {job.get('job_id')} ran past its derived deadline")
+    by_phase: dict[str, list[float]] = {}
+    for job in body["jobs"]:
+        by_phase.setdefault(job["phase"], []).append(job["deadline_seconds"])
+    limit = sum(sum(v) if mode == "serial" else max(v) for v in by_phase.values())
+    elapsed = _elapsed_seconds(report)
+    if elapsed is not None and elapsed > limit + CLOCK_SKEW_SECONDS:
+        problems.append(f"{label}: the run exceeded its cumulative deadline")
     return problems
 
 
@@ -193,6 +260,7 @@ def _elapsed_seconds(report: Mapping[str, Any]) -> float | None:
 def _compare(concurrent: object, serial: object) -> dict[str, Any]:
     plan_c, problems = bundle_problems(concurrent)
     plan_s, serial_problems = bundle_problems(serial)
+    measured: dict[str, dict[str, float]] = {}
     problems = [f"concurrent: {p}" for p in problems] + [f"serial: {p}" for p in serial_problems]
     if not isinstance(concurrent, dict) or not isinstance(serial, dict):
         return {"status": "REFUSED", "problems": problems or ["a bundle is not an object"]}
@@ -204,6 +272,17 @@ def _compare(concurrent: object, serial: object) -> dict[str, Any]:
         if not problems:
             problems.extend(_execution_problems("concurrent", concurrent, plan_c, "concurrent"))
             problems.extend(_execution_problems("serial", serial, plan_s, "serial"))
+            for label, bundle, plan in (
+                ("concurrent", concurrent, plan_c),
+                ("serial", serial, plan_s),
+            ):
+                problems.extend(_allocation_problems(label, plan, label))
+                problems.extend(_deadline_problems(label, bundle, plan, label))
+                found, measured[label] = _measured(label, bundle)
+                problems.extend(found)
+            cpu = [measured[k].get("cpu_seconds", 0.0) for k in ("concurrent", "serial")]
+            if min(cpu) > 0 and max(cpu) / min(cpu) > CPU_EQUIVALENCE_FACTOR:
+                problems.append("the bundles consumed very different CPU time: not equivalent work")
     if concurrent.get("execution_mode") != "concurrent":
         problems.append("the first bundle was not produced in concurrent mode")
     if serial.get("execution_mode") != "serial":
@@ -229,6 +308,8 @@ def _compare(concurrent: object, serial: object) -> dict[str, Any]:
         "serial_seconds": seconds_s,
         "speedup": round(seconds_s / seconds_c, 4),
         "equivalence_digest": equivalence_digest(plan_c.as_dict()),
+        "measured_resources": measured,
+        "cpu_equivalence_factor": CPU_EQUIVALENCE_FACTOR,
         "resource_traces": {
             "concurrent": concurrent["resource_trace"],
             "serial": serial["resource_trace"],
