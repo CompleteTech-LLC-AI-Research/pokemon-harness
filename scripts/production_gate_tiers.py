@@ -403,7 +403,9 @@ def run_tier(
         if publish is not None:
             publish(tier_result)
     finally:
-        # Hands back the prior handler of a successfully installed guard; assembly or publication may fail before the tier is published.
+        # Attempts best-effort restoration of the saved handler (``restore()`` suppresses
+        # ``ValueError``/``OSError``, so OS restoration is not guaranteed); assembly or
+        # publication may fail before the tier is published.
         cancelled_during_finalization = finalization_guard.restore()
     if interrupted_between_iterations:
         # The repetition loop was cancelled.  Carry the accumulated iterations

@@ -885,7 +885,9 @@ def run_matrix_tier(
         if publish is not None:
             publish(tier_result)
     finally:
-        # Hands back the prior handler of a successfully installed guard; assembly or publication may fail before the tier is published.
+        # Attempts best-effort restoration of the saved handler (``restore()`` suppresses
+        # ``ValueError``/``OSError``, so OS restoration is not guaranteed); assembly or
+        # publication may fail before the tier is published.
         cancelled_during_finalization = finalization_guard.restore()
     if cancelled_during_finalization:
         # The evidence is complete; carry it out and record the cancellation
