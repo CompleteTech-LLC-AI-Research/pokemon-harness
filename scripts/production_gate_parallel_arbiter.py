@@ -280,6 +280,9 @@ class ArbiterHub:
 
         operation, pair, loss = body.get("op"), clip(body.get("pair", "")), ""
         with self._lock:
+            if self._jobs.get(job.job_id) is not job:
+                # Retired while this request waited (for example in authentication): mutate nothing.
+                return "closed", "the job was retired before this request could be applied"
             job.last_seen = self._clock()
             closed = self.closed_reason
             if operation == "hello":

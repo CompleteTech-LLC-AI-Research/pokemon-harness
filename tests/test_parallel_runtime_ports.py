@@ -140,8 +140,11 @@ def test_a_connector_that_arrives_before_the_listener_adopts_is_queued_not_refus
         adopted.close()
 
 
-def test_a_port_the_owner_never_leased_is_left_to_the_normal_bind(owner):
-    assert handoff.take_listener("127.0.0.1", 1) is None
+def test_a_port_the_owner_never_leased_fails_closed_never_to_an_ordinary_bind(owner):
+    """Contract inverted by the post-Astra repair: it used to return None and let callers bind."""
+
+    with pytest.raises(handoff.HandoffError):
+        handoff.take_listener("127.0.0.1", 1)
 
 
 def test_without_an_owner_nothing_changes(monkeypatch):
@@ -224,3 +227,40 @@ def test_the_broker_leases_only_inside_its_range():
             broker.lease()
     finally:
         broker.close()
+
+
+def test_a_configured_owner_refuses_a_bare_or_invalid_port_request(owner):
+    for bad in (0, -1, "80", None):
+        with pytest.raises(handoff.HandoffError):
+            handoff.take_listener("127.0.0.1", bad)
+
+
+def _unused_port():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    number = probe.getsockname()[1]
+    probe.close()
+    return number
+
+
+def _nothing_listens(port):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+    except OSError:
+        return True
+    return False
+
+
+def test_the_mcp_and_serial_listeners_fail_closed_in_a_configured_job_for_an_unleased_port(owner):
+    from pokered_harness.link.serial_link import TcpSerialLink
+    from pokered_harness.mcp_server_remote_contract import _bind_listener
+
+    port = _unused_port()
+    with pytest.raises(Exception) as mcp:
+        _bind_listener("127.0.0.1", port)
+    assert "listen_failed" in str(mcp.value) or type(mcp.value).__name__ == "McpHarnessError"
+    assert _nothing_listens(port), "no ordinary bind may follow a refused handoff"
+    port = _unused_port()
+    with pytest.raises(handoff.HandoffError):
+        TcpSerialLink.listen(port, "blue", accept_timeout_s=0.2)
+    assert _nothing_listens(port)

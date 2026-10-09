@@ -476,3 +476,91 @@ def test_without_the_required_marker_a_failed_join_is_recorded_and_the_worker_st
     assert mark.read_text() == "spawned"
     body, _problems = read_guardian_receipt(receipt, secret, process.pid)
     assert body["contained"] is True and body["cgroup_error"], "unqualified: recorded, never hidden"
+
+
+def _reuse_scenario(monkeypatch, *, dies):
+    """Fake the kernel facts: a pinned parent 4101 and a child 4102 whose parent field names 4101.
+
+    ``dies`` picks WHEN the pinned parent instance exits (and its number would be reused): None never,
+    "during-read" while its children are listed, "after-snapshot" right after the live snapshot.
+    """
+
+    from scripts import production_gate_parallel_processes as proc
+
+    parent, child = 4101, 4102
+    fds, state = {}, {"exited": False, "snapshots": 0, "child_reads": 0}
+
+    def fake_open(pid):
+        fds[pid] = os.open(os.devnull, os.O_RDONLY)
+        return fds[pid]
+
+    def fake_exited(fd):
+        if fd != fds.get(parent):
+            return False
+        state["snapshots"] += 1
+        if dies == "after-snapshot" and state["snapshots"] > 1:
+            state["exited"] = True
+        return state["exited"]
+
+    def fake_children(pid):
+        state["child_reads"] += 1
+        if dies == "during-read":
+            state["exited"] = (
+                True  # dies while its list is read; the number now belongs to a stranger
+            )
+        return [child] if pid == parent else []
+
+    facts = {parent: (1000, 1, "S"), child: (5000, parent, "S")}
+    monkeypatch.setattr(proc, "_pidfd_open", fake_open)
+    monkeypatch.setattr(proc, "_exited", fake_exited)
+    monkeypatch.setattr(proc, "read_stat", lambda pid: facts.get(pid))
+    monkeypatch.setattr(proc, "children_of", fake_children)
+    monkeypatch.setattr(proc, "socket_ports", lambda pids: {})
+    tree = proc.OwnedTree(parent, "tok", observe_seconds=0.0)
+    tree.observe(force=True)
+    for fd in fds.values():
+        os.close(fd)
+    return tree, state, child
+
+
+def test_a_parent_number_reused_between_snapshot_and_traversal_never_donates_children(monkeypatch):
+    """The held pidfd must show the SAME parent instance before AND after its children are listed."""
+
+    during, state, child = _reuse_scenario(monkeypatch, dies="during-read")
+    assert child not in during.tracked and during.adopted_total == 0
+    assert state["child_reads"] == 1, "the list was read once and then discarded as untrustworthy"
+    after, state, child = _reuse_scenario(monkeypatch, dies="after-snapshot")
+    assert child not in after.tracked and after.adopted_total == 0
+    assert state["child_reads"] == 0, "a parent already gone is never asked for its children"
+    alive, _state, child = _reuse_scenario(monkeypatch, dies=None)
+    assert child in alive.tracked and alive.adopted_total == 1, (
+        "the control adopts when the parent is valid"
+    )
+
+
+def test_cleanup_signals_only_pinned_instances_and_never_a_replacement_by_number(monkeypatch):
+    """Non-interference is independent of collection: a signal goes through the held pidfd only."""
+
+    from scripts import production_gate_parallel_processes as proc
+
+    sent = []
+
+    def forbid(*_a, **_k):
+        raise AssertionError("a process was signalled by its number")
+
+    monkeypatch.setattr(proc.os, "kill", forbid)
+    monkeypatch.setattr(proc.os, "killpg", forbid)
+    monkeypatch.setattr(
+        proc.signal, "pidfd_send_signal", lambda fd, signum: sent.append((fd, signum))
+    )
+    tree = object.__new__(
+        proc.OwnedTree
+    )  # no constructor: nothing was pinned or read from the kernel
+    tree._entries = {777: (31, 1234)}
+    assert tree._signal({777}, signal.SIGTERM) == [777] and sent == [(31, signal.SIGTERM)]
+
+    def gone(fd, signum):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(proc.signal, "pidfd_send_signal", gone)
+    assert tree._signal({777}, signal.SIGKILL) == [], "an exited instance is not signalled again"

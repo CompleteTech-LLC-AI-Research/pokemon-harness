@@ -65,6 +65,11 @@ if name == "drop_arbiter":
     client.reserve("pair-1")
     client._conn.close()
     time.sleep(30)
+if name == "malformed_progress":
+    os.makedirs(os.path.join(job_root, "evidence"), exist_ok=True)
+    open(os.path.join(job_root, "evidence", "gate-report.json"), "w").write(json.dumps(
+        {"tiers": [{"name": "unit", "status": ["PASS"], "counts": {}, "test_records": []}]}))
+    time.sleep(120)
 if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
@@ -118,6 +123,10 @@ if name == "fail":
 elif name == "capacity_blocked":
     report["capacity"] = {"status": "ok", "admission": {"decisions": [
         {"pair_id": "pair-1", "status": "blocked", "reason": "memory pressure"}]}}
+elif name in ("malformed_capacity_list", "malformed_capacity_map"):
+    bad = ["blocked"] if name.endswith("list") else {"blocked": 1}
+    report["capacity"] = {"status": "ok", "admission": {"decisions": [
+        {"pair_id": "pair-1", "status": bad, "reason": "x"}]}}
 elif name == "wrong_run":
     artifact["run_id"] = "9" * 32
 elif name == "wrong_head":
@@ -668,3 +677,94 @@ def test_a_dropped_arbiter_connection_cancels_the_owned_sibling_and_keeps_the_re
     ledger = report["cleanup"]["source-job"]["arbiter"]
     assert ledger["dropped"] is True and ledger["unreleased"] == ["pair-1"]
     assert report["elapsed_seconds"] < 20
+
+
+@pytest.mark.parametrize("scenario", ["malformed_capacity_list", "malformed_capacity_map"])
+def test_malformed_child_capacity_evidence_fails_that_job_through_the_real_finish_path(
+    tmp_path, scenario
+):
+    """The actual finish caller, with an unhashable admission status: a failed job, a passing sibling."""
+
+    _, _, report = run(tmp_path, {"source": scenario, "cython": "pass"})
+    assert states(report) == {"source": "failed", "cython": "passed"}
+    source = next(job for job in report["jobs"] if job["job_id"] == "source-job")
+    assert any("capacity evidence is malformed" in p for p in source["artifact_problems"])
+    assert report["overall"] == "FAIL"
+
+
+def test_a_timed_out_job_with_malformed_progress_is_recovered_without_aborting_the_run(tmp_path):
+    """The actual recovery caller after a deadline: an unhashable tier status must not raise."""
+
+    plan = make_plan(deadline_seconds=1.0)
+    _, _, report = run(tmp_path, {"source": "malformed_progress", "cython": "pass"}, plan=plan)
+    assert states(report) == {"source": "timeout", "cython": "passed"}
+    assert report["overall"] == "FAIL"
+
+
+def test_a_required_ownership_failure_stops_every_later_launch_in_the_same_batch(
+    tmp_path, monkeypatch
+):
+    ready = {
+        "required": True,
+        "qualified": True,
+        "admitted": True,
+        "reason": "",
+        "qualification": "probe",
+    }
+    monkeypatch.setattr("scripts.production_gate_parallel.kernel_ownership", lambda required: ready)
+    calls = []
+
+    def create(cls, name, **_kw):
+        calls.append(name)
+        if len(calls) == 1:
+            return cls(None, "refused by the host for the first job")
+        return cls(tmp_path / "would-have-succeeded", "")  # an available cgroup for the second job
+
+    monkeypatch.setattr("scripts.production_gate_parallel.JobCgroup.create", classmethod(create))
+    plan, root, report = run(
+        tmp_path, {"source": "pass", "cython": "pass"}, require_kernel_ownership=True
+    )
+    assert len(calls) == 1, "closing admission must stop the second launch before it is attempted"
+    assert states(report) == {"source": "failed", "cython": "not_started"}
+    second = next(job for job in report["jobs"] if job["job_id"] == "cython-job")
+    assert "live arbiter closed admission" in second["reason"]
+    assert not list((root / plan.run_id).glob("*/guardian.json")), "no guardian, hence no worker"
+
+
+def test_an_interrupt_with_mixed_cleanup_proof_retains_runtime_and_reservations(
+    tmp_path, monkeypatch
+):
+    """KeyboardInterrupt while two jobs run, one cleanup unproven: retain it, release the proven."""
+
+    from scripts import production_gate_parallel as orchestrator
+    from scripts.production_gate_parallel_safety import should_retain_runtime
+
+    real, verdicts, calls = orchestrator.cleanup_proven, iter([False]), []
+    monkeypatch.setattr(
+        orchestrator, "cleanup_proven", lambda *a, **k: next(verdicts, True) and real(*a, **k)
+    )
+
+    def sleeper(seconds):
+        calls.append(seconds)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+    budget = PairBudget(2)
+    _, _, report = run(
+        tmp_path,
+        {"source": "slow_pass:30", "cython": "slow_pass:30"},
+        budget=budget,
+        sleeper=sleeper,
+    )
+    assert report["cleanup_complete"] is False and should_retain_runtime(report) is True
+    assert any("cleanup unproven" in p for p in report["orchestration_problems"])
+    assert report["overall"] == "FAIL"
+    assert budget.reserved_total == 1, "the unproven job keeps its pair; the proven one is released"
+
+
+def test_a_clean_run_reports_complete_cleanup_so_runtime_files_may_be_removed(tmp_path):
+    from scripts.production_gate_parallel_safety import should_retain_runtime
+
+    _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"})
+    assert report["cleanup_complete"] is True and should_retain_runtime(report) is False

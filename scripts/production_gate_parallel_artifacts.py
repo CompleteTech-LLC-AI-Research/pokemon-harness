@@ -398,11 +398,12 @@ def parse_partial_progress(tree: Mapping[str, Path]) -> dict[str, Any]:
                     if isinstance(r, dict) and type(r.get("iteration")) is int
                 ]
                 errors = tier.get("errors") if isinstance(tier.get("errors"), list) else []
+                claimed = tier.get("status")
                 progress["tiers"].append(
                     {
                         "name": str(tier.get("name"))[:64],
-                        "claimed_status": tier.get("status")
-                        if tier.get("status") in TIER_STATUSES
+                        "claimed_status": claimed
+                        if isinstance(claimed, str) and claimed in TIER_STATUSES
                         else "UNKNOWN",
                         "counts": {k: counts[k] for k in COUNT_KEYS if type(counts.get(k)) is int},
                         "records": len(iterations),

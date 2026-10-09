@@ -335,3 +335,40 @@ def test_an_enrolled_session_whose_parsed_digest_differs_from_the_plan_pin_close
     enroll_production(session, policy_sha256="b" * 64, environ=environment)
     assert session.admission.arbiter.closed_reason and "plan-pinned" in hub.closed_reason
     assert session.admission.admit("a").status == "blocked"
+
+
+def test_a_request_waiting_in_authentication_cannot_reserve_after_its_job_is_retired(
+    hub, monkeypatch
+):
+    """Deterministic interleaving, no sleeps: capture, retire, release, then the request must fail."""
+
+    import threading
+
+    from scripts import production_gate_parallel_arbiter as hub_module
+
+    client = connect(hub, "source-job", 1)
+    entered, release = threading.Event(), threading.Event()
+    real = hub_module.unseal
+
+    def blocking(key, data):
+        if wire.peek(data).get("op") == "reserve":
+            entered.set()
+            assert release.wait(5.0), "the test never released the blocked request"
+        return real(key, data)
+
+    monkeypatch.setattr(hub_module, "unseal", blocking)
+    outcome = []
+    worker = threading.Thread(target=lambda: outcome.append(client.reserve("p")), daemon=True)
+    worker.start()
+    assert entered.wait(5.0), "the request never reached authentication"
+    ledger = hub.unregister(
+        "source-job", cleanup_proven=False
+    )  # the retained snapshot is taken here
+    assert ledger["unreleased"] == [] and ledger["retained_unproven"] == []
+    release.set()
+    worker.join(5.0)
+    assert not worker.is_alive()
+    assert outcome and outcome[0][0] == "closed", "a retired job must not be granted a reservation"
+    assert hub.retained() == {}, "no capacity may exist that the retirement snapshot did not see"
+    other = connect(hub, "cython-job", 2)
+    assert other.reserve("x")[0] == "granted" and other.reserve("y")[0] == "granted"

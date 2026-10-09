@@ -499,3 +499,9 @@ def test_one_jobs_failing_aggregation_becomes_a_failed_outcome_and_aborts_nothin
         finished_utc=None,
         token="t",
     ) == {"state": "passed"}
+
+
+def test_the_unmutated_report_verifies_cleanly_so_each_malformed_rejection_is_its_own(tmp_path):
+    root, artifact, body, job = _report_with(tmp_path, lambda r: None)
+    problems, _report = verify_gate_report(root, artifact, body, job)
+    assert problems == [], "no seeded failure: the baseline report must verify without a problem"

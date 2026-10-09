@@ -40,7 +40,7 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         ),
         (
             "owned process trees: authenticated guardian, parent status-pipe absence proof, "
-            "pidfd-verified signals, parent-death signals, proof before any release or removal"
+            "pidfd-verified signals, parent-death signals, explicit cleanup proof before any release or removal (an exceptional exit retains by default)"
         ),
         (
             "orchestrator subreaper adoption with kernel-attributed pidfd cleanup (retention "
@@ -59,7 +59,7 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         "full real-ROM dual-runtime run over the six tiers (#107.5) is NOT done",
         "elapsed-time comparison against sequential execution on equivalent conditions is NOT done",
         "operator allocation (#85/#86), #106 policy and the 18 orientation fixtures are unmet",
-        "nothing in this candidate has been executed; authored controls are not gameplay evidence",
+        "only 29 authored V11 controls (43 observed cases) ran, on candidate a10b5854; the post-Astra repairs and their controls have NOT been executed; no control is gameplay, real-ROM or performance evidence",
         (
             "not implemented: writable site dirs of a non-venv interpreter (refused), host-enforced "
             "immutability, a complete library inventory; the qualified mode refuses a host "
@@ -85,7 +85,7 @@ LIMITATIONS = (
         "kernel ownership is proven per job from joined and emptied facts and only on a host that "
         "delegates a cgroup; the unqualified mode is never an acceptance"
     ),
-    "none of this source has been executed: new and updated controls await a Sol-admitted batch",
+    "the post-Astra repairs and their new controls have not been executed and await a Sol-admitted batch; the earlier 43-case focused run covers only the a10b5854 controls",
 )
 
 __all__ = ("COVERAGE_DECLARATION", "LIMITATIONS")

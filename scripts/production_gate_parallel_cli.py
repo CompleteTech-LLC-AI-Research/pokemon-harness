@@ -42,6 +42,7 @@ from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan
 from scripts.production_gate_parallel_processes import interrupt_on_signals
 from scripts.production_gate_parallel_report import render_report_text, write_report
 from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes, runtime_digest
+from scripts.production_gate_parallel_safety import should_retain_runtime
 from scripts.production_gate_parallel_validation import loads_strict
 
 
@@ -313,7 +314,7 @@ def run_parallel_cli(
         )
     report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}
     report["runtime_immutability"] = "NOT_COMPLETE: see acceptance_limits of each runtime manifest"
-    if any("cleanup unproven" in item for item in report.get("orchestration_problems", [])):
+    if should_retain_runtime(report):  # explicit proof only, on every path
         report["snapshot_retained"] = snapshot["root"]  # never remove what cleanup has not cleared
     else:
         thaw_and_remove(Path(snapshot["root"]))

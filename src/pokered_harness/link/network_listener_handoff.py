@@ -4,8 +4,9 @@ A job may be given ``POKERED_LISTENER_HANDOFF``: the name of an abstract unix so
 owner (the orchestrator, or a test) keeps real bound, listening loopback sockets.  A listener asks
 for exactly ``(host, port)``, receives the open socket by SCM_RIGHTS, validates it and acknowledges;
 the owner closes its own copy only after that acknowledgment, so the port is never unbound between
-"reserved" and "listening" and no competing binder can slip in.  Without the variable, or for a
-port the owner did not lease, nothing changes and callers bind normally.
+"reserved" and "listening" and no competing binder can slip in.  Without the variable nothing
+changes and callers bind normally; with it, an endpoint the owner did not lease is refused
+(``HandoffError``) and never bound in the ordinary way.
 """
 
 from __future__ import annotations
@@ -90,19 +91,26 @@ def validate_listener(listener: socket.socket, host: str, port: int) -> None:
 def take_listener(
     host: str, port: int, *, socket_class: Callable[..., Any] = _SOCKET
 ) -> socket.socket | None:
-    """Receive and acknowledge the leased listening socket for (host, port), else None."""
+    """Receive and acknowledge the leased listening socket for (host, port).
+
+    None only when NO owner is configured (standalone use).  With an owner configured, anything
+    but a validated and acknowledged leased socket raises ``HandoffError``: a configured parallel
+    job never falls back to an ordinary bind, and an endpoint it was not leased is refused.
+    """
 
     name = broker_name()
-    if name is None or type(port) is not int or port <= 0:
+    if name is None:
         return None
+    if type(port) is not int or port <= 0:
+        raise HandoffError(
+            f"a configured parallel job can only listen on a leased port, not {port!r}"
+        )
     with _connect(name) as conn:
         conn.send(json.dumps({"op": "take", "host": host, "port": port}).encode("ascii"))
         data, descriptors, _flags, _address = socket.recv_fds(conn, MESSAGE_LIMIT, 1)
         reply = json.loads(data)
         if not descriptors:
-            if isinstance(reply, dict) and reply.get("ok") is False:
-                return None
-            raise HandoffError(f"the listener owner sent no socket: {reply!r}")
+            raise HandoffError(f"the listener owner did not lease {host}:{port}: {reply!r}")
         listener = socket_class(fileno=descriptors[0])
         try:
             validate_listener(listener, host, port)

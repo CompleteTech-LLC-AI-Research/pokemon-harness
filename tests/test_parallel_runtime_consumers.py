@@ -129,3 +129,18 @@ def test_standalone_the_serial_link_helper_still_hands_out_an_ordinary_free_port
         monkeypatch.delenv(name, raising=False)
     port = serial._free_port()
     assert isinstance(port, int) and 0 < port < 65536
+
+
+def test_standalone_the_serial_link_helper_hands_out_a_port_that_can_really_be_bound(monkeypatch):
+    from tests import test_serial_link as serial
+
+    for name in (HANDOFF_ENV, "POKERED_PARALLEL_PORT_BASE", "POKERED_PARALLEL_PORT_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+    port = serial._free_port()
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(2.0)
+        probe.bind(("127.0.0.1", port))  # availability, not just a plausible integer
+        probe.listen(1)
+    finally:
+        probe.close()

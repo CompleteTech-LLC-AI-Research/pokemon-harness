@@ -159,3 +159,25 @@ def test_the_parallel_producer_captures_the_policy_once_and_refuses_a_file_that_
     assert "cannot be captured" in capture_policy(path, None)[2][0]
     missing = capture_policy(tmp_path / "absent.json", None)
     assert missing[0] == "" and "cannot be captured" in missing[2][0]
+
+
+def test_a_second_read_of_the_policy_file_cannot_hide_behind_identical_bytes(tmp_path, monkeypatch):
+    """Each read returns DIFFERENT bytes and the reads are counted: only the first may be used."""
+
+    path = tmp_path / "policy.json"
+    path.write_bytes(b"{}")
+    first = policy_bytes()
+    reads = []
+
+    def changing(self):
+        if self != path:
+            return real(self)
+        reads.append(1)
+        return first if len(reads) == 1 else first + b" " * len(reads)
+
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", changing)
+    policy, error, digest = gate_capacity.load_capacity_policy_captured(path)
+    assert error is None and policy == make_policy()
+    assert len(reads) == 1, "the loader must read the file exactly once"
+    assert digest == hashlib.sha256(first).hexdigest()

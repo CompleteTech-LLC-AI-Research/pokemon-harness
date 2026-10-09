@@ -98,7 +98,8 @@ def child_capacity_loss(capacity: object) -> str:
     admission = capacity.get("admission") if isinstance(capacity, dict) else None
     decisions = admission.get("decisions") if isinstance(admission, dict) else None
     for decision in decisions if isinstance(decisions, list) else []:
-        if isinstance(decision, dict) and decision.get("status") in ADMISSION_REFUSALS:
+        status = decision.get("status") if isinstance(decision, dict) else None
+        if isinstance(status, str) and status in ADMISSION_REFUSALS:
             return f"{decision.get('pair_id')}: {decision.get('status')}: {str(decision.get('reason'))[:200]}"
     return ""
 

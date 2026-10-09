@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from scripts import production_gate_parallel_safety as safety
 from scripts.production_gate_parallel_arbiter import ArbiterHub
 from scripts.production_gate_parallel_artifacts import (
     TERMINAL_ARTIFACT_NAME,
@@ -421,6 +422,7 @@ def _run_plan(
     outcomes: dict[str, dict[str, Any]] = {}
     running: list[_Running] = []
     cleanup: dict[str, dict[str, Any]] = {}
+    launched_jobs: set[str] = set()
     out_manifests: dict[str, dict[str, tuple[int, int]]] = {}
     trees: dict[str, dict[str, Path]] = {}
     ports_seen: dict[str, set[int]] = {}
@@ -499,8 +501,7 @@ def _run_plan(
     def recover(item: _Running) -> tuple[Mapping[str, Any] | None, Mapping[str, Any]]:
         """Whatever the cancelled job already produced; kept beside, never as, a PASS."""
 
-        artifact, _problems = read_terminal_artifact(item.tree["root"])
-        return artifact, collect_partial_evidence(item.tree)
+        return safety.recover_evidence(read_terminal_artifact, collect_partial_evidence, item.tree)
 
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
         _close_handles(item)
@@ -541,7 +542,12 @@ def _run_plan(
         if not proven:
             receipt["proof"] = False
         view.close()
-        lost = child_capacity_loss(outcome.get("capacity"))
+        lost, malformed = safety.child_capacity_loss_total(
+            child_capacity_loss, outcome.get("capacity")
+        )
+        if malformed:
+            outcome["state"] = "failed"
+            outcome["artifact_problems"].append(malformed)
         if not lost and not (guardian and guardian.get("phase") == "final"):
             lost = "the job's guardian was lost"
         elif (
@@ -731,6 +737,7 @@ def _run_plan(
                 handles,
             )
         )
+        launched_jobs.add(job_id)
         progress()
 
     def poll() -> None:
@@ -823,6 +830,9 @@ def _run_plan(
                 if not admit(batch):
                     continue
                 for job in batch:
+                    if hub.closed_reason and not cancel_reason:
+                        budget.mark_lost(hub.closed_reason)
+                        cancel_reason = f"live arbiter closed admission: {hub.closed_reason}"
                     if not cancel_reason:
                         start(job)
                 poll()
@@ -832,7 +842,7 @@ def _run_plan(
                         settle(
                             job_id, "not_started", f"not started: {cancel_reason or 'no dispatch'}"
                         )
-                    proof = cleanup.get(job_id, {}).get("process_tree", {}).get("proof", True)
+                    proof = safety.cleanup_proven_for(launched_jobs, cleanup, job_id)
                     if proof:
                         live.release(job_id)
                     else:
@@ -853,8 +863,7 @@ def _run_plan(
         for job_id in phase_of:
             if job_id not in outcomes:
                 settle(job_id, "not_started", f"not started: {cancel_reason or 'no dispatch'}")
-            proof = cleanup.get(job_id, {}).get("process_tree", {}).get("proof", True)
-            if proof:
+            if safety.cleanup_proven_for(launched_jobs, cleanup, job_id):
                 live.release(job_id)
         for job_id, tree in trees.items():
             proven = cleanup.get(job_id, {}).get("process_tree", {}).get("proof") is True
@@ -885,6 +894,11 @@ def _run_plan(
     problems.extend(distinct_tree_problems(trees))
     if project_root.is_dir():
         problems.extend(diff_snapshots(shared_before, snapshot_tree(project_root, excluded)))
+    complete, unproven_jobs = safety.cleanup_completeness(launched_jobs, cleanup)
+    for job_id in unproven_jobs:
+        note = f"{job_id}: cleanup unproven; reservation retained"
+        if note not in problems:
+            problems.append(note)
     ordered = [outcomes[job["job_id"]] for job in body["jobs"]]
     report = aggregate_outcomes(plan, ordered)
     report.update(
@@ -901,6 +915,7 @@ def _run_plan(
         )
     )
     report["kernel_ownership"] = qualification_after(ownership, cleanup)
+    report["cleanup_complete"] = complete
     return report
 
 

@@ -275,6 +275,15 @@ class OwnedTree:
     def alive(self, table: object = None) -> set[int]:
         return self._alive_set()
 
+    def _parent_instance_valid(self, parent: int) -> bool:
+        """The very instance pinned earlier is still unexited (held pidfd) and keeps its start time."""
+
+        entry = self._entries.get(parent)
+        if entry is None or _exited(entry[0]):
+            return False
+        stat = read_stat(parent)
+        return stat is not None and stat[0] == entry[1]
+
     def observe(self, *, force: bool = False) -> None:
         """Adopt new descendants, walking only down from verified-owned live parents.
 
@@ -290,11 +299,15 @@ class OwnedTree:
         frontier = sorted(self._alive_set())
         while frontier:
             parent = frontier.pop()
+            if not self._parent_instance_valid(parent):
+                continue  # the pinned instance is gone: its number may already be reused
             kids = children_of(parent)
             if kids is None:
                 self.contained = False
                 self.reason = "containment not established: the kernel lists no children"
                 return
+            if not self._parent_instance_valid(parent):
+                continue  # the list may belong to a replacement that reused the number: discard it
             for pid in kids:
                 if pid in self._entries:
                     continue
