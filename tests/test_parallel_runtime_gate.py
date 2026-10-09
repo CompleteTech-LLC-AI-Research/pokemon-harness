@@ -768,3 +768,24 @@ def test_a_clean_run_reports_complete_cleanup_so_runtime_files_may_be_removed(tm
 
     _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"})
     assert report["cleanup_complete"] is True and should_retain_runtime(report) is False
+
+
+def test_an_error_inside_finish_fails_that_job_closed_and_aborts_no_sibling(tmp_path, monkeypatch):
+    """A callback error in the real finish path (the receipt reader) is contained to its own job."""
+
+    from scripts import production_gate_parallel as orchestrator
+
+    real, calls = orchestrator.read_guardian_receipt, []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("the receipt reader exploded")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "read_guardian_receipt", flaky)
+    _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"})
+    assert sorted(states(report).values()) == ["failed", "passed"]
+    broken = next(job for job in report["jobs"] if job["state"] == "failed")
+    assert "finish failed closed: RuntimeError" in " ".join(broken["artifact_problems"])
+    assert report["cleanup_complete"] is False and report["overall"] == "FAIL"

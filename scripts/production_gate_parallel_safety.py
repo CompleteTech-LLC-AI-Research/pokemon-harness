@@ -29,6 +29,52 @@ def cleanup_completeness(
     return not unproven, unproven
 
 
+def note_unproven_cleanup(
+    launched: Collection[str], cleanup: Mapping[str, Any], problems: list[str]
+) -> bool:
+    """One diagnostic per launched job without proved cleanup; True only when every job is proved."""
+
+    complete, unproven = cleanup_completeness(launched, cleanup)
+    for job_id in unproven:
+        note = f"{job_id}: cleanup unproven; reservation retained"
+        if note not in problems:
+            problems.append(note)
+    return complete
+
+
+def fail_finish(
+    outcome_record: Callable[..., dict[str, Any]],
+    plan: Any,
+    item: Any,
+    status: int,
+    exc: BaseException,
+    outcomes: dict[str, dict[str, Any]],
+    cleanup: dict[str, dict[str, Any]],
+    running: list[Any],
+) -> None:
+    """An error inside finish fails that job closed: its cleanup stays unproven, siblings go on."""
+
+    if item in running:
+        running.remove(item)
+    reason = f"finish failed closed: {type(exc).__name__}: {str(exc)[:160]}"
+    outcomes.setdefault(
+        item.job_id,
+        outcome_record(
+            plan,
+            item.job_id,
+            "failed",
+            child_exit_status=status,
+            artifact=None,
+            artifact_problems=[reason],
+            reason=reason,
+            launched_utc=None,
+            finished_utc=None,
+            partial_evidence=None,
+        ),
+    )
+    cleanup.setdefault(item.job_id, {"process_tree": {"proof": False, "reason": reason}})
+
+
 def should_retain_runtime(report: Mapping[str, Any]) -> bool:
     """Runtime files are removed only on explicit, complete cleanup proof; anything else retains."""
 
@@ -62,6 +108,8 @@ __all__ = (
     "child_capacity_loss_total",
     "cleanup_completeness",
     "cleanup_proven_for",
+    "fail_finish",
+    "note_unproven_cleanup",
     "recover_evidence",
     "should_retain_runtime",
 )

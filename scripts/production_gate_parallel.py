@@ -592,7 +592,12 @@ def _run_plan(
         for item in running[:]:
             status = item.process.poll()
             if status is not None and item in running:
-                finish(item, status, allow_cancel=allow_cancel)
+                try:
+                    finish(item, status, allow_cancel=allow_cancel)
+                except Exception as exc:  # noqa: BLE001 - an aggregation error fails its own job only
+                    safety.fail_finish(
+                        outcome_record, plan, item, status, exc, outcomes, cleanup, running
+                    )
 
     def stop(item: _Running) -> None:
         """Ask the guardian to contain its subtree first, then prove it from outside."""
@@ -894,11 +899,7 @@ def _run_plan(
     problems.extend(distinct_tree_problems(trees))
     if project_root.is_dir():
         problems.extend(diff_snapshots(shared_before, snapshot_tree(project_root, excluded)))
-    complete, unproven_jobs = safety.cleanup_completeness(launched_jobs, cleanup)
-    for job_id in unproven_jobs:
-        note = f"{job_id}: cleanup unproven; reservation retained"
-        if note not in problems:
-            problems.append(note)
+    complete = safety.note_unproven_cleanup(launched_jobs, cleanup, problems)
     ordered = [outcomes[job["job_id"]] for job in body["jobs"]]
     report = aggregate_outcomes(plan, ordered)
     report.update(
