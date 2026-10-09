@@ -119,7 +119,11 @@ class ArbiterClient:
             raise ArbiterError(
                 f"the parent arbiter cannot be reached: {type(exc).__name__}"
             ) from exc
-        self._call("hello", policy=policy)
+        try:
+            self._call("hello", policy=policy)
+        except ArbiterError:
+            self._conn.close()
+            raise
         if heartbeat:
             threading.Thread(target=self._beat, args=(heartbeat,), daemon=True).start()
         atexit.register(self.close)
