@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 
 import pytest
@@ -260,3 +261,209 @@ def test_terminal_cleanup_gate_preserves_frozen_turn(monkeypatch) -> None:
     assert observer.error is None
     assert observer.turn == frozen
     assert observer.snapshot()["settled"] is True
+
+
+# --- #595: verified KO-return / terminal continuation hooks (N1, N2) ----------
+
+_PROVIDER = {
+    "red": dict(select=0x5564, exchange=0x5605, load=0x3725, text=0x5A4C, printer=0x3C49,
+                player=0x5952, enemy=0x69D3),
+    "yellow": dict(select=0x56D6, exchange=0x5777, load=0x371B, text=0x5BBE, printer=0x3C36,
+                   player=0x5AC4, enemy=0x6B59),
+}
+_HOOK_SHORT = {
+    "player_ko": "player_action_ko_return", "enemy_ko": "enemy_action_ko_return",
+    "victory": "terminal_victory", "blackout": "terminal_blackout",
+}
+_BYTE_CONTROL = {  # hook -> (index, replacement byte)
+    "player_action_ko_return": (6, 0xC0), "enemy_action_ko_return": (6, 0xC0),
+    "terminal_victory": (4, 0xD1), "terminal_blackout": (9, 0xD1),
+}
+
+
+class _FakePyboy:
+    def __init__(self, memory):
+        self.memory, self.registered = memory, []
+
+    def hook_register(self, bank, address, callback, context):
+        self.registered.append((bank, address))
+
+
+class _FakeSymbols:
+    def __init__(self, table):
+        self.table = table
+
+    def bank_addr(self, name):
+        return self.table[name]
+
+    def addr_of(self, name):
+        return self.table[name][1]
+
+
+class _FakeSession:
+    def __init__(self, table, memory):
+        self.symbols, self._pyboy = _FakeSymbols(table), _FakePyboy(memory)
+
+
+def _continuation_session(version, mutate=None):
+    pins = _PROVIDER["yellow" if version == "yellow" else "red"]
+    table = {
+        "SelectEnemyMove": (15, pins["select"]),
+        "LinkBattleExchangeData": (15, pins["exchange"]),
+        "LoadScreenTilesFromBuffer1": (0, pins["load"]),
+        "wSerialExchangeNybbleReceiveData": (0, 0xCC3E),
+        "FullyParalyzedText": (15, pins["text"]),
+        "PrintText": (0, pins["printer"]),
+        "CheckPlayerStatusConditions.MonHurtItselfOrFullyParalysed": (15, pins["player"]),
+        "CheckEnemyStatusConditions.monHurtItselfOrFullyParalysed": (15, pins["enemy"]),
+    }
+    memory = {}
+
+    def put(bank, address, data):
+        for index, value in enumerate(data):
+            memory[bank, address + index] = value
+
+    le = lambda value: value.to_bytes(2, "little")  # noqa: E731
+    put(15, pins["select"] + 10, b"\xcd" + le(pins["exchange"]) + b"\xcd" + le(pins["load"])
+        + b"\xfa" + le(0xCC3E))
+    for key in ("player", "enemy"):
+        put(15, pins[key] - 6, b"\x21" + le(pins["text"]) + b"\xcd" + le(pins["printer"]))
+    for name, label, offset, pinned in evidence._CONTINUATION_PINS:
+        address, signature = pinned["yellow" if version == "yellow" else "red"]
+        table[label] = (15, address - offset)
+        put(15, address, bytes.fromhex(signature))
+    if mutate is not None:
+        mutate(table, memory)
+    return _FakeSession(table, memory)
+
+
+@pytest.mark.parametrize("version", ("red", "blue", "yellow"))
+def test_continuation_locations_pin_terminal_and_ko_hooks_for_every_version(version) -> None:
+    session = _continuation_session(version)
+    locations = evidence.continuation_locations(session, version)
+    assert [name for name, _bank, _address in locations] == [
+        "post_exchange", "local_fully_paralyzed", "enemy_fully_paralyzed",
+        "player_action_ko_return", "enemy_action_ko_return", "terminal_victory", "terminal_blackout",
+    ]
+    wanted = (0x593A, 0x69D3, 0x46BB, 0x489C) if version == "yellow" else (
+        0x57C8, 0x684D, 0x4699, 0x4837)
+    assert [(bank, address) for _name, bank, address in locations[3:]] == [(15, a) for a in wanted]
+    owned = evidence.install_continuation_hooks(session, object(), version=version)
+    assert owned == [(bank, address) for _name, bank, address in locations]
+    assert session._pyboy.registered == owned and len(owned) == 7
+
+
+def _drift_cases():
+    for version in ("red", "blue", "yellow"):
+        for short, hook in _HOOK_SHORT.items():
+            for kind in ("byte", "address", "bank"):
+                yield pytest.param(version, hook, kind, id=f"{version}-{short}-{kind}")
+
+
+@pytest.mark.parametrize("version, hook, kind", tuple(_drift_cases()))
+def test_continuation_locations_reject_terminal_and_ko_signature_drift(version, hook, kind) -> None:
+    _name, label, offset, pinned = next(x for x in evidence._CONTINUATION_PINS if x[0] == hook)
+    address, signature = pinned["yellow" if version == "yellow" else "red"]
+    data = bytes.fromhex(signature)
+
+    def mutate(table, memory):
+        if kind == "byte":
+            index, replacement = _BYTE_CONTROL[hook]
+            assert memory[15, address + index] == data[index] != replacement
+            memory[15, address + index] = replacement
+        elif kind == "address":
+            table[label] = (15, address - offset + 1)
+            for index, value in enumerate(data):
+                memory[15, address + 1 + index] = value
+        else:
+            table[label] = (14, address - offset)
+            for index, value in enumerate(data):
+                memory[14, address + index] = value
+
+    session = _continuation_session(version, mutate)
+    message = f"{hook} " + {"byte": "signature bytes", "address": "address", "bank": "bank"}[kind] + " mismatch"
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
+        evidence.install_continuation_hooks(session, object(), version=version)
+    assert session._pyboy.registered == []
+
+
+# --- #595: local readiness and wait contract (N6 readiness, N6 local) ----------
+
+
+def _ko_rows(*, terminal=True, cleanup=True):
+    from tests.test_battle_turn_evidence import _ko_pair_without_terminal, _terminal_pair
+
+    rows = _ko_pair_without_terminal()
+    if terminal:
+        for row, full in zip(rows, _terminal_pair(), strict=True):
+            row["terminal"] = full["terminal"]
+            if cleanup:
+                row["cleanup"] = full["cleanup"]
+    return rows
+
+
+@pytest.mark.parametrize(
+    "case, row, expected",
+    (
+        pytest.param("errored", {"settled": False, "unsupported_reason": "battle observation X: ValueError: e"}, False, id="errored"),
+        pytest.param("unsettled", {"settled": False}, False, id="unsettled"),
+        pytest.param("non-dict", None, False, id="non-dict"),
+        pytest.param("nonko-settled", {"settled": True, "turn": {"outcome": "settled"}}, True, id="nonko-settled"),
+        pytest.param("ko-no-terminal", {"settled": True, "turn": {"outcome": "ko"}, "terminal": None, "cleanup": None}, False, id="ko-no-terminal"),
+        pytest.param("ko-terminal-no-cleanup", {"settled": True, "turn": {"outcome": "ko"}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": None}, False, id="ko-terminal-no-cleanup"),
+        pytest.param("ko-cleanup-still-in-battle", {"settled": True, "turn": {"outcome": "ko"}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": {"is_in_battle": 2}}, False, id="ko-cleanup-still-in-battle"),
+        pytest.param("ko-terminal-cleanup", {"settled": True, "turn": {"outcome": "ko"}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": {"is_in_battle": 0}}, True, id="ko-terminal-cleanup"),
+    ),
+)
+def test_battle_evidence_ready_contract(case, row, expected) -> None:
+    from tests._pyboy_link_session_roms_battle_support import battle_evidence_ready
+
+    assert battle_evidence_ready(row) is expected
+
+
+class _ScriptedLink:
+    def __init__(self):
+        self.calls = 0
+
+    def step_interleaved(self, frames, chunk_cycles=None):
+        self.calls += 1
+
+
+class _ScriptedObserver:
+    def __init__(self, link, rows_for_calls):
+        self.link, self.rows_for_calls = link, rows_for_calls
+
+    def snapshot(self):
+        return self.rows_for_calls(self.link.calls)
+
+
+@pytest.mark.parametrize("case", ("local-never-ready", "local-nonko-ready", "local-ko-cleanup-arrives", "local-ko-never-cleanup"))
+def test_local_battle_wait_contract(case) -> None:
+    from tests._pyboy_link_session_roms_battle_support import _wait_for_settled_battle_evidence
+
+    link = _ScriptedLink()
+    nonko = [_row(), _row(reverse=True)]
+    plans = {
+        "local-never-ready": lambda calls: [
+            {"schema_version": evidence.SCHEMA_VERSION, "settled": False} for _ in range(2)
+        ],
+        "local-nonko-ready": lambda calls: nonko,
+        "local-ko-cleanup-arrives": lambda calls: _ko_rows(cleanup=calls >= 2),
+        "local-ko-never-cleanup": lambda calls: _ko_rows(terminal=False),
+    }
+    rows_for = plans[case]
+    counters = {"_battle_evidence": [
+        _ScriptedObserver(link, lambda calls, i=i: rows_for(calls)[i]) for i in (0, 1)
+    ]}
+    if case in ("local-never-ready", "local-ko-never-cleanup"):
+        expected = (
+            "['settled snapshot is missing']" if case == "local-never-ready"
+            else "['KO outcome lacks EndOfBattle evidence']"
+        )
+        with pytest.raises(AssertionError) as caught:
+            _wait_for_settled_battle_evidence(link, counters)
+        assert str(caught.value).startswith(f"battle settlement evidence failed: {expected}; rows=")
+        assert link.calls == 120
+    else:
+        _wait_for_settled_battle_evidence(link, counters)
+        assert link.calls == (0 if case == "local-nonko-ready" else 2)

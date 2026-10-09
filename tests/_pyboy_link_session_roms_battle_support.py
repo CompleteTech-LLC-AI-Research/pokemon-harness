@@ -54,6 +54,22 @@ def _install_battle_diag_counters(
     return counters
 
 
+def battle_evidence_ready(row) -> bool:
+    """A settled snapshot; a KO also needs EndOfBattle and a cleaned-up room."""
+    if not isinstance(row, dict) or row.get("unsupported_reason") or row.get("settled") is not True:
+        return False
+    turn = row.get("turn")
+    if not isinstance(turn, dict) or turn.get("outcome") != "ko":
+        return True
+    terminal, cleanup = row.get("terminal"), row.get("cleanup")
+    return (
+        isinstance(terminal, dict)
+        and terminal.get("boundary") == "EndOfBattle"
+        and isinstance(cleanup, dict)
+        and cleanup.get("is_in_battle") == 0
+    )
+
+
 def _assert_settled_battle_evidence(counters: dict) -> None:
     observers = counters.get("_battle_evidence")
     assert isinstance(observers, list) and len(observers) == 2
@@ -68,7 +84,7 @@ def _wait_for_settled_battle_evidence(link, counters: dict, *, budget_frames: in
     observers = counters.get("_battle_evidence")
     assert isinstance(observers, list) and len(observers) == 2
     for _ in range(0, budget_frames, 20):
-        if all(observer.snapshot()["settled"] for observer in observers):
+        if all(battle_evidence_ready(observer.snapshot()) for observer in observers):
             break
         link.step_interleaved(20, chunk_cycles=_LINK_CHUNK_CYCLES)
     _assert_settled_battle_evidence(counters)
