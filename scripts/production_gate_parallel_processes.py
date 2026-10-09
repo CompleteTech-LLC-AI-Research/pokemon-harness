@@ -255,7 +255,7 @@ class OwnedTree:
     def tracked(self) -> dict[int, int]:
         return {pid: started for pid, (_, started) in self._entries.items()}
 
-    def _adopt(self, pid: int, seen_start: int) -> bool:
+    def _adopt(self, pid: int, seen_start: int, parent: int | None = None) -> bool:
         descriptor = _pidfd_open(pid)
         if descriptor is None:
             self.contained = False
@@ -264,6 +264,9 @@ class OwnedTree:
         stat = read_stat(pid)
         if stat is None or stat[0] != seen_start:
             os.close(descriptor)  # the number was recycled before the pidfd pinned it
+            return False
+        if parent is not None and not self._parent_instance_valid(parent):
+            os.close(descriptor)  # the parent may have died and its number been reused: discard
             return False
         self._entries[pid] = (descriptor, seen_start)
         self.adopted_total += 1
@@ -314,7 +317,9 @@ class OwnedTree:
                 stat = read_stat(pid)
                 if stat is None or stat[1] != parent:
                     continue
-                if self._adopt(pid, stat[0]):
+                if not self._parent_instance_valid(parent):
+                    break  # the parent is gone: nothing read from here on proves ownership
+                if self._adopt(pid, stat[0], parent):
                     frontier.append(pid)
                 elif not self.contained:
                     return

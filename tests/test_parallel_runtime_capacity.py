@@ -177,3 +177,28 @@ def test_a_child_admission_refusal_is_reported_as_a_capacity_loss(status):
 )
 def test_no_refusal_is_no_capacity_loss_and_hostile_shapes_do_not_raise(capacity):
     assert child_capacity_loss(capacity) == ""
+
+
+@pytest.mark.parametrize(
+    "capacity",
+    [
+        {"admission": {"decisions": [{"status": ["blocked"]}]}},
+        {"admission": {"decisions": [{"status": {"blocked": 1}}]}},
+        {"admission": {"decisions": ["not-an-object"]}},
+        {"admission": {"decisions": 5}},
+    ],
+)
+def test_capacity_evidence_the_consumer_cannot_read_is_reported_not_silently_ignored(capacity):
+    from scripts.production_gate_parallel_safety import capacity_evidence_problem
+
+    assert capacity_evidence_problem(capacity) != ""
+
+
+@pytest.mark.parametrize(
+    "capacity",
+    [None, {}, [], {"admission": []}, {"admission": {"decisions": [{"status": "blocked"}]}}],
+)
+def test_readable_capacity_evidence_raises_no_problem(capacity):
+    from scripts.production_gate_parallel_safety import capacity_evidence_problem
+
+    assert capacity_evidence_problem(capacity) == ""

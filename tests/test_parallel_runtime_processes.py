@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     GuardianStatus,
@@ -478,17 +480,19 @@ def test_without_the_required_marker_a_failed_join_is_recorded_and_the_worker_st
     assert body["contained"] is True and body["cgroup_error"], "unqualified: recorded, never hidden"
 
 
-def _reuse_scenario(monkeypatch, *, dies):
+def _reuse_scenario(monkeypatch, *, dies, child_start=5000):
     """Fake the kernel facts: a pinned parent 4101 and a child 4102 whose parent field names 4101.
 
-    ``dies`` picks WHEN the pinned parent instance exits (and its number would be reused): None never,
-    "during-read" while its children are listed, "after-snapshot" right after the live snapshot.
+    ``dies`` picks WHEN the pinned parent instance exits (and its number would be reused): None
+    never, "after-snapshot", "during-read" (while its children are listed), "before-child-read"
+    (just before the child is looked at) or "during-pin" (while the child's pidfd is read back).
+    A child with another ``child_start`` and the same parent number is a replacement's child.
     """
 
     from scripts import production_gate_parallel_processes as proc
 
     parent, child = 4101, 4102
-    fds, state = {}, {"exited": False, "snapshots": 0, "child_reads": 0}
+    fds, state = {}, {"exited": False, "snapshots": 0, "child_reads": 0, "child_stats": 0}
 
     def fake_open(pid):
         fds[pid] = os.open(os.devnull, os.O_RDONLY)
@@ -510,32 +514,70 @@ def _reuse_scenario(monkeypatch, *, dies):
             )
         return [child] if pid == parent else []
 
-    facts = {parent: (1000, 1, "S"), child: (5000, parent, "S")}
+    def fake_stat(pid):
+        if pid == parent:
+            return (1000, 1, "S")
+        if pid != child:
+            return None
+        state["child_stats"] += 1
+        if dies == "before-child-read" and state["child_stats"] == 1:
+            state["exited"] = True
+        if dies == "during-pin" and state["child_stats"] == 2:
+            state["exited"] = True
+        return (child_start, parent, "S")  # the replacement's child names the same parent number
+
     monkeypatch.setattr(proc, "_pidfd_open", fake_open)
     monkeypatch.setattr(proc, "_exited", fake_exited)
-    monkeypatch.setattr(proc, "read_stat", lambda pid: facts.get(pid))
+    monkeypatch.setattr(proc, "read_stat", fake_stat)
     monkeypatch.setattr(proc, "children_of", fake_children)
     monkeypatch.setattr(proc, "socket_ports", lambda pids: {})
     tree = proc.OwnedTree(parent, "tok", observe_seconds=0.0)
     tree.observe(force=True)
+    return tree, state, child, fds
+
+
+def _close_all(fds):
     for fd in fds.values():
-        os.close(fd)
-    return tree, state, child
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def test_a_parent_number_reused_between_snapshot_and_traversal_never_donates_children(monkeypatch):
-    """The held pidfd must show the SAME parent instance before AND after its children are listed."""
+    """The held pidfd must show the SAME parent instance across the list, each child read and pin."""
 
-    during, state, child = _reuse_scenario(monkeypatch, dies="during-read")
+    during, state, child, fds = _reuse_scenario(monkeypatch, dies="during-read")
     assert child not in during.tracked and during.adopted_total == 0
     assert state["child_reads"] == 1, "the list was read once and then discarded as untrustworthy"
-    after, state, child = _reuse_scenario(monkeypatch, dies="after-snapshot")
+    _close_all(fds)
+    after, state, child, fds = _reuse_scenario(monkeypatch, dies="after-snapshot")
     assert child not in after.tracked and after.adopted_total == 0
     assert state["child_reads"] == 0, "a parent already gone is never asked for its children"
-    alive, _state, child = _reuse_scenario(monkeypatch, dies=None)
-    assert child in alive.tracked and alive.adopted_total == 1, (
-        "the control adopts when the parent is valid"
+    _close_all(fds)
+    alive, _state, child, fds = _reuse_scenario(monkeypatch, dies=None)
+    assert child in alive.tracked and alive.adopted_total == 1, "the control adopts when valid"
+    _close_all(fds)
+
+
+def test_a_parent_that_dies_before_or_during_the_pin_never_lets_a_stranger_be_adopted(monkeypatch):
+    """A replacement's child has the same parent number and a DIFFERENT start; its stat and pidfd
+    read-back look consistent, so only the parent instance check around them can refuse it."""
+
+    before, _state, child, fds = _reuse_scenario(
+        monkeypatch, dies="before-child-read", child_start=7777
     )
+    assert child not in before.tracked and before.adopted_total == 0
+    assert child not in fds, "no pidfd may even be opened once the parent instance is gone"
+    _close_all(fds)
+    during, _state, child, fds = _reuse_scenario(monkeypatch, dies="during-pin", child_start=7777)
+    assert child not in during.tracked and during.adopted_total == 0, "nothing is committed"
+    with pytest.raises(OSError):
+        os.fstat(fds[child])  # the provisional descriptor was closed, not kept
+    _close_all(fds)
+    stranger_ok, _state, child, fds = _reuse_scenario(monkeypatch, dies=None, child_start=7777)
+    assert child in stranger_ok.tracked, "with a valid parent the same facts are an ordinary child"
+    _close_all(fds)
 
 
 def test_cleanup_signals_only_pinned_instances_and_never_a_replacement_by_number(monkeypatch):

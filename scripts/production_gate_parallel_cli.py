@@ -102,6 +102,17 @@ def freeze_selection(
     return (next(iter(per_mode.values()), {}), problems)
 
 
+def settle_runtime(report: dict[str, Any], snapshot_root: str, runtime_root: Path) -> bool:
+    """Remove the private snapshot and runtime copies only on explicit, complete cleanup proof."""
+
+    if should_retain_runtime(report):
+        report["snapshot_retained"] = snapshot_root  # never remove what cleanup has not cleared
+        return False
+    thaw_and_remove(Path(snapshot_root))
+    thaw_and_remove(runtime_root)
+    return True
+
+
 def run_parallel_cli(
     *,
     args: Any,
@@ -314,11 +325,7 @@ def run_parallel_cli(
         )
     report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}
     report["runtime_immutability"] = "NOT_COMPLETE: see acceptance_limits of each runtime manifest"
-    if should_retain_runtime(report):  # explicit proof only, on every path
-        report["snapshot_retained"] = snapshot["root"]  # never remove what cleanup has not cleared
-    else:
-        thaw_and_remove(Path(snapshot["root"]))
-        thaw_and_remove(runtime_root)
+    settle_runtime(report, snapshot["root"], runtime_root)
     compare_to = getattr(args, "parallel_compare_to", None)
     if compare_to is not None:
         try:

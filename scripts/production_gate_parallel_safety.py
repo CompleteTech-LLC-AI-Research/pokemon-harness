@@ -56,23 +56,53 @@ def fail_finish(
 
     if item in running:
         running.remove(item)
+    job_id = item.job_id
     reason = f"finish failed closed: {type(exc).__name__}: {str(exc)[:160]}"
-    outcomes.setdefault(
-        item.job_id,
-        outcome_record(
-            plan,
-            item.job_id,
-            "failed",
-            child_exit_status=status,
-            artifact=None,
-            artifact_problems=[reason],
-            reason=reason,
-            launched_utc=None,
-            finished_utc=None,
-            partial_evidence=None,
-        ),
-    )
-    cleanup.setdefault(item.job_id, {"process_tree": {"proof": False, "reason": reason}})
+    published = outcomes.get(job_id)
+    try:
+        if isinstance(published, dict):
+            # Whatever was already published (even a pass), an error in finish makes it a failure;
+            # earlier failures, partial evidence and artifacts stay in the row.
+            published["state"] = "failed"
+            earlier = published.get("artifact_problems")
+            published["artifact_problems"] = [
+                *(earlier if isinstance(earlier, list) else []),
+                reason,
+            ]
+            published["reason"] = (
+                f"{published['reason']}; {reason}" if published.get("reason") else reason
+            )
+        else:
+            outcomes[job_id] = outcome_record(
+                plan,
+                job_id,
+                "failed",
+                child_exit_status=status,
+                artifact=None,
+                artifact_problems=[reason],
+                reason=reason,
+                launched_utc=None,
+                finished_utc=None,
+                partial_evidence=None,
+            )
+    except Exception:  # noqa: BLE001 - the fallback must neither raise nor drop the diagnostic
+        outcomes[job_id] = {
+            "job_id": job_id,
+            "state": "failed",
+            "child_exit_status": status,
+            "artifact_problems": [reason],
+            "reason": reason,
+        }
+    record = cleanup.get(job_id)
+    if isinstance(record, dict):
+        record["finish_error"] = reason  # the cleanup facts already recorded are kept as they are
+        return
+    try:  # one more bounded, pidfd-only attempt; the guardian proof was never evaluated, so never proved
+        receipt = dict(item.owned.terminate(grace_seconds=1.0))
+        receipt.update(proof=False, reason="the guardian proof was not evaluated: " + reason)
+    except Exception as again:  # noqa: BLE001
+        receipt = {"proof": False, "reason": f"{reason}; the retry failed: {type(again).__name__}"}
+    cleanup[job_id] = {"process_tree": receipt, "finish_error": reason}
 
 
 def should_retain_runtime(report: Mapping[str, Any]) -> bool:
@@ -81,9 +111,29 @@ def should_retain_runtime(report: Mapping[str, Any]) -> bool:
     return report.get("cleanup_complete") is not True
 
 
+def capacity_evidence_problem(capacity: Any) -> str:
+    """Empty when every admission decision is an object with a string status, else why not."""
+
+    admission = capacity.get("admission") if isinstance(capacity, Mapping) else None
+    decisions = admission.get("decisions") if isinstance(admission, Mapping) else None
+    if decisions is None:
+        return ""
+    if not isinstance(decisions, list):
+        return "the admission decisions are not a list"
+    for index, decision in enumerate(decisions):
+        if not isinstance(decision, Mapping):
+            return f"admission decision {index} is not an object"
+        if not isinstance(decision.get("status"), str):
+            return f"admission decision {index} has a non-string status"
+    return ""
+
+
 def child_capacity_loss_total(loss: Callable[[Any], str], capacity: Any) -> tuple[str, str]:
     """(loss reason, malformed note): evidence that cannot be read fails the job, not the run."""
 
+    problem = capacity_evidence_problem(capacity)
+    if problem:
+        return "", f"the child's capacity evidence is malformed ({problem})"
     try:
         return loss(capacity), ""
     except Exception as exc:  # noqa: BLE001 - containment boundary for untrusted nested values
@@ -105,6 +155,7 @@ def recover_evidence(
 
 
 __all__ = (
+    "capacity_evidence_problem",
     "child_capacity_loss_total",
     "cleanup_completeness",
     "cleanup_proven_for",

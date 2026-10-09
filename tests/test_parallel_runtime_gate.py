@@ -789,3 +789,61 @@ def test_an_error_inside_finish_fails_that_job_closed_and_aborts_no_sibling(tmp_
     broken = next(job for job in report["jobs"] if job["state"] == "failed")
     assert "finish failed closed: RuntimeError" in " ".join(broken["artifact_problems"])
     assert report["cleanup_complete"] is False and report["overall"] == "FAIL"
+
+
+def test_an_exception_after_the_passing_row_was_stored_still_fails_that_job(tmp_path, monkeypatch):
+    """The error comes AFTER finish published a pass: the stored row must become a failure."""
+
+    from scripts import production_gate_parallel as orchestrator
+
+    real, calls = orchestrator._manifest, []
+
+    def flaky(directory):
+        calls.append(directory)
+        if len(calls) == 1:
+            raise RuntimeError("the manifest reader exploded after the pass was stored")
+        return real(directory)
+
+    monkeypatch.setattr(orchestrator, "_manifest", flaky)
+    _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"})
+    assert sorted(states(report).values()) == ["failed", "passed"]
+    broken = next(job for job in report["jobs"] if job["state"] == "failed")
+    assert "finish failed closed: RuntimeError" in " ".join(broken["artifact_problems"])
+    assert report["overall"] == "FAIL"
+    assert any("finish_error" in record for record in report["cleanup"].values())
+
+
+def test_the_cli_settle_step_keeps_the_runtime_after_an_unproven_interrupt_and_removes_it_after_a_clean_run(
+    tmp_path, monkeypatch
+):
+    """The actual CLI function that calls thaw_and_remove, fed by REAL orchestrator reports."""
+
+    from scripts import production_gate_parallel as orchestrator
+    from scripts import production_gate_parallel_cli as cli
+
+    removed = []
+    monkeypatch.setattr(cli, "thaw_and_remove", lambda path: removed.append(Path(path)))
+    real, verdicts, calls = orchestrator.cleanup_proven, iter([False]), []
+    monkeypatch.setattr(
+        orchestrator, "cleanup_proven", lambda *a, **k: next(verdicts, True) and real(*a, **k)
+    )
+
+    def sleeper(seconds):
+        calls.append(seconds)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+    (tmp_path / "interrupted").mkdir()
+    (tmp_path / "clean").mkdir()
+    _, _, interrupted = run(
+        tmp_path / "interrupted",
+        {"source": "slow_pass:30", "cython": "slow_pass:30"},
+        sleeper=sleeper,
+    )
+    assert cli.settle_runtime(interrupted, str(tmp_path / "snap"), tmp_path / "rt") is False
+    assert removed == [] and interrupted["snapshot_retained"] == str(tmp_path / "snap")
+    monkeypatch.setattr(orchestrator, "cleanup_proven", real)
+    _, _, clean = run(tmp_path / "clean", {"source": "pass", "cython": "pass"})
+    assert cli.settle_runtime(clean, str(tmp_path / "snap"), tmp_path / "rt") is True
+    assert removed == [tmp_path / "snap", tmp_path / "rt"] and "snapshot_retained" not in clean
