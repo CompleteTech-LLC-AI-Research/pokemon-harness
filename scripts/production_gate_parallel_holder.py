@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.production_gate_parallel_holder_schema import terminal_schema_problems
 from scripts.production_gate_parallel_processes import (
     GUARDIAN_SOURCE,
     GuardianStatus,
@@ -38,15 +39,18 @@ from scripts.production_gate_parallel_processes import (
 )
 from scripts.production_gate_parallel_validation import loads_strict
 
-HOLDER_MAX_SECONDS = 86400.0  # the single steady-state wait; real stops come from O's deadline or PDEATHSIG
+HOLDER_MAX_SECONDS = (
+    86400.0  # the single steady-state wait; real stops come from O's deadline or PDEATHSIG
+)
 
 HOLDER_SOURCE = r"""
 import ctypes, hashlib, hmac, json, os, select, signal, subprocess, sys, time
 
 holder_path, guardian_path, grace_text = sys.argv[1], sys.argv[2], sys.argv[3]
 secret_fd, status_fd, guardian_source = int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
-max_seconds, guardian_argv, grace = float(sys.argv[7]), sys.argv[8:], float(grace_text)
-parent, began, stopped = os.getppid(), time.monotonic(), []
+max_seconds, grace = float(sys.argv[7]), float(grace_text)
+owner_pid, owner_start, guardian_argv = int(sys.argv[8]), int(sys.argv[9]), sys.argv[10:]
+began, stopped = time.monotonic(), []
 for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(number, lambda signum, frame: stopped.append(signum))
 secret = bytes.fromhex(os.read(secret_fd, 256).decode())
@@ -79,11 +83,11 @@ def note(data):
     try:
         os.write(status_fd, data)
     except OSError:
-        pass
+        stopped.append(signal.SIGTERM)  # lost owner pipe: never keep launching unobserved work
 
 
 def write(body):
-    body = dict(body, holder_pid=me, holder_start=start)
+    body = dict(body, holder_pid=me, holder_start=start, owner_pid=owner_pid, owner_start=owner_start)
     text = json.dumps(body, sort_keys=True, separators=(",", ":"))
     body["mac"] = hmac.new(secret, text.encode(), hashlib.sha256).hexdigest()
     with open(holder_path + ".tmp", "w") as handle:
@@ -99,8 +103,15 @@ def final(**fields):
     write(body)
 
 
-libc.prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG: contain if the orchestrator dies
-if os.getppid() != parent:
+def owner_matches():
+    return os.getppid() == owner_pid and stat_field(owner_pid, 19) == owner_start
+
+
+if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG must succeed before any fork
+    state["never_started"] = True
+    final(contained=False, reason="parent-death signal could not be established")
+    sys.exit(70)
+if not owner_matches():
     stopped.append(signal.SIGTERM)
 if libc.prctl(36, 1, 0, 0, 0) != 0 or not subreaper_on():  # set, then READ BACK, before any fork
     state["never_started"] = True
@@ -117,9 +128,15 @@ key_read, key_write = os.pipe()
 os.write(key_write, secret.hex().encode())
 os.close(key_write)
 write({"phase": "spawning", "subreaper_start": True})  # intent persisted BEFORE the fork
+if stopped or not owner_matches():  # recheck original O, never a replacement parent, just before fork
+    os.close(key_read)
+    state.update(never_started=True, echild=True)
+    final(proof=True)
+    sys.exit(128 + signal.SIGTERM)
 try:
     guardian = subprocess.Popen([sys.executable, "-c", guardian_source, guardian_path, grace_text,
-                                 str(key_read), str(status_fd), *guardian_argv], pass_fds=(key_read, status_fd))
+                                 str(key_read), str(status_fd), *guardian_argv],
+                                 pass_fds=(key_read, status_fd), start_new_session=True)
 except OSError as exc:
     os.close(key_read)
     state.update(never_started=True, echild=True)
@@ -242,7 +259,7 @@ while True:
 state["remaining"] = [[pid, first] for pid, (fd, first) in held.items()]
 known = state["guardian_status"] is not None
 proof = bool(state["echild"] and not held and not state["unknown"] and not state["incomplete"]
-             and subreaper_on() and known)
+             and not state["reaped_unheld"] and subreaper_on() and known)
 final(proof=proof)
 code = state["guardian_status"]
 if code is None:
@@ -277,12 +294,21 @@ def instance_absent(pid: int, start: int | None) -> bool | None:
         os.close(descriptor)
 
 
-def _authentic(body: dict[str, Any], secret: bytes, pid: int | None, start: int | None) -> list[str]:
+def _authentic(
+    body: dict[str, Any], secret: bytes, pid: int | None, start: int | None
+) -> list[str]:
     mac = body.pop("mac", None)
     text = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    if not isinstance(mac, str) or not hmac.compare_digest(mac, hmac.new(secret, text, hashlib.sha256).hexdigest()):
+    if not isinstance(mac, str) or not hmac.compare_digest(
+        mac, hmac.new(secret, text, hashlib.sha256).hexdigest()
+    ):
         return ["holder receipt is not authenticated by the producer's key"]
-    if pid is None or start is None or body.get("holder_pid") != pid or body.get("holder_start") != start:
+    if (
+        pid is None
+        or start is None
+        or body.get("holder_pid") != pid
+        or body.get("holder_start") != start
+    ):
         return ["holder receipt names a different producer instance than the pinned root"]
     return []
 
@@ -296,7 +322,14 @@ class HolderRef:
     pid: int
 
     def read_receipts(
-        self, status: GuardianStatus, guardian_path: Path, secret: bytes, root_pid: int, root_start: int | None
+        self,
+        status: GuardianStatus,
+        guardian_path: Path,
+        secret: bytes,
+        root_pid: int,
+        root_start: int | None,
+        *,
+        reader: Any = read_guardian_receipt,
     ) -> tuple[dict[str, Any] | None, list[str]]:
         """Guardian receipt authenticated against the guardian's OWN recorded instance (status pipe first,
         else the authenticated holder receipt); with no recorded identity nothing is trusted."""
@@ -304,49 +337,56 @@ class HolderRef:
         status.drain()
         identity = status.guardian or self.verdict(root_pid, root_start)["guardian"]
         if identity is None:
-            return None, ["the guardian instance was never recorded by the holder: its receipt is not trusted"]
-        return read_guardian_receipt(guardian_path, secret, *identity)
+            return None, [
+                "the guardian instance was never recorded by the holder: its receipt is not trusted"
+            ]
+        return reader(guardian_path, secret, *identity)
 
     def verdict(self, root_pid: int | None, root_start: int | None) -> dict[str, Any]:
         """Always-conservative reading of the holder receipt; ``proof`` only for an authentic, final, completed sweep."""
 
-        out: dict[str, Any] = {"present": False, "authentic": False, "final": False, "proof": False, "guardian": None, "problems": []}
+        out: dict[str, Any] = {
+            "present": False,
+            "authentic": False,
+            "final": False,
+            "proof": False,
+            "guardian": None,
+            "problems": [],
+        }
         try:
             body = loads_strict(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            out["problems"].append("holder terminal receipt is missing or malformed: proof withheld")
+            out["problems"].append(
+                "holder terminal receipt is missing or malformed: proof withheld"
+            )
             return out
         if not isinstance(body, dict):
             out["problems"].append("holder receipt is not an object")
             return out
         out["present"] = True
-        problems = _authentic(body, self.secret, root_pid if root_pid == self.pid else None, root_start)
+        problems = _authentic(
+            body, self.secret, root_pid if root_pid == self.pid else None, root_start
+        )
         if problems:
             out["problems"] += problems
             return out
         out["authentic"] = True
         guardian = body.get("guardian")
-        if isinstance(guardian, dict) and type(guardian.get("pid")) is int and type(guardian.get("start")) is int:
+        if (
+            isinstance(guardian, dict)
+            and type(guardian.get("pid")) is int
+            and type(guardian.get("start")) is int
+        ):
             out["guardian"] = (guardian["pid"], guardian["start"])
         if body.get("phase") != "final":
             out["problems"].append("the holder never finished: proof withheld")
             return out
         out["final"] = True
-        complete = (
-            body.get("contained") is True
-            and body.get("echild") is True
-            and body.get("subreaper_start") is True
-            and body.get("subreaper_end") is True
-            and body.get("incomplete") is False
-            and not body.get("unknown")
-            and not body.get("remaining")
-            and body.get("proof") is True
-            and (body.get("never_started") is True or type(body.get("guardian_status")) is int)
-        )
-        if not complete:
-            out["problems"].append("the holder's sweep was not a completed, exhausted, fully reaped one")
+        problems = terminal_schema_problems(body)
+        if problems:
+            out["problems"].extend(problems)
             return out
-        adopted = [item for item in body.get("adopted") or [] if isinstance(item, list) and len(item) == 2]
+        adopted = body["adopted"]
         absent = [instance_absent(pid, start) for pid, start in adopted]
         if any(item is not True for item in absent):
             out["problems"].append("an adopted instance is not proven absent by kernel evidence")
@@ -368,6 +408,10 @@ def launch_holder(
     """Start H (which starts the real guardian); same shape as ``launch_guardian`` but the returned
     process is the HOLDER, so its pid/start are the holder's and the guardian is authenticated separately."""
 
+    owner_pid = os.getpid()
+    owner = read_stat(owner_pid)
+    if owner is None:
+        raise OSError("the original orchestrator instance could not be established")
     secret = os.urandom(32)
     secret_read, secret_write = os.pipe()
     status_read, status_write = os.pipe()
@@ -378,9 +422,20 @@ def launch_holder(
         secret_write = -1
         process = subprocess.Popen(
             [
-                sys.executable, "-c", HOLDER_SOURCE, str(holder_path), str(receipt_path), str(grace_seconds),
-                str(secret_read), str(status_write), GUARDIAN_SOURCE, str(max_seconds),
-                f"--cgroup={cgroup}", *worker_argv,
+                sys.executable,
+                "-c",
+                HOLDER_SOURCE,
+                str(holder_path),
+                str(receipt_path),
+                str(grace_seconds),
+                str(secret_read),
+                str(status_write),
+                GUARDIAN_SOURCE,
+                str(max_seconds),
+                str(owner_pid),
+                str(owner[0]),
+                f"--cgroup={cgroup}",
+                *worker_argv,
             ],
             pass_fds=(secret_read, status_write),
             **popen_kwargs,
@@ -393,7 +448,9 @@ def launch_holder(
         os.close(status_write)
         if secret_write >= 0:
             os.close(secret_write)
-    process.guardian_status = GuardianStatus(status_read, holder=HolderRef(holder_path, secret, process.pid))  # type: ignore[attr-defined]
+    process.guardian_status = GuardianStatus(
+        status_read, holder=HolderRef(holder_path, secret, process.pid)
+    )  # type: ignore[attr-defined]
     return process, secret
 
 

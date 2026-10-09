@@ -12,7 +12,6 @@ identity, structured rows and timestamps match the frozen plan.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import signal
@@ -56,19 +55,21 @@ from scripts.production_gate_parallel_cgroup import (
     kernel_ownership,
     qualification_after,
 )
-from scripts.production_gate_parallel_declaration import COVERAGE_DECLARATION, LIMITATIONS
+from scripts.production_gate_parallel_holder import launch_holder
 from scripts.production_gate_parallel_identity import (
     expected_identity,
     identity_differences,
 )
 from scripts.production_gate_parallel_isolation import (
     assign_port_ranges,
+    create_job_tree,
     diff_snapshots,
     distinct_tree_problems,
     isolation_environment,
     port_range_problems,
     snapshot_tree,
 )
+from scripts.production_gate_parallel_ownership import holder_loss, receipt_loss
 from scripts.production_gate_parallel_phases import (
     barrier_decision,
     jobs_in_phase,
@@ -77,14 +78,16 @@ from scripts.production_gate_parallel_phases import (
 )
 from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
 from scripts.production_gate_parallel_ports import HANDOFF_ENV, HandoffRegistry
-from scripts.production_gate_parallel_holder import launch_holder
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     OrchestratorAdoption,
     OwnedTree,
     cleanup_proven,
     launch_guardian,
+    read_guardian_receipt,
 )
+from scripts.production_gate_parallel_reporting import _report_extras, _write_progress
+from scripts.production_gate_parallel_stopping import prepare_stops, stop_process
 
 __all__ = [
     "CapacityError",
@@ -114,20 +117,9 @@ def _wall_now() -> datetime:
 
 
 def prepare_job_tree(run_root: Path, run_id: str, job_id: str) -> dict[str, Path]:
-    """Create the owned private trees for one job; refuse symlinks and existing trees."""
+    """Create private writers through the isolation module, retaining the public entrypoint."""
 
-    if run_root.is_symlink() or not run_root.is_dir():
-        raise OSError("run root must be an existing real directory")
-    base = run_root / run_id / job_id
-    if not base.resolve().is_relative_to(run_root.resolve()):
-        raise OSError("job tree escapes the run root")
-    base.mkdir(mode=0o700, parents=True, exist_ok=False)
-    tree = {"root": base}
-    for name in TREE_DIRECTORIES:
-        path = base / name
-        path.mkdir(mode=0o700, exist_ok=False)
-        tree[name] = path
-    return tree
+    return create_job_tree(run_root, run_id, job_id, TREE_DIRECTORIES)
 
 
 def job_environment(
@@ -214,6 +206,8 @@ class _Running:
     receipt: Path
     secret: bytes
     handles: list[Any] = field(default_factory=list)
+    cleanup_deadline: float | None = None
+    stop_requested: bool = False
 
 
 WorkerArgvFactory = Callable[[ParallelPlan, str, Mapping[str, Path], Path], Sequence[str]]
@@ -334,15 +328,6 @@ def _close_handles(running: _Running) -> None:
             pass
 
 
-def _write_progress(path: Path, payload: Mapping[str, Any]) -> None:
-    temporary = path.with_suffix(".tmp")
-    try:
-        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, path)
-    except OSError:
-        pass
-
-
 def run_parallel_plan(
     plan: ParallelPlan,
     *,
@@ -433,8 +418,13 @@ def _run_plan(
     handoffs = HandoffRegistry()
 
     def signal_guardians(_reason: str) -> None:
-        for item in tuple(running):  # the live arbiter lost: every owned sibling is told at once
-            item.owned.signal_root(signal.SIGTERM)
+        for item in tuple(
+            running
+        ):  # ready siblings are told at once; cancel waits for early startup
+            view = item.process.guardian_status  # type: ignore[attr-defined]
+            view.drain()
+            if view.ready:
+                item.owned.signal_root(signal.SIGTERM)
 
     hub = ArbiterHub(budget.total_pairs, on_loss=signal_guardians)
     ownership = kernel_ownership(require_kernel_ownership)
@@ -505,10 +495,32 @@ def _run_plan(
 
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
         _close_handles(item)
-        receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
         view = item.process.guardian_status  # type: ignore[attr-defined]
+        item.cleanup_deadline = (
+            item.cleanup_deadline or clock() + body["deadlines"]["cleanup_seconds"]
+        )
+        early_loss = holder_loss(view, {"pid": item.process.pid, "start": item.owned.root_start})
+        if early_loss and allow_cancel:
+            prepare_stops(
+                [other for other in running if other is not item],
+                hub,
+                item.cleanup_deadline,
+                grace_seconds=grace_seconds,
+                clock=clock,
+                sleeper=sleeper,
+            )
+        receipt = item.owned.terminate(
+            grace_seconds=grace_seconds,
+            clock=clock,
+            sleeper=sleeper,
+            deadline=item.cleanup_deadline,
+        )
         guardian, guardian_problems = view.read_receipts(
-            item.receipt, item.secret, item.process.pid, item.owned.root_start
+            item.receipt,
+            item.secret,
+            item.process.pid,
+            item.owned.root_start,
+            reader=read_guardian_receipt,
         )
         proven = cleanup_proven(receipt, guardian, view)
         ledger = hub.unregister(item.job_id, cleanup_proven=proven)
@@ -531,7 +543,7 @@ def _run_plan(
         )
         if guardian and guardian.get("worker_status") != status and status >= 0:
             guardian_problems.append("the guardian saw a different worker exit status")
-        if guardian_problems or receipt["terminated"] or not receipt["proof"]:
+        if guardian_problems or receipt["terminated"] or not proven:
             outcome["state"] = "failed"
             outcome["artifact_problems"].extend(guardian_problems)
             outcome["artifact_problems"].append(
@@ -548,9 +560,9 @@ def _run_plan(
         if malformed:
             outcome["state"] = "failed"
             outcome["artifact_problems"].append(malformed)
-        if not lost and not (guardian and guardian.get("phase") == "final"):
-            lost = "the job's guardian was lost"
-        elif (
+        if not lost:
+            lost = receipt_loss(view, receipt, guardian)
+        if (
             not lost
             and guardian
             and guardian.get("contained") is False
@@ -591,12 +603,23 @@ def _run_plan(
     def harvest(*, allow_cancel: bool = True) -> None:
         for item in running[:]:
             status = item.process.poll()
-            if status is not None and item in running:
+            if status is not None and item in running and not item.stop_requested:
                 try:
                     finish(item, status, allow_cancel=allow_cancel)
                 except Exception as exc:  # noqa: BLE001 - an aggregation error fails its own job only
                     safety.fail_finish(
-                        outcome_record, plan, item, status, exc, outcomes, cleanup, running
+                        outcome_record,
+                        plan,
+                        item,
+                        status,
+                        exc,
+                        outcomes,
+                        cleanup,
+                        running,
+                        deadline=item.cleanup_deadline
+                        or clock() + body["deadlines"]["cleanup_seconds"],
+                        clock=clock,
+                        sleeper=sleeper,
                     )
 
     def stop(item: _Running) -> None:
@@ -604,21 +627,23 @@ def _run_plan(
 
         view = item.process.guardian_status  # type: ignore[attr-defined]
         hub.expect_drop(item.job_id)  # the owner ends this connection; that alone is not a loss
-        # The guardian installs its handlers before it reports readiness over the status pipe; a
-        # stop signal sent earlier would kill it with the default action and leave no receipt.
-        ready_limit = clock() + grace_seconds + 2.0
-        while item.process.poll() is None and clock() < ready_limit:
-            view.drain()
-            if view.ready or view.eof:
-                break
-            sleeper(0.01)
-        item.owned.signal_root(signal.SIGTERM)
-        limit = clock() + 6 * grace_seconds + 6.0  # guardian ~3x grace + 1, then the holder's own sweep
-        while item.process.poll() is None and clock() < limit:
-            sleeper(0.02)
-        receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
+        deadline = item.cleanup_deadline or clock() + body["deadlines"]["cleanup_seconds"]
+        item.cleanup_deadline = deadline
+        stop_process(
+            item, view, deadline, grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
+        )
+        receipt = item.owned.terminate(
+            grace_seconds=grace_seconds,
+            clock=clock,
+            sleeper=sleeper,
+            deadline=item.cleanup_deadline or clock() + body["deadlines"]["cleanup_seconds"],
+        )
         guardian, _problems = view.read_receipts(
-            item.receipt, item.secret, item.process.pid, item.owned.root_start
+            item.receipt,
+            item.secret,
+            item.process.pid,
+            item.owned.root_start,
+            reader=read_guardian_receipt,
         )
         if not cleanup_proven(receipt, guardian, view):
             receipt["proof"] = False
@@ -634,7 +659,13 @@ def _run_plan(
     def cancel(reason: str) -> None:
         nonlocal cancel_reason
         cancel_reason = cancel_reason or reason
-        harvest(allow_cancel=False)  # completed failures are kept before any signal is sent
+        deadline = clock() + body["deadlines"]["cleanup_seconds"]
+        prepare_stops(
+            running, hub, deadline, grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
+        )
+        harvest(
+            allow_cancel=False
+        )  # completed jobs were never signalled; failures remain their own rows
         for item in list(running):
             stop(item)
             recovered, partial = recover(item)
@@ -918,44 +949,6 @@ def _run_plan(
     report["kernel_ownership"] = qualification_after(ownership, cleanup)
     report["cleanup_complete"] = complete
     return report
-
-
-def _report_extras(
-    plan: ParallelPlan,
-    started: float,
-    clock: Callable[[], float],
-    cancel_reason: str,
-    cleanup: Mapping[str, Any],
-    problems: Sequence[str],
-    *,
-    observations: Sequence[Any] = (),
-    serial: bool = False,
-    load: tuple[Any, Any] = ((), ()),
-) -> dict[str, Any]:
-    body = plan.as_dict()
-    return {
-        "fail_fast": body["fail_fast"],
-        "elapsed_seconds": round(clock() - started, 3),
-        "cancellation": cancel_reason,
-        "cleanup": dict(cleanup),
-        "orchestration_problems": list(problems),
-        "capacity": body["capacity"],
-        "capacity_observations": list(observations),
-        "execution_mode": "serial" if serial else "concurrent",
-        "plan": plan.text,
-        "resource_trace": {
-            "affinity_cpus": len(os.sched_getaffinity(0))
-            if hasattr(os, "sched_getaffinity")
-            else 0,
-            "loadavg_start": list(load[0]),
-            "loadavg_end": list(load[1]),
-        },
-        "row_identity_enforced": True,
-        "sequential_comparison": {"status": "NOT_RUN"},
-        "limitations": list(LIMITATIONS),
-        "coverage_declaration": COVERAGE_DECLARATION,
-        **({"overall": "FAIL"} if problems else {}),
-    }
 
 
 def terminal_artifact_path(tree: Mapping[str, Path]) -> Path:

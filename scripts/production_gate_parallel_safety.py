@@ -6,6 +6,7 @@ be interpreted is a failed job with a diagnostic, never an exception that aborts
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
@@ -51,6 +52,10 @@ def fail_finish(
     outcomes: dict[str, dict[str, Any]],
     cleanup: dict[str, dict[str, Any]],
     running: list[Any],
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
     """An error inside finish fails that job closed: its cleanup stays unproven, siblings go on."""
 
@@ -98,7 +103,9 @@ def fail_finish(
         record["finish_error"] = reason  # the cleanup facts already recorded are kept as they are
         return
     try:  # one more bounded, pidfd-only attempt; the guardian proof was never evaluated, so never proved
-        receipt = dict(item.owned.terminate(grace_seconds=1.0))
+        receipt = dict(
+            item.owned.terminate(grace_seconds=1.0, deadline=deadline, clock=clock, sleeper=sleeper)
+        )
         receipt.update(proof=False, reason="the guardian proof was not evaluated: " + reason)
     except Exception as again:  # noqa: BLE001
         receipt = {"proof": False, "reason": f"{reason}; the retry failed: {type(again).__name__}"}

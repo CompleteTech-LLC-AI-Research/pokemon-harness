@@ -42,6 +42,8 @@ from pathlib import Path
 from typing import Any, Self
 
 from scripts.production_gate_parallel_cgroup import JobCgroup
+from scripts.production_gate_parallel_cleanup import terminate_tree
+from scripts.production_gate_parallel_ownership import observe_cgroup_membership
 from scripts.production_gate_parallel_validation import loads_strict
 
 JOB_TOKEN_ENV = "POKERED_PARALLEL_JOB_TOKEN"
@@ -218,7 +220,7 @@ def _exited(descriptor: int) -> bool:
 
 
 def proc_state(pid: int, descriptor: int | None = None) -> str:
-    """"alive", "exited" (ONLY on kernel evidence: a readable held pidfd or pidfd_open ESRCH) or "unknown"
+    """ "alive", "exited" (ONLY on kernel evidence: a readable held pidfd or pidfd_open ESRCH) or "unknown"
     (stat missing, unreadable or malformed while no exit is shown).  Unknown is never an exit."""
 
     if read_stat(pid) is not None and (descriptor is None or not _exited(descriptor)):
@@ -258,7 +260,9 @@ class OwnedTree:
         self._known_children = known_children
         self.adoption = adoption
         self.status = status
-        self.holder_mode = getattr(status, "holder", None) is not None  # root is a holder, not a guardian
+        self.holder_mode = (
+            getattr(status, "holder", None) is not None
+        )  # root is a holder, not a guardian
         self.launch_adopting = bool(adoption is not None and adoption.verify())
         self.orphans_pinned = 0
         self.unattributed: list[int] = []
@@ -323,13 +327,17 @@ class OwnedTree:
             return False
         stat = read_stat(parent)
         if stat is None:
-            self._mark_unknown(parent)  # its pidfd says alive, its stat cannot be read: unknown, not gone
+            self._mark_unknown(
+                parent
+            )  # its pidfd says alive, its stat cannot be read: unknown, not gone
         return stat is not None and stat[0] == entry[1]
 
     def _mark_unknown(self, pid: int) -> None:
         self.contained = False
         self.unknown_live.append(pid)
-        self.reason = "containment not established: a live process cannot be read (unknown, not an exit)"
+        self.reason = (
+            "containment not established: a live process cannot be read (unknown, not an exit)"
+        )
 
     def _targets(self) -> set[int]:
         """Pinned live processes to signal now; a holder root is signalled last, by terminate itself."""
@@ -346,8 +354,6 @@ class OwnedTree:
         if not self.contained or (not force and now - self._last < self._observe_seconds):
             return
         self._last = now
-        if self.cgroup is not None and not self.cgroup_joined:
-            self.cgroup_joined = self.cgroup.contains(self.root_pid)
         frontier = sorted(self._alive_set())
         while frontier and self.contained:
             parent = frontier.pop()
@@ -368,7 +374,9 @@ class OwnedTree:
                 stat = read_stat(pid)
                 if stat is None:
                     if proc_state(pid) == "unknown":
-                        self._mark_unknown(pid)  # listed by a live owned parent, unreadable: not an exit
+                        self._mark_unknown(
+                            pid
+                        )  # listed by a live owned parent, unreadable: not an exit
                         break
                     continue
                 if stat[1] != parent:
@@ -379,6 +387,7 @@ class OwnedTree:
                     frontier.append(pid)
                 elif not self.contained:
                     return
+        observe_cgroup_membership(self)
         for ports in socket_ports(self._alive_set()).values():
             self.ports.update(ports)
 
@@ -418,7 +427,9 @@ class OwnedTree:
             stat = read_stat(pid)
             if stat is None:
                 if proc_state(pid) == "unknown":
-                    self._mark_unknown(pid)  # a live child of the orchestrator whose state is unreadable
+                    self._mark_unknown(
+                        pid
+                    )  # a live child of the orchestrator whose state is unreadable
                     return
                 continue
             if stat[1] != me:
@@ -488,93 +499,19 @@ class OwnedTree:
         grace_seconds: float,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
-        """TERM every pinned live process, wait a bounded time, KILL the rest, prove absence."""
+        """Stop pinned instances under a single absolute cleanup deadline."""
 
-        self.pin_new()
-        states_before = {
-            pid: ("exited" if _exited(fd) else "alive") for pid, (fd, _) in self._entries.items()
-        }
-        terminated = self._signal(self._targets(), signal.SIGTERM) if self.contained else []
-        limit = clock() + grace_seconds
-        while self._targets() and clock() < limit:
-            sleeper(0.02)
-        killed = self._signal(self._targets(), signal.SIGKILL)
-        limit = clock() + max(grace_seconds, 1.0)
-        while self._targets() and clock() < limit:
-            sleeper(0.02)
-        for _ in range(ORPHAN_ROUNDS):  # orphans born while the sweep ran
-            self.pin_new()
-            late = self._targets()
-            if not late:
-                break
-            killed += self._signal(late, SIGKILL_NUMBER)
-            limit = clock() + max(grace_seconds, 1.0)
-            while self._targets() and clock() < limit:
-                sleeper(0.02)
-        if self.holder_mode and self._alive_set():  # the holder finishes its own bounded sweep first
-            limit = clock() + 2.0 * (grace_seconds + max(grace_seconds, 1.0)) + 3.0
-            while self._alive_set() and clock() < limit:
-                sleeper(0.02)
-            killed += self._signal(self._alive_set(), SIGKILL_NUMBER)
-            limit = clock() + max(grace_seconds, 1.0)
-            while self._alive_set() and clock() < limit:
-                sleeper(0.02)
-        emptied = False
-        if self.cgroup is not None and self.cgroup_joined:
-            emptied = self.cgroup.kill(clock=clock, sleeper=sleeper)
-            if emptied:
-                self.pin_new()
-        self._reap_orphans()
-        remaining = sorted(self._alive_set())
-        surviving = sorted(self.current_ports())
-        root_entry = self._entries.get(self.root_pid)
-        root_gone = root_entry is not None and _exited(root_entry[0])
-        adoption = {
-            "enabled": bool(self.adoption is not None and self.adoption.enabled),
-            "at_launch": self.launch_adopting,
-            "at_proof": bool(self.adoption is not None and self.adoption.verify()),
-            "root_gone": root_gone,
-            "orphans_pinned": self.orphans_pinned,
-            "unattributed": sorted(self.unattributed),
-            "unknown_live": sorted(self.unknown_live),
-            "cgroup": {
-                "configured": self.cgroup is not None,
-                "available": bool(self.cgroup is not None and self.cgroup.available),
-                "reason": self.cgroup.reason if self.cgroup is not None else "not configured",
-                "joined": self.cgroup_joined,
-                "emptied": emptied,
-            },
-        }
-        adoption["proof"] = bool(
-            (emptied and not remaining)
-            or (
-                adoption["at_launch"]
-                and adoption["at_proof"]
-                and root_gone
-                and not self.unattributed
-                and not remaining
-            )
+        return terminate_tree(
+            self,
+            grace_seconds=grace_seconds,
+            clock=clock,
+            sleeper=sleeper,
+            deadline=deadline,
+            orphan_rounds=ORPHAN_ROUNDS,
+            late_kill_number=SIGKILL_NUMBER,
         )
-        if self.cgroup is not None and (emptied or not self.cgroup_joined):
-            self.cgroup.remove()  # an empty group is removed; a populated one is left, never forced
-        receipt = {
-            "tracked": len(self._entries),
-            "adopted_total": self.adopted_total,
-            "states_before": states_before,
-            "terminated": terminated,
-            "killed": killed,
-            "remaining": remaining,
-            "ports_seen": sorted(self.ports),
-            "surviving_ports": surviving,
-            "contained": self.contained,
-            "reason": self.reason,
-            "adoption": adoption,
-            "root": {"pid": self.root_pid, "start": self.root_start},
-            "proof": self.contained and not remaining and not surviving,
-        }
-        self.close()
-        return receipt
 
     def signal_root(self, signum: int) -> bool:
         """Signal only the pinned root (the guardian) so it contains its own subtree first."""
@@ -815,7 +752,7 @@ class GuardianStatus:
             if not data:
                 self.eof = True
                 return
-            self.ready = self.ready or b"R" in data
+            self.ready = self.ready or b"R" in data or (self.holder is not None and b"H" in data)
             self.spawned = self.spawned or b"S" in data
             self._buffer = (self._buffer + data)[-256:]
             found = re.search(rb"W(\d+):(\d+)\n", self._buffer)
@@ -826,13 +763,22 @@ class GuardianStatus:
                 self.guardian = (int(named.group(1)), int(named.group(2)))
 
     def read_receipts(
-        self, guardian_path: Path, secret: bytes, root_pid: int, root_start: int | None
+        self,
+        guardian_path: Path,
+        secret: bytes,
+        root_pid: int,
+        root_start: int | None,
+        *,
+        reader: Any = None,
     ) -> tuple[dict[str, Any] | None, list[str]]:
         """Receipts of this job.  Legacy: the root IS the guardian.  Holder mode: the root is the holder and
         the guardian is authenticated against ITS OWN recorded instance (never the root's)."""
+        reader = reader or read_guardian_receipt
         if self.holder is None:
-            return read_guardian_receipt(guardian_path, secret, root_pid, root_start)
-        return self.holder.read_receipts(self, guardian_path, secret, root_pid, root_start)
+            return reader(guardian_path, secret, root_pid, root_start)
+        return self.holder.read_receipts(
+            self, guardian_path, secret, root_pid, root_start, reader=reader
+        )
 
     def absent_proof(self) -> bool:
         self.drain()
@@ -979,13 +925,15 @@ def cleanup_proven(
 
     if owned_receipt.get("proof") is not True:
         return False
-    if status is not None and status.holder is not None:  # holder mode: its authentic final ALWAYS gates
+    if getattr(status, "holder", None) is not None:  # holder mode: its authentic final ALWAYS gates
         root, adoption = owned_receipt.get("root") or {}, owned_receipt.get("adoption") or {}
         proven = status.holder.verdict(root.get("pid"), root.get("start"))["proof"]
         if not (proven and adoption.get("root_gone")):
             return False
-        return guardian is None or guardian.get("phase") != "final" or (
-            guardian.get("contained") is True and guardian.get("proof") is True
+        return (
+            guardian is None
+            or guardian.get("phase") != "final"
+            or (guardian.get("contained") is True and guardian.get("proof") is True)
         )
     if guardian is not None and guardian.get("phase") == "final":
         return guardian.get("contained") is True and guardian.get("proof") is True

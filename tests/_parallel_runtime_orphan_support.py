@@ -211,7 +211,27 @@ def pin_handshake_then_kill_guardian(job_root, wait_seconds=20.0):
     (root / "orphan.pid").write_text(str(orphan.pid))
     guardian = os.getppid()
     stat = read_stat(guardian)
-    orchestrator = stat[1] if stat is not None else None
+    parent = stat[1] if stat is not None else None
+    orchestrator, holder = parent, None
+    holder_path = root / "holder.json"
+    if holder_path.exists():
+        try:
+            record = json.loads(holder_path.read_text())
+            hstat = read_stat(parent) if parent is not None else None
+            if (
+                hstat is None
+                or record["holder_pid"] != parent
+                or record["holder_start"] != hstat[0]
+                or record["owner_pid"] != hstat[1]
+            ):
+                orchestrator = None
+            else:
+                holder, orchestrator = parent, record["owner_pid"]
+                ostate = read_stat(orchestrator)
+                if ostate is None or ostate[0] != record["owner_start"]:
+                    orchestrator = None
+        except (OSError, ValueError, KeyError, TypeError):
+            orchestrator = None  # a partial topology observation cannot establish this precondition
     held, began = None, time.monotonic()
     while orchestrator is not None:
         held = _pidfd_held_for(orchestrator, orphan.pid)
@@ -226,6 +246,7 @@ def pin_handshake_then_kill_guardian(job_root, wait_seconds=20.0):
         "orphan_start": own[0] if own is not None else None,
         "guardian_pid": guardian,
         "orchestrator_pid": orchestrator,
+        "holder_pid": holder,
         "waited_seconds": round(time.monotonic() - began, 3),
         "wait_limit_seconds": wait_seconds,
         **(held or {}),

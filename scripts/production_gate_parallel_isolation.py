@@ -326,3 +326,22 @@ def build_snapshot(
         "bytes": max_bytes - budget[0],
         "write_probe": "denied",
     }
+
+
+def create_job_tree(
+    run_root: Path, run_id: str, job_id: str, directories: Sequence[str]
+) -> dict[str, Path]:
+    """Create the owned private trees for one job; refuse symlinks and existing trees."""
+
+    if run_root.is_symlink() or not run_root.is_dir():
+        raise OSError("run root must be an existing real directory")
+    base = run_root / run_id / job_id
+    if not base.resolve().is_relative_to(run_root.resolve()):
+        raise OSError("job tree escapes the run root")
+    base.mkdir(mode=0o700, parents=True, exist_ok=False)
+    tree = {"root": base}
+    for name in directories:
+        path = base / name
+        path.mkdir(mode=0o700, exist_ok=False)
+        tree[name] = path
+    return tree

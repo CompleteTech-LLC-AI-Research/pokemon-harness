@@ -112,6 +112,7 @@ class JobCgroup:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
+        deadline: float | None = None,
     ) -> bool:
         """Kill every member atomically and return True only when the kernel reports it empty."""
 
@@ -122,10 +123,12 @@ class JobCgroup:
         except OSError:
             return False
         limit = clock() + KILL_WAIT_SECONDS
+        if deadline is not None:
+            limit = min(limit, deadline)
         while clock() < limit:
             if self.populated() is False:
                 return True
-            sleeper(0.02)
+            sleeper(min(0.02, max(0.0, limit - clock())))
         return self.populated() is False
 
     def remove(self) -> None:
