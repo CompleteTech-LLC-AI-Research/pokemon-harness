@@ -199,3 +199,42 @@ def test_the_sequential_gate_stays_the_default_and_the_parallel_flags_are_guarde
     with pytest.raises(SystemExit) as with_evidence:
         gate.main(["--parallel-runtimes", "--evidence-dir", str(tmp_path / "evidence")])
     assert with_evidence.value.code == 2
+
+
+def test_the_unqualified_flag_is_opt_in_and_requires_the_parallel_mode():
+    assert gate.build_parser().parse_args([]).parallel_allow_unqualified is False
+    with pytest.raises(SystemExit) as alone:
+        gate.main(["--parallel-allow-unqualified"])
+    assert alone.value.code == 2
+
+
+def test_the_qualified_cli_mode_refuses_before_any_snapshot_probe_or_child(
+    tmp_path, monkeypatch, capsys
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from scripts import production_gate_parallel_cli as cli
+
+    unavailable = {"admitted": False, "reason": "no delegated cgroup", "qualified": False}
+    monkeypatch.setattr(cli, "kernel_ownership", lambda required: unavailable)
+    root = tmp_path / "root"
+    status = cli.run_parallel_cli(
+        args=SimpleNamespace(
+            runtime_mode="both", parallel_run_root=root, parallel_allow_unqualified=False
+        ),
+        parser=None,
+        project_root=tmp_path,
+        python_executable=Path(sys.executable),
+        cython_python_executable=None,
+        assets=(),
+        required_nodeids_by_tier={},
+        configuration_problems=(),
+        capacity_policy=object(),
+        capacity_policy_path=tmp_path / "policy.json",
+        selected=(),
+        early_smoke=False,
+        fail_fast=False,
+    )
+    assert status == 2 and "kernel ownership" in capsys.readouterr().out
+    assert not root.exists(), "nothing was created before the refusal"
