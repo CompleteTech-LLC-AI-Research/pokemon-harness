@@ -3,6 +3,7 @@
 PARALLEL_RUNTIME_PARTS = (
     "artifacts",
     "capacity",
+    "cgroup",
     "comparison",
     "gate",
     "identity",
@@ -13,6 +14,7 @@ PARALLEL_RUNTIME_PARTS = (
     "ports",
     "processes",
     "records",
+    "runtime_inputs",
     "validation",
 )
 PARALLEL_RUNTIME_MODULES = tuple(
