@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
+import traceback
 from pathlib import Path
 
 import pytest
 
 from scripts import gate_capacity
+from scripts.production_gate_model import TIER_DESCRIPTIONS
 from tests._gate_capacity_support import (
     FakeMatrixPopen,
     _matrix_row_prepare,
@@ -97,7 +100,7 @@ def test_batch_tier_finalization_interrupt_keeps_loaded_failure_evidence(tmp_pat
 
     monkeypatch.setattr(gate, "prepare_runtime_gate", _matrix_row_prepare({}))
     monkeypatch.setattr(gate, "run_pytest_once", run_once)
-    with _real_sigint_at_line(gate.run_tier, "    if omitted_failures:\n") as signalled:
+    with _real_sigint_at_line(gate.run_tier, "        if omitted_failures:\n") as signalled:
         result = gate.run_runtime_gates(
             runtime_mode="source",
             project_root=tmp_path,
@@ -388,6 +391,7 @@ def test_cancellation_between_timing_repetitions_keeps_loaded_iteration(tmp_path
             required_nodeids_by_tier={},
             timeout_override=5,
         )[0]
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     finally:
         signal.signal(signal.SIGINT, previous_handler)
 
@@ -663,3 +667,255 @@ def test_early_smoke_return_boundary_interrupt_keeps_the_executed_smoke(tmp_path
     assert result.cancellation, result
     assert result.tiers[1].status == "NOT_STARTED", result.tiers[1]
     assert gate.runtime_gate_passes(result) is False
+
+
+_ROW = "tests/test_matrix.py::test_pair[aaa-fail]"
+
+
+def _custom_sigint_handler(_signum, _frame):
+    raise KeyboardInterrupt
+
+
+_PREVIOUS_HANDLER = pytest.mark.parametrize(
+    "previous", [signal.default_int_handler, _custom_sigint_handler], ids=["default", "custom"]
+)
+
+
+@contextlib.contextmanager
+def _installed_sigint_handler(handler):
+    original = signal.signal(signal.SIGINT, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+
+def _failing_pytest_once(reason, output):
+    def run_once(**kwargs):
+        report = gate.GateReport(
+            gate.Counts(total=1, failed=1),
+            nodeids=(_ROW,),
+            failed_records=({"nodeid": _ROW, "outcome": "failed", "reason": reason},),
+        )
+        return 1, report, output, ["pytest"]
+
+    return run_once
+
+
+def _recording_publish(published):
+    def publish(tier):
+        published.append((tier, signal.getsignal(signal.SIGINT)))
+
+    return publish
+
+
+def _batch_call(tmp_path, publish, name="unit"):
+    return gate.run_tier(
+        name=name,
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        repeat=5,
+        timeout_override=5,
+        report_directory=tmp_path,
+        publish=publish,
+    )
+
+
+def _matrix_call(tmp_path, publish):
+    return gate.run_matrix_tier(
+        name="trade",
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        environment={},
+        required_problems=[],
+        timeout_override=5,
+        report_directory=tmp_path,
+        required_nodeids=(_ROW,),
+        matrix_workers=1,
+        publish=publish,
+    )
+
+
+def _published_before_restoration(published, tier, previous):
+    assert len(published) == 1 and published[0][0] is tier, published
+    assert published[0][1] is not previous, "the tier must be published before restoration"
+
+
+def _frame_names(exc):
+    return [frame.name for frame in traceback.extract_tb(exc.__traceback__)]
+
+
+@_PREVIOUS_HANDLER
+def test_between_repetition_cancellation_restores_the_previous_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    """The between-repetition path raised before restore(), leaking the guard handler."""
+
+    calls: list[int] = []
+    published: list = []
+    first = _failing_pytest_once("TIMING-ITERATION-FAILURE", "RETAIN-TIMING-OUTPUT")
+
+    def run_once(**kwargs):
+        calls.append(len(calls) + 1)
+        if len(calls) > 1:
+            os.kill(os.getpid(), signal.SIGINT)
+        return first(**kwargs)
+
+    monkeypatch.setattr(gate, "run_pytest_once", run_once)
+    with _installed_sigint_handler(previous):
+        with pytest.raises(gate.TierInterruptedDuringCleanup) as raised:
+            _batch_call(tmp_path, _recording_publish(published), name="timing")
+        assert signal.getsignal(signal.SIGINT) is previous
+    tier = raised.value.tier
+    assert calls == [1, 2], calls
+    _published_before_restoration(published, tier, previous)
+    assert tier.status == "INTERRUPTED", tier.status
+    assert tier.counts.failed == 1 and tier.returncodes == [1], (tier.counts, tier.returncodes)
+    assert "RETAIN-TIMING-OUTPUT" in tier.output_tail, tier.output_tail
+    assert any("TIMING-ITERATION-FAILURE" in d.reason for d in tier.failure_details), (
+        tier.failure_details
+    )
+
+
+@_PREVIOUS_HANDLER
+def test_batch_publish_failure_keeps_the_exception_and_restores_the_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    injected = RuntimeError("PUBLISH-FAILURE")
+
+    def publish(tier):
+        raise injected
+
+    monkeypatch.setattr(
+        gate, "run_pytest_once", _failing_pytest_once("BATCH-FAILURE", "RETAIN-BATCH-OUTPUT")
+    )
+    with _installed_sigint_handler(previous):
+        with pytest.raises(RuntimeError) as raised:
+            _batch_call(tmp_path, publish)
+        assert signal.getsignal(signal.SIGINT) is previous
+    assert raised.value is injected
+    assert "publish" in _frame_names(raised.value), _frame_names(raised.value)
+
+
+@_PREVIOUS_HANDLER
+def test_batch_assembly_failure_keeps_the_exception_and_restores_the_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    published: list = []
+    monkeypatch.setattr(
+        gate, "run_pytest_once", _failing_pytest_once("BATCH-FAILURE", "RETAIN-BATCH-OUTPUT")
+    )
+    monkeypatch.delitem(TIER_DESCRIPTIONS, "unit")
+    with _installed_sigint_handler(previous):
+        with pytest.raises(KeyError) as raised:
+            _batch_call(tmp_path, _recording_publish(published))
+        assert signal.getsignal(signal.SIGINT) is previous
+    assert raised.value.args == ("unit",), raised.value.args
+    assert published == [], published
+
+
+@_PREVIOUS_HANDLER
+def test_batch_normal_return_publishes_then_restores_the_previous_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    published: list = []
+    monkeypatch.setattr(
+        gate, "run_pytest_once", _failing_pytest_once("BATCH-FAILURE", "RETAIN-BATCH-OUTPUT")
+    )
+    with _installed_sigint_handler(previous):
+        tier = _batch_call(tmp_path, _recording_publish(published))
+        assert signal.getsignal(signal.SIGINT) is previous
+    _published_before_restoration(published, tier, previous)
+    assert tier.status == "FAIL" and tier.counts.failed == 1, (tier.status, tier.counts)
+    assert tier.returncodes == [1] and "RETAIN-BATCH-OUTPUT" in tier.output_tail
+
+
+def test_batch_finalization_cancellation_carries_the_published_tier_and_restores_the_handler(
+    tmp_path, monkeypatch
+):
+    published: list = []
+    monkeypatch.setattr(
+        gate, "run_pytest_once", _failing_pytest_once("BATCH-FAILURE", "RETAIN-BATCH-OUTPUT")
+    )
+    with _real_sigint_at_line(gate.run_tier, "        if omitted_failures:\n") as signalled:
+        with pytest.raises(gate.TierInterruptedDuringCleanup) as raised:
+            _batch_call(tmp_path, _recording_publish(published))
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert signalled, "the control did not deliver its signal"
+    tier = raised.value.tier
+    _published_before_restoration(published, tier, signal.default_int_handler)
+    assert tier.status == "FAIL" and tier.counts.failed == 1, (tier.status, tier.counts)
+    assert any("BATCH-FAILURE" in d.reason for d in tier.failure_details), tier.failure_details
+    assert "RETAIN-BATCH-OUTPUT" in tier.output_tail, tier.output_tail
+
+
+@_PREVIOUS_HANDLER
+def test_matrix_publish_failure_keeps_the_exception_and_restores_the_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    injected = RuntimeError("PUBLISH-FAILURE")
+
+    def publish(tier):
+        raise injected
+
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeMatrixPopen)
+    with _installed_sigint_handler(previous):
+        with pytest.raises(RuntimeError) as raised:
+            _matrix_call(tmp_path, publish)
+        assert signal.getsignal(signal.SIGINT) is previous
+    assert raised.value is injected
+    assert "publish" in _frame_names(raised.value), _frame_names(raised.value)
+
+
+@_PREVIOUS_HANDLER
+def test_matrix_assembly_failure_keeps_the_exception_and_restores_the_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    published: list = []
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeMatrixPopen)
+    monkeypatch.delitem(TIER_DESCRIPTIONS, "trade")
+    with _installed_sigint_handler(previous):
+        with pytest.raises(KeyError) as raised:
+            _matrix_call(tmp_path, _recording_publish(published))
+        assert signal.getsignal(signal.SIGINT) is previous
+    assert raised.value.args == ("trade",), raised.value.args
+    assert published == [], published
+
+
+@_PREVIOUS_HANDLER
+def test_matrix_normal_return_publishes_then_restores_the_previous_sigint_handler(
+    tmp_path, monkeypatch, previous
+):
+    published: list = []
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeMatrixPopen)
+    with _installed_sigint_handler(previous):
+        tier = _matrix_call(tmp_path, _recording_publish(published))
+        assert signal.getsignal(signal.SIGINT) is previous
+    _published_before_restoration(published, tier, previous)
+    assert tier.status == "FAIL" and tier.counts.failed == 1, (tier.status, tier.counts)
+    assert "MATRIX-OUTPUT" in tier.output_tail, tier.output_tail
+    assert any("runtime-identity-marker" in d.reason for d in tier.failure_details), (
+        tier.failure_details
+    )
+
+
+def test_matrix_finalization_cancellation_carries_the_published_tier_and_restores_the_handler(
+    tmp_path, monkeypatch
+):
+    published: list = []
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeMatrixPopen)
+    prefix = "        case_results = [case_results_by_nodeid"
+    with _real_sigint_at_line(gate.run_matrix_tier, prefix) as signalled:
+        with pytest.raises(gate.TierInterruptedDuringCleanup) as raised:
+            _matrix_call(tmp_path, _recording_publish(published))
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert signalled, "the control did not deliver its signal"
+    tier = raised.value.tier
+    _published_before_restoration(published, tier, signal.default_int_handler)
+    assert tier.status == "FAIL" and tier.counts.failed == 1, (tier.status, tier.counts)
+    assert "MATRIX-OUTPUT" in tier.output_tail, tier.output_tail
+    assert any("runtime-identity-marker" in d.reason for d in tier.failure_details), (
+        tier.failure_details
+    )

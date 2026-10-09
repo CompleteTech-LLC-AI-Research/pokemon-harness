@@ -341,57 +341,61 @@ def run_tier(
     # the signal, assemble the complete tier, and carry the cancellation out
     # afterwards instead.
     finalization_guard = _defer_sigint_while_finalizing()
-    if omitted_failures:
-        iteration_failures.append(f"[...{omitted_failures} additional failure entries omitted...]")
-    if failed_output:
-        output_tail = failed_output
+    try:
+        if omitted_failures:
+            iteration_failures.append(f"[...{omitted_failures} additional failure entries omitted...]")
+        if failed_output:
+            output_tail = failed_output
 
-    duration = time.monotonic() - started
-    unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
-    if interrupted_between_iterations or 130 in returncodes:
-        status = "INTERRUPTED"
-    elif iteration_failures or any(code != 0 for code in returncodes) or unexpected:
-        status = "FAIL"
-    elif aggregate.total == 0:
-        status = "FAIL"
-        output_tail = f"pytest selected no tests for marker expression {TIER_EXPRESSIONS[name]!r}"
-    elif required and aggregate.skipped:
-        status = "FAIL"
-        output_tail = (
-            f"required tier produced {aggregate.skipped} skip(s); "
-            "missing/unsupported coverage is not accepted in the production gate\n" + output_tail
+        duration = time.monotonic() - started
+        unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
+        if interrupted_between_iterations or 130 in returncodes:
+            status = "INTERRUPTED"
+        elif iteration_failures or any(code != 0 for code in returncodes) or unexpected:
+            status = "FAIL"
+        elif aggregate.total == 0:
+            status = "FAIL"
+            output_tail = f"pytest selected no tests for marker expression {TIER_EXPRESSIONS[name]!r}"
+        elif required and aggregate.skipped:
+            status = "FAIL"
+            output_tail = (
+                f"required tier produced {aggregate.skipped} skip(s); "
+                "missing/unsupported coverage is not accepted in the production gate\n" + output_tail
+            )
+        elif aggregate.skipped:
+            # Optional coverage may be unavailable on a BYO-ROM machine, but a
+            # partial run must remain visibly optional instead of being reported as
+            # a full PASS merely because another optional case passed.
+            status = "SKIP"
+        else:
+            status = "PASS" if aggregate.passed else "SKIP"
+
+        tier_result = TierResult(
+            name=name,
+            description=TIER_DESCRIPTIONS[name],
+            expression=TIER_EXPRESSIONS[name],
+            required=required,
+            status=status,
+            counts=aggregate,
+            returncodes=returncodes,
+            duration_seconds=duration,
+            skip_reasons=dict(sorted(aggregate_reasons.items())),
+            command=command,
+            output_tail=output_tail,
+            iteration_failures=iteration_failures,
+            selected_nodeids=selected_nodeids,
+            failure_details=failure_details,
+            failure_details_omitted=failure_details_omitted,
         )
-    elif aggregate.skipped:
-        # Optional coverage may be unavailable on a BYO-ROM machine, but a
-        # partial run must remain visibly optional instead of being reported as
-        # a full PASS merely because another optional case passed.
-        status = "SKIP"
-    else:
-        status = "PASS" if aggregate.passed else "SKIP"
-
-    tier_result = TierResult(
-        name=name,
-        description=TIER_DESCRIPTIONS[name],
-        expression=TIER_EXPRESSIONS[name],
-        required=required,
-        status=status,
-        counts=aggregate,
-        returncodes=returncodes,
-        duration_seconds=duration,
-        skip_reasons=dict(sorted(aggregate_reasons.items())),
-        command=command,
-        output_tail=output_tail,
-        iteration_failures=iteration_failures,
-        selected_nodeids=selected_nodeids,
-        failure_details=failure_details,
-        failure_details_omitted=failure_details_omitted,
-    )
-    # Durable publication before the signal handler is restored, for the same
-    # reason as the matrix supervisor: otherwise a ``SIGINT`` landing between
-    # ``restore()`` and the caller's receipt of the return value loses every
-    # accumulated timing iteration.
-    if publish is not None:
-        publish(tier_result)
+        # Durable publication before the signal handler is restored, for the same
+        # reason as the matrix supervisor: otherwise a ``SIGINT`` landing between
+        # ``restore()`` and the caller's receipt of the return value loses every
+        # accumulated timing iteration.
+        if publish is not None:
+            publish(tier_result)
+    finally:
+        # Every exit after installation hands back the exact prior SIGINT handler; the tier is already published.
+        cancelled_during_finalization = finalization_guard.restore()
     if interrupted_between_iterations:
         # The repetition loop was cancelled.  Carry the accumulated iterations
         # out as an interrupted tier instead of letting the cancellation escape
@@ -400,7 +404,7 @@ def run_tier(
             tier_result,
             f"{name} cancelled between timing repetitions after loading iteration evidence",
         ) from None
-    if finalization_guard.restore():
+    if cancelled_during_finalization:
         # The evidence is complete; carry it out and record the cancellation
         # separately instead of letting the orchestrator synthesize an empty row.
         raise TierInterruptedDuringCleanup(

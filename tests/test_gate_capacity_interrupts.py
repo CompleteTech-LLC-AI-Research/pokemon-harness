@@ -513,7 +513,7 @@ def test_matrix_finalization_interrupt_keeps_loaded_failure_evidence(tmp_path, m
     signal_line = start + next(
         index
         for index, line in enumerate(source)
-        if line.startswith("    case_results = [case_results_by_nodeid")
+        if line.startswith("        case_results = [case_results_by_nodeid")
     )
     signalled: list[bool] = []
 
@@ -546,6 +546,7 @@ def test_matrix_finalization_interrupt_keeps_loaded_failure_evidence(tmp_path, m
             timeout_override=5,
             capacity_session=session,
         )
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     except KeyboardInterrupt:  # pragma: no cover - regression guard
         pytest.fail("assembly cancellation escaped instead of finalizing evidence")
     finally:
