@@ -687,7 +687,7 @@ def test_malformed_child_capacity_evidence_fails_that_job_through_the_real_finis
 
     _, _, report = run(tmp_path, {"source": scenario, "cython": "pass"})
     assert states(report) == {"source": "failed", "cython": "passed"}
-    source = next(job for job in report["jobs"] if job["job_id"] == "source-job")
+    source = next(job for job in report["jobs"] if job["mode"] == "source")
     assert any("capacity evidence is malformed" in p for p in source["artifact_problems"])
     assert report["overall"] == "FAIL"
 
@@ -726,7 +726,7 @@ def test_a_required_ownership_failure_stops_every_later_launch_in_the_same_batch
     )
     assert len(calls) == 1, "closing admission must stop the second launch before it is attempted"
     assert states(report) == {"source": "failed", "cython": "not_started"}
-    second = next(job for job in report["jobs"] if job["job_id"] == "cython-job")
+    second = next(job for job in report["jobs"] if job["mode"] == "cython")
     assert "live arbiter closed admission" in second["reason"]
     assert not list((root / plan.run_id).glob("*/guardian.json")), "no guardian, hence no worker"
 
