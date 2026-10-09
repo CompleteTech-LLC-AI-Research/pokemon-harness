@@ -780,7 +780,10 @@ def _literal_value(node):
 
     The fold is therefore done structurally, over the literal expression
     grammar: constants, containers of constants, unary and binary operators,
-    and chained comparisons between them. Anything that could read runtime
+    chained comparisons and ``and``/``or`` between them. ``and``/``or`` yield
+    the selected operand's own value and type, stopping at the first decisive
+    operand as Python does; an unresolvable operand reached first bails.
+    Anything that could read runtime
     state -- ``Name``, ``Call``, ``Attribute``, ``Subscript`` -- makes the walk
     bail and return ``_NOT_LITERAL``. That boundary is what keeps ``x == x``
     enforced: it reads a ``Name``, so it is not decidable, and reporting a live
@@ -839,16 +842,14 @@ def _literal_value(node):
         except (ArithmeticError, TypeError):
             return _NOT_LITERAL
     if isinstance(node, ast.BoolOp):
-        result = isinstance(node.op, ast.And)
+        is_and = isinstance(node.op, ast.And)
         for value in node.values:
             item = _literal_value(value)
             if item is _NOT_LITERAL:
                 return _NOT_LITERAL
-            if isinstance(node.op, ast.And):
-                result = result and bool(item)
-            else:
-                result = result or bool(item)
-        return result
+            if bool(item) != is_and:
+                return item
+        return item
     if isinstance(node, ast.Compare):
         left = _literal_value(node.left)
         if left is _NOT_LITERAL:
