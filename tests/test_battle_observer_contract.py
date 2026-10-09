@@ -8,7 +8,12 @@ from copy import deepcopy
 import pytest
 
 from tests import _battle_turn_evidence as evidence
-from tests.test_battle_turn_evidence import _observer, _row, verify_battle_turns
+from tests.test_battle_turn_evidence import (
+    _observer,
+    _row,
+    source_mutant,
+    verify_battle_turns,
+)
 
 
 def _prepared_observer(monkeypatch, *, status_actor: str = "local"):
@@ -915,7 +920,7 @@ def test_peer_ko_flow_settles_before_end_of_battle(case) -> None:
 
 
 @pytest.mark.parametrize("case", _N4_CASES, ids=[case[0] for case in _N4_CASES])
-def test_ko_boundary_negative_controls(case) -> None:
+def test_ko_boundary_negative_controls(case, monkeypatch) -> None:
     _name, attacker, defender, bad, error, verdict, a_anchors, d_anchors = case
     hook, _, cause = error.partition(":")
     error = f"battle observation {hook}: ValueError: {cause}" if bad != "-" else None
@@ -926,3 +931,53 @@ def test_ko_boundary_negative_controls(case) -> None:
         zip(observers, completed, (a_anchors, d_anchors))
     ):
         _check_peer(observer, completion, anchors, error if bad == "AD"[role] else None)
+    if _name in _MUTANTS:
+        _run_mutant(monkeypatch, _name, (attacker, defender), error)
+
+
+_HP_GUARD = (
+    '        if _read(self.session, "wEnemyMonHP" if side == "local" else "wBattleMonHP", 2)'
+    " != [0, 0]:\n            return\n"
+)
+# case id -> (target, symbol, exact source anchor, replacement, first error, KO completion seq, visits)
+_MUTANTS = {
+    "ko-hook-nonzero-target-ignored": (
+        evidence.BattleTurnObserver,
+        "_ko_return",
+        _HP_GUARD,
+        "",
+        "terminal_victory:faint skip actor is not fainted",
+        9,
+        11,
+    ),
+    "ko-missing-pp-decrement": (
+        evidence,
+        "validate_turn",
+        "entries != 1 or ",
+        "",
+        "terminal_victory:local PP delta is inconsistent with execution",
+        8,
+        10,
+    ),
+}
+
+
+def _run_mutant(monkeypatch, name, scripts, baseline_error):
+    """Re-run the case on fresh sessions with ONE production fragment removed in memory."""
+    target, symbol, anchor, replacement, cause, completion, visits = _MUTANTS[name]
+    hook, _, reason = cause.partition(":")
+    mutant_error = f"battle observation {hook}: ValueError: {reason}"
+    assert mutant_error != baseline_error
+    with source_mutant(monkeypatch, target, symbol, anchor, replacement):
+        observers, completed, rows = _run_flow("red", scripts)
+        assert verify_battle_turns(rows) == [mutant_error]
+        attacker, defender = observers
+        assert (attacker.error, attacker.sequence, completed[0]) == (
+            mutant_error,
+            visits,
+            completion,
+        )
+        assert (defender.error, completed[1]) == (None, 8)
+    clean_observers, _, clean_rows = _run_flow("red", scripts)
+    assert verify_battle_turns(clean_rows) == [baseline_error]
+    assert clean_observers[0].error == baseline_error

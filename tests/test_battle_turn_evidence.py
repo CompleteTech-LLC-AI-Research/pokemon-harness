@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from copy import deepcopy
 
@@ -842,3 +843,31 @@ def test_terminal_sequence_must_follow_settlement(case) -> None:
         row["terminal"]["seq"] = sequence
         row["cleanup"]["seq"] = sequence + 1
     assert verify_battle_turns(rows) == [f"invalid terminal sequence: {sequence}"]
+
+
+@contextlib.contextmanager
+def source_mutant(monkeypatch, target, name: str, anchor: str, replacement: str):
+    """In-memory mutant of ``target.name`` (class method or module function).
+
+    Exactly one ``anchor`` fragment of the live source is replaced and compiled against the real
+    module globals; the original binding is restored on exit, also when the body fails.
+    """
+    import inspect
+    import sys
+    import types
+
+    original = getattr(target, name)
+    is_module = isinstance(target, types.ModuleType)
+    source = inspect.getsource(original)
+    assert source.count(anchor) == 1, f"mutation anchor for {name} must occur exactly once"
+    text = ("" if is_module else "class _Holder:\n") + source.replace(anchor, replacement)
+    scope: dict = {}
+    module = target if is_module else sys.modules[target.__module__]
+    exec(compile(text, f"<mutant {name}>", "exec"), vars(module), scope)  # noqa: S102
+    mutant = scope[name] if is_module else scope["_Holder"].__dict__[name]
+    assert mutant is not original and mutant.__code__.co_code != original.__code__.co_code
+    with monkeypatch.context() as patch:
+        patch.setattr(target, name, mutant)
+        assert getattr(target, name) is mutant
+        yield original
+    assert getattr(target, name) is original
