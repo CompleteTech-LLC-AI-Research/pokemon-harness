@@ -601,6 +601,7 @@ def _run_plan(
     def start(job: Mapping[str, Any]) -> None:
         job_id = job["job_id"]
         handles: list[Any] = []
+        job_cgroup = JobCgroup(None, "not created")
         try:
             tree = prepare_job_tree(run_root, body["run_id"], job_id)
             trees[job_id] = tree
@@ -645,6 +646,7 @@ def _run_plan(
             )
         except (OSError, CapacityError) as exc:
             close_handoff(job_id)
+            job_cgroup.remove()
             for handle in handles:
                 handle.close()
             settle(job_id, "failed", f"could not start: {type(exc).__name__}")

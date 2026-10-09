@@ -464,8 +464,8 @@ class OwnedTree:
                 and not remaining
             )
         )
-        if emptied and self.cgroup is not None:
-            self.cgroup.remove()
+        if self.cgroup is not None and (emptied or not self.cgroup_joined):
+            self.cgroup.remove()  # an empty group is removed; a populated one is left, never forced
         receipt = {
             "tracked": len(self._entries),
             "adopted_total": self.adopted_total,
