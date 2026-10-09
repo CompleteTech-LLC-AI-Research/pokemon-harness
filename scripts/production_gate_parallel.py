@@ -68,7 +68,12 @@ from scripts.production_gate_parallel_phases import (
     phase_names,
 )
 from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
-from scripts.production_gate_parallel_processes import JOB_TOKEN_ENV, OwnedTree
+from scripts.production_gate_parallel_processes import (
+    JOB_TOKEN_ENV,
+    OwnedTree,
+    guardian_argv,
+    read_guardian_receipt,
+)
 
 __all__ = [
     "CapacityError",
@@ -229,6 +234,7 @@ class _Running:
     token: str
     owned: OwnedTree
     launched_wall: datetime
+    receipt: Path
     handles: list[Any] = field(default_factory=list)
 
 
@@ -293,6 +299,7 @@ def _finish_job(
     clock: Callable[[], float],
     wall_clock: Callable[[], datetime] = _wall_now,
     measure: Measurer | None = None,
+    worker_pid: int | None = None,
 ) -> dict[str, Any]:
     artifact, read_problems = read_terminal_artifact(running.tree["root"])
     problems = list(read_problems)
@@ -303,7 +310,7 @@ def _finish_job(
                 plan,
                 running.job_id,
                 child_exit_status=exit_status,
-                child_pid=running.process.pid,
+                child_pid=worker_pid if worker_pid is not None else running.process.pid,
                 expected_token=running.token,
                 window=(running.launched_wall, wall_clock()),
             )
@@ -420,14 +427,23 @@ def run_parallel_plan(
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
         _close_handles(item)
         receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
-        cleanup[item.job_id] = {"process_tree": receipt}
+        guardian, guardian_problems = read_guardian_receipt(item.receipt)
+        cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
         ports_seen[item.job_id] = set(item.owned.ports)
-        outcome = _finish_job(plan, item, status, clock, wall_clock, measure)
-        if receipt["terminated"] or not receipt["proof"]:
+        worker_pid = guardian.get("worker_pid") if guardian else None
+        outcome = _finish_job(plan, item, status, clock, wall_clock, measure, worker_pid)
+        if guardian and guardian.get("worker_status") != status and status >= 0:
+            guardian_problems.append("the guardian saw a different worker exit status")
+        if guardian_problems or receipt["terminated"] or not receipt["proof"]:
             outcome["state"] = "failed"
+            outcome["artifact_problems"].extend(guardian_problems)
             outcome["artifact_problems"].append(
                 "owned descendants outlived the worker or could not be proven gone"
             )
+        if guardian and guardian.get("start_error"):
+            outcome["reason"] = f"could not start: {guardian['start_error']}"
+        if not (guardian and guardian.get("proof") is True and guardian.get("contained") is True):
+            receipt["proof"] = False
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
         running.remove(item)
@@ -446,16 +462,26 @@ def run_parallel_plan(
             if status is not None and item in running:
                 finish(item, status, allow_cancel=allow_cancel)
 
+    def stop(item: _Running) -> None:
+        """Ask the guardian to contain its subtree first, then prove it from outside."""
+
+        item.owned.signal_root(signal.SIGTERM)
+        limit = clock() + 2 * grace_seconds + 3.0
+        while item.process.poll() is None and clock() < limit:
+            sleeper(0.02)
+        receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
+        guardian, _problems = read_guardian_receipt(item.receipt)
+        if not (guardian and guardian.get("proof") is True and guardian.get("contained") is True):
+            receipt["proof"] = False
+        cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
+        ports_seen[item.job_id] = set(item.owned.ports)
+
     def cancel(reason: str) -> None:
         nonlocal cancel_reason
         cancel_reason = cancel_reason or reason
         harvest(allow_cancel=False)  # completed failures are kept before any signal is sent
         for item in list(running):
-            receipt = item.owned.terminate(
-                grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
-            )
-            cleanup[item.job_id] = {"process_tree": receipt}
-            ports_seen[item.job_id] = set(item.owned.ports)
+            stop(item)
             status = item.process.poll()
             _close_handles(item)
             settle(item.job_id, "interrupted", f"cancelled: {reason}", status)
@@ -468,7 +494,12 @@ def run_parallel_plan(
             tree = prepare_job_tree(run_root, body["run_id"], job_id)
             trees[job_id] = tree
             token = f"{body['run_id']}:{job_id}:{uuid.uuid4().hex}"
-            argv = list(worker_argv_factory(plan, job_id, tree, project_root))
+            receipt_path = tree["root"] / "guardian.json"
+            argv = guardian_argv(
+                receipt_path,
+                grace_seconds,
+                list(worker_argv_factory(plan, job_id, tree, project_root)),
+            )
             handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
             launched = wall_clock()
@@ -505,6 +536,7 @@ def run_parallel_plan(
                 token,
                 OwnedTree(process.pid, token, clock=clock),
                 launched,
+                receipt_path,
                 handles,
             )
         )
@@ -526,11 +558,7 @@ def run_parallel_plan(
             for item in list(running):
                 item.owned.observe()
                 if item in running and clock() > item.deadline:
-                    receipt = item.owned.terminate(
-                        grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
-                    )
-                    cleanup[item.job_id] = {"process_tree": receipt}
-                    ports_seen[item.job_id] = set(item.owned.ports)
+                    stop(item)
                     status = item.process.poll()
                     _close_handles(item)
                     settle(item.job_id, "timeout", "deadline exceeded", status)

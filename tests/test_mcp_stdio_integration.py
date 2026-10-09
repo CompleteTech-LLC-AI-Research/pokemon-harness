@@ -154,6 +154,11 @@ def _payload(result):
 
 
 def _free_port() -> int:
+    from tests._parallel_runtime_port_support import reserve_port
+
+    reserved = reserve_port()
+    if reserved is not None:
+        return reserved
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])

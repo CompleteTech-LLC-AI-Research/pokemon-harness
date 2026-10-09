@@ -21,6 +21,11 @@ from tests._rom_assets import rom_path, sym_path
 
 
 def _free_port() -> int:
+    from tests._parallel_runtime_port_support import reserve_port
+
+    reserved = reserve_port()
+    if reserved is not None:
+        return reserved
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(("127.0.0.1", 0))

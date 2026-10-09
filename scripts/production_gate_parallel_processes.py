@@ -15,16 +15,20 @@ only by kernel-verified identity, never by a number, a name or an environment va
   per-launch token is an attestation carried by artifacts, never ownership.
 
 If pidfds are unavailable the tree reports ``contained=False`` and cleanup is never
-claimed proven (fail closed).  Residual limit, stated rather than hidden: a descendant
-that is created and orphaned between two observations cannot be attributed without a
-subreaper/guardian launcher, which this module does not provide.
+claimed proven (fail closed).  The window between two observations is closed by the
+job-local guardian below: every job runs under a subreaper process (``prctl``
+``PR_SET_CHILD_SUBREAPER``), so a descendant orphaned at any moment is re-parented to
+the guardian, which terminates it and writes an authenticated receipt; a job whose
+guardian could not establish the subreaper never runs its worker (fail closed).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import select
 import signal
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -222,6 +226,18 @@ class OwnedTree:
         self.close()
         return receipt
 
+    def signal_root(self, signum: int) -> bool:
+        """Signal only the pinned root (the guardian) so it contains its own subtree first."""
+
+        entry = self._entries.get(self.root_pid)
+        if entry is None:
+            return False
+        try:
+            signal.pidfd_send_signal(entry[0], signum)
+        except OSError:
+            return False
+        return True
+
     def straggler_check(self) -> list[int]:
         """Live owned processes (call after the worker exited normally)."""
 
@@ -235,3 +251,142 @@ class OwnedTree:
             except OSError:
                 pass
         self._entries = {}
+
+
+GUARDIAN_SOURCE = r"""
+import ctypes, json, os, signal, subprocess, sys, time
+
+receipt_path, grace, argv = sys.argv[1], float(sys.argv[2]), sys.argv[4:]
+
+
+def write(body):
+    temporary = receipt_path + ".tmp"
+    with open(temporary, "w") as handle:
+        json.dump(body, handle)
+    os.replace(temporary, receipt_path)
+
+
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+    write({"contained": False, "reason": "subreaper could not be established", "proof": False})
+    sys.exit(70)
+stopped = []
+for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(number, lambda signum, frame: stopped.append(signum))
+me = os.getpid()
+try:
+    worker = subprocess.Popen(argv)
+except OSError as exc:
+    write({
+        "contained": True, "start_error": type(exc).__name__, "worker_pid": None,
+        "worker_status": None, "adopted": [], "killed": [], "remaining": [], "proof": True,
+    })
+    sys.exit(127)
+status = None
+while status is None and not stopped:
+    status = worker.poll()
+    time.sleep(0.05)
+
+
+def children():
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, "rb") as handle:
+                raw = handle.read().decode("utf-8", "replace")
+            rest = raw[raw.rindex(")") + 2:].split()
+            if int(rest[1]) == me:
+                found.append((int(name), rest[0]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return found
+
+
+def reap():
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+if status is None:
+    worker.terminate()
+    try:
+        status = worker.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        worker.kill()
+        status = worker.wait()
+adopted, killed, remaining = set(), set(), []
+deadline = time.monotonic() + grace
+limit = deadline + max(grace, 1.0)
+while True:
+    reap()
+    live = [pid for pid, state in children() if state != "Z"]
+    if not live:
+        break
+    adopted.update(live)
+    if time.monotonic() > limit:
+        remaining = live
+        break
+    sending = signal.SIGTERM if time.monotonic() < deadline else signal.SIGKILL
+    for pid in live:
+        try:
+            os.kill(pid, sending)
+            if sending == signal.SIGKILL:
+                killed.add(pid)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.05)
+reap()
+adopted.discard(worker.pid)
+write({
+    "contained": True, "worker_pid": worker.pid, "worker_status": status,
+    "stopped_by_signal": stopped[0] if stopped else None, "adopted": sorted(adopted),
+    "killed": sorted(killed), "remaining": sorted(remaining), "proof": not remaining,
+})
+if stopped:
+    sys.exit(128 + stopped[0])
+sys.exit(status if status >= 0 else 128 - status)
+"""
+
+
+def guardian_argv(receipt_path: Path, grace_seconds: float, worker_argv: list[str]) -> list[str]:
+    """Wrap a worker command in the job-local guardian (stdlib only, no project import)."""
+
+    return [
+        sys.executable,
+        "-c",
+        GUARDIAN_SOURCE,
+        str(receipt_path),
+        str(grace_seconds),
+        "--",
+        *worker_argv,
+    ]
+
+
+def read_guardian_receipt(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    """Read the guardian's receipt; a missing or unproven one is a failed-closed problem."""
+
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, ["guardian receipt is missing or malformed: containment unproven"]
+    if not isinstance(body, dict) or body.get("contained") is not True:
+        return body if isinstance(body, dict) else None, [
+            "the guardian could not establish containment"
+        ]
+    if body.get("start_error"):
+        return body, [f"could not start: {body['start_error']}"]
+    problems: list[str] = []
+    if body.get("proof") is not True or body.get("remaining"):
+        problems.append("the guardian could not remove every adopted descendant")
+    if body.get("adopted"):
+        problems.append(f"descendants outlived the worker and were adopted: {body['adopted'][:5]}")
+    if not isinstance(body.get("worker_pid"), int) or isinstance(body.get("worker_pid"), bool):
+        problems.append("guardian receipt names no worker pid")
+    return body, problems

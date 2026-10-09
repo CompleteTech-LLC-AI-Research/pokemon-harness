@@ -5,12 +5,19 @@ are outside the worker's process group, exactly like preflight/pytest/matrix chi
 """
 
 import os
+import signal
 import socket
 import subprocess
 import sys
 import time
 
-from scripts.production_gate_parallel_processes import JOB_TOKEN_ENV, OwnedTree, read_stat
+from scripts.production_gate_parallel_processes import (
+    JOB_TOKEN_ENV,
+    OwnedTree,
+    guardian_argv,
+    read_guardian_receipt,
+    read_stat,
+)
 
 WORKER = r"""
 import os, socket, subprocess, sys, time
@@ -151,3 +158,60 @@ def test_cleanup_is_never_claimed_proven_when_the_root_cannot_be_pinned():
     tree = OwnedTree(2**22 + 12345, "tok-6")  # no such process
     receipt = tree.terminate(grace_seconds=0.1)
     assert tree.contained is False and receipt["proof"] is False and receipt["terminated"] == []
+
+
+def run_guardian(tmp_path, mode):
+    """Run a real guardian around the detaching worker; returns (process, receipt, mark)."""
+
+    receipt = tmp_path / "guardian.json"
+    mark = tmp_path / "grandchild.pid"
+    argv = guardian_argv(receipt, 1.0, [sys.executable, "-c", WORKER, str(mark), mode])
+    return subprocess.Popen(argv, start_new_session=True), receipt, mark
+
+
+def test_the_guardian_adopts_and_removes_an_orphan_created_at_the_moment_the_worker_exits(tmp_path):
+    other = sentinel()
+    guardian, receipt, mark = run_guardian(tmp_path, "exit")
+    try:
+        grandchild = int(wait_for(mark))
+        guardian.wait(timeout=30)
+        body, problems = read_guardian_receipt(receipt)
+        assert body["contained"] is True and body["proof"] is True and body["remaining"] == []
+        assert grandchild in body["adopted"]
+        assert any("outlived the worker" in item for item in problems)
+        assert not alive(grandchild), "the orphan was not removed by the guardian"
+        assert other.poll() is None and alive(other.pid), "an unrelated process was touched"
+    finally:
+        kill_all(other)
+        guardian.kill()
+        guardian.wait()
+
+
+def test_a_stop_signal_makes_the_guardian_contain_the_whole_detached_subtree(tmp_path):
+    guardian, receipt, mark = run_guardian(tmp_path, "hold")
+    try:
+        grandchild = int(wait_for(mark))
+        wait_for(tmp_path / "grandchild.pid.port")
+        guardian.send_signal(signal.SIGTERM)
+        guardian.wait(timeout=30)
+        body, _problems = read_guardian_receipt(receipt)
+        assert body["stopped_by_signal"] == signal.SIGTERM and body["proof"] is True
+        assert grandchild in body["adopted"] and not alive(grandchild)
+    finally:
+        guardian.kill()
+        guardian.wait()
+
+
+def test_a_worker_that_cannot_start_is_reported_by_the_guardian_not_lost(tmp_path):
+    receipt = tmp_path / "guardian.json"
+    process = subprocess.Popen(guardian_argv(receipt, 1.0, ["/nonexistent/python"]))
+    assert process.wait(timeout=30) == 127
+    body, problems = read_guardian_receipt(receipt)
+    assert body["start_error"] == "FileNotFoundError"
+    assert problems == ["could not start: FileNotFoundError"]
+
+
+def test_a_missing_or_unproven_guardian_receipt_is_a_failed_closed_problem(tmp_path):
+    assert read_guardian_receipt(tmp_path / "absent.json")[1]
+    (tmp_path / "bad.json").write_text('{"contained": false}', encoding="utf-8")
+    assert read_guardian_receipt(tmp_path / "bad.json")[1]

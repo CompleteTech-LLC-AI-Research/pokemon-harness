@@ -27,6 +27,11 @@ from tests._serial_link_pair import make_tcp_pair
 
 def _free_port() -> int:
     """Grab an unused local TCP port by binding to 0 and reading back."""
+    from tests._parallel_runtime_port_support import reserve_port
+
+    reserved = reserve_port()
+    if reserved is not None:
+        return reserved
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("127.0.0.1", 0))

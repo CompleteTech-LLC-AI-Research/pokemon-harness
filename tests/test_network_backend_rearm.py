@@ -20,6 +20,11 @@ from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendE
 
 
 def _free_port() -> int:
+    from tests._parallel_runtime_port_support import reserve_port
+
+    reserved = reserve_port()
+    if reserved is not None:
+        return reserved
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     try:

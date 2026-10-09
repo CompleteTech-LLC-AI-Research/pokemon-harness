@@ -42,7 +42,30 @@ def require(condition: bool, message: str) -> None:
         raise ProbeFailure(message)
 
 
+def _job_port() -> int | None:
+    """A port of this concurrent job's reserved range, or None outside a parallel job."""
+
+    import importlib.util
+    import os
+    from pathlib import Path
+
+    if not os.environ.get("POKERED_PARALLEL_PORT_BASE"):
+        return None
+    name = "_parallel_runtime_port_support"
+    module = sys.modules.get(name)
+    if module is None:
+        path = Path(__file__).resolve().parents[1] / "tests" / "_parallel_runtime_port_support.py"
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module.reserve_port()
+
+
 def free_port() -> int:
+    reserved = _job_port()
+    if reserved is not None:
+        return reserved
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind((LOOPBACK, 0))
