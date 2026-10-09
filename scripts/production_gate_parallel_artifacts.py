@@ -354,6 +354,74 @@ MAX_EVIDENCE_FILES = 400
 MAX_HASHED_BYTES = 8 * 1024 * 1024
 
 
+MAX_PROGRESS_TIERS = 32
+MAX_PROGRESS_ERRORS = 5
+OUTPUT_TAIL_BYTES = 2000
+
+
+def parse_partial_progress(tree: Mapping[str, Path]) -> dict[str, Any]:
+    """Structured view of what the producer wrote before a cancel or timeout; never a PASS.
+
+    Per-tier counts, claimed status, the last terminal-record iteration and the first errors are
+    read with the bounded strict loader; the child's output tail is kept as text.  Every status is a
+    *claim* recorded as ``claimed_status``: ``terminal`` is always False, so incomplete progress can
+    never be mistaken for, or promoted to, a terminal verdict.
+    """
+
+    progress: dict[str, Any] = {
+        "terminal": False,
+        "source": None,
+        "parse_error": "",
+        "tiers": [],
+        "output_tail": "",
+    }
+    evidence = tree.get("evidence")
+    path = Path(evidence) / "gate-report.json" if evidence is not None else None
+    if path is not None and path.is_file() and not path.is_symlink():
+        progress["source"] = "evidence/gate-report.json"
+        try:
+            if path.stat().st_size > MAX_ARTIFACT_BYTES:
+                raise ValueError("too large")
+            report = loads_strict(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            progress["parse_error"] = type(exc).__name__
+        else:
+            tiers = report.get("tiers") if isinstance(report, dict) else None
+            for tier in (tiers if isinstance(tiers, list) else [])[:MAX_PROGRESS_TIERS]:
+                if not isinstance(tier, dict):
+                    continue
+                counts = tier.get("counts") if isinstance(tier.get("counts"), dict) else {}
+                records = tier.get("test_records")
+                iterations = [
+                    r["iteration"]
+                    for r in (records if isinstance(records, list) else [])
+                    if isinstance(r, dict) and type(r.get("iteration")) is int
+                ]
+                errors = tier.get("errors") if isinstance(tier.get("errors"), list) else []
+                progress["tiers"].append(
+                    {
+                        "name": str(tier.get("name"))[:64],
+                        "claimed_status": tier.get("status")
+                        if tier.get("status") in TIER_STATUSES
+                        else "UNKNOWN",
+                        "counts": {k: counts[k] for k in COUNT_KEYS if type(counts.get(k)) is int},
+                        "records": len(iterations),
+                        "last_iteration": max(iterations, default=0),
+                        "errors": [str(item)[:200] for item in errors[:MAX_PROGRESS_ERRORS]],
+                    }
+                )
+    root = tree.get("root")
+    if root is not None:
+        try:
+            with open(Path(root) / "child.stdout", "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - OUTPUT_TAIL_BYTES))
+                progress["output_tail"] = handle.read().decode("utf-8", "replace")
+        except OSError:
+            pass
+    return progress
+
+
 def collect_partial_evidence(tree: Mapping[str, Path]) -> dict[str, Any]:
     """Digest whatever a cancelled or timed-out job left behind, without trusting or deleting it."""
 
@@ -386,7 +454,7 @@ def collect_partial_evidence(tree: Mapping[str, Path]) -> dict[str, Any]:
                     except OSError:
                         entry["sha256"] = None
                 files.append(entry)
-    return {"files": files, "truncated": truncated}
+    return {"files": files, "truncated": truncated, "progress": parse_partial_progress(tree)}
 
 
 def verify_gate_report(

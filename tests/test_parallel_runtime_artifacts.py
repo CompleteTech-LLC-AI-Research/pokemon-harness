@@ -16,6 +16,7 @@ from scripts.production_gate_parallel_artifacts import (
     aggregate_outcomes,
     collect_partial_evidence,
     outcome_record,
+    parse_partial_progress,
     read_terminal_artifact,
     validate_terminal_artifact,
     verify_gate_report,
@@ -342,3 +343,45 @@ def test_partial_evidence_of_an_unfinished_job_is_digested_not_deleted(tmp_path)
     assert set(paths) == {"raw/progress.json", "tmp/pytest.log"} and not found["truncated"]
     assert paths["raw/progress.json"]["sha256"] == hashlib.sha256(b'{"done": 3}').hexdigest()
     assert (tree["raw"] / "progress.json").exists() and (tree["tmp"] / "pytest.log").exists()
+
+
+def _progress_tree(tmp_path, report_text=None):
+    root = tmp_path / "job"
+    (root / "evidence").mkdir(parents=True)
+    (root / "child.stdout").write_bytes(b"x" * 5000 + b"last line")
+    if report_text is not None:
+        (root / "evidence" / "gate-report.json").write_text(report_text, encoding="utf-8")
+    return {"root": root, "evidence": root / "evidence"}
+
+
+def test_partial_progress_is_parsed_into_structured_counts_and_never_a_terminal_verdict(tmp_path):
+    import json
+
+    report = {
+        "tiers": [
+            {
+                "name": "unit",
+                "status": "PASS",
+                "counts": {"passed": 3, "failed": 0, "total": 3, "bogus": 9},
+                "test_records": [{"iteration": 1}, {"iteration": 2}],
+                "errors": ["boom"],
+            },
+            {"name": "timing", "status": "NOT-A-STATUS", "counts": "garbage"},
+            "not-an-object",
+        ]
+    }
+    progress = parse_partial_progress(_progress_tree(tmp_path, json.dumps(report)))
+    assert progress["terminal"] is False and progress["parse_error"] == ""
+    first, second = progress["tiers"]
+    assert (
+        first["counts"] == {"passed": 3, "failed": 0, "total": 3} and first["last_iteration"] == 2
+    )
+    assert first["claimed_status"] == "PASS" and first["errors"] == ["boom"]
+    assert second["claimed_status"] == "UNKNOWN" and second["counts"] == {}
+    assert progress["output_tail"].endswith("last line") and len(progress["output_tail"]) <= 2000
+
+
+def test_unparseable_partial_progress_is_an_explicit_error_not_an_exception(tmp_path):
+    progress = parse_partial_progress(_progress_tree(tmp_path, '{"tiers": [NaN'))
+    assert progress["terminal"] is False and progress["parse_error"] and progress["tiers"] == []
+    assert parse_partial_progress(_progress_tree(tmp_path / "other"))["source"] is None
