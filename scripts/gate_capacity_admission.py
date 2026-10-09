@@ -760,11 +760,10 @@ class CapacitySession:
     def _apply_sample(self, sample: CapacitySample) -> None:
         before = self.availability_status
         self._apply_sample_state(sample)
-        if before == "ok" and self.availability_status != "ok":
+        report = getattr(self.admission, "report_loss", None)
+        if report is not None and before == "ok" and self.availability_status != "ok":
             # Capacity this child saw healthy is gone: the one live book must hear it at once.
-            self.admission.report_loss(
-                "; ".join(self.availability_reasons) or self.availability_status
-            )
+            report("; ".join(self.availability_reasons) or self.availability_status)
 
     def _apply_sample_state(self, sample: CapacitySample) -> None:
         if (
