@@ -234,7 +234,9 @@ def test_fail_fast_true_cancels_the_other_runtime_with_bounded_owned_cleanup(tmp
     assert cancelled["child_exit_status"] is not None
     assert cancelled["child_exit_status"] != 0
     assert report["elapsed_seconds"] < 20
-    assert not (root / plan.run_id / f"{other}-job" / "tmp").exists()
+    # Policy changed by the F4/F5 repair: the temp tree of a job that did not pass holds the
+    # progress evidence of the cancellation, so it is retained instead of removed.
+    assert (root / plan.run_id / f"{other}-job" / "tmp").exists()
 
 
 def test_a_runtime_that_never_starts_is_a_retained_failure_not_a_pass(tmp_path):
@@ -292,7 +294,7 @@ def test_a_runtime_past_its_deadline_is_terminated_and_reported_as_a_timeout(tmp
     assert states(report) == {"source": "timeout", "cython": "passed"}
     assert report["overall"] == "FAIL"
     assert report["elapsed_seconds"] < 15
-    assert not (root / plan.run_id / "source-job" / "tmp").exists()
+    assert (root / plan.run_id / "source-job" / "tmp").exists(), "timed-out evidence is retained"
 
 
 def test_an_external_interrupt_cancels_every_owned_child_without_touching_other_processes(
