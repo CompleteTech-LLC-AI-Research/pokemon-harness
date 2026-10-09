@@ -479,6 +479,7 @@ def _alive(pid):
 
 def test_a_killed_guardian_is_contained_by_orchestrator_adoption_with_a_proven_cleanup(tmp_path):
     sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    time.sleep(0.05)  # strictly earlier than any guardian start tick (10 ms granularity)
     try:
         budget = PairBudget(2)
         plan, root, report = run(

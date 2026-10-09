@@ -376,6 +376,9 @@ def test_an_orphan_reparented_to_the_orchestrator_is_pinned_terminated_and_prove
         "os._exit(0)\n"
     )
     sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    time.sleep(
+        0.05
+    )  # start ticks have a 10 ms granularity: the sentinel must start strictly earlier
     with OrchestratorAdoption() as adoption:
         guardian = subprocess.Popen(
             [sys.executable, "-c", script],
@@ -410,6 +413,7 @@ def test_cleanup_is_unproven_when_adoption_was_not_active_at_launch(tmp_path):
 def test_an_unattributed_child_with_the_job_token_is_never_signalled_and_blocks_the_proof():
     with OrchestratorAdoption() as adoption:
         guardian = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        time.sleep(0.05)  # the outsider must start strictly after the root (10 ms tick granularity)
         outsider = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
             env={**os.environ, JOB_TOKEN_ENV: "tok-outsider"},
