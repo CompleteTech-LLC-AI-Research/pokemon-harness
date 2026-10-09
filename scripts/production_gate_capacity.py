@@ -203,10 +203,17 @@ class _DeferredSigintGuard:
     no cleanup, so the signal is recorded and re-raised as a typed cancellation
     once the complete tier result exists.  Dispatch and teardown keep their
     ordinary immediate cancellation behavior.
+
+    A previous handler that Python cannot hand back (``signal.getsignal`` reports
+    ``None``: a handler installed outside Python) is never replaced.  Deferral is
+    declined, ``declined_reason`` says so, and ``restore()`` has nothing to
+    restore; a SIGINT during assembly then raises immediately, exactly as it did
+    before this guard existed.
     """
 
     def __init__(self) -> None:
         self.triggered = False
+        self.declined_reason = ""
         self._previous: Any | None = None
         self._installed = False
         self._restored = False
@@ -215,6 +222,12 @@ class _DeferredSigintGuard:
         self.triggered = True
 
     def install(self) -> None:
+        if signal.getsignal(signal.SIGINT) is None:
+            self.declined_reason = (
+                "the previous SIGINT handler was not installed from Python and cannot be "
+                "restored; deferral declined and the handler left untouched"
+            )
+            return
         try:
             self._previous = signal.signal(signal.SIGINT, self._handler)
         except (ValueError, OSError):  # pragma: no cover - not the main thread.

@@ -680,6 +680,13 @@ _PREVIOUS_HANDLER = pytest.mark.parametrize(
     "previous", [signal.default_int_handler, _custom_sigint_handler], ids=["default", "custom"]
 )
 
+# SIG_IGN would swallow and SIG_DFL would kill on a real SIGINT, so only the controls that deliver none use these.
+_RESTORABLE_HANDLER = pytest.mark.parametrize(
+    "previous",
+    [signal.default_int_handler, _custom_sigint_handler, signal.SIG_IGN, signal.SIG_DFL],
+    ids=["default", "custom", "ign", "dfl"],
+)
+
 
 @contextlib.contextmanager
 def _installed_sigint_handler(handler):
@@ -779,7 +786,7 @@ def test_between_repetition_cancellation_restores_the_previous_sigint_handler(
     )
 
 
-@_PREVIOUS_HANDLER
+@_RESTORABLE_HANDLER
 def test_batch_publish_failure_keeps_the_exception_and_restores_the_sigint_handler(
     tmp_path, monkeypatch, previous
 ):
@@ -799,7 +806,7 @@ def test_batch_publish_failure_keeps_the_exception_and_restores_the_sigint_handl
     assert "publish" in _frame_names(raised.value), _frame_names(raised.value)
 
 
-@_PREVIOUS_HANDLER
+@_RESTORABLE_HANDLER
 def test_batch_assembly_failure_keeps_the_exception_and_restores_the_sigint_handler(
     tmp_path, monkeypatch, previous
 ):
@@ -816,7 +823,7 @@ def test_batch_assembly_failure_keeps_the_exception_and_restores_the_sigint_hand
     assert published == [], published
 
 
-@_PREVIOUS_HANDLER
+@_RESTORABLE_HANDLER
 def test_batch_normal_return_publishes_then_restores_the_previous_sigint_handler(
     tmp_path, monkeypatch, previous
 ):
@@ -851,7 +858,7 @@ def test_batch_finalization_cancellation_carries_the_published_tier_and_restores
     assert "RETAIN-BATCH-OUTPUT" in tier.output_tail, tier.output_tail
 
 
-@_PREVIOUS_HANDLER
+@_RESTORABLE_HANDLER
 def test_matrix_publish_failure_keeps_the_exception_and_restores_the_sigint_handler(
     tmp_path, monkeypatch, previous
 ):
@@ -869,7 +876,7 @@ def test_matrix_publish_failure_keeps_the_exception_and_restores_the_sigint_hand
     assert "publish" in _frame_names(raised.value), _frame_names(raised.value)
 
 
-@_PREVIOUS_HANDLER
+@_RESTORABLE_HANDLER
 def test_matrix_assembly_failure_keeps_the_exception_and_restores_the_sigint_handler(
     tmp_path, monkeypatch, previous
 ):
@@ -884,7 +891,7 @@ def test_matrix_assembly_failure_keeps_the_exception_and_restores_the_sigint_han
     assert published == [], published
 
 
-@_PREVIOUS_HANDLER
+@_RESTORABLE_HANDLER
 def test_matrix_normal_return_publishes_then_restores_the_previous_sigint_handler(
     tmp_path, monkeypatch, previous
 ):
