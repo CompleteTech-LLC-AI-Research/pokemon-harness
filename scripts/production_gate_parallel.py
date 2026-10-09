@@ -77,13 +77,13 @@ from scripts.production_gate_parallel_phases import (
 )
 from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
 from scripts.production_gate_parallel_ports import HANDOFF_ENV, HandoffRegistry
+from scripts.production_gate_parallel_holder import launch_holder
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     OrchestratorAdoption,
     OwnedTree,
     cleanup_proven,
     launch_guardian,
-    read_guardian_receipt,
 )
 
 __all__ = [
@@ -506,10 +506,10 @@ def _run_plan(
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
         _close_handles(item)
         receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
-        guardian, guardian_problems = read_guardian_receipt(
+        view = item.process.guardian_status  # type: ignore[attr-defined]
+        guardian, guardian_problems = view.read_receipts(
             item.receipt, item.secret, item.process.pid, item.owned.root_start
         )
-        view = item.process.guardian_status  # type: ignore[attr-defined]
         proven = cleanup_proven(receipt, guardian, view)
         ledger = hub.unregister(item.job_id, cleanup_proven=proven)
         cleanup[item.job_id] = {
@@ -613,11 +613,11 @@ def _run_plan(
                 break
             sleeper(0.01)
         item.owned.signal_root(signal.SIGTERM)
-        limit = clock() + 3 * grace_seconds + 3.0  # the guardian's own worst case is ~3x grace + 1
+        limit = clock() + 6 * grace_seconds + 6.0  # guardian ~3x grace + 1, then the holder's own sweep
         while item.process.poll() is None and clock() < limit:
             sleeper(0.02)
         receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
-        guardian, _problems = read_guardian_receipt(
+        guardian, _problems = view.read_receipts(
             item.receipt, item.secret, item.process.pid, item.owned.root_start
         )
         if not cleanup_proven(receipt, guardian, view):
@@ -680,7 +680,7 @@ def _run_plan(
             )
             if require_kernel_ownership and not job_cgroup.available:
                 raise OwnershipError(f"kernel ownership is required: {job_cgroup.reason}")
-            process, secret = launch_guardian(
+            process, secret = (launch_holder if adoption.enabled else launch_guardian)(
                 receipt_path,
                 grace_seconds,
                 worker_argv,

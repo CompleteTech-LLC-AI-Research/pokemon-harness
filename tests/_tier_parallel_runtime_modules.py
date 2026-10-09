@@ -9,6 +9,7 @@ PARALLEL_RUNTIME_PARTS = (
     "consumers",
     "enrollment",
     "gate",
+    "holder",
     "identity",
     "isolation",
     "lifecycle",

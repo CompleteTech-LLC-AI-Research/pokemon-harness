@@ -217,6 +217,26 @@ def _exited(descriptor: int) -> bool:
     return bool(readable)
 
 
+def proc_state(pid: int, descriptor: int | None = None) -> str:
+    """"alive", "exited" (ONLY on kernel evidence: a readable held pidfd or pidfd_open ESRCH) or "unknown"
+    (stat missing, unreadable or malformed while no exit is shown).  Unknown is never an exit."""
+
+    if read_stat(pid) is not None and (descriptor is None or not _exited(descriptor)):
+        return "alive"
+    if descriptor is not None:
+        return "exited" if _exited(descriptor) else "unknown"
+    try:
+        opened = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return "exited"
+    except (AttributeError, OSError):
+        return "unknown"
+    try:
+        return "exited" if _exited(opened) else "unknown"
+    finally:
+        os.close(opened)
+
+
 class OwnedTree:
     """Every process a job's worker ever started, each pinned by a verified pidfd."""
 
@@ -238,9 +258,11 @@ class OwnedTree:
         self._known_children = known_children
         self.adoption = adoption
         self.status = status
+        self.holder_mode = getattr(status, "holder", None) is not None  # root is a holder, not a guardian
         self.launch_adopting = bool(adoption is not None and adoption.verify())
         self.orphans_pinned = 0
         self.unattributed: list[int] = []
+        self.unknown_live: list[int] = []
         self._orphans: set[int] = set()
         self.token = token  # attestation only; never used to find or signal a process
         self._clock = clock
@@ -275,7 +297,10 @@ class OwnedTree:
             return False
         stat = read_stat(pid)
         if stat is None or stat[0] != seen_start:
+            unknown = stat is None and proc_state(pid, descriptor) == "unknown"
             os.close(descriptor)  # the number was recycled before the pidfd pinned it
+            if unknown:
+                self._mark_unknown(pid)  # alive by its pidfd but unreadable: not an exit
             return False
         if parent is not None and not self._parent_instance_valid(parent):
             os.close(descriptor)  # the parent may have died and its number been reused: discard
@@ -297,7 +322,19 @@ class OwnedTree:
         if entry is None or _exited(entry[0]):
             return False
         stat = read_stat(parent)
+        if stat is None:
+            self._mark_unknown(parent)  # its pidfd says alive, its stat cannot be read: unknown, not gone
         return stat is not None and stat[0] == entry[1]
+
+    def _mark_unknown(self, pid: int) -> None:
+        self.contained = False
+        self.unknown_live.append(pid)
+        self.reason = "containment not established: a live process cannot be read (unknown, not an exit)"
+
+    def _targets(self) -> set[int]:
+        """Pinned live processes to signal now; a holder root is signalled last, by terminate itself."""
+        alive = self._alive_set()
+        return alive - {self.root_pid} if self.holder_mode else alive
 
     def observe(self, *, force: bool = False) -> None:
         """Adopt new descendants, walking only down from verified-owned live parents.
@@ -312,7 +349,7 @@ class OwnedTree:
         if self.cgroup is not None and not self.cgroup_joined:
             self.cgroup_joined = self.cgroup.contains(self.root_pid)
         frontier = sorted(self._alive_set())
-        while frontier:
+        while frontier and self.contained:
             parent = frontier.pop()
             if not self._parent_instance_valid(parent):
                 continue  # the pinned instance is gone: its number may already be reused
@@ -329,7 +366,12 @@ class OwnedTree:
                 if pid in self._entries:
                     continue
                 stat = read_stat(pid)
-                if stat is None or stat[1] != parent:
+                if stat is None:
+                    if proc_state(pid) == "unknown":
+                        self._mark_unknown(pid)  # listed by a live owned parent, unreadable: not an exit
+                        break
+                    continue
+                if stat[1] != parent:
                     continue
                 if not self._parent_instance_valid(parent):
                     break  # the parent is gone: nothing read from here on proves ownership
@@ -374,7 +416,12 @@ class OwnedTree:
             if pid in self._entries or pid in known:
                 continue
             stat = read_stat(pid)
-            if stat is None or stat[1] != me:
+            if stat is None:
+                if proc_state(pid) == "unknown":
+                    self._mark_unknown(pid)  # a live child of the orchestrator whose state is unreadable
+                    return
+                continue
+            if stat[1] != me:
                 continue
             descriptor = _pidfd_open(pid)
             if descriptor is None:
@@ -383,7 +430,11 @@ class OwnedTree:
                 return
             again = read_stat(pid)
             if again is None or again[0] != stat[0]:
+                gone = again is not None or _exited(descriptor)
                 os.close(descriptor)
+                if not gone:
+                    self._mark_unknown(pid)
+                    return
                 continue
             mine = (
                 read_session(pid) in sessions
@@ -444,20 +495,28 @@ class OwnedTree:
         states_before = {
             pid: ("exited" if _exited(fd) else "alive") for pid, (fd, _) in self._entries.items()
         }
-        terminated = self._signal(self._alive_set(), signal.SIGTERM) if self.contained else []
+        terminated = self._signal(self._targets(), signal.SIGTERM) if self.contained else []
         limit = clock() + grace_seconds
-        while self._alive_set() and clock() < limit:
+        while self._targets() and clock() < limit:
             sleeper(0.02)
-        killed = self._signal(self._alive_set(), signal.SIGKILL)
+        killed = self._signal(self._targets(), signal.SIGKILL)
         limit = clock() + max(grace_seconds, 1.0)
-        while self._alive_set() and clock() < limit:
+        while self._targets() and clock() < limit:
             sleeper(0.02)
         for _ in range(ORPHAN_ROUNDS):  # orphans born while the sweep ran
             self.pin_new()
-            late = self._alive_set()
+            late = self._targets()
             if not late:
                 break
             killed += self._signal(late, SIGKILL_NUMBER)
+            limit = clock() + max(grace_seconds, 1.0)
+            while self._targets() and clock() < limit:
+                sleeper(0.02)
+        if self.holder_mode and self._alive_set():  # the holder finishes its own bounded sweep first
+            limit = clock() + 2.0 * (grace_seconds + max(grace_seconds, 1.0)) + 3.0
+            while self._alive_set() and clock() < limit:
+                sleeper(0.02)
+            killed += self._signal(self._alive_set(), SIGKILL_NUMBER)
             limit = clock() + max(grace_seconds, 1.0)
             while self._alive_set() and clock() < limit:
                 sleeper(0.02)
@@ -478,6 +537,7 @@ class OwnedTree:
             "root_gone": root_gone,
             "orphans_pinned": self.orphans_pinned,
             "unattributed": sorted(self.unattributed),
+            "unknown_live": sorted(self.unknown_live),
             "cgroup": {
                 "configured": self.cgroup is not None,
                 "available": bool(self.cgroup is not None and self.cgroup.available),
@@ -510,6 +570,7 @@ class OwnedTree:
             "contained": self.contained,
             "reason": self.reason,
             "adoption": adoption,
+            "root": {"pid": self.root_pid, "start": self.root_start},
             "proof": self.contained and not remaining and not surviving,
         }
         self.close()
@@ -730,9 +791,11 @@ class GuardianStatus:
     worker was ever spawned - unlike a missing file, which anything with write access could cause.
     """
 
-    def __init__(self, descriptor: int) -> None:
+    def __init__(self, descriptor: int, holder: Any = None) -> None:
         self.fd = descriptor
         os.set_blocking(descriptor, False)
+        self.holder = holder  # a HolderRef when the root is a per-job holder above the guardian
+        self.guardian: tuple[int, int] | None = None  # the guardian instance the holder recorded
         self.ready = False
         self.spawned = False
         self.worker: tuple[int, int] | None = None
@@ -758,6 +821,18 @@ class GuardianStatus:
             found = re.search(rb"W(\d+):(\d+)\n", self._buffer)
             if found and self.worker is None:
                 self.worker = (int(found.group(1)), int(found.group(2)))
+            named = re.search(rb"G(\d+):(\d+)\n", self._buffer)
+            if named and self.guardian is None:
+                self.guardian = (int(named.group(1)), int(named.group(2)))
+
+    def read_receipts(
+        self, guardian_path: Path, secret: bytes, root_pid: int, root_start: int | None
+    ) -> tuple[dict[str, Any] | None, list[str]]:
+        """Receipts of this job.  Legacy: the root IS the guardian.  Holder mode: the root is the holder and
+        the guardian is authenticated against ITS OWN recorded instance (never the root's)."""
+        if self.holder is None:
+            return read_guardian_receipt(guardian_path, secret, root_pid, root_start)
+        return self.holder.read_receipts(self, guardian_path, secret, root_pid, root_start)
 
     def absent_proof(self) -> bool:
         self.drain()
@@ -904,6 +979,14 @@ def cleanup_proven(
 
     if owned_receipt.get("proof") is not True:
         return False
+    if status is not None and status.holder is not None:  # holder mode: its authentic final ALWAYS gates
+        root, adoption = owned_receipt.get("root") or {}, owned_receipt.get("adoption") or {}
+        proven = status.holder.verdict(root.get("pid"), root.get("start"))["proof"]
+        if not (proven and adoption.get("root_gone")):
+            return False
+        return guardian is None or guardian.get("phase") != "final" or (
+            guardian.get("contained") is True and guardian.get("proof") is True
+        )
     if guardian is not None and guardian.get("phase") == "final":
         return guardian.get("contained") is True and guardian.get("proof") is True
     if status is not None and status.absent_proof():
