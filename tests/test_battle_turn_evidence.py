@@ -831,7 +831,8 @@ def test_terminal_hp_divergence_fails_after_valid_cleanup() -> None:
 
 
 @pytest.mark.parametrize(
-    "case", (pytest.param("equal-seq", id="equal-seq"), pytest.param("earlier-seq", id="earlier-seq"))
+    "case",
+    (pytest.param("equal-seq", id="equal-seq"), pytest.param("earlier-seq", id="earlier-seq")),
 )
 def test_terminal_sequence_must_follow_settlement(case) -> None:
     """A terminal at or before the settled sequence is rejected (synthetic validator rows)."""

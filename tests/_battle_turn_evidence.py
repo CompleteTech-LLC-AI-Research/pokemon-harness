@@ -58,14 +58,30 @@ EVIDENCE_EVENTS = (
 # Verified KO-return and terminal continuation hooks: (event, SYM label, offset,
 # {red/blue | yellow: (address, signature hex)}).  All sit in ROM bank 0x0F.
 _CONTINUATION_PINS = (
-    ("player_action_ko_return", "MirrorMoveCheck.notDone", 15,
-     {"red": (0x57C8, "21e6cf2a46b0c8cdb662"), "yellow": (0x593A, "21e5cf2a46b0c8cd2864")}),
-    ("enemy_action_ko_return", "EnemyCheckIfMirrorMoveEffect.handleExplosionMiss", 15,
-     {"red": (0x684D, "2115d02a46b0c8cdb662"), "yellow": (0x69D3, "2114d02a46b0c8cd2864")}),
-    ("terminal_victory", "TrainerBattleVictory", 3,
-     {"red": (0x4699, "06fcfa5cd0a72002"), "yellow": (0x46BB, "06fcfa5bd0a72002")}),
-    ("terminal_blackout", "HandlePlayerBlackOut", 0,
-     {"red": (0x4837, "fa2bd1fe042824fa59d0"), "yellow": (0x489C, "fa2ad1fe042824fa58d0")}),
+    (
+        "player_action_ko_return",
+        "MirrorMoveCheck.notDone",
+        15,
+        {"red": (0x57C8, "21e6cf2a46b0c8cdb662"), "yellow": (0x593A, "21e5cf2a46b0c8cd2864")},
+    ),
+    (
+        "enemy_action_ko_return",
+        "EnemyCheckIfMirrorMoveEffect.handleExplosionMiss",
+        15,
+        {"red": (0x684D, "2115d02a46b0c8cdb662"), "yellow": (0x69D3, "2114d02a46b0c8cd2864")},
+    ),
+    (
+        "terminal_victory",
+        "TrainerBattleVictory",
+        3,
+        {"red": (0x4699, "06fcfa5cd0a72002"), "yellow": (0x46BB, "06fcfa5bd0a72002")},
+    ),
+    (
+        "terminal_blackout",
+        "HandlePlayerBlackOut",
+        0,
+        {"red": (0x4837, "fa2bd1fe042824fa59d0"), "yellow": (0x489C, "fa2ad1fe042824fa58d0")},
+    ),
 )
 _KO_HOOKS = ("player_action_ko_return", "enemy_action_ko_return")
 _TERMINAL_HOOKS = ("terminal_victory", "terminal_blackout")
@@ -858,7 +874,9 @@ def continuation_locations(session: Any, version: str) -> tuple[tuple[str, int, 
         if base + offset != address:
             raise ValueError(f"{name} address mismatch")
         expected = bytes.fromhex(signature)
-        actual = bytes(int(session._pyboy.memory[hook_bank, address + i]) for i in range(len(expected)))
+        actual = bytes(
+            int(session._pyboy.memory[hook_bank, address + i]) for i in range(len(expected))
+        )
         if actual != expected:
             raise ValueError(f"{name} signature bytes mismatch")
         locations.append((name, hook_bank, address))
@@ -878,11 +896,30 @@ def install_continuation_hooks(
     return owned
 
 
+def battle_evidence_ready(row: Any) -> bool:
+    """A settled snapshot; a KO also needs EndOfBattle and a cleaned-up room."""
+    if not isinstance(row, dict) or row.get("unsupported_reason") or row.get("settled") is not True:
+        return False
+    turn = row.get("turn")
+    sides = [turn.get(side) for side in ("local", "enemy")] if isinstance(turn, dict) else []
+    knocked_out = isinstance(turn, dict) and turn.get("outcome") == "ko"
+    if not knocked_out and not any(isinstance(mon, dict) and mon.get("hp") == 0 for mon in sides):
+        return True
+    terminal, cleanup = row.get("terminal"), row.get("cleanup")
+    return (
+        isinstance(terminal, dict)
+        and terminal.get("boundary") == "EndOfBattle"
+        and isinstance(cleanup, dict)
+        and cleanup.get("is_in_battle") == 0
+    )
+
+
 __all__ = [
     "EVIDENCE_EVENTS",
     "SCHEMA_VERSION",
     "BattleTurnObserver",
     "adjudicate_pair",
+    "battle_evidence_ready",
     "choose_supported_battle_move",
     "continuation_locations",
     "install_continuation_hooks",

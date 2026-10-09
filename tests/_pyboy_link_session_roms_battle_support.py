@@ -9,6 +9,7 @@ from __future__ import annotations
 from tests._battle_turn_evidence import (
     EVIDENCE_EVENTS,
     BattleTurnObserver,
+    battle_evidence_ready,
     install_continuation_hooks,
     verify_battle_turns,
 )
@@ -52,23 +53,6 @@ def _install_battle_diag_counters(
         install_continuation_hooks(sess, observer, version=version)
     counters["_battle_evidence"] = observers
     return counters
-
-
-def battle_evidence_ready(row) -> bool:
-    """A settled snapshot; a KO also needs EndOfBattle and a cleaned-up room."""
-    if not isinstance(row, dict) or row.get("unsupported_reason") or row.get("settled") is not True:
-        return False
-    turn = row.get("turn")
-    sides = [turn.get(side) for side in ("local", "enemy")] if isinstance(turn, dict) else []
-    if not any(isinstance(mon, dict) and mon.get("hp") == 0 for mon in sides):
-        return True
-    terminal, cleanup = row.get("terminal"), row.get("cleanup")
-    return (
-        isinstance(terminal, dict)
-        and terminal.get("boundary") == "EndOfBattle"
-        and isinstance(cleanup, dict)
-        and cleanup.get("is_in_battle") == 0
-    )
 
 
 def _assert_settled_battle_evidence(counters: dict) -> None:
