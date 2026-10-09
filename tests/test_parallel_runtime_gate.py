@@ -88,7 +88,7 @@ elif name == "missing_rep":
 elif name == "old_reuse":
     artifact.update(fresh_run=False, diagnostic_reuse=True)
 root_pgid = os.getpgid(0)
-info = {"pid": os.getpid(), "pgid": root_pgid, "started": started,
+info = {"pid": os.getpid(), "pgid": root_pgid, "ppid": os.getppid(), "sid": os.getsid(0), "started": started,
         "TMPDIR": os.environ.get("TMPDIR"), "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME"),
         "HOME": os.environ.get("HOME"), "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
         "SECRET": os.environ.get("POKERED_TEST_SECRET")}
@@ -176,6 +176,16 @@ def test_both_runtimes_pass_concurrently_in_isolated_trees_with_terminal_artifac
         assert info["SECRET"] is None, "an unlisted parent variable leaked into the child"
         assert info["pgid"] == info["pid"] != os.getpgid(0), "child is not its own process group"
         assert group_gone(info["pgid"])
+        guardian = json.loads((job_root / "guardian.json").read_text(encoding="utf-8"))
+        assert guardian["phase"] == "final" and guardian["proof"] is True and guardian["mac"]
+        assert guardian["worker_pid"] == info["pid"] and info["ppid"] == guardian["guardian_pid"]
+        assert guardian["worker_pgid"] == info["pgid"] == info["sid"], (
+            "worker is not its own session"
+        )
+        assert (
+            guardian["guardian_pgid"] == guardian["guardian_pid"] != info["pgid"] != os.getpgid(0)
+        )
+        assert guardian["guardian_pgid"] != os.getpgid(0), "the guardian shares the caller's group"
         assert report["cleanup"][f"{mode}-job"]["tmp_removed"] is True
         assert not (job_root / "tmp").exists()
     assert report["sequential_comparison"] == {"status": "NOT_RUN"}

@@ -24,10 +24,13 @@ guardian could not establish the subreaper never runs its worker (fail closed).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import select
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -125,6 +128,8 @@ class OwnedTree:
         self._last = float("-inf")
         self._entries: dict[int, tuple[int, int]] = {}
         self.ports: set[int] = set()
+        self.root_start: int | None = None
+        self.adopted_total = 0
         self.contained = True
         self.reason = ""
         stat = read_stat(root_pid)
@@ -136,6 +141,7 @@ class OwnedTree:
                 os.close(descriptor)
         else:
             self._entries[root_pid] = (descriptor, stat[0])
+            self.root_start = stat[0]
 
     @property
     def tracked(self) -> dict[int, int]:
@@ -152,6 +158,7 @@ class OwnedTree:
             os.close(descriptor)  # the number was recycled before the pidfd pinned it
             return False
         self._entries[pid] = (descriptor, seen_start)
+        self.adopted_total += 1
         return True
 
     def _alive_set(self) -> set[int]:
@@ -202,6 +209,9 @@ class OwnedTree:
         """TERM every pinned live process, wait a bounded time, KILL the rest, prove absence."""
 
         self.observe(force=True)
+        states_before = {
+            pid: ("exited" if _exited(fd) else "alive") for pid, (fd, _) in self._entries.items()
+        }
         terminated = self._signal(self._alive_set(), signal.SIGTERM) if self.contained else []
         limit = clock() + grace_seconds
         while self._alive_set() and clock() < limit:
@@ -214,6 +224,8 @@ class OwnedTree:
         surviving = sorted(self.current_ports())
         receipt = {
             "tracked": len(self._entries),
+            "adopted_total": self.adopted_total,
+            "states_before": states_before,
             "terminated": terminated,
             "killed": killed,
             "remaining": remaining,
@@ -254,34 +266,55 @@ class OwnedTree:
 
 
 GUARDIAN_SOURCE = r"""
-import ctypes, json, os, signal, subprocess, sys, time
+import signal, sys
 
-receipt_path, grace, argv = sys.argv[1], float(sys.argv[2]), sys.argv[4:]
+stopped = []
+for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(number, lambda signum, frame: stopped.append(signum))
+import ctypes, hashlib, hmac, json, os, subprocess, time
+
+receipt_path, grace, secret_fd, argv = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), sys.argv[5:]
+secret = bytes.fromhex(os.read(secret_fd, 256).decode())
+os.close(secret_fd)
+me = os.getpid()
+with open("/proc/self/stat", "rb") as handle:
+    start = int(handle.read().decode("utf-8", "replace").rsplit(")", 1)[1].split()[19])
 
 
 def write(body):
+    body = dict(body, guardian_pid=me, guardian_start=start, guardian_pgid=os.getpgid(0))
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    body["mac"] = hmac.new(secret, text.encode(), hashlib.sha256).hexdigest()
     temporary = receipt_path + ".tmp"
     with open(temporary, "w") as handle:
         json.dump(body, handle)
     os.replace(temporary, receipt_path)
 
 
+def final(**fields):
+    base = {"phase": "final", "contained": True, "worker_pid": None, "worker_status": None,
+            "worker_pgid": None, "stopped_by_signal": stopped[0] if stopped else None,
+            "adopted": [], "killed": [], "remaining": [], "proof": True}
+    write(dict(base, **fields))
+
+
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-    write({"contained": False, "reason": "subreaper could not be established", "proof": False})
+    final(contained=False, proof=False, reason="subreaper could not be established")
     sys.exit(70)
-stopped = []
-for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-    signal.signal(number, lambda signum, frame: stopped.append(signum))
-me = os.getpid()
+write({"phase": "ready"})  # handlers and subreaper are in place: a stop signal is now handled
+if stopped:
+    final(never_started=True)
+    sys.exit(128 + stopped[0])
 try:
-    worker = subprocess.Popen(argv)
+    worker = subprocess.Popen(argv, start_new_session=True)
 except OSError as exc:
-    write({
-        "contained": True, "start_error": type(exc).__name__, "worker_pid": None,
-        "worker_status": None, "adopted": [], "killed": [], "remaining": [], "proof": True,
-    })
+    final(start_error=type(exc).__name__)
     sys.exit(127)
+try:
+    worker_pgid = os.getpgid(worker.pid)
+except OSError:
+    worker_pgid = None
 status = None
 while status is None and not stopped:
     status = worker.poll()
@@ -344,49 +377,111 @@ while True:
     time.sleep(0.05)
 reap()
 adopted.discard(worker.pid)
-write({
-    "contained": True, "worker_pid": worker.pid, "worker_status": status,
-    "stopped_by_signal": stopped[0] if stopped else None, "adopted": sorted(adopted),
-    "killed": sorted(killed), "remaining": sorted(remaining), "proof": not remaining,
-})
+final(worker_pid=worker.pid, worker_status=status, worker_pgid=worker_pgid,
+      adopted=sorted(adopted), killed=sorted(killed), remaining=sorted(remaining),
+      proof=not remaining)
 if stopped:
     sys.exit(128 + stopped[0])
 sys.exit(status if status >= 0 else 128 - status)
 """
 
 
-def guardian_argv(receipt_path: Path, grace_seconds: float, worker_argv: list[str]) -> list[str]:
-    """Wrap a worker command in the job-local guardian (stdlib only, no project import)."""
+def launch_guardian(
+    receipt_path: Path, grace_seconds: float, worker_argv: list[str], **popen_kwargs: Any
+) -> tuple[subprocess.Popen[Any], bytes]:
+    """Start the guardian; its HMAC key travels over a pipe the worker never inherits."""
 
-    return [
-        sys.executable,
-        "-c",
-        GUARDIAN_SOURCE,
-        str(receipt_path),
-        str(grace_seconds),
-        "--",
-        *worker_argv,
-    ]
+    secret = os.urandom(32)
+    read_end, write_end = os.pipe()
+    try:
+        os.write(write_end, secret.hex().encode())
+        os.close(write_end)
+        write_end = -1
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                GUARDIAN_SOURCE,
+                str(receipt_path),
+                str(grace_seconds),
+                str(read_end),
+                "--",
+                *worker_argv,
+            ],
+            pass_fds=(read_end,),
+            **popen_kwargs,
+        )
+    finally:
+        os.close(read_end)
+        if write_end >= 0:
+            os.close(write_end)
+    return process, secret
 
 
-def read_guardian_receipt(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
-    """Read the guardian's receipt; a missing or unproven one is a failed-closed problem."""
+def _authentic(
+    body: dict[str, Any], secret: bytes, expected_pid: int | None, expected_start: int | None
+) -> list[str]:
+    mac = body.pop("mac", None)
+    expected = hmac.new(
+        secret, json.dumps(body, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
+    ).hexdigest()
+    if not isinstance(mac, str) or not hmac.compare_digest(mac, expected):
+        return ["guardian receipt is not authenticated by the producer's key"]
+    if expected_pid is not None and body.get("guardian_pid") != expected_pid:
+        return ["guardian receipt names a different producer process"]
+    if expected_start is not None and body.get("guardian_start") != expected_start:
+        return ["guardian receipt names a different producer instance (start time)"]
+    return []
+
+
+def read_guardian_receipt(
+    path: Path,
+    secret: bytes | None = None,
+    expected_pid: int | None = None,
+    expected_start: int | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Read the guardian receipt; unauthenticated, missing or unproven ones fail closed."""
 
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None, ["guardian receipt is missing or malformed: containment unproven"]
-    if not isinstance(body, dict) or body.get("contained") is not True:
-        return body if isinstance(body, dict) else None, [
-            "the guardian could not establish containment"
-        ]
+    if not isinstance(body, dict):
+        return None, ["guardian receipt is not an object"]
+    if secret is not None:
+        problems = _authentic(body, secret, expected_pid, expected_start)
+        if problems:
+            return None, problems
+    if body.get("phase") == "ready":
+        return body, ["the guardian never finished: containment unproven"]
+    if body.get("contained") is not True:
+        return body, ["the guardian could not establish containment"]
     if body.get("start_error"):
         return body, [f"could not start: {body['start_error']}"]
-    problems: list[str] = []
+    problems = []
     if body.get("proof") is not True or body.get("remaining"):
         problems.append("the guardian could not remove every adopted descendant")
     if body.get("adopted"):
         problems.append(f"descendants outlived the worker and were adopted: {body['adopted'][:5]}")
+    if body.get("never_started"):
+        return body, problems
     if not isinstance(body.get("worker_pid"), int) or isinstance(body.get("worker_pid"), bool):
         problems.append("guardian receipt names no worker pid")
     return body, problems
+
+
+def cleanup_proven(
+    owned_receipt: dict[str, Any], guardian: dict[str, Any] | None, receipt_exists: bool
+) -> bool:
+    """Budget may be released only with the parent's own proof AND an authenticated guardian proof.
+
+    The one exception is a guardian that never produced any receipt: the worker is spawned only
+    after the readiness receipt is written, so with no receipt file, no adopted descendant and
+    nothing alive in the parent's own pidfd measurement, no worker can have existed.
+    """
+
+    if owned_receipt.get("proof") is not True:
+        return False
+    if guardian is not None and guardian.get("phase") == "final":
+        return guardian.get("contained") is True and guardian.get("proof") is True
+    return not receipt_exists and owned_receipt.get("adopted_total") == 0

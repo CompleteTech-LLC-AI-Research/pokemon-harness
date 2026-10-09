@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import shutil
 import signal
@@ -67,11 +66,12 @@ from scripts.production_gate_parallel_phases import (
     may_cancel_siblings,
     phase_names,
 )
-from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
+from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, cli_deadlines, load_plan
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     OwnedTree,
-    guardian_argv,
+    cleanup_proven,
+    launch_guardian,
     read_guardian_receipt,
 )
 
@@ -235,6 +235,7 @@ class _Running:
     owned: OwnedTree
     launched_wall: datetime
     receipt: Path
+    secret: bytes
     handles: list[Any] = field(default_factory=list)
 
 
@@ -427,7 +428,9 @@ def run_parallel_plan(
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
         _close_handles(item)
         receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
-        guardian, guardian_problems = read_guardian_receipt(item.receipt)
+        guardian, guardian_problems = read_guardian_receipt(
+            item.receipt, item.secret, item.process.pid, item.owned.root_start
+        )
         cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
         ports_seen[item.job_id] = set(item.owned.ports)
         worker_pid = guardian.get("worker_pid") if guardian else None
@@ -442,7 +445,7 @@ def run_parallel_plan(
             )
         if guardian and guardian.get("start_error"):
             outcome["reason"] = f"could not start: {guardian['start_error']}"
-        if not (guardian and guardian.get("proof") is True and guardian.get("contained") is True):
+        if not cleanup_proven(receipt, guardian, item.receipt.exists()):
             receipt["proof"] = False
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
@@ -465,13 +468,20 @@ def run_parallel_plan(
     def stop(item: _Running) -> None:
         """Ask the guardian to contain its subtree first, then prove it from outside."""
 
+        # The guardian installs its handlers before it writes the readiness receipt; a stop
+        # signal sent earlier would kill it with the default action and leave no receipt.
+        ready_limit = clock() + grace_seconds + 2.0
+        while item.process.poll() is None and not item.receipt.exists() and clock() < ready_limit:
+            sleeper(0.01)
         item.owned.signal_root(signal.SIGTERM)
         limit = clock() + 3 * grace_seconds + 3.0  # the guardian's own worst case is ~3x grace + 1
         while item.process.poll() is None and clock() < limit:
             sleeper(0.02)
         receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
-        guardian, _problems = read_guardian_receipt(item.receipt)
-        if not (guardian and guardian.get("proof") is True and guardian.get("contained") is True):
+        guardian, _problems = read_guardian_receipt(
+            item.receipt, item.secret, item.process.pid, item.owned.root_start
+        )
+        if not cleanup_proven(receipt, guardian, item.receipt.exists()):
             receipt["proof"] = False
         cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
         ports_seen[item.job_id] = set(item.owned.ports)
@@ -495,16 +505,14 @@ def run_parallel_plan(
             trees[job_id] = tree
             token = f"{body['run_id']}:{job_id}:{uuid.uuid4().hex}"
             receipt_path = tree["root"] / "guardian.json"
-            argv = guardian_argv(
-                receipt_path,
-                grace_seconds,
-                list(worker_argv_factory(plan, job_id, tree, project_root)),
-            )
+            worker_argv = list(worker_argv_factory(plan, job_id, tree, project_root))
             handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
             launched = wall_clock()
-            process = subprocess.Popen(
-                argv,
+            process, secret = launch_guardian(
+                receipt_path,
+                grace_seconds,
+                worker_argv,
                 cwd=project_root,
                 env=job_environment(
                     tree,
@@ -537,6 +545,7 @@ def run_parallel_plan(
                 OwnedTree(process.pid, token, clock=clock),
                 launched,
                 receipt_path,
+                secret,
                 handles,
             )
         )
@@ -785,35 +794,6 @@ INPUT_FILES = (
 )
 
 
-def _deadlines(args: Any, required: Mapping[str, Sequence[str]], pairs: int) -> dict[str, float]:
-    from scripts.production_gate_model import (
-        COLLECTION_TIMEOUT_SECONDS,
-        DEFAULT_TIMEOUT_SECONDS,
-        MATRIX_AGGREGATE_GRACE_SECONDS,
-        MATRIX_CASE_TIMEOUT_SECONDS,
-    )
-
-    tier = (
-        float(args.timeout_seconds)
-        if args.timeout_seconds
-        else max(DEFAULT_TIMEOUT_SECONDS.values())
-    )
-    row = (
-        float(args.matrix_timeout_seconds)
-        if args.matrix_timeout_seconds
-        else max(MATRIX_CASE_TIMEOUT_SECONDS.values())
-    )
-    largest = max((len(items) for items in required.values()), default=0)
-    matrix = row * math.ceil(max(largest, 1) / max(pairs, 1)) + MATRIX_AGGREGATE_GRACE_SECONDS
-    return {
-        "preflight_seconds": float(COLLECTION_TIMEOUT_SECONDS),
-        "row_seconds": row,
-        "tier_seconds": max(tier, matrix),
-        "repetition_seconds": tier,
-        "cleanup_seconds": CLEANUP_SECONDS,
-    }
-
-
 def run_parallel_cli(
     *,
     args: Any,
@@ -914,7 +894,7 @@ def run_parallel_cli(
                     tiers=tuple(selected),
                     required_nodeids_by_tier=required_nodeids_by_tier,
                     repetitions=args.repeat_timing,
-                    deadlines=_deadlines(args, required_nodeids_by_tier, pairs),
+                    deadlines=cli_deadlines(args, required_nodeids_by_tier, pairs, CLEANUP_SECONDS),
                     total_pairs=total if type(total) is int else 0,
                     policy_digest=file_sha256(capacity_policy_path),
                     early_smoke=early_smoke,

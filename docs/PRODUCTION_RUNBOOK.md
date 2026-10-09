@@ -1789,10 +1789,15 @@ What the mode does:
   job's pairs before dispatch and are re-observed on every poll; unknown quota, a queued or blocked
   admission, an insufficient reading or a lost reservation fails closed and is recorded. `--matrix-workers`
   given explicitly is a per-job ceiling. Children do not receive the capacity policy.
-- **Owned processes.** Each job's descendants are pinned by pidfds after their identity was verified,
-  signalled only through those pidfds, and proven gone before the reservation is released; unrelated
-  processes and other processes' environments are never touched. A descendant that is created and orphaned
-  between two observations cannot be attributed without a subreaper launcher, which is not provided.
+- **Owned processes.** Every job runs under a job-local guardian (a subreaper, `PR_SET_CHILD_SUBREAPER`)
+  that starts the worker in its own session. An orphan created at any instant is re-parented to the guardian,
+  terminated, and listed in a receipt authenticated with an HMAC key the worker never inherits and bound to
+  the guardian's pid and start time. The guardian installs its handlers and writes a readiness receipt before
+  it spawns anything, and the orchestrator waits for that receipt before it signals, so a cancel cannot kill
+  a guardian that has no receipt to leave. The orchestrator additionally pins each process by a verified pidfd
+  and signals only through it. A reservation is released only when both proofs hold (or, for a guardian that
+  left no receipt at all, when nothing was ever adopted and nothing is alive); otherwise it is retained and
+  reported. If the guardian itself is killed from outside, only the pidfd observation covers its orphans.
 - **Strict aggregation.** A job passes only with an observed zero child exit status and a terminal
   artifact whose independently measured identity (before and after the run), per-launch token, timestamps,
   structured rows (runtime, tier, case, game, mode, ordered roles, repetition, outcome), tiers, counts and

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -406,3 +407,34 @@ def build_parallel_plan(
     if problems:
         raise PlanError("; ".join(problems))
     return ParallelPlan(text=canonical_json(body), digest=body["plan_sha256"])
+
+
+def cli_deadlines(
+    args: Any, required: Mapping[str, Sequence[str]], pairs: int, cleanup_seconds: float
+) -> dict[str, float]:
+    from scripts.production_gate_model import (
+        COLLECTION_TIMEOUT_SECONDS,
+        DEFAULT_TIMEOUT_SECONDS,
+        MATRIX_AGGREGATE_GRACE_SECONDS,
+        MATRIX_CASE_TIMEOUT_SECONDS,
+    )
+
+    tier = (
+        float(args.timeout_seconds)
+        if args.timeout_seconds
+        else max(DEFAULT_TIMEOUT_SECONDS.values())
+    )
+    row = (
+        float(args.matrix_timeout_seconds)
+        if args.matrix_timeout_seconds
+        else max(MATRIX_CASE_TIMEOUT_SECONDS.values())
+    )
+    largest = max((len(items) for items in required.values()), default=0)
+    matrix = row * math.ceil(max(largest, 1) / max(pairs, 1)) + MATRIX_AGGREGATE_GRACE_SECONDS
+    return {
+        "preflight_seconds": float(COLLECTION_TIMEOUT_SECONDS),
+        "row_seconds": row,
+        "tier_seconds": max(tier, matrix),
+        "repetition_seconds": tier,
+        "cleanup_seconds": cleanup_seconds,
+    }

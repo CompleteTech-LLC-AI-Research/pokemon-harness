@@ -4,6 +4,7 @@ The worker below mimics the gate: it starts children with ``start_new_session`` 
 are outside the worker's process group, exactly like preflight/pytest/matrix children.
 """
 
+import json
 import os
 import signal
 import socket
@@ -14,7 +15,8 @@ import time
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     OwnedTree,
-    guardian_argv,
+    cleanup_proven,
+    launch_guardian,
     read_guardian_receipt,
     read_stat,
 )
@@ -161,21 +163,23 @@ def test_cleanup_is_never_claimed_proven_when_the_root_cannot_be_pinned():
 
 
 def run_guardian(tmp_path, mode):
-    """Run a real guardian around the detaching worker; returns (process, receipt, mark)."""
+    """Run a real guardian around the detaching worker; returns (process, secret, receipt, mark)."""
 
     receipt = tmp_path / "guardian.json"
     mark = tmp_path / "grandchild.pid"
-    argv = guardian_argv(receipt, 1.0, [sys.executable, "-c", WORKER, str(mark), mode])
-    return subprocess.Popen(argv, start_new_session=True), receipt, mark
+    process, secret = launch_guardian(
+        receipt, 1.0, [sys.executable, "-c", WORKER, str(mark), mode], start_new_session=True
+    )
+    return process, secret, receipt, mark
 
 
 def test_the_guardian_adopts_and_removes_an_orphan_created_at_the_moment_the_worker_exits(tmp_path):
     other = sentinel()
-    guardian, receipt, mark = run_guardian(tmp_path, "exit")
+    guardian, secret, receipt, mark = run_guardian(tmp_path, "exit")
     try:
         grandchild = int(wait_for(mark))
         guardian.wait(timeout=30)
-        body, problems = read_guardian_receipt(receipt)
+        body, problems = read_guardian_receipt(receipt, secret, guardian.pid)
         assert body["contained"] is True and body["proof"] is True and body["remaining"] == []
         assert grandchild in body["adopted"]
         assert any("outlived the worker" in item for item in problems)
@@ -188,27 +192,83 @@ def test_the_guardian_adopts_and_removes_an_orphan_created_at_the_moment_the_wor
 
 
 def test_a_stop_signal_makes_the_guardian_contain_the_whole_detached_subtree(tmp_path):
-    guardian, receipt, mark = run_guardian(tmp_path, "hold")
+    guardian, secret, receipt, mark = run_guardian(tmp_path, "hold")
     try:
         grandchild = int(wait_for(mark))
         wait_for(tmp_path / "grandchild.pid.port")
         guardian.send_signal(signal.SIGTERM)
         guardian.wait(timeout=30)
-        body, _problems = read_guardian_receipt(receipt)
+        body, _problems = read_guardian_receipt(receipt, secret, guardian.pid)
         assert body["stopped_by_signal"] == signal.SIGTERM and body["proof"] is True
         assert grandchild in body["adopted"] and not alive(grandchild)
+        assert body["worker_pgid"] == body["worker_pid"] != body["guardian_pgid"]
     finally:
         guardian.kill()
         guardian.wait()
 
 
+def test_a_stop_signal_before_the_worker_starts_leaves_a_proven_never_started_receipt(tmp_path):
+    receipt = tmp_path / "guardian.json"
+    process, secret = launch_guardian(receipt, 1.0, [sys.executable, "-c", "pass"])
+    try:
+        wait_for(receipt)  # readiness receipt: handlers are installed from here on
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=30)
+        body, problems = read_guardian_receipt(receipt, secret, process.pid)
+        assert body["phase"] in ("ready", "final")
+        if body["phase"] == "final":
+            assert body["proof"] is True and problems in (
+                [],
+                ["guardian receipt names no worker pid"],
+            )
+    finally:
+        process.kill()
+        process.wait()
+
+
 def test_a_worker_that_cannot_start_is_reported_by_the_guardian_not_lost(tmp_path):
     receipt = tmp_path / "guardian.json"
-    process = subprocess.Popen(guardian_argv(receipt, 1.0, ["/nonexistent/python"]))
+    process, secret = launch_guardian(receipt, 1.0, ["/nonexistent/python"])
     assert process.wait(timeout=30) == 127
-    body, problems = read_guardian_receipt(receipt)
+    body, problems = read_guardian_receipt(receipt, secret, process.pid)
     assert body["start_error"] == "FileNotFoundError"
     assert problems == ["could not start: FileNotFoundError"]
+
+
+def test_a_forged_or_foreign_receipt_is_never_authenticated(tmp_path):
+    guardian, secret, receipt, mark = run_guardian(tmp_path, "exit")
+    try:
+        wait_for(mark)
+        guardian.wait(timeout=30)
+        genuine, _ = read_guardian_receipt(receipt, secret, guardian.pid)
+        assert genuine is not None
+        assert read_guardian_receipt(receipt, b"x" * 32, guardian.pid)[0] is None
+        assert read_guardian_receipt(receipt, secret, guardian.pid + 1)[0] is None
+        assert read_guardian_receipt(receipt, secret, guardian.pid, 1)[0] is None
+        forged = json.loads(receipt.read_text(encoding="utf-8"))
+        forged["proof"], forged["adopted"] = True, []
+        receipt.write_text(json.dumps(forged), encoding="utf-8")
+        assert read_guardian_receipt(receipt, secret, guardian.pid)[0] is None
+    finally:
+        guardian.kill()
+        guardian.wait()
+
+
+def test_budget_may_only_be_released_with_both_the_parent_proof_and_the_guardian_proof():
+    parent_ok = {"proof": True, "adopted_total": 0}
+    final_ok = {"phase": "final", "contained": True, "proof": True}
+    assert cleanup_proven(parent_ok, final_ok, True) is True
+    assert cleanup_proven({**parent_ok, "proof": False}, final_ok, True) is False
+    assert cleanup_proven(parent_ok, {**final_ok, "proof": False}, True) is False
+    assert cleanup_proven(parent_ok, {**final_ok, "contained": False}, True) is False
+    assert cleanup_proven(parent_ok, {"phase": "ready"}, True) is False
+    assert cleanup_proven(parent_ok, None, True) is False, (
+        "an unauthenticated receipt proves nothing"
+    )
+    assert cleanup_proven({**parent_ok, "adopted_total": 2}, None, False) is False
+    assert cleanup_proven(parent_ok, None, False) is True, (
+        "no receipt file and no descendant ever existed"
+    )
 
 
 def test_a_missing_or_unproven_guardian_receipt_is_a_failed_closed_problem(tmp_path):
