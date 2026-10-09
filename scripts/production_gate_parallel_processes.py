@@ -375,11 +375,16 @@ class OwnedTree:
         self.observe(force=True)
 
     def _reap_orphans(self) -> None:
-        for pid in list(self._orphans):
-            entry = self._entries.get(pid)
-            if entry is not None and _exited(entry[0]):
+        """Reap exited pinned processes that are this orchestrator's children (never the root).
+
+        The root is reaped by its ``Popen``; a pinned process that is not our child makes
+        ``waitid`` fail with ECHILD, which is ignored, and a pidfd cannot name a recycled pid.
+        """
+
+        for pid, (descriptor, _started) in list(self._entries.items()):
+            if pid != self.root_pid and _exited(descriptor):
                 with contextlib.suppress(OSError, AttributeError):
-                    os.waitid(os.P_PIDFD, entry[0], os.WEXITED | os.WNOHANG)
+                    os.waitid(os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG)
 
     def current_ports(self) -> set[int]:
         return {p for ports in socket_ports(self._alive_set()).values() for p in ports}

@@ -143,6 +143,7 @@ def run_parallel_cli(
     cython = cython_python_executable or python_executable
     interpreters = {"source": str(python_executable), "cython": str(cython)}
     snapshot: dict[str, Any] = {}
+    private: dict[str, Any] = {}
     plan = None
     measure: Measurer | None = None
     if not problems:
@@ -288,6 +289,7 @@ def run_parallel_cli(
             measure=measure,
             capacity_policy_text=capacity_policy_path.read_text(encoding="utf-8"),
         )
+    report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}
     if any("cleanup unproven" in item for item in report.get("orchestration_problems", [])):
         report["snapshot_retained"] = snapshot["root"]  # never remove what cleanup has not cleared
     else:

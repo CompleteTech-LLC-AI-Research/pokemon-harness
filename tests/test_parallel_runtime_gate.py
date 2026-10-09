@@ -20,6 +20,7 @@ from scripts.production_gate_parallel import (
     PairBudget,
     run_parallel_plan,
 )
+from scripts.production_gate_parallel_processes import read_stat
 from tests._parallel_runtime_report_support import make_plan
 
 FAKE_WORKER = r"""
@@ -472,11 +473,8 @@ def test_a_guardian_killed_from_outside_keeps_the_reservation_and_fails_the_run(
 
 
 def _alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    state = read_stat(pid)
+    return state is not None and state[2] != "Z"
 
 
 def test_a_killed_guardian_is_contained_by_orchestrator_adoption_with_a_proven_cleanup(tmp_path):
@@ -492,7 +490,7 @@ def test_a_killed_guardian_is_contained_by_orchestrator_adoption_with_a_proven_c
         assert not _alive(orphan), "an orphan of the killed guardian outlived the run"
         assert states(report)["source"] == "failed" and report["overall"] == "FAIL"
         tree = report["cleanup"][pid_files[0].parent.name]["process_tree"]
-        assert tree["adoption"]["proof"] is True and tree["adoption"]["orphans_pinned"] >= 1
+        assert tree["adoption"]["proof"] is True and tree["adoption"]["root_gone"] is True
         assert tree["adoption"]["unattributed"] == []
         assert not any("cleanup unproven" in item for item in report["orchestration_problems"])
         assert budget.reserved_total == 0, "proven adoption cleanup must release the reservation"
