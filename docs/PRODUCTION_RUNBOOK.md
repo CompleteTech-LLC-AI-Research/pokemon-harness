@@ -1820,11 +1820,14 @@ the real-ROM qualification is a separate requirement.
   child's local ceiling). A lost arbiter (silent lease, repeated violations, unreachable), a lost guardian, a
   policy different from the plan pin or a capacity loss closes admission for every job at once and signals
   every owned guardian immediately; a child that cannot reach its arbiter refuses to run, so there is no
-  fallback to static shares or to final-only reports. A child connection that drops without a bye is itself
-  a lost arbiter: the reservations it held stay in the book as retained evidence, still counted against the
-  one budget, and are freed only when the owner has proved the job's cleanup. Enrolment is explicit: only the
+  fallback to static shares or to final-only reports. A child connection that drops without a bye while
+  the child still holds a pair, and that the orchestrator did not ask for, is itself a lost arbiter: the
+  reservations it held stay in the book as retained evidence, still counted against the one budget, and are
+  freed only when the owner has proved the job's cleanup. A stop the orchestrator performs itself (a job
+  deadline, a cancellation) is announced first and is not a loss, and a drop that holds no pair closes nothing
+  for the siblings. Enrolment is explicit: only the
   production entry point enrols its capacity session, bound to the job identity and to the digest of the very
-  bytes it parsed (the policy file is read once, hashed and parsed from those bytes), and it then removes the
+  bytes it parsed (the policy file is read once, hashed and parsed from those bytes; the parallel producer then plans, derives the per-job policies and dispatches from one capture of its own and refuses a file that is no longer those bytes), and it then removes the
   credentials from its environment; the pytest environment builder strips them as well, so synthetic
   sessions and their simulated losses can never reach the real book. The key and socket name still reach the
   gate process through its environment block (`/proc/<pid>/environ` keeps the original), so the MAC proves
