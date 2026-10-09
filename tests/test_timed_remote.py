@@ -15,6 +15,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from scripts.production_gate_parallel_ports import HANDOFF_ENV, ListenerBroker
 from tests._timed_remote_support import (
     BOUND,
     PRELUDE,
@@ -30,6 +31,16 @@ from tests._timed_remote_support import (
     sockets,
     start,
 )
+
+
+@pytest.fixture
+def owner(monkeypatch):
+    """A real listener owner: the port stays bound and listening until the listener adopts it."""
+
+    broker = ListenerBroker().start()
+    monkeypatch.setenv(HANDOFF_ENV, broker.name)
+    yield broker
+    broker.close()
 
 
 @pytest.mark.parametrize("kind", ["socketpair", "tcp", "tcp6"])
@@ -310,7 +321,7 @@ def test_local_validation_takes_ownership_and_emits_nothing(remote, options):
         assert peer.recv(1) == b""
 
 
-def test_connect_listen_share_exact_factory_deadline_through_hello(remote, monkeypatch):
+def test_connect_listen_share_exact_factory_deadline_through_hello(remote, monkeypatch, owner):
     addresses = queue.Queue()
     created = []
     original_socket = socket.socket
@@ -318,9 +329,7 @@ def test_connect_listen_share_exact_factory_deadline_through_hello(remote, monke
     original_handshake = remote.TimedWireChannel.handshake
     readiness_deadlines = []
     handshake_deadlines = []
-    with original_socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
+    port = owner.lease()  # bound and listening, kept until the listener adopts it
 
     class ObservedSocket(original_socket):
         def __init__(self, *args, **kwargs):
@@ -381,14 +390,12 @@ def test_connect_listen_share_exact_factory_deadline_through_hello(remote, monke
 
 
 @pytest.mark.parametrize("action", ["timeout", "cancel"])
-def test_accept_wait_is_bounded_and_closes_listener(remote, monkeypatch, action):
+def test_accept_wait_is_bounded_and_closes_listener(remote, monkeypatch, action, owner):
     wire = importlib.import_module(remote.__package__ + ".timed_wire")
     listening = threading.Event()
     created = []
     original_socket = socket.socket
-    with original_socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
+    port = owner.lease()  # bound and listening, kept until the listener adopts it
 
     class ObservedSocket(original_socket):
         def __init__(self, *args, **kwargs):

@@ -21,9 +21,9 @@ from tests._rom_assets import rom_path, sym_path
 
 
 def _free_port() -> int:
-    from tests._parallel_runtime_port_support import reserve_port
+    from tests._parallel_runtime_port_support import leased_port
 
-    reserved = reserve_port()
+    reserved = leased_port()
     if reserved is not None:
         return reserved
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

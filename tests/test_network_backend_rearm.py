@@ -20,9 +20,9 @@ from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendE
 
 
 def _free_port() -> int:
-    from tests._parallel_runtime_port_support import reserve_port
+    from tests._parallel_runtime_port_support import leased_port
 
-    reserved = reserve_port()
+    reserved = leased_port()
     if reserved is not None:
         return reserved
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -276,9 +276,13 @@ def test_listen_and_connect_over_loopback_exchange_byte():
 
     # Pre-bind the listener in main thread so we can reliably connect
     # once the server thread calls accept().
-    listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", port))
+    from pokered_harness.link.network_listener_handoff import take_listener
+
+    listener = take_listener("127.0.0.1", port)  # a job-owned listening socket, else bind as always
+    if listener is None:
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
     listener.listen(1)
 
     def server():

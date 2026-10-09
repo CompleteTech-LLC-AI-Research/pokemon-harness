@@ -23,6 +23,7 @@ from typing import NamedTuple
 import pytest
 
 from scripts.probe_timed_rom_pair import resolve_assets
+from tests._parallel_runtime_port_support import handoff_environment, leased_port
 from tests._rom_assets import fixture_path, rom_path, sym_path
 from tests.test_mcp_timed_rom import PIPE_CAP, RomClient
 
@@ -302,6 +303,7 @@ def _server_environment(runtime_mode):
         if resolved not in entries:
             entries.append(resolved)
     env = {key: value for key, value in os.environ.items() if not key.startswith("POKERED_")}
+    env.update(handoff_environment())
     env["PYTHONPATH"] = os.pathsep.join(entries)
     env["PYTHONUNBUFFERED"] = "1"
     if runtime_mode == "source":
@@ -746,9 +748,11 @@ class TcpPair:
         explicit boolean overrides it so the negative control can prove the
         arm is load-bearing.
         """
-        with socket.socket() as reservation:
-            reservation.bind(("127.0.0.1", 0))
-            port = reservation.getsockname()[1]
+        port = leased_port()
+        if port is None:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
         listening = await self._call(
             0,
             "link_listen",

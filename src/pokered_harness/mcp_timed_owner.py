@@ -20,6 +20,7 @@ from concurrent.futures import Future, InvalidStateError
 from dataclasses import asdict, dataclass, is_dataclass
 from types import MappingProxyType
 
+from .link.network_listener_handoff import take_listener
 from .link.timed_remote import TimedRemoteEndpoint
 from .link.timed_wire import ProtocolError
 
@@ -542,9 +543,13 @@ class TimedOwner:
             self._publish(state="connecting", host=host, port=port, error=None)
         if request.kind == "listen":
             family = socket.AF_INET if ipaddress.ip_address(host).version == 4 else socket.AF_INET6
-            with socket.socket(family, socket.SOCK_STREAM, socket.IPPROTO_TCP) as listener:
+            adopted = take_listener(host, port, socket_class=socket.socket)
+            with adopted or socket.socket(
+                family, socket.SOCK_STREAM, socket.IPPROTO_TCP
+            ) as listener:
                 listener.setblocking(False)
-                listener.bind((host, port))
+                if adopted is None:
+                    listener.bind((host, port))
                 listener.listen(1)
                 self._remaining(request)
                 with self._condition:

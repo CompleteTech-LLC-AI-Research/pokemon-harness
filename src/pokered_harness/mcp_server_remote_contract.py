@@ -16,6 +16,7 @@ from typing import Any
 
 from pokered_harness.config import SUPPORTED_ROM_VERSIONS
 from pokered_harness.link.network_backend import NetworkBackendError, validate_loopback_host
+from pokered_harness.link.network_listener_handoff import HandoffError, take_listener
 from pokered_harness.link.serial_link import SerialLinkError
 
 # Direct names this module calls; cyclic back-edges go through _entry.
@@ -311,10 +312,17 @@ def _negotiate_network_clock_role(
 
 def _bind_listener(host: str, port: int) -> socket.socket:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    listener = socket.socket(family, socket.SOCK_STREAM)
     try:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind((host, port))
+        adopted = take_listener(host, port)  # an owner-held listener, else bind as always
+    except (HandoffError, OSError) as exc:
+        raise McpHarnessError(
+            "listen_failed", f"unable to adopt the handed-over listener for {host}:{port}: {exc}"
+        ) from exc
+    listener = adopted or socket.socket(family, socket.SOCK_STREAM)
+    try:
+        if adopted is None:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((host, port))
         listener.listen(1)
         # A short accept timeout lets the cancellation event be observed
         # without requiring a platform-specific wakeup socket.

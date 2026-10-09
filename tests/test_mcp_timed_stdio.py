@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._parallel_runtime_port_support import reserve_port
+from tests._parallel_runtime_port_support import handoff_environment, leased_port
 
 ROOT = Path(__file__).resolve().parents[1]
 CALL_BOUND = 20.0
@@ -235,6 +235,7 @@ class ProcessClient:
 async def _pair(tmp_path):
     rom, boot = _authored_paths(tmp_path)
     env = {key: value for key, value in os.environ.items() if not key.startswith("POKERED_")}
+    env.update(handoff_environment())
     env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"), str(ROOT / "vendor/pyboy-src")))
     env["PYTHONUNBUFFERED"] = "1"
     clients = []
@@ -280,7 +281,7 @@ async def _both(*calls):
 
 
 async def _connected(left, right):
-    port = reserve_port()
+    port = leased_port()
     if port is None:
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -380,7 +381,7 @@ async def test_authored_timed_stdio_pair_frames_and_cleanup(tmp_path, terminatio
 async def test_authored_timed_stdio_expected_peer_mismatch(tmp_path):
     """Reject a real peer's HELLO identity through the public structured error."""
     async with _pair(tmp_path) as (left, right):
-        port = reserve_port()
+        port = leased_port()
         if port is None:
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))

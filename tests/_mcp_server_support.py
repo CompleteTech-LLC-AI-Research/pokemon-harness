@@ -85,9 +85,9 @@ def _link_state_with_peer() -> tuple[
 
 
 def _free_port() -> int:
-    from tests._parallel_runtime_port_support import reserve_port
+    from tests._parallel_runtime_port_support import leased_port
 
-    reserved = reserve_port()
+    reserved = leased_port()
     if reserved is not None:
         return reserved
     s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)

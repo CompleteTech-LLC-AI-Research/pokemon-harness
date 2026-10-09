@@ -120,6 +120,7 @@ from pokered_harness.link.network_backend import (
     _validate_connected_socket_loopback,
     validate_loopback_host,
 )
+from pokered_harness.link.network_listener_handoff import take_listener
 
 # --- opcodes ---------------------------------------------------------------
 
@@ -283,14 +284,16 @@ class TcpSerialLink:
         host = validate_loopback_host(host)
         accept_timeout_s = _validate_timeout_seconds(accept_timeout_s, "accept_timeout_s")
         port = _validate_port(port, allow_zero=True)
-        listener = socket.socket(
+        adopted = take_listener(host, port)  # an owner-held listener, else bind as always
+        listener = adopted or socket.socket(
             socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM
         )
         conn: socket.socket | None = None
         try:
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            bind_address = (host, port, 0, 0) if ":" in host else (host, port)
-            listener.bind(bind_address)
+            if adopted is None:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                bind_address = (host, port, 0, 0) if ":" in host else (host, port)
+                listener.bind(bind_address)
             listener.listen(1)
             if ready_event is not None:
                 ready_event.set()

@@ -133,6 +133,7 @@ from pokered_harness.link._network_backend_support import (
     _validate_rom_version,  # noqa: F401  (retained facade attribute: network_backend._validate_rom_version)
     validate_loopback_host,
 )
+from pokered_harness.link.network_listener_handoff import take_listener
 from pokered_harness.link.serial_coordinator import (
     SerialOperationGate,  # noqa: F401  (retained facade attribute: network_backend.SerialOperationGate)
 )
@@ -183,14 +184,18 @@ class NetworkBackend(
         if accept_timeout_s is None:
             raise ValueError("accept_timeout_s must be finite and positive")
         family = _socket_family(normalized_host)
-        listener = socket.socket(family, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # A job-owned listener hands the already-bound socket over; otherwise bind as always.
+        adopted = take_listener(normalized_host, port)
+        listener = adopted if adopted is not None else socket.socket(family, socket.SOCK_STREAM)
+        if adopted is None:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         bind_address = (
             (normalized_host, port, 0, 0) if family == socket.AF_INET6 else (normalized_host, port)
         )
         conn: socket.socket | None = None
         try:
-            listener.bind(bind_address)
+            if adopted is None:
+                listener.bind(bind_address)
             listener.listen(backlog)
             deadline = time.monotonic() + accept_timeout_s
             while conn is None:

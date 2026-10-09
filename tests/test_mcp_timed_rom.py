@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from scripts.probe_timed_rom_pair import resolve_assets
-from tests._parallel_runtime_port_support import reserve_port
+from tests._parallel_runtime_port_support import handoff_environment, leased_port
 from tests._rom_assets import fixture_path, rom_path, sym_path
 from tests.test_mcp_timed_stdio import EXIT_BOUND, ProcessClient, _both, _mode
 
@@ -167,6 +167,7 @@ async def _pair(tmp_path, assets):
             env = {
                 key: value for key, value in os.environ.items() if not key.startswith("POKERED_")
             }
+            env.update(handoff_environment())
             env.update(
                 {
                     "POKERED_ROM_PATH": str(copied["rom"]),
@@ -369,7 +370,7 @@ async def test_timed_rom_stdio_pair(tmp_path, listener, connector):
         async with asyncio.timeout(PAIR_BOUND):
             await _both(*(_prelink(client, asset) for client, asset in zip(clients, assets)))
             left, right = clients
-            port = reserve_port()
+            port = leased_port()
             if port is None:
                 with socket.socket() as reservation:
                     reservation.bind(("127.0.0.1", 0))

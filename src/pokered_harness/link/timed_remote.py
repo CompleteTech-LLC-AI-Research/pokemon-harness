@@ -23,6 +23,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .network_listener_handoff import take_listener
 from .timed_link_session import TimedLinkSession
 from .timed_wire import Cancelled, ChannelClosed, DeadlineExceeded, ProtocolError, TimedWireChannel
 
@@ -275,7 +276,8 @@ class TimedRemoteEndpoint:
         address = _address(host)
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("port must be an integer in 1..65535")
-        listener = socket.socket(
+        adopted = take_listener(str(address), port, socket_class=socket.socket)
+        listener = adopted or socket.socket(
             socket.AF_INET if address.version == 4 else socket.AF_INET6,
             socket.SOCK_STREAM,
             socket.IPPROTO_TCP,
@@ -283,7 +285,8 @@ class TimedRemoteEndpoint:
         conn = None
         try:
             listener.setblocking(False)
-            listener.bind((str(address), port))
+            if adopted is None:
+                listener.bind((str(address), port))
             listener.listen(1)
             while conn is None:
                 _ready(listener, writing=False, deadline=deadline, cancel_event=cancel_event)

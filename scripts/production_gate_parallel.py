@@ -65,6 +65,7 @@ from scripts.production_gate_parallel_phases import (
     phase_names,
 )
 from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
+from scripts.production_gate_parallel_ports import HANDOFF_ENV, HandoffRegistry
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     OrchestratorAdoption,
@@ -178,6 +179,7 @@ def job_environment(
     token: str = "",
     port_range: tuple[int, int] | None = None,
     deadline_epoch: float | None = None,
+    handoff: str | None = None,
 ) -> dict[str, str]:
     """Build an isolated environment: private writers, one thread per library, job token."""
 
@@ -191,6 +193,8 @@ def job_environment(
         env[JOB_TOKEN_ENV] = token
     if deadline_epoch is not None:
         env["POKERED_PARALLEL_DEADLINE_EPOCH"] = repr(deadline_epoch)
+    if handoff:
+        env[HANDOFF_ENV] = handoff
     return env
 
 
@@ -458,6 +462,17 @@ def _run_plan(
     phase_of = {job["job_id"]: job["phase"] for job in body["jobs"]}
     ranges = assign_port_ranges(list(phase_of))
     problems.extend(port_range_problems(ranges))
+    handoffs = HandoffRegistry()
+
+    def close_handoff(job_id: str) -> dict[str, Any] | None:
+        ledger = handoffs.close(job_id)
+        if ledger and ledger["unacknowledged"]:
+            problems.append(
+                f"{job_id}: a leased listener was transferred but never acknowledged "
+                f"{ledger['unacknowledged'][:5]}"
+            )
+        return ledger
+
     cancel_reason = ""
     progress_path = run_root / body["run_id"] / "progress.json"
     excluded = (
@@ -520,7 +535,11 @@ def _run_plan(
         guardian, guardian_problems = read_guardian_receipt(
             item.receipt, item.secret, item.process.pid, item.owned.root_start
         )
-        cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
+        cleanup[item.job_id] = {
+            "process_tree": receipt,
+            "guardian": guardian or {},
+            "listener_handoff": close_handoff(item.job_id),
+        }
         ports_seen[item.job_id] = set(item.owned.ports)
         worker_pid = guardian.get("worker_pid") if guardian else None
         outcome = _finish_job(plan, item, status, clock, wall_clock, measure, worker_pid)
@@ -579,7 +598,11 @@ def _run_plan(
         if not cleanup_proven(receipt, guardian, view):
             receipt["proof"] = False
         view.close()
-        cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
+        cleanup[item.job_id] = {
+            "process_tree": receipt,
+            "guardian": guardian or {},
+            "listener_handoff": close_handoff(item.job_id),
+        }
         ports_seen[item.job_id] = set(item.owned.ports)
 
     def cancel(reason: str) -> None:
@@ -618,6 +641,7 @@ def _run_plan(
             handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
             launched = wall_clock()
+            handoff = handoffs.open(job_id, *ranges[job_id])
             process, secret = launch_guardian(
                 receipt_path,
                 grace_seconds,
@@ -630,6 +654,7 @@ def _run_plan(
                     token=token,
                     port_range=ranges[job_id],
                     deadline_epoch=launched.timestamp() + float(job["deadline_seconds"]),
+                    handoff=handoff,
                 ),
                 stdin=subprocess.DEVNULL,
                 stdout=handles[0],
@@ -637,6 +662,7 @@ def _run_plan(
                 start_new_session=True,
             )
         except (OSError, CapacityError) as exc:
+            close_handoff(job_id)
             for handle in handles:
                 handle.close()
             settle(job_id, "failed", f"could not start: {type(exc).__name__}")
@@ -764,6 +790,7 @@ def _run_plan(
     finally:
         if running:
             cancel(cancel_reason or "orchestrator exit")
+        handoffs.close_all()
         for job_id in phase_of:
             if job_id not in outcomes:
                 settle(job_id, "not_started", f"not started: {cancel_reason or 'no dispatch'}")

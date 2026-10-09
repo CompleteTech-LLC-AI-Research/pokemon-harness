@@ -59,7 +59,7 @@ def _job_port() -> int | None:
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
-    return module.reserve_port()
+    return module.leased_port()
 
 
 def free_port() -> int:
