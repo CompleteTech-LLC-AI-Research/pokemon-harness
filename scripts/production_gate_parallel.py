@@ -204,6 +204,43 @@ def terminate_owned_group(
         pass
 
 
+def affinity_pairs() -> int:
+    """Pairs the allowed CPU set can host (two emulators per pair); Linux affinity if present."""
+
+    try:
+        return len(os.sched_getaffinity(0)) // 2
+    except AttributeError:  # pragma: no cover - non-Linux fallback
+        return (os.cpu_count() or 0) // 2
+
+
+def capacity_loss_probe(
+    reserved_pairs: int, measure: Callable[[], object] = affinity_pairs
+) -> Callable[[], object]:
+    """Return a probe that reports capacity loss, never a policy re-derivation.
+
+    The first reading is the baseline; the admitted ceiling stays the capacity policy.  The
+    probe reports ``reserved_pairs`` (no loss) while the reading holds the baseline-or-reserved
+    floor, the lower reading once it drops, and ``None`` when the quota cannot be read.
+    """
+
+    def read() -> object:
+        try:
+            return measure()
+        except (OSError, ValueError):
+            return None
+
+    baseline = read()
+    floor = min(reserved_pairs, baseline) if type(baseline) is int else None
+
+    def probe() -> object:
+        current = read()
+        if floor is None or type(current) is not int:
+            return None
+        return reserved_pairs if current >= floor else current
+
+    return probe
+
+
 def _group_gone(group: int) -> bool:
     try:
         os.killpg(group, 0)
@@ -675,6 +712,7 @@ def run_parallel_cli(
         project_root=project_root,
         budget=PairBudget(total),
         worker_argv_factory=factory,
+        capacity_probe=capacity_loss_probe(sum(job["pairs"] for job in plan.as_dict()["jobs"])),
     )
     report["row_identity_enforced"] = False
     report["limitations"] = [

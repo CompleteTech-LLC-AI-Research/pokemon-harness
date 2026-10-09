@@ -16,6 +16,7 @@ import pytest
 from scripts.production_gate_parallel import (
     CapacityError,
     PairBudget,
+    capacity_loss_probe,
     run_parallel_plan,
 )
 from scripts.production_gate_parallel_plan import build_parallel_plan
@@ -348,3 +349,20 @@ def test_the_single_global_budget_rejects_unknown_zero_duplicate_and_excess_rese
     budget.mark_lost("probe reported fewer pairs")
     with pytest.raises(CapacityError, match="capacity lost"):
         budget.reserve("c", 1)
+
+
+def test_the_capacity_probe_reports_loss_only_when_the_baseline_floor_is_breached():
+    readings = iter([6, 6, 4, 3])
+    probe = capacity_loss_probe(4, measure=lambda: next(readings))  # baseline 6 -> floor 4
+    assert [probe(), probe(), probe()] == [4, 4, 3]
+
+
+def test_the_capacity_probe_floor_never_exceeds_the_reserved_pairs_and_unknown_quota_is_loss():
+    readings = iter([2, 2, 1])
+    probe = capacity_loss_probe(4, measure=lambda: next(readings))  # baseline 2 -> floor 2
+    assert [probe(), probe()] == [4, 1]
+
+    def unreadable():
+        raise OSError("cgroup unreadable")
+
+    assert capacity_loss_probe(4, measure=unreadable)() is None
