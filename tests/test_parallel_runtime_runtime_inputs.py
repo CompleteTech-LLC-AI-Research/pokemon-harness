@@ -179,3 +179,42 @@ def test_a_default_sys_path_entry_the_uid_can_modify_outside_the_copy_is_refused
     finally:
         thaw_and_remove(tmp_path / "runtime")
     assert any("default sys.path names" in p for p in result["source"]["problems"])
+
+
+def _tree(root, snapshot):
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "dep.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "lib" / "x.pth").write_text(f"{snapshot}/src\n", encoding="utf-8")
+    (root / "bin").mkdir()
+    (root / "bin" / "python").symlink_to("/usr/bin/python3")
+    return root
+
+
+def test_the_runtime_digest_is_path_independent_and_sensitive_to_every_change(tmp_path):
+    first = _tree(tmp_path / "a", "/run1/snapshot/checkout")
+    second = _tree(tmp_path / "b", "/run2/snapshot/checkout")
+    digest = inputs.runtime_digest(first, Path("/run1/snapshot/checkout"))
+    assert inputs.runtime_digest(second, Path("/run2/snapshot/checkout")) == digest
+    (second / "lib" / "dep.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert inputs.runtime_digest(second, Path("/run2/snapshot/checkout")) != digest
+    (second / "lib" / "dep.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (second / "lib" / "added.py").write_text("", encoding="utf-8")
+    assert inputs.runtime_digest(second, Path("/run2/snapshot/checkout")) != digest
+    (second / "lib" / "added.py").unlink()
+    (second / "bin" / "python").unlink()
+    (second / "bin" / "python").symlink_to("/usr/bin/python3.11")
+    assert inputs.runtime_digest(second, Path("/run2/snapshot/checkout")) != digest
+
+
+def test_the_pin_check_refuses_a_runtime_that_differs_from_the_frozen_digest(tmp_path):
+    root, checkout = tmp_path / "r", tmp_path / "checkout"
+    root.mkdir()
+    (root / "m.py").write_text("x", encoding="utf-8")
+    body = {"runtime_inputs": {"source": inputs.runtime_digest(root, checkout)}}
+    assert inputs.runtime_pin_problem(body, "source", root, checkout) == ""
+    (root / "m.py").write_text("y", encoding="utf-8")
+    assert "differs from the digest the plan pinned" in inputs.runtime_pin_problem(
+        body, "source", root, checkout
+    )
+    assert inputs.runtime_pin_problem(body, "cython", root, checkout) == "", "no pin for that mode"
+    assert inputs.runtime_pin_problem({}, "source", root, checkout) == ""

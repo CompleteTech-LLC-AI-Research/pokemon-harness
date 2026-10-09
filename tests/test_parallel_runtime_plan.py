@@ -241,3 +241,16 @@ def test_a_malformed_child_policy_pin_is_refused_by_the_plan_validator():
     body = json.loads(make_plan(capacity_policy_text=POLICY_TEXT, total_pairs=4).text)
     body["jobs"][0]["policy_sha256"] = "not-a-digest"
     assert any("policy_sha256" in item for item in validate_plan_body(body))
+
+
+def test_the_frozen_plan_pins_each_private_runtime_digest_and_refuses_malformed_pins():
+    pins = {"source": "1" * 64, "cython": "2" * 64}
+    plan = make_plan(runtime_inputs=pins)
+    assert plan.as_dict()["runtime_inputs"] == pins
+    assert (
+        make_plan(runtime_inputs=pins, run_id="1" * 32).digest != make_plan(run_id="1" * 32).digest
+    )
+    assert "runtime_inputs" not in make_plan().as_dict(), "pinning is opt-in per plan"
+    for bad in ({"source": "not-a-digest"}, {"bogus": "1" * 64}):
+        with pytest.raises(PlanError, match="runtime_inputs"):
+            make_plan(runtime_inputs=bad)

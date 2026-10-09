@@ -41,7 +41,7 @@ from scripts.production_gate_parallel_isolation import (
 )
 from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan, cli_deadlines
 from scripts.production_gate_parallel_processes import interrupt_on_signals
-from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes
+from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes, runtime_digest
 from scripts.production_gate_parallel_validation import loads_strict
 
 
@@ -234,6 +234,13 @@ def run_parallel_cli(
                     total_pairs=total if type(total) is int else 0,
                     policy_digest=file_sha256(capacity_policy_path),
                     capacity_policy_text=capacity_policy_path.read_text(encoding="utf-8"),
+                    runtime_inputs={
+                        mode: runtime_digest(
+                            Path(info["manifest"]["private_prefix"]), Path(snapshot["checkout"])
+                        )
+                        for mode, info in private.items()
+                        if info["manifest"]["private_prefix"]
+                    },
                     early_smoke=early_smoke,
                     fail_fast=fail_fast,
                     matrix_workers=args.matrix_workers if explicit_matrix_workers else None,

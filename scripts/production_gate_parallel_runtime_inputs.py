@@ -17,6 +17,7 @@ No permission of any shared tree is changed; only this module's own copies are f
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -25,6 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from scripts.production_gate_parallel_identity import sha256_file
 from scripts.production_gate_parallel_isolation import (
     IsolationError,
     freeze_tree,
@@ -96,6 +98,47 @@ def writable_entries(root: Path, limit: int = WRITABLE_REPORT_LIMIT) -> list[str
         except OSError:
             continue
     return found
+
+
+def runtime_digest(prefix: Path, checkout: Path) -> str:
+    """Path-independent content digest of a private runtime: names, bytes and link targets.
+
+    The snapshot checkout path inside editable-install files is normalised, so the same environment
+    yields the same digest in every run, while any changed, added or removed file changes it.  The
+    plan freezes this digest and the worker refuses to run on a runtime that does not match it.
+    """
+
+    needle, outer = str(checkout).encode(), hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(prefix, followlinks=False):
+        dirnames.sort()
+        base = Path(dirpath)
+        names = sorted(filenames) + [d for d in dirnames if (base / d).is_symlink()]
+        dirnames[:] = [d for d in dirnames if d != "__pycache__" and not (base / d).is_symlink()]
+        for name in sorted(names):
+            path = base / name
+            relative = path.relative_to(prefix).as_posix()
+            if path.is_symlink():
+                record = f"L {relative} {os.readlink(path)}"
+            elif path.suffix == ".pth" or name.startswith("__editable__"):
+                data = path.read_bytes().replace(needle, b"<SNAPSHOT>")
+                record = f"F {relative} {hashlib.sha256(data).hexdigest()}"
+            else:
+                record = f"F {relative} {sha256_file(path)}"
+            outer.update(record.encode("utf-8", "surrogateescape") + b"\n")
+    return outer.hexdigest()
+
+
+def runtime_pin_problem(
+    plan_body: Mapping[str, Any], mode: str, prefix: Path, checkout: Path
+) -> str:
+    """Empty when this runtime matches the digest the plan froze (or none was frozen for it)."""
+
+    pins = plan_body.get("runtime_inputs")
+    if not isinstance(pins, dict) or mode not in pins:
+        return ""
+    if runtime_digest(prefix, checkout) == pins[mode]:
+        return ""
+    return f"the runtime under {prefix} differs from the digest the plan pinned"
 
 
 def redirect_editable_paths(copy: Path, original: Path, snapshot: Path) -> int:
@@ -216,4 +259,11 @@ def build_private_runtimes(
     return results
 
 
-__all__ = ("build_private_runtimes", "probe_runtime", "redirect_editable_paths", "writable_entries")
+__all__ = (
+    "build_private_runtimes",
+    "probe_runtime",
+    "redirect_editable_paths",
+    "runtime_digest",
+    "runtime_pin_problem",
+    "writable_entries",
+)

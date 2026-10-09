@@ -31,6 +31,7 @@ from scripts.production_gate_parallel_identity import IDENTITY_KEYS, measure_ide
 from scripts.production_gate_parallel_plan import PlanError, load_plan
 from scripts.production_gate_parallel_processes import JOB_TOKEN_ENV
 from scripts.production_gate_parallel_records import build_rows, diagnostics_for_tier
+from scripts.production_gate_parallel_runtime_inputs import runtime_pin_problem
 from scripts.production_gate_parallel_validation import loads_strict, parse_utc
 
 TIMEOUT_EXIT_STATUS = 124
@@ -210,6 +211,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 3
     if args.rom_root is None or args.fixture_root is None:
         print("worker refused: ROM and fixture roots must be explicit", file=sys.stderr)
+        return 3
+    pin_problem = runtime_pin_problem(
+        plan.as_dict(), job["mode"], Path(sys.prefix), args.project_root
+    )
+    if pin_problem:
+        print(f"worker refused: {pin_problem}", file=sys.stderr)
         return 3
     pinned = job.get("policy_sha256")
     if args.capacity_policy is not None and pinned is not None:

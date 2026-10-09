@@ -52,6 +52,7 @@ PLAN_KEYS = frozenset(
         "required_nodeids",
         "roles",
         "run_id",
+        "runtime_inputs",
         "schema_version",
         "tiers",
     }
@@ -69,6 +70,8 @@ JOB_KEYS = frozenset(
         "timing_rep_ids",
     }
 )
+OPTIONAL_JOB_KEYS = frozenset({"policy_sha256"})
+OPTIONAL_PLAN_KEYS = frozenset({"runtime_inputs"})
 DEADLINE_KEYS = frozenset(
     {
         "cleanup_seconds",
@@ -154,9 +157,14 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _unknown(label: str, body: Mapping[str, Any], allowed: frozenset[str]) -> list[str]:
+def _unknown(
+    label: str,
+    body: Mapping[str, Any],
+    allowed: frozenset[str],
+    optional: frozenset[str] = frozenset(),
+) -> list[str]:
     extra = sorted(set(body) - allowed)
-    missing = sorted(allowed - set(body))
+    missing = sorted(allowed - optional - set(body))
     problems = [f"{label}: unknown keys {extra}"] if extra else []
     if missing:
         problems.append(f"{label}: missing keys {missing}")
@@ -177,7 +185,7 @@ def _validate_job(index: int, job: object, plan: Mapping[str, Any]) -> list[str]
     label = f"jobs[{index}]"
     if not isinstance(job, dict):
         return [f"{label} must be an object"]
-    problems = _unknown(label, job, JOB_KEYS)
+    problems = _unknown(label, job, JOB_KEYS, OPTIONAL_JOB_KEYS)
     if problems:
         return problems
     mode, phase = job["mode"], job["phase"]
@@ -225,7 +233,7 @@ def _validate_plan_body(body: object) -> list[str]:
 
     if not isinstance(body, dict):
         return ["plan must be a JSON object"]
-    problems = _unknown("plan", body, PLAN_KEYS)
+    problems = _unknown("plan", body, PLAN_KEYS, OPTIONAL_PLAN_KEYS)
     if problems:
         return problems
     if body["schema_version"] != PLAN_SCHEMA_VERSION or not _is_int(body["schema_version"]):
@@ -304,6 +312,13 @@ def _validate_plan_body(body: object) -> list[str]:
             problems.append("capacity.total_pairs must be a positive integer")
         if not SHA256_RE.match(str(capacity.get("policy_digest"))):
             problems.append("capacity.policy_digest must be a lowercase sha256")
+    pins = body.get("runtime_inputs")
+    if "runtime_inputs" in body and (
+        not isinstance(pins, dict)
+        or not pins
+        or not all(k in RUNTIME_MODES and SHA256_RE.match(str(v)) for k, v in pins.items())
+    ):
+        problems.append("runtime_inputs must map runtime modes to lowercase sha256 digests")
     jobs = body["jobs"]
     if not isinstance(jobs, list) or not jobs:
         problems.append("jobs must be a non-empty list")
@@ -372,6 +387,7 @@ def build_parallel_plan(
     pairs_per_job: Mapping[str, int] | None = None,
     policy_digest: str,
     capacity_policy_text: str | None = None,
+    runtime_inputs: Mapping[str, str] | None = None,
     early_smoke: bool,
     fail_fast: bool,
     require_row_ids: bool = True,
@@ -450,6 +466,8 @@ def build_parallel_plan(
         "jobs": jobs,
         "created_utc": created_utc or datetime.now(UTC).isoformat(timespec="seconds"),
     }
+    if runtime_inputs:
+        body["runtime_inputs"] = dict(sorted(runtime_inputs.items()))
     body["plan_sha256"] = _digest_of(body)
     problems = validate_plan_body(body)
     if problems:
