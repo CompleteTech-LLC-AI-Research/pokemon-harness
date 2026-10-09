@@ -408,11 +408,11 @@ def _ko_rows(*, terminal=True, cleanup=True):
         pytest.param("errored", {"settled": False, "unsupported_reason": "battle observation X: ValueError: e"}, False, id="errored"),
         pytest.param("unsettled", {"settled": False}, False, id="unsettled"),
         pytest.param("non-dict", None, False, id="non-dict"),
-        pytest.param("nonko-settled", {"settled": True, "turn": {"outcome": "settled"}}, True, id="nonko-settled"),
-        pytest.param("ko-no-terminal", {"settled": True, "turn": {"outcome": "ko"}, "terminal": None, "cleanup": None}, False, id="ko-no-terminal"),
-        pytest.param("ko-terminal-no-cleanup", {"settled": True, "turn": {"outcome": "ko"}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": None}, False, id="ko-terminal-no-cleanup"),
-        pytest.param("ko-cleanup-still-in-battle", {"settled": True, "turn": {"outcome": "ko"}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": {"is_in_battle": 2}}, False, id="ko-cleanup-still-in-battle"),
-        pytest.param("ko-terminal-cleanup", {"settled": True, "turn": {"outcome": "ko"}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": {"is_in_battle": 0}}, True, id="ko-terminal-cleanup"),
+        pytest.param("nonko-settled", {"settled": True, "turn": {"local": {"hp": 5}, "enemy": {"hp": 5}}}, True, id="nonko-settled"),
+        pytest.param("ko-no-terminal", {"settled": True, "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}}, "terminal": None, "cleanup": None}, False, id="ko-no-terminal"),
+        pytest.param("ko-terminal-no-cleanup", {"settled": True, "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": None}, False, id="ko-terminal-no-cleanup"),
+        pytest.param("ko-cleanup-still-in-battle", {"settled": True, "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": {"is_in_battle": 2}}, False, id="ko-cleanup-still-in-battle"),
+        pytest.param("ko-terminal-cleanup", {"settled": True, "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}}, "terminal": {"boundary": "EndOfBattle"}, "cleanup": {"is_in_battle": 0}}, True, id="ko-terminal-cleanup"),
     ),
 )
 def test_battle_evidence_ready_contract(case, row, expected) -> None:

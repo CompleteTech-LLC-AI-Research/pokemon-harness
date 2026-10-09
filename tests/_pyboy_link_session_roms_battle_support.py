@@ -59,7 +59,8 @@ def battle_evidence_ready(row) -> bool:
     if not isinstance(row, dict) or row.get("unsupported_reason") or row.get("settled") is not True:
         return False
     turn = row.get("turn")
-    if not isinstance(turn, dict) or turn.get("outcome") != "ko":
+    sides = [turn.get(side) for side in ("local", "enemy")] if isinstance(turn, dict) else []
+    if not any(isinstance(mon, dict) and mon.get("hp") == 0 for mon in sides):
         return True
     terminal, cleanup = row.get("terminal"), row.get("cleanup")
     return (
