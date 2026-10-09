@@ -43,6 +43,7 @@ from scripts.production_gate_parallel_capacity import (
     PairBudget,
     affinity_pairs,
     capacity_loss_probe,
+    child_capacity_loss,
     require_parallel_capacity,
     write_pinned_policy,
 )
@@ -557,11 +558,18 @@ def _run_plan(
         if not cleanup_proven(receipt, guardian, view):
             receipt["proof"] = False
         view.close()
+        lost = child_capacity_loss(outcome.get("capacity"))
+        if lost:
+            outcome["state"] = "failed"
+            outcome["artifact_problems"].append(f"the child reported a capacity loss: {lost}")
+            budget.mark_lost(f"{item.job_id}: {lost}")
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
         running.remove(item)
         progress()
-        if (
+        if allow_cancel and running and lost:
+            cancel(f"capacity loss reported by {item.job_id}: {lost}")
+        elif (
             allow_cancel
             and outcome["state"] != "passed"
             and running

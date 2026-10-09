@@ -84,6 +84,25 @@ def derive_job_policy(global_text: str, pairs: int) -> str:
     return json.dumps(body, sort_keys=True, indent=2) + "\n"
 
 
+ADMISSION_REFUSALS = frozenset({"blocked", "expired"})
+
+
+def child_capacity_loss(capacity: object) -> str:
+    """A child's own admission refusing or losing a pair is a loss of the one shared capacity.
+
+    Empty when the child's reported decisions contain no refusal.  The parent turns a non-empty
+    reading into a lost budget and cancels the siblings, so pressure seen by one child is
+    propagated to every other, never kept as a local detail.
+    """
+
+    admission = capacity.get("admission") if isinstance(capacity, dict) else None
+    decisions = admission.get("decisions") if isinstance(admission, dict) else None
+    for decision in decisions if isinstance(decisions, list) else []:
+        if isinstance(decision, dict) and decision.get("status") in ADMISSION_REFUSALS:
+            return f"{decision.get('pair_id')}: {decision.get('status')}: {str(decision.get('reason'))[:200]}"
+    return ""
+
+
 def policy_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

@@ -9,6 +9,7 @@ from scripts.production_gate_parallel_capacity import (
     LiveCapacity,
     PairBudget,
     capacity_loss_probe,
+    child_capacity_loss,
     derive_job_policy,
     policy_digest,
     policy_file_problem,
@@ -160,3 +161,19 @@ def test_a_derived_policy_that_differs_from_the_plan_pin_is_refused_before_it_is
     with pytest.raises(CapacityError, match="differs from the digest the plan pinned"):
         write_pinned_policy(target, GLOBAL_POLICY, 2, wrong)
     assert not target.exists()
+
+
+@pytest.mark.parametrize("status", ["blocked", "expired"])
+def test_a_child_admission_refusal_is_reported_as_a_capacity_loss(status):
+    capacity = {
+        "admission": {"decisions": [{"pair_id": "p", "status": status, "reason": "pressure"}]}
+    }
+    assert status in child_capacity_loss(capacity) and "pressure" in child_capacity_loss(capacity)
+
+
+@pytest.mark.parametrize(
+    "capacity",
+    [None, {}, {"admission": []}, {"admission": {"decisions": [{"status": "queued"}, "x"]}}],
+)
+def test_no_refusal_is_no_capacity_loss_and_hostile_shapes_do_not_raise(capacity):
+    assert child_capacity_loss(capacity) == ""

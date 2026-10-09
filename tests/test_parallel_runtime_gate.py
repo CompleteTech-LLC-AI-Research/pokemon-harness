@@ -92,6 +92,9 @@ if name == "fail":
     tiers[0]["status"] = "FAIL"
     artifact.update(overall="FAIL", gate_problems=["unit failed"], child_exit_status=1)
     exit_code = 1
+elif name == "capacity_blocked":
+    report["capacity"] = {"status": "ok", "admission": {"decisions": [
+        {"pair_id": "pair-1", "status": "blocked", "reason": "memory pressure"}]}}
 elif name == "wrong_run":
     artifact["run_id"] = "9" * 32
 elif name == "wrong_head":
@@ -513,3 +516,16 @@ def test_failed_and_interrupted_jobs_keep_their_temp_trees_and_recover_partial_e
             assert evidence is not None and isinstance(evidence["files"], list)
             assert job["launched_utc"] and job["finished_utc"], "parent-observed times are retained"
     assert report["cleanup"]["source-job"]["tmp_removed"] is False
+
+
+def test_a_capacity_loss_reported_by_one_child_cancels_the_other_and_marks_the_budget_lost(
+    tmp_path,
+):
+    budget = PairBudget(2)
+    _, _, report = run(
+        tmp_path, {"source": "capacity_blocked", "cython": "slow_pass:30"}, budget=budget
+    )
+    assert states(report) == {"source": "failed", "cython": "interrupted"}
+    assert "capacity loss reported by" in report["cancellation"]
+    assert budget.lost_reason and "memory pressure" in budget.lost_reason
+    assert report["overall"] == "FAIL"
