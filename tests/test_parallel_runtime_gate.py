@@ -575,7 +575,8 @@ def test_an_orphan_pinned_before_its_guardian_died_is_removed_by_pidfd_with_a_pr
         recorded = pid_file.parent / OBSERVATION
         assert recorded.exists(), "no pin evidence was recorded: precondition unmet"
         seen = json.loads(recorded.read_text())
-        assert seen["pinned"] and seen["guardian_alive"], f"precondition unmet, not evidence: {seen}"
+        ready = seen["pinned"] and seen["guardian_alive"]
+        assert ready, f"precondition unmet (not containment evidence): {seen}"
         assert seen["orchestrator_pid"] == os.getpid() and seen["orphan_pid"] == orphan
         assert seen["fdinfo_line"] == f"Pid:\t{orphan}" and seen["orphan_start"]
         assert held == "gone", "a pinned orphan outlived the run"
