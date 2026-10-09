@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 import pytest
 
@@ -43,12 +44,15 @@ def row(tier, case, repetition, source):
     return {"id": mode + "/" + tier + "/" + case, "runtime": mode, "tier": tier, "case": case,
             "game": "", "mode": mode, "roles": [], "repetition": repetition,
             "outcome": "passed", "source": source}
-rows = [row("unit", c, 0, "selected_nodeids+tier_status") for c in plan["required_nodeids"]["unit"]]
-rows += [row("timing", r, i + 1, "returncodes") for i, r in enumerate(job["timing_rep_ids"])]
-tiers = [
-    {"name": "unit", "status": "PASS", "counts": counts(2), "returncodes": [0]},
-    {"name": "timing", "status": "PASS", "counts": counts(5), "returncodes": [0] * 5},
-]
+tiers, rows = [], []
+for tier_name in job["tiers"]:
+    if tier_name == "timing":
+        tiers.append({"name": "timing", "status": "PASS", "counts": counts(5), "returncodes": [0] * 5})
+        rows += [row("timing", r, i + 1, "returncodes") for i, r in enumerate(job["timing_rep_ids"])]
+    else:
+        cases = plan["required_nodeids"].get(tier_name) or ["tests/test_%s.py::test_case" % tier_name]
+        tiers.append({"name": tier_name, "status": "PASS", "counts": counts(len(cases)), "returncodes": [0]})
+        rows += [row(tier_name, c, 0, "selected_nodeids+tier_status") for c in cases]
 now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
 begun = now()
 identity = {"commit": plan["commit"], "clean_head": True,
@@ -359,3 +363,58 @@ def test_the_single_global_budget_rejects_unknown_zero_duplicate_and_excess_rese
     budget.mark_lost("probe reported fewer pairs")
     with pytest.raises(CapacityError, match="capacity lost"):
         budget.reserve("c", 1)
+
+
+def job_states(report):
+    return {job["job_id"]: job["state"] for job in report["jobs"]}
+
+
+def test_simultaneous_failures_are_both_harvested_before_fail_fast_cancels_anything(tmp_path):
+    plan = make_plan(fail_fast=True)
+    waits = []
+
+    def late_sleeper(seconds):  # first poll happens only after both children have finished
+        waits.append(seconds)
+        time.sleep(1.5 if len(waits) == 1 else seconds)
+
+    _, _, report = run(
+        tmp_path, {"source": "fail", "cython": "fail"}, plan=plan, sleeper=late_sleeper
+    )
+    assert states(report) == {"source": "failed", "cython": "failed"}
+    assert all(job["artifact"] is not None for job in report["jobs"]), "a failure was discarded"
+    assert all(job["child_exit_status"] == 1 for job in report["jobs"])
+    assert "fail_fast" in report["cancellation"] and report["overall"] == "FAIL"
+
+
+def test_both_smokes_finish_before_selected_jobs_and_a_failed_smoke_never_cancels_its_sibling(
+    tmp_path,
+):
+    plan = make_plan(fail_fast=True, early_smoke=True)
+    _, root, report = run(tmp_path, {"source": "fail", "cython": "slow_pass:0.6"}, plan=plan)
+    assert job_states(report) == {
+        "source-smoke-job": "failed",
+        "cython-smoke-job": "passed",
+        "source-job": "not_started",
+        "cython-job": "not_started",
+    }
+    assert "smoke barrier" in report["cancellation"] and report["overall"] == "FAIL"
+    assert not (root / plan.run_id / "source-job").exists()
+    smoke = next(job for job in report["jobs"] if job["job_id"] == "cython-smoke-job")
+    assert [tier["name"] for tier in smoke["artifact"]["tiers"]] == ["smoke"]
+
+
+def test_with_the_early_smoke_all_four_jobs_run_in_phase_order_and_are_retained(tmp_path):
+    plan = make_plan(fail_fast=False, early_smoke=True)
+    _, _, report = run(tmp_path, {"source": "pass", "cython": "pass"}, plan=plan)
+    assert job_states(report) == {
+        "source-smoke-job": "passed",
+        "cython-smoke-job": "passed",
+        "source-job": "passed",
+        "cython-job": "passed",
+    }
+    assert [job["job_id"] for job in report["jobs"]] == [
+        "source-smoke-job",
+        "cython-smoke-job",
+        "source-job",
+        "cython-job",
+    ]
