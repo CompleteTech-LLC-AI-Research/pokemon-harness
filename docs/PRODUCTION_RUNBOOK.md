@@ -1756,3 +1756,40 @@ starter/trade/battle workflows, and cross-host networking remain unqualified
 extensions, not prerequisites for the declared canonical loopback scope.
 Cross-host operation would require authenticated encrypted transport; the
 current TCP API must remain restricted to loopback.
+
+## Opt-in concurrent runtime gates (`--parallel-runtimes`, #107)
+
+Sequential execution remains the default. `python scripts/production_gate.py --runtime-mode both
+--parallel-runtimes --parallel-run-root <new private directory outside the checkout> --capacity-policy
+<policy.json> [--keep-going | --fail-fast]` instead starts the source and Cython gates as two separate
+owned child processes under one immutable plan.
+
+What the mode does:
+
+- **Frozen plan.** Before dispatch the plan pins the fresh run UUID, the exact clean commit, the build
+  identity, input and asset digests, the ordered tiers and required case ids, the timing repetitions
+  (at least five), per-job deadlines, `fail_fast` and the capacity policy digest. Children re-validate the
+  canonical plan text and its digest; nothing trusts a mutable caller claim.
+- **Isolation.** Each job gets private output, temp, cache, build, evidence and raw trees below the
+  run root, its own environment (one thread per numerical library) and its own process group. The parent
+  signals only process groups it started.
+- **One global pair budget.** `max_concurrent_pairs` from the capacity policy is the single budget. A
+  job's share is reserved up front, parallel dispatch is refused unless it admits one pair per job, and
+  an unknown, zero or lost capacity fails closed. Children do not receive the capacity policy, so the
+  budget is never cloned or double counted.
+- **Strict aggregation.** A job passes only with an observed zero child exit status and a terminal
+  artifact that matches the plan: run, plan digest, commit, build, inputs, assets, runtime identity
+  (no source fallback in native), tier order, integer counts with no skip, xfail, error or failure, five
+  timing return codes, and a fresh run. Missing, malformed, duplicate, stale and partial artifacts, and
+  symlinked or escaping paths, are failures. Every job outcome is retained; one runtime cannot mask the
+  other's failure.
+- **Failure policy.** With `--keep-going` (and `fail_fast` false) an ordinary failure lets the other job
+  finish. With `--fail-fast`, an interrupt, a deadline or capacity loss the parent cancels only its own
+  child process groups with bounded cleanup, and marks interrupted or unstarted jobs explicitly.
+
+Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
+with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy
+and the 18 orientation fixtures are not provided by this change. Real runs aggregate tier counts and return
+codes (the sequential gate does not report per-row ids), so row-level identity is enforced only for
+authored controls. The authored controls drive real child processes but never run a gate or ROM and are
+not gameplay or performance evidence. Release status remains PARTIAL.

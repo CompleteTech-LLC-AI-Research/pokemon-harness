@@ -60,6 +60,8 @@ REAL_ROM_MODULES = frozenset(
 # reviewed and added to exactly one of these sets before it can enter pytest's
 # collection path.  This is deliberately a little repetitive: the manifest is
 # a guard against a test silently falling into the wrong production tier.
+_FRAME_ADMISSION_PARTS = ("invariants", "overrun", "rows", "span", "state_table", "validator")
+_PARALLEL_RUNTIME_PARTS = ("artifacts", "gate", "lifecycle", "plan")
 UNIT_MODULES = frozenset(
     {
         "test_normal_red_profile_support.py",
@@ -250,12 +252,8 @@ UNIT_MODULES = frozenset(
         "test_timed_battle_probe_contract.py",
         "test_timed_battle_probe_action_economy.py",
         "test_timed_battle_probe_admission.py",
-        "test_timed_frame_admission_invariants.py",
-        "test_timed_frame_admission_overrun.py",
-        "test_timed_frame_admission_rows.py",
-        "test_timed_frame_admission_span.py",
-        "test_timed_frame_admission_state_table.py",
-        "test_timed_frame_admission_validator.py",
+        *(f"test_timed_frame_admission_{part}.py" for part in _FRAME_ADMISSION_PARTS),
+        *(f"test_parallel_runtime_{part}.py" for part in _PARALLEL_RUNTIME_PARTS),
         "test_timed_battle_probe_ownership.py",
         "test_timed_battle_probe_terminal.py",
         "test_timed_input_observation.py",

@@ -196,6 +196,20 @@ def build_parser() -> argparse.ArgumentParser:
             "must be separate from --evidence-dir"
         ),
     )
+    parser.add_argument(
+        "--parallel-runtimes",
+        action="store_true",
+        help=(
+            "opt in to concurrent source and Cython runtime jobs under one immutable plan and "
+            "one global pair budget; requires --runtime-mode both, --capacity-policy and "
+            "--parallel-run-root (sequential execution remains the default)"
+        ),
+    )
+    parser.add_argument(
+        "--parallel-run-root",
+        type=Path,
+        help="existing private directory outside the checkout for per-job trees and the report",
+    )
     return parser
 
 
@@ -216,6 +230,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--smoke-only cannot be combined with --unit-only or --tier")
     if args.cython_python_executable is not None and args.runtime_mode != "both":
         parser.error("--cython-python requires --runtime-mode both")
+    if args.parallel_run_root is not None and not args.parallel_runtimes:
+        parser.error("--parallel-run-root requires --parallel-runtimes")
+    if args.parallel_runtimes and (
+        args.raw_output_dir is not None or args.evidence_dir is not None
+    ):
+        parser.error("--parallel-runtimes keeps per-job evidence under --parallel-run-root")
 
     raw_output_directory = None
     if args.raw_output_dir is not None:
@@ -254,6 +274,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         configuration_problems.append(nodeid_config_error)
 
     capacity_session = None
+    loaded_policy = None
+    loaded_policy_path = None
     capacity_payload = gate_capacity.unavailable_capacity(
         "no --capacity-policy supplied; capacity admission is not enforced"
     )
@@ -268,6 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             configuration_problems.append(f"capacity policy blocked: {policy_error}")
         else:
             capacity_session = gate_capacity.CapacitySession(policy, repo_root=project_root)
+            loaded_policy, loaded_policy_path = policy, capacity_path
 
     early_smoke = not (args.unit_only or args.tier or args.smoke_only)
     fail_fast = early_smoke if args.fail_fast is None else args.fail_fast
@@ -279,6 +302,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = list(dict.fromkeys(args.tier))
     else:
         selected = list(DEFAULT_TIERS)
+    if args.parallel_runtimes:
+        from scripts import production_gate_parallel as gate_parallel
+
+        return gate_parallel.run_parallel_cli(
+            args=args,
+            parser=parser,
+            project_root=project_root,
+            python_executable=python_executable,
+            cython_python_executable=cython_python_executable,
+            assets=assets,
+            required_nodeids_by_tier=required_nodeids_by_tier,
+            configuration_problems=configuration_problems,
+            capacity_policy=loaded_policy,
+            capacity_policy_path=loaded_policy_path,
+            selected=selected,
+            early_smoke=early_smoke,
+            fail_fast=fail_fast,
+        )
     accumulated_runtime_results: list[RuntimeGateResult] = []
     try:
         runtime_results = run_runtime_gates(
