@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from scripts import production_gate_parallel_isolation as isolation
 from scripts.production_gate_parallel_isolation import (
     IsolationError,
     assign_port_ranges,
@@ -66,11 +67,55 @@ def test_the_snapshot_is_a_private_copy_and_writes_are_denied_by_the_os(tmp_path
     assert not (tmp_path / "run" / "snapshot").exists()
 
 
-@pytest.mark.skipif(os.geteuid() != 0, reason="only when permission bits do not bind this process")
-def test_without_write_denial_the_snapshot_fails_closed_with_the_observed_evidence(tmp_path):
+def test_without_write_denial_the_snapshot_fails_closed_with_the_observed_evidence(
+    tmp_path, monkeypatch
+):
+    """Unconditional negative control: the production fail-closed path on a really writable copy.
+
+    The single mutation is a deliberate no-op ``freeze_tree`` - the exact counterfactual "the
+    freezer removed no write bit".  Everything else is production code on the real operating
+    system: ``build_snapshot`` copies the files, the real ``write_denied_problems`` really opens
+    a snapshot file for writing and really creates a directory, both succeed because nothing was
+    frozen, and ``build_snapshot`` then really removes its copy and raises.  Nothing is stubbed:
+    not the probe, not the error, not ``geteuid``, and no outcome is faked.  It therefore runs and
+    passes for any uid, with no skip.  Limits: it proves the production path refuses a writable
+    copy, not that every filesystem or OS enforces permission bits; the real denial is the
+    positive test above, which keeps its explicit boundary for hosts where bits do not bind root.
+    """
+
     root, rom, fixtures = repo(tmp_path)
-    with pytest.raises(IsolationError, match="isolation capability not established"):
-        build_snapshot(root, rom, fixtures, tmp_path / "run" / "snapshot")
+    destination = tmp_path / "run" / "snapshot"
+    bystander = tmp_path / "run" / "bystander.txt"
+    bystander.parent.mkdir()
+    bystander.write_text("owned by someone else")
+    production_freezer = isolation.freeze_tree
+    observed = {}
+
+    def no_op_freezer(frozen_root):
+        files = [p for p in sorted(frozen_root.rglob("*")) if p.is_file() and not p.is_symlink()]
+        observed["called_with"] = frozen_root
+        observed["files"] = len(files)
+        observed["os_writable"] = [os.access(p, os.W_OK) for p in files]
+
+    monkeypatch.setattr(isolation, "freeze_tree", no_op_freezer)
+    assert isolation.freeze_tree is not production_freezer
+    with pytest.raises(IsolationError, match="isolation capability not established") as raised:
+        build_snapshot(root, rom, fixtures, destination)
+    message = str(raised.value)
+    # Evidence the real probe can only produce when the OS really let both writes happen.
+    assert "a snapshot file opened for writing" in message
+    assert "a directory could be created" in message
+    # The OS itself reported every private copy as writable when the freezer should have acted.
+    assert observed["called_with"] == destination
+    assert observed["files"] >= 4 and all(observed["os_writable"])
+    # Owned cleanup: only the snapshot was removed; the source, assets and a bystander survive.
+    assert not destination.exists()
+    assert (root / "scripts" / "a.py").read_text() == "x = 1\n"
+    assert (rom / "red.gb").read_bytes() == b"rom"
+    assert (fixtures / "f.state").read_bytes() == b"fx"
+    assert bystander.read_text() == "owned by someone else"
+    monkeypatch.undo()
+    assert isolation.freeze_tree is production_freezer
 
 
 def test_a_second_snapshot_never_reuses_a_destination(tmp_path):
