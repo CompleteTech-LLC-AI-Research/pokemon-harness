@@ -6,7 +6,12 @@ membership reader and the kill/empty proof are driven through their injectable r
 
 from pathlib import Path
 
-from scripts.production_gate_parallel_cgroup import JobCgroup, kernel_ownership, own_cgroup_path
+from scripts.production_gate_parallel_cgroup import (
+    JobCgroup,
+    kernel_ownership,
+    own_cgroup_path,
+    qualification_after,
+)
 
 
 def hierarchy(tmp_path):
@@ -98,3 +103,28 @@ def test_kernel_ownership_is_required_or_explicitly_unqualified(tmp_path):
     permitted = kernel_ownership(False, create=missing)
     assert not permitted["qualified"] and permitted["admitted"]
     assert permitted["qualification"].startswith("UNQUALIFIED_COMPATIBILITY")
+
+
+def _facts(joined, emptied):
+    return {"process_tree": {"adoption": {"cgroup": {"joined": joined, "emptied": emptied}}}}
+
+
+def test_qualification_comes_from_per_job_facts_never_from_a_label():
+    probe = {"required": True, "qualified": True, "admitted": True}
+    both = {"a": _facts(True, True), "b": _facts(True, True)}
+    assert qualification_after(probe, both)["qualified_final"] is True
+    assert (
+        qualification_after(probe, {"a": _facts(True, True), "b": _facts(True, False)})[
+            "qualified_final"
+        ]
+        is False
+    )
+    assert qualification_after(probe, {"a": _facts(False, True)})["qualified_final"] is False
+    assert qualification_after(probe, {})["qualified_final"] is False, (
+        "nothing started proves nothing"
+    )
+    assert qualification_after({**probe, "required": False}, both)["qualified_final"] is False
+    assert qualification_after({**probe, "qualified": False}, both)["qualified_final"] is False
+    assert (
+        qualification_after(probe, {"a": {"process_tree": "garbage"}})["qualified_final"] is False
+    )

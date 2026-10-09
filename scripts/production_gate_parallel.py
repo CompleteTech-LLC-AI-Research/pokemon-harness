@@ -48,7 +48,12 @@ from scripts.production_gate_parallel_capacity import (
     require_parallel_capacity,
     write_pinned_policy,
 )
-from scripts.production_gate_parallel_cgroup import JobCgroup, kernel_ownership
+from scripts.production_gate_parallel_cgroup import (
+    JobCgroup,
+    OwnershipError,
+    kernel_ownership,
+    qualification_after,
+)
 from scripts.production_gate_parallel_declaration import COVERAGE_DECLARATION
 from scripts.production_gate_parallel_identity import (
     expected_identity,
@@ -654,11 +659,14 @@ def _run_plan(
                 if use_cgroup
                 else JobCgroup(None, "disabled by the caller")
             )
+            if require_kernel_ownership and not job_cgroup.available:
+                raise OwnershipError(f"kernel ownership is required: {job_cgroup.reason}")
             process, secret = launch_guardian(
                 receipt_path,
                 grace_seconds,
                 worker_argv,
-                cgroup=str(job_cgroup.path) if job_cgroup.available else "",
+                cgroup=("!" if require_kernel_ownership else "")
+                + (str(job_cgroup.path) if job_cgroup.available else ""),
                 cwd=project_root,
                 env=job_environment(
                     tree,
@@ -675,13 +683,16 @@ def _run_plan(
                 stderr=handles[1],
                 start_new_session=True,
             )
-        except (OSError, CapacityError) as exc:
+        except (OSError, CapacityError, OwnershipError) as exc:
             close_handoff(job_id)
             hub.unregister(job_id)
             job_cgroup.remove()
             for handle in handles:
                 handle.close()
-            settle(job_id, "failed", f"could not start: {type(exc).__name__}")
+            detail = str(exc) if isinstance(exc, OwnershipError) else type(exc).__name__
+            settle(job_id, "failed", f"could not start: {detail}")
+            if isinstance(exc, OwnershipError):
+                hub.lose(f"{job_id}: {detail}")
             if body["fail_fast"] and may_cancel_siblings(phase_of[job_id], True):
                 cancel(f"fail_fast: {job_id} could not start")
             return
@@ -881,7 +892,7 @@ def _run_plan(
             load=(load_before, os.getloadavg() if hasattr(os, "getloadavg") else ()),
         )
     )
-    report["kernel_ownership"] = ownership
+    report["kernel_ownership"] = qualification_after(ownership, cleanup)
     return report
 
 

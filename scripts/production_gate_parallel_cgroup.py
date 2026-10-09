@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -164,4 +164,52 @@ def kernel_ownership(
     }
 
 
-__all__ = ("JobCgroup", "kernel_ownership", "own_cgroup_path")
+class OwnershipError(RuntimeError):
+    """Kernel ownership was required for a job and could not be established."""
+
+
+def qualification_after(
+    ownership: Mapping[str, object], cleanup: Mapping[str, Mapping[str, object]]
+) -> dict[str, object]:
+    """Final kernel-ownership truth from per-job facts, never from a label or a probe alone.
+
+    A run is kernel-qualified only if ownership was REQUIRED, the probe passed and every job that
+    started both joined its cgroup and had it emptied by the kernel's own reading.  The explicit
+    unqualified compatibility mode (not required) can never be qualified, whatever the probe saw.
+    """
+
+    jobs: dict[str, dict[str, bool]] = {}
+    for job_id, entry in cleanup.items():
+        tree = entry.get("process_tree") if isinstance(entry, Mapping) else None
+        adoption = tree.get("adoption") if isinstance(tree, Mapping) else None
+        group = adoption.get("cgroup") if isinstance(adoption, Mapping) else None
+        group = group if isinstance(group, Mapping) else {}
+        jobs[job_id] = {
+            "joined": group.get("joined") is True,
+            "emptied": group.get("emptied") is True,
+        }
+    qualified = (
+        ownership.get("required") is True
+        and ownership.get("qualified") is True
+        and bool(jobs)
+        and all(fact["joined"] and fact["emptied"] for fact in jobs.values())
+    )
+    return {
+        **ownership,
+        "jobs": jobs,
+        "qualified_final": qualified,
+        "qualification_final": (
+            "kernel ownership proven for every started job; full #107 acceptance is not claimed"
+            if qualified
+            else "UNQUALIFIED: kernel ownership was not required, not available or not proven per job"
+        ),
+    }
+
+
+__all__ = (
+    "JobCgroup",
+    "OwnershipError",
+    "kernel_ownership",
+    "own_cgroup_path",
+    "qualification_after",
+)

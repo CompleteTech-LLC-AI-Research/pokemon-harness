@@ -432,3 +432,47 @@ def test_an_unattributed_child_with_the_job_token_is_never_signalled_and_blocks_
     assert untouched, "a child that is not kernel-attributed to the job must never be signalled"
     assert receipt["adoption"]["unattributed"] == [outsider.pid]
     assert receipt["adoption"]["proof"] is False and cleanup_proven(receipt, None, None) is False
+
+
+MARK_WORKER = "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('spawned')"
+
+
+def run_marking_guardian(tmp_path, cgroup):
+    receipt, mark = tmp_path / "guardian.json", tmp_path / "spawned.txt"
+    process, secret = launch_guardian(
+        receipt,
+        1.0,
+        [sys.executable, "-c", MARK_WORKER, str(mark)],
+        cgroup=cgroup,
+        start_new_session=True,
+    )
+    process.wait(timeout=30)
+    return process, secret, receipt, mark
+
+
+def test_required_ownership_refuses_to_spawn_the_worker_when_the_cgroup_join_fails(tmp_path):
+    process, secret, receipt, mark = run_marking_guardian(
+        tmp_path, "!" + str(tmp_path / "no-cgroup")
+    )
+    assert process.returncode == 70 and not mark.exists(), "the worker must never exist"
+    body, problems = read_guardian_receipt(receipt, secret, process.pid)
+    assert body["never_started"] is True and body["contained"] is False and body["proof"] is False
+    assert "cgroup join failed" in body["reason"], "the original reason is recorded"
+    assert any("cgroup join failed" in item for item in problems)
+    assert process.guardian_status.absent_proof(), (
+        "EOF without spawn intent proves no worker existed"
+    )
+
+
+def test_required_ownership_without_any_cgroup_path_also_refuses(tmp_path):
+    process, secret, receipt, mark = run_marking_guardian(tmp_path, "!")
+    assert process.returncode == 70 and not mark.exists()
+    body, _problems = read_guardian_receipt(receipt, secret, process.pid)
+    assert body["never_started"] is True and "no cgroup was supplied" in body["reason"]
+
+
+def test_without_the_required_marker_a_failed_join_is_recorded_and_the_worker_still_runs(tmp_path):
+    process, secret, receipt, mark = run_marking_guardian(tmp_path, str(tmp_path / "no-cgroup"))
+    assert mark.read_text() == "spawned"
+    body, _problems = read_guardian_receipt(receipt, secret, process.pid)
+    assert body["contained"] is True and body["cgroup_error"], "unqualified: recorded, never hidden"

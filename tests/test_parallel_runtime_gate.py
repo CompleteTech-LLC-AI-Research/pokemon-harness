@@ -617,3 +617,33 @@ def test_a_child_policy_that_stops_being_the_plan_pinned_one_closes_admission_an
     assert "child capacity policy changed" in report["cancellation"]
     assert all(job["state"] != "passed" for job in report["jobs"])
     assert report["elapsed_seconds"] < 20
+
+
+def test_required_kernel_ownership_refuses_every_job_whose_cgroup_cannot_be_created(
+    tmp_path, monkeypatch
+):
+    ready = {
+        "required": True,
+        "qualified": True,
+        "admitted": True,
+        "reason": "",
+        "qualification": "probe",
+    }
+    monkeypatch.setattr("scripts.production_gate_parallel.kernel_ownership", lambda required: ready)
+    monkeypatch.setattr(
+        "scripts.production_gate_parallel.JobCgroup.create",
+        classmethod(lambda cls, name, **_kw: cls(None, "refused by the host for this job")),
+    )
+    budget = PairBudget(2)
+    plan, root, report = run(
+        tmp_path, {"source": "pass", "cython": "pass"}, budget=budget, require_kernel_ownership=True
+    )
+    assert {job["state"] for job in report["jobs"]} == {"failed"} and report["overall"] == "FAIL"
+    for job in report["jobs"]:
+        assert (
+            "kernel ownership is required" in job["reason"]
+            and "refused by the host" in job["reason"]
+        )
+    assert not list((root / plan.run_id).glob("*/guardian.json")), "no guardian, hence no worker"
+    assert report["kernel_ownership"]["qualified_final"] is False
+    assert budget.reserved_total == 0

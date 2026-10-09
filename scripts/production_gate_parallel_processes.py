@@ -521,6 +521,8 @@ import ctypes, hashlib, hmac, json, os, resource, subprocess, time
 receipt_path, grace = sys.argv[1], float(sys.argv[2])
 secret_fd, status_fd, argv = int(sys.argv[3]), int(sys.argv[4]), sys.argv[6:]
 cgroup = sys.argv[5][9:] if sys.argv[5].startswith("--cgroup=") else ""
+required = cgroup.startswith("!")  # qualified mode: no ownership, no worker
+cgroup = cgroup.lstrip("!")
 cgroup_error = ""
 parent = os.getppid()
 secret = bytes.fromhex(os.read(secret_fd, 256).decode())
@@ -563,12 +565,24 @@ if os.getppid() != parent:
 if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
     final(contained=False, proof=False, reason="subreaper could not be established")
     sys.exit(70)
+if required and not cgroup:
+    final(contained=False, proof=False, never_started=True,
+          reason="kernel ownership is required but no cgroup was supplied")
+    sys.exit(70)
 if cgroup:
     try:
+        own = [l[3:] for l in open("/proc/self/cgroup").read().splitlines() if l.startswith("0::")][0]
         with open(cgroup + "/cgroup.procs", "w") as handle:
             handle.write(str(me))
-    except OSError as exc:
-        cgroup_error = type(exc).__name__
+        joined = ("0::" + own.rstrip("/") + "/" + os.path.basename(cgroup)) in open("/proc/self/cgroup").read().splitlines()
+        if not joined:
+            cgroup_error = "join not visible in /proc/self/cgroup"
+    except (OSError, IndexError) as exc:
+        cgroup_error = type(exc).__name__ + (": " + str(exc) if str(exc) else "")
+    if cgroup_error and required:
+        final(contained=False, proof=False, never_started=True,
+              reason="cgroup join failed: " + cgroup_error)
+        sys.exit(70)
 write({"phase": "ready", "cgroup": cgroup, "cgroup_error": cgroup_error})  # handlers and subreaper are in place
 note(b"R")
 if stopped:
@@ -822,7 +836,11 @@ def read_guardian_receipt(
     if body.get("phase") == "ready":
         return body, ["the guardian never finished: containment unproven"]
     if body.get("contained") is not True:
-        return body, ["the guardian could not establish containment"]
+        return body, [
+            "the guardian could not establish containment ("
+            + str(body.get("reason") or body.get("cgroup_error") or "no reason recorded")
+            + ")"
+        ]
     if body.get("start_error"):
         return body, [f"could not start: {body['start_error']}"]
     problems = []
