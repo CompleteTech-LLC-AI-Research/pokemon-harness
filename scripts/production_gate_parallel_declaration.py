@@ -24,8 +24,10 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         ),
         (
             "live parent arbiter: every child row reservation, release, block, expiry and loss over "
-            "a bounded authenticated acknowledged protocol; a lost arbiter, guardian, policy or "
-            "capacity closes admission and signals every owned guardian at once"
+            "a bounded authenticated acknowledged protocol; a lost arbiter (including a dropped "
+            "connection, whose reservations are retained until cleanup is proved), guardian, policy "
+            "or capacity closes admission and signals every owned guardian at once; explicit "
+            "production enrolment bound to the digest of the policy bytes parsed"
         ),
         "phases: both additional smokes complete before any selected-tier job; both retained",
         (

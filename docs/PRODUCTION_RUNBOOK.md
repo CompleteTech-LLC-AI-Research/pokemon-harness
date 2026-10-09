@@ -1820,9 +1820,16 @@ the real-ROM qualification is a separate requirement.
   child's local ceiling). A lost arbiter (silent lease, repeated violations, unreachable), a lost guardian, a
   policy different from the plan pin or a capacity loss closes admission for every job at once and signals
   every owned guardian immediately; a child that cannot reach its arbiter refuses to run, so there is no
-  fallback to static shares or to final-only reports. The key and socket name reach the job through its
-  environment, so the MAC proves job binding, not secrecy against a hostile process of the same UID. Ordinary
-  standalone gate use is unchanged.
+  fallback to static shares or to final-only reports. A child connection that drops without a bye is itself
+  a lost arbiter: the reservations it held stay in the book as retained evidence, still counted against the
+  one budget, and are freed only when the owner has proved the job's cleanup. Enrolment is explicit: only the
+  production entry point enrols its capacity session, bound to the job identity and to the digest of the very
+  bytes it parsed (the policy file is read once, hashed and parsed from those bytes), and it then removes the
+  credentials from its environment; the pytest environment builder strips them as well, so synthetic
+  sessions and their simulated losses can never reach the real book. The key and socket name still reach the
+  gate process through its environment block (`/proc/<pid>/environ` keeps the original), so the MAC proves
+  job binding, not secrecy against a hostile process of the same UID. Ordinary standalone gate use is
+  unchanged.
 - **Owned processes.** Every job runs under a job-local guardian (a subreaper) that starts the worker in its
   own session; both guardian and worker die with their parent (`PR_SET_PDEATHSIG`), and SIGTERM/SIGHUP of the
   orchestrator become the bounded-cancel interrupt. An orphan created at any instant is re-parented to the
@@ -1842,7 +1849,10 @@ the real-ROM qualification is a separate requirement.
   `cgroup.kill` plus the kernel's own `populated 0` reading. On a host without delegation (for example a
   root-owned `0::/` cgroup) that layer is unavailable. The fully qualified mode, which is the default of
   `--parallel-runtimes`, REQUIRES that kernel ownership: when it is unavailable the run is refused before any
-  child exists and every job is `not_started`. `--parallel-allow-unqualified` runs on adoption and retention
+  child exists and every job is `not_started`; a job whose cgroup cannot be created is refused with the
+  original reason, and the guardian verifies its join in `/proc/self/cgroup` and refuses to spawn the
+  worker when it cannot (the parent's status pipe then proves no worker existed). The report's
+  `qualified_final` is derived from the per-job joined and emptied facts, never from the probe or a label. `--parallel-allow-unqualified` runs on adoption and retention
   evidence only and the report says `UNQUALIFIED_COMPATIBILITY`; an observational sweep is never claimed to
   close the escaped-orphan window, and no run claims full #107 acceptance.
 - **Strict aggregation.** The parent re-reads the referenced complete gate report itself and re-derives
