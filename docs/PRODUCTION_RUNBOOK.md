@@ -1783,20 +1783,31 @@ the real-ROM qualification is a separate requirement.
   global configuration), removes all write permission bits, and probes that the OS really refuses writes (a
   snapshot file opened for writing or a directory creation fails closed with the observed evidence). Every job
   runs from the snapshot. The native import-origin guard accepts an installation attributed to the original
-  checkout only after proving that checkout's tracked bytes are identical to the snapshot's. Shared
-  site-packages are hashed before and after every job, not write-protected. No host or global permission is
-  changed.
-- **Ports.** Each job gets a disjoint loopback port range; helpers that use the job port allocator hold an
-  `flock` reservation for the life of the allocating process. A number-only API cannot be made race-free
-  against a non-cooperating binder: the window between handing out a port and the consumer's bind remains,
-  and inline `bind(0)` uses in files outside the authorised paths still release before binding
-  (`tests/_mcp_trade_records_rom_support.py`, `tests/test_timed_remote.py`); observed listeners outside the
-  assigned range fail the run.
+  checkout only after proving that checkout's tracked bytes are identical to the snapshot's. The interpreter
+  environment is resolved too (interpreter, stdlib, default `sys.path`, site directories, shared libraries a
+  real run maps): a virtual environment is copied into a private tree whose editable installs are redirected
+  to the snapshot and which is frozen like the snapshot, and every job runs the copy's interpreter. The base
+  interpreter, its stdlib and every other mapped library must already be unwritable for the executing UID by
+  the kernel's own access check, otherwise the run is refused (copying a base prefix is not implemented).
+  Permission bits refuse ordinary writes by the job; they do not bind the owner against a deliberate `chmod`.
+  No host or global permission is changed.
+- **Ports.** Each job gets a disjoint loopback port range and an owner-held listener broker. A consumer
+  leases a port: the orchestrator binds and listens the socket itself and keeps it, and the production
+  listener (`NetworkBackend.listen`, the timed listener and its MCP owner, the serial-link listener and the
+  MCP link listener) receives that very socket over a unix socket (SCM_RIGHTS), validates it (TCP stream,
+  listening, loopback, exact port), acknowledges, and only then does the owner close its own copy, so no
+  competing binder can take the port in between. Without the broker variable every listener binds as before;
+  a parallel job without a broker refuses a bare port number. A listener that nothing leased is not covered,
+  and observed listeners outside the assigned range fail the run.
 - **Capacity.** One global budget is partitioned: each child gate receives a derived policy file with the
   same limits and `max_concurrent_pairs` equal to its share, so its actual tier and matrix row admission is
   governed, and the shares sum to at most the total. The parent's session samples the filesystem of the run
   root and runs under its background monitoring, so observation cannot delay deadline enforcement. Unknown or
-  insufficient capacity, a queued or blocked admission and a lost reservation fail closed.
+  insufficient capacity, a queued or blocked admission and a lost reservation fail closed. The effective child
+  policy digests are frozen in the plan, re-proven when written and verified by the worker. A blocked or
+  expired admission reported by one child marks the one budget lost and cancels the siblings even without
+  fail-fast. This is partitioned allocation with propagated loss; it is not an arbiter between the children's
+  own row admission.
 - **Owned processes.** Every job runs under a job-local guardian (a subreaper) that starts the worker in its
   own session; both guardian and worker die with their parent (`PR_SET_PDEATHSIG`), and SIGTERM/SIGHUP of the
   orchestrator become the bounded-cancel interrupt. An orphan created at any instant is re-parented to the
@@ -1804,8 +1815,13 @@ the real-ROM qualification is a separate requirement.
   The parent also reads its own status pipe from the guardian (ready, spawn intent): a missing file proves
   nothing, but end-of-stream without spawn intent is affirmative proof that no worker existed. A reservation
   is released, and a temp tree or the snapshot removed, only after the parent's pidfd proof AND the guardian's
-  proof hold; a failed or interrupted job keeps its temp tree. If the guardian itself is killed from outside,
-  the job stays unproven (reservation and trees retained) and only the parent's observation covers orphans.
+  proof hold; a failed or interrupted job keeps its temp tree. The orchestrator is itself a child subreaper
+  while it runs jobs, so when a guardian is killed from outside its subtree is re-parented to the
+  orchestrator, which lists only its own children, pins by pidfd those that are kernel-attributed to the job
+  (lineage from pinned processes, the job's sessions, the worker the guardian reported on its pipe),
+  terminates them and records an adoption proof. Any other adopted child is listed as unattributed, is never
+  signalled, and keeps the cleanup unproven (reservation and trees retained). An orphan that left the job's
+  session and whose parent died before the first sweep is unattributed.
 - **Strict aggregation.** The parent re-reads the referenced complete gate report itself and re-derives
   tiers, rows and verdict from it; rows come from the producer's actual per-test terminal records (all games,
   ordered `listener`/`connector` roles, per repetition) carried through the gate with
@@ -1813,13 +1829,19 @@ the real-ROM qualification is a separate requirement.
   frozen one. Identity is measured by the worker before and after and by the parent after the job. Decoding is
   bounded and total: nesting, size, duplicate keys, non-finite numbers and hostile containers are recorded
   failures that never abort the other jobs' evidence. Completed failures are harvested before any cancellation,
-  and a cancelled job keeps its recovered terminal artifact and digested partial evidence beside its status.
+  and a cancelled job keeps its recovered terminal artifact, digested partial evidence and a bounded strict
+  parse of its partial gate report (per-tier claimed status, counts, last iteration, errors; never a verdict).
 - **Comparison.** `--parallel-serial` runs the same plan one job at a time; `--parallel-compare-to` re-validates
   both bundles and requires equivalent plans, genuinely serial (ordered, non-overlapping) and genuinely
   concurrent (overlapping) parent-observed intervals, every smoke job ended before any selected job began,
-  measured resource traces with equal CPU affinity, no capacity loss and a lifecycle proof for every job.
+  measured resource traces with equal CPU affinity, no capacity loss and a lifecycle proof for every job. It
+  also requires each guardian's measured CPU and peak memory (wait4 rusage), every concurrent phase to fit the
+  one pair budget, every job and the whole run to stay inside their derived deadlines, and reports a declared
+  CPU-time equivalence factor that is evidence next to the measurements, not a qualification.
 
 Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
 with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy and
-the 18 orientation fixtures are not provided by this change. The authored controls drive real child processes
+the 18 orientation fixtures are not provided by this change. Also not implemented: a private copy of a
+writable base interpreter prefix, cgroup-level kernel ownership of every descendant, pinning the runtime
+manifest in the plan, and arbitration between the children's row admission. The authored controls drive real child processes
 but never run a gate or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.
