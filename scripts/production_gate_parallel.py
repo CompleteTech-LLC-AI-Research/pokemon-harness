@@ -67,6 +67,7 @@ from scripts.production_gate_parallel_phases import (
 from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
+    OrchestratorAdoption,
     OwnedTree,
     cleanup_proven,
     launch_guardian,
@@ -396,9 +397,54 @@ def run_parallel_plan(
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     wall_clock: Callable[[], datetime] = _wall_now,
+    adopt_orphans: bool = True,
 ) -> dict[str, Any]:
     """Dispatch every planned job (phase by phase) and return the retained aggregate report."""
 
+    with OrchestratorAdoption(enabled=adopt_orphans) as adoption:
+        return _run_plan(
+            plan,
+            adoption=adoption,
+            run_root=run_root,
+            project_root=project_root,
+            budget=budget,
+            worker_argv_factory=worker_argv_factory,
+            base_env=base_env,
+            capacity=capacity,
+            capacity_probe=capacity_probe,
+            interrupt=interrupt,
+            serial=serial,
+            measure=measure,
+            capacity_policy_text=capacity_policy_text,
+            poll_seconds=poll_seconds,
+            grace_seconds=grace_seconds,
+            clock=clock,
+            sleeper=sleeper,
+            wall_clock=wall_clock,
+        )
+
+
+def _run_plan(
+    plan: ParallelPlan,
+    *,
+    adoption: OrchestratorAdoption,
+    run_root: Path,
+    project_root: Path,
+    budget: PairBudget,
+    worker_argv_factory: WorkerArgvFactory,
+    base_env: Mapping[str, str] | None,
+    capacity: LiveCapacity | None,
+    capacity_probe: Callable[[], object] | None,
+    interrupt: threading.Event | None,
+    serial: bool,
+    measure: Measurer | None,
+    capacity_policy_text: str | None,
+    poll_seconds: float,
+    grace_seconds: float,
+    clock: Callable[[], float],
+    sleeper: Callable[[float], None],
+    wall_clock: Callable[[], datetime],
+) -> dict[str, Any]:
     body = plan.as_dict()
     live = capacity or LiveCapacity(budget, probe=capacity_probe)
     started = clock()
@@ -606,7 +652,14 @@ def run_parallel_plan(
                 clock() + float(job["deadline_seconds"]),
                 tree,
                 token,
-                OwnedTree(process.pid, token, clock=clock),
+                OwnedTree(
+                    process.pid,
+                    token,
+                    clock=clock,
+                    adoption=adoption,
+                    status=process.guardian_status,  # type: ignore[attr-defined]
+                    known_children=lambda: {i.process.pid for i in running},
+                ),
                 launched,
                 receipt_path,
                 secret,

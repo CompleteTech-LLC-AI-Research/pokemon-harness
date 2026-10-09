@@ -8,6 +8,7 @@ is gameplay, real-ROM or performance evidence and none of it closes the full dua
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -33,6 +34,14 @@ if name == "kill_guardian":
     import signal as _signal
     os.kill(os.getppid(), _signal.SIGKILL)
     time.sleep(0.3)
+if name == "kill_guardian_orphan":
+    import signal as _signal, subprocess as _subprocess
+    orphan = _subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                               start_new_session=True)
+    open(os.path.join(job_root, "orphan.pid"), "w").write(str(orphan.pid))
+    os.kill(os.getppid(), _signal.SIGKILL)
+    time.sleep(0.3)
+    os._exit(0)
 if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
@@ -446,11 +455,47 @@ def test_with_the_early_smoke_all_four_jobs_run_in_phase_order_and_are_retained(
 
 def test_a_guardian_killed_from_outside_keeps_the_reservation_and_fails_the_run(tmp_path):
     budget = PairBudget(2)
-    _, _, report = run(tmp_path, {"source": "kill_guardian", "cython": "pass"}, budget=budget)
+    _, _, report = run(
+        tmp_path,
+        {"source": "kill_guardian", "cython": "pass"},
+        budget=budget,
+        adopt_orphans=False,  # v8: adoption off is the unproven case; the default is the next test
+    )
     assert states(report) == {"source": "failed", "cython": "passed"}
     assert budget.reserved_total == 1, "a reservation was released without a proven cleanup"
     assert any("cleanup unproven" in item for item in report["orchestration_problems"])
     assert report["overall"] == "FAIL"
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_a_killed_guardian_is_contained_by_orchestrator_adoption_with_a_proven_cleanup(tmp_path):
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        budget = PairBudget(2)
+        plan, root, report = run(
+            tmp_path, {"source": "kill_guardian_orphan", "cython": "pass"}, budget=budget
+        )
+        pid_files = list((root / plan.run_id).glob("*/orphan.pid"))
+        assert pid_files, "the scenario never started its detached grandchild"
+        orphan = int(pid_files[0].read_text())
+        assert not _alive(orphan), "an orphan of the killed guardian outlived the run"
+        assert states(report)["source"] == "failed" and report["overall"] == "FAIL"
+        tree = report["cleanup"][pid_files[0].parent.name]["process_tree"]
+        assert tree["adoption"]["proof"] is True and tree["adoption"]["orphans_pinned"] >= 1
+        assert tree["adoption"]["unattributed"] == []
+        assert not any("cleanup unproven" in item for item in report["orchestration_problems"])
+        assert budget.reserved_total == 0, "proven adoption cleanup must release the reservation"
+        assert sentinel.poll() is None, "an unrelated child of the orchestrator was signalled"
+    finally:
+        sentinel.kill()
+        sentinel.wait()
 
 
 def test_failed_and_interrupted_jobs_keep_their_temp_trees_and_recover_partial_evidence(tmp_path):

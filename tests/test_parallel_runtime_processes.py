@@ -15,11 +15,14 @@ import time
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     GuardianStatus,
+    OrchestratorAdoption,
     OwnedTree,
+    children_of,
     cleanup_proven,
     interrupt_on_signals,
     launch_guardian,
     read_guardian_receipt,
+    read_session,
     read_stat,
 )
 
@@ -331,3 +334,64 @@ def test_a_missing_or_unproven_guardian_receipt_is_a_failed_closed_problem(tmp_p
     assert read_guardian_receipt(tmp_path / "absent.json")[1]
     (tmp_path / "bad.json").write_text('{"contained": false}', encoding="utf-8")
     assert read_guardian_receipt(tmp_path / "bad.json")[1]
+
+
+def test_children_of_lists_only_the_named_process_children_and_nothing_else():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert child.pid in children_of(os.getpid())
+        assert child.pid not in children_of(child.pid)
+        assert children_of(2**22 + 12345) == []
+        assert read_session(child.pid) == read_session(os.getpid())
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_orchestrator_adoption_sets_reads_back_and_restores_the_subreaper_flag():
+    with OrchestratorAdoption() as adoption:
+        assert adoption.active and adoption.verify()
+        previous = adoption._previous
+    assert adoption.verify() is bool(previous)
+    with OrchestratorAdoption(enabled=False) as disabled:
+        assert not disabled.active and not disabled.verify()
+
+
+def test_an_orphan_reparented_to_the_orchestrator_is_pinned_terminated_and_proven(tmp_path):
+    script = (
+        "import os, subprocess, sys\n"
+        "w = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " start_new_session=True)\n"
+        "print(w.pid, flush=True)\n"
+        "os._exit(0)\n"
+    )
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    with OrchestratorAdoption() as adoption:
+        guardian = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            text=True,
+            env={**os.environ, JOB_TOKEN_ENV: "tok-adopt"},
+        )
+        orphan = int(guardian.stdout.readline())
+        end = time.monotonic() + 10
+        while time.monotonic() < end and (read_stat(guardian.pid) or (0, 0, "?"))[2] != "Z":
+            time.sleep(0.02)
+        tree = OwnedTree(guardian.pid, "tok-adopt", adoption=adoption)
+        try:
+            receipt = tree.terminate(grace_seconds=1.0)
+        finally:
+            guardian.wait()
+            sentinel_alive = sentinel.poll() is None
+            sentinel.kill()
+            sentinel.wait()
+    assert not alive(orphan), "the re-parented orphan survived the sweep"
+    assert receipt["adoption"]["proof"] is True and receipt["adoption"]["orphans_pinned"] == 1
+    assert receipt["proof"] is True and sentinel_alive, "an unrelated child must not be signalled"
+
+
+def test_cleanup_is_unproven_when_adoption_was_not_active_at_launch(tmp_path):
+    receipt = {"proof": True, "adoption": {"proof": False}}
+    assert cleanup_proven(receipt, None, None) is False
+    receipt["adoption"]["proof"] = True
+    assert cleanup_proven(receipt, None, None) is True

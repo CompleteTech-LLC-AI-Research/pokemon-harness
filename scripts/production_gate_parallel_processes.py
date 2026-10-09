@@ -25,10 +25,12 @@ guardian could not establish the subreaper never runs its worker (fail closed).
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import hmac
 import json
 import os
+import re
 import select
 import signal
 import subprocess
@@ -37,13 +39,17 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from scripts.production_gate_parallel_validation import loads_strict
 
 JOB_TOKEN_ENV = "POKERED_PARALLEL_JOB_TOKEN"
 LISTEN_STATE = "0A"
 DEFAULT_OBSERVE_SECONDS = 0.1
+SIGKILL_NUMBER = signal.SIGKILL
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
+ORPHAN_ROUNDS = 3
 
 
 def read_stat(pid: int) -> tuple[int, int, str] | None:
@@ -58,6 +64,100 @@ def read_stat(pid: int) -> tuple[int, int, str] | None:
         return int(rest[19]), int(rest[1]), rest[0]
     except (ValueError, IndexError):
         return None
+
+
+def read_session(pid: int) -> int | None:
+    """Session id of ``pid`` (field 6 of /proc/<pid>/stat), or None when it is gone."""
+
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace")
+        return int(raw[raw.rindex(")") + 2 :].split()[3])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def children_of(pid: int) -> list[int] | None:
+    """Direct children of ``pid`` from its own per-thread ``children`` files.
+
+    Only the named process is read, never the whole process table.  None means this kernel does
+    not list children (no CONFIG_PROC_CHILDREN), which must be treated as containment unproven.
+    """
+
+    base = Path(f"/proc/{pid}/task")
+    try:
+        threads = os.listdir(base)
+    except OSError:
+        return []
+    found: list[int] = []
+    for thread in threads:
+        try:
+            text = (base / thread / "children").read_text(encoding="ascii")
+        except FileNotFoundError:
+            if (base / thread).exists():
+                return None
+            continue
+        except OSError:
+            continue
+        found.extend(int(item) for item in text.split() if item.isdigit())
+    return found
+
+
+def environ_has_token(pid: int, token: str) -> bool:
+    """Attribution label only, and only ever asked about a process that is already our own child."""
+
+    try:
+        data = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return f"{JOB_TOKEN_ENV}={token}".encode() in data.split(b"\0")
+
+
+class OrchestratorAdoption:
+    """The orchestrator itself is a child subreaper while it runs jobs.
+
+    A guardian that is SIGKILLed can no longer contain its subtree; with this flag the kernel
+    re-parents that subtree to the orchestrator instead of init, so every orphan stays inside the
+    orchestrator's own children list, where it can be pinned by pidfd and terminated.  The flag is
+    read back, and restored when the run ends.  Where it cannot be established nothing is claimed.
+    """
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self.active = False
+        self.reason = "" if enabled else "disabled by the caller"
+        self._previous = 0
+        self._libc: Any = None
+
+    def verify(self) -> bool:
+        if self._libc is None:
+            return False
+        flag = ctypes.c_int(0)
+        return (
+            self._libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(flag), 0, 0, 0) == 0
+            and flag.value == 1
+        )
+
+    def __enter__(self) -> Self:
+        if not self.enabled:
+            return self
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            flag = ctypes.c_int(0)
+            if libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(flag), 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER")
+            self._previous = flag.value
+            if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+            self._libc = libc
+            self.active = self.verify()
+        except (OSError, AttributeError) as exc:
+            self.reason = f"subreaper not established: {exc}"
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._libc is not None and not self._previous:
+            self._libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+        self.active = False
 
 
 def process_table() -> dict[int, tuple[int, int, str]]:
@@ -124,8 +224,18 @@ class OwnedTree:
         *,
         clock: Callable[[], float] = time.monotonic,
         observe_seconds: float = DEFAULT_OBSERVE_SECONDS,
+        adoption: OrchestratorAdoption | None = None,
+        status: GuardianStatus | None = None,
+        known_children: Callable[[], set[int]] = set,
     ) -> None:
         self.root_pid = root_pid
+        self._known_children = known_children
+        self.adoption = adoption
+        self.status = status
+        self.launch_adopting = bool(adoption is not None and adoption.verify())
+        self.orphans_pinned = 0
+        self.unattributed: list[int] = []
+        self._orphans: set[int] = set()
         self.token = token  # attestation only; never used to find or signal a process
         self._clock = clock
         self._observe_seconds = observe_seconds
@@ -172,23 +282,107 @@ class OwnedTree:
         return self._alive_set()
 
     def observe(self, *, force: bool = False) -> None:
-        """Adopt new descendants, walking only down from verified-owned live parents."""
+        """Adopt new descendants, walking only down from verified-owned live parents.
+
+        Each owned process is asked for its own children; no other process is read.
+        """
 
         now = self._clock()
         if not self.contained or (not force and now - self._last < self._observe_seconds):
             return
         self._last = now
-        table = process_table()
-        frontier = self._alive_set()
-        grew = True
-        while grew:
-            grew = False
-            for pid, (started, parent, _state) in table.items():
-                if pid not in self._entries and parent in frontier and self._adopt(pid, started):
-                    frontier.add(pid)
-                    grew = True
+        frontier = sorted(self._alive_set())
+        while frontier:
+            parent = frontier.pop()
+            kids = children_of(parent)
+            if kids is None:
+                self.contained = False
+                self.reason = "containment not established: the kernel lists no children"
+                return
+            for pid in kids:
+                if pid in self._entries:
+                    continue
+                stat = read_stat(pid)
+                if stat is None or stat[1] != parent:
+                    continue
+                if self._adopt(pid, stat[0]):
+                    frontier.append(pid)
+                elif not self.contained:
+                    return
         for ports in socket_ports(self._alive_set()).values():
             self.ports.update(ports)
+
+    def pin_orphans(self) -> None:
+        """Pin what the kernel re-parented to this orchestrator and belongs to this job.
+
+        Ownership is "our own child, pinned by pidfd after its start time was re-read"; the job
+        session, the worker the guardian reported over the status pipe, or the job token only
+        label which job an orphan came from.  Children that cannot be attributed are listed and
+        never signalled.
+        """
+
+        adoption = self.adoption
+        if adoption is None or not self.contained:
+            return
+        if not adoption.verify():
+            self.reason = "orchestrator subreaper flag is no longer set: adoption unproven"
+            self.launch_adopting = False
+            return
+        me = os.getpid()
+        kids = children_of(me)
+        if kids is None:
+            self.contained = False
+            self.reason = "containment not established: the kernel lists no children"
+            return
+        if self.status is not None:
+            self.status.drain()
+        worker = self.status.worker if self.status is not None else None
+        sessions = {self.root_pid} | ({worker[0]} if worker is not None else set())
+        root_start = self.root_start or 0
+        foreign: list[int] = []
+        known = self._known_children()
+        for pid in kids:
+            if pid in self._entries or pid in known:
+                continue
+            stat = read_stat(pid)
+            if stat is None or stat[1] != me:
+                continue
+            descriptor = _pidfd_open(pid)
+            if descriptor is None:
+                self.contained = False
+                self.reason = "containment not established: an orphan could not be pinned"
+                return
+            again = read_stat(pid)
+            if again is None or again[0] != stat[0]:
+                os.close(descriptor)
+                continue
+            mine = (
+                read_session(pid) in sessions
+                or (worker is not None and (pid, stat[0]) == worker)
+                or environ_has_token(pid, self.token)
+            )
+            if mine:
+                self._entries[pid] = (descriptor, stat[0])
+                self._orphans.add(pid)
+                self.adopted_total += 1
+                self.orphans_pinned += 1
+            else:
+                os.close(descriptor)
+                if stat[0] > root_start and stat[2] != "Z":
+                    foreign.append(pid)
+        self.unattributed = foreign
+
+    def pin_new(self) -> None:
+        self.observe(force=True)
+        self.pin_orphans()
+        self.observe(force=True)
+
+    def _reap_orphans(self) -> None:
+        for pid in list(self._orphans):
+            entry = self._entries.get(pid)
+            if entry is not None and _exited(entry[0]):
+                with contextlib.suppress(OSError, AttributeError):
+                    os.waitid(os.P_PIDFD, entry[0], os.WEXITED | os.WNOHANG)
 
     def current_ports(self) -> set[int]:
         return {p for ports in socket_ports(self._alive_set()).values() for p in ports}
@@ -212,7 +406,7 @@ class OwnedTree:
     ) -> dict[str, Any]:
         """TERM every pinned live process, wait a bounded time, KILL the rest, prove absence."""
 
-        self.observe(force=True)
+        self.pin_new()
         states_before = {
             pid: ("exited" if _exited(fd) else "alive") for pid, (fd, _) in self._entries.items()
         }
@@ -224,8 +418,35 @@ class OwnedTree:
         limit = clock() + max(grace_seconds, 1.0)
         while self._alive_set() and clock() < limit:
             sleeper(0.02)
+        for _ in range(ORPHAN_ROUNDS):  # orphans born while the sweep ran
+            self.pin_new()
+            late = self._alive_set()
+            if not late:
+                break
+            killed += self._signal(late, SIGKILL_NUMBER)
+            limit = clock() + max(grace_seconds, 1.0)
+            while self._alive_set() and clock() < limit:
+                sleeper(0.02)
+        self._reap_orphans()
         remaining = sorted(self._alive_set())
         surviving = sorted(self.current_ports())
+        root_entry = self._entries.get(self.root_pid)
+        root_gone = root_entry is not None and _exited(root_entry[0])
+        adoption = {
+            "enabled": bool(self.adoption is not None and self.adoption.enabled),
+            "at_launch": self.launch_adopting,
+            "at_proof": bool(self.adoption is not None and self.adoption.verify()),
+            "root_gone": root_gone,
+            "orphans_pinned": self.orphans_pinned,
+            "unattributed": sorted(self.unattributed),
+        }
+        adoption["proof"] = bool(
+            adoption["at_launch"]
+            and adoption["at_proof"]
+            and root_gone
+            and not self.unattributed
+            and not remaining
+        )
         receipt = {
             "tracked": len(self._entries),
             "adopted_total": self.adopted_total,
@@ -237,6 +458,7 @@ class OwnedTree:
             "surviving_ports": surviving,
             "contained": self.contained,
             "reason": self.reason,
+            "adoption": adoption,
             "proof": self.contained and not remaining and not surviving,
         }
         self.close()
@@ -335,6 +557,12 @@ except OSError as exc:
     final(start_error=type(exc).__name__)
     sys.exit(127)
 try:
+    with open("/proc/%d/stat" % worker.pid, "rb") as handle:
+        worker_start = int(handle.read().decode("utf-8", "replace").rsplit(")", 1)[1].split()[19])
+except (OSError, ValueError, IndexError):
+    worker_start = 0
+note(("W%d:%d\n" % (worker.pid, worker_start)).encode())
+try:
     worker_pgid = os.getpgid(worker.pid)
 except OSError:
     worker_pgid = None
@@ -346,17 +574,20 @@ while status is None and not stopped:
 
 def children():
     found = []
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        try:
-            with open("/proc/%s/stat" % name, "rb") as handle:
-                raw = handle.read().decode("utf-8", "replace")
-            rest = raw[raw.rindex(")") + 2:].split()
-            if int(rest[1]) == me:
-                found.append((int(name), rest[0]))
-        except (OSError, ValueError, IndexError):
-            continue
+    try:
+        threads = os.listdir("/proc/%d/task" % me)
+        for thread in threads:
+            with open("/proc/%d/task/%s/children" % (me, thread)) as handle:
+                names = handle.read().split()
+            for name in names:
+                try:
+                    with open("/proc/%s/stat" % name, "rb") as stat:
+                        raw = stat.read().decode("utf-8", "replace")
+                    found.append((int(name), raw[raw.rindex(")") + 2:].split()[0]))
+                except (OSError, ValueError, IndexError):
+                    continue
+    except OSError:
+        return None
     return found
 
 
@@ -382,7 +613,11 @@ deadline = time.monotonic() + grace
 limit = deadline + max(grace, 1.0)
 while True:
     reap()
-    live = [pid for pid, state in children() if state != "Z"]
+    listing = children()
+    if listing is None:
+        remaining = [-1]
+        break
+    live = [pid for pid, state in listing if state != "Z"]
     if not live:
         break
     adopted.update(live)
@@ -423,6 +658,8 @@ class GuardianStatus:
         os.set_blocking(descriptor, False)
         self.ready = False
         self.spawned = False
+        self.worker: tuple[int, int] | None = None
+        self._buffer = b""
         self.eof = False
         self.error = False
 
@@ -440,6 +677,10 @@ class GuardianStatus:
                 return
             self.ready = self.ready or b"R" in data
             self.spawned = self.spawned or b"S" in data
+            self._buffer = (self._buffer + data)[-256:]
+            found = re.search(rb"W(\d+):(\d+)\n", self._buffer)
+            if found and self.worker is None:
+                self.worker = (int(found.group(1)), int(found.group(2)))
 
     def absent_proof(self) -> bool:
         self.drain()
@@ -567,13 +808,19 @@ def cleanup_proven(
 ) -> bool:
     """Budget may be released only with the parent's own proof AND an authenticated guardian proof.
 
-    The single exception is an affirmative absence proof taken from the parent's own status pipe:
-    the guardian is gone (EOF) and never signalled spawn intent, so no worker can have existed.
-    A missing, removed or unauthenticated file proves nothing.
+    Two exceptions exist when the guardian left no final receipt.  An affirmative absence proof from
+    the parent's own status pipe: the guardian is gone (EOF) and never signalled spawn intent, so no
+    worker can have existed.  Or an adoption proof: the orchestrator was a subreaper from before the
+    launch until the proof, the guardian is gone, and every re-parented orphan of the job was pinned
+    by pidfd and terminated, with none left unattributed.  A missing, removed or unauthenticated
+    file proves nothing.
     """
 
     if owned_receipt.get("proof") is not True:
         return False
     if guardian is not None and guardian.get("phase") == "final":
         return guardian.get("contained") is True and guardian.get("proof") is True
-    return status is not None and status.absent_proof()
+    if status is not None and status.absent_proof():
+        return True
+    adoption = owned_receipt.get("adoption")
+    return isinstance(adoption, dict) and adoption.get("proof") is True
