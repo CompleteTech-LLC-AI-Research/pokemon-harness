@@ -621,6 +621,8 @@ def test_guard_declines_a_native_none_handler_and_leaves_signal_alone(monkeypatc
     calls = _native_none_signal(monkeypatch)
     before = signal.getsignal(signal.SIGINT)
     guard = capacity_module._defer_sigint_while_finalizing()
+    assert calls == [], calls
+    assert signal.getsignal(signal.SIGINT) is before
     assert guard.declined_reason, "the unsupported native-handler case must be explicit"
     assert guard.restore() is False
     assert guard.restore() is False

@@ -207,8 +207,9 @@ class _DeferredSigintGuard:
     A previous handler that Python cannot hand back (``signal.getsignal`` reports
     ``None``: a handler installed outside Python) is never replaced.  Deferral is
     declined, ``declined_reason`` says so, and ``restore()`` has nothing to
-    restore; a SIGINT during assembly then raises immediately, exactly as it did
-    before this guard existed.
+    restore.  A SIGINT then follows the preserved native disposition, which may
+    ignore, terminate or handle it in its own way; deferral and the protection of
+    the assembled evidence are unsupported in that configuration.
     """
 
     def __init__(self) -> None:
