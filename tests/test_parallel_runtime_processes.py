@@ -29,6 +29,7 @@ from scripts.production_gate_parallel_processes import (
     read_session,
     read_stat,
 )
+from tests import _parallel_runtime_orphan_support as support
 
 WORKER = r"""
 import os, socket, subprocess, sys, time
@@ -769,3 +770,213 @@ def test_an_orchestrator_that_cannot_read_its_own_children_claims_no_adoption_co
         assert tree.orphans_pinned == 0 and state["signals"] == []
     finally:
         _close_all(fds)
+
+
+ME = os.getpid()
+GOOD_CMDLINE = ("\0".join(support.ORPHAN_ARGV) + "\0").encode()
+LIVE_BUT_UNPROVEN = [
+    pytest.param([None], GOOD_CMDLINE, "missing, unreadable or malformed", id="stat-unreadable"),
+    pytest.param([(1000, ME, "Z")], GOOD_CMDLINE, "zombie", id="zombie-not-shown-exited"),
+    pytest.param([(1000, ME + 1, "S")], GOOD_CMDLINE, "parent is", id="not-our-child"),
+    pytest.param(
+        [(1000, ME, "S")],
+        OSError(errno.EACCES, "denied"),
+        "command line is unreadable",
+        id="cmdline-unreadable",
+    ),
+    pytest.param(
+        [(1000, ME, "S")], b"python\0-c\0other\0", "not the fixture's orphan", id="foreign-command"
+    ),
+    pytest.param(
+        [(1000, ME, "S"), None], GOOD_CMDLINE, "changed or became unreadable", id="stat-vanishes"
+    ),
+    pytest.param(
+        [(1000, ME, "S"), (1001, ME, "S")],
+        GOOD_CMDLINE,
+        "changed or became unreadable",
+        id="instance-changes",
+    ),
+]
+
+
+def _survivor_world(monkeypatch, *, stats, exits, cmdline=GOOD_CMDLINE, open_error=None):
+    """Stand-ins for the kernel facts behind Survivor: no process is created, polled or signalled.
+
+    ``stats`` and ``exits`` are the successive readings of read_stat and of the pidfd exit poll (the
+    last one repeats); descriptors are real /dev/null handles so a leak or a double close shows.
+    """
+
+    opened, closed, sent = [], [], []
+    stat_feed, exit_feed = list(stats), list(exits)
+
+    def feed(items):
+        return items.pop(0) if len(items) > 1 else items[0]
+
+    def open_pidfd(_pid):
+        if open_error is not None:
+            raise open_error
+        opened.append(os.open(os.devnull, os.O_RDONLY))
+        return opened[-1]
+
+    def read_cmdline(_pid):
+        if isinstance(cmdline, BaseException):
+            raise cmdline
+        return cmdline
+
+    real_close = support._close
+
+    def recording_close(descriptor):
+        closed.append(descriptor)
+        return real_close(descriptor)
+
+    monkeypatch.setattr(support, "_open_pidfd", open_pidfd)
+    monkeypatch.setattr(support, "_read_cmdline", read_cmdline)
+    monkeypatch.setattr(support, "_exited", lambda _descriptor: feed(exit_feed))
+    monkeypatch.setattr(support, "read_stat", lambda _pid: feed(stat_feed))
+    monkeypatch.setattr(support, "_close", recording_close)
+    monkeypatch.setattr(
+        support.signal, "pidfd_send_signal", lambda fd, signum: sent.append((fd, signum))
+    )
+    monkeypatch.setattr(support.os, "waitid", lambda *_args: object())  # exit shown by the pidfd
+    return opened, closed, sent
+
+
+@pytest.mark.parametrize(("stats", "cmdline", "reason"), LIVE_BUT_UNPROVEN)
+def test_a_pinned_process_that_cannot_be_proven_is_never_reported_gone_or_signalled(
+    monkeypatch, stats, cmdline, reason
+):
+    opened, closed, sent = _survivor_world(monkeypatch, stats=stats, exits=[False], cmdline=cmdline)
+    survivor = support.Survivor()
+    with pytest.raises(AssertionError) as caught:
+        survivor.capture(4242)
+    assert reason in str(caught.value) and "NOT gone" in str(caught.value)
+    assert sent == [] and survivor.descriptor is None, "nothing was signalled or kept"
+    assert closed == opened and len(opened) == 1, "the pinned descriptor was closed exactly once"
+
+
+@pytest.mark.parametrize(
+    ("stats", "cmdline"),
+    [
+        pytest.param([None], GOOD_CMDLINE, id="stat-unreadable-but-exited"),
+        pytest.param([(999, ME + 1, "S")], GOOD_CMDLINE, id="a-strangers-stat-after-exit"),
+        pytest.param(
+            [(1000, ME, "S")], OSError(errno.ESRCH, "gone"), id="cmdline-fails-after-exit"
+        ),
+    ],
+)
+def test_gone_is_claimed_only_from_the_pidfd_exit_evidence(monkeypatch, stats, cmdline):
+    opened, closed, sent = _survivor_world(monkeypatch, stats=stats, exits=[True], cmdline=cmdline)
+    survivor = support.Survivor()
+    assert survivor.capture(4242) == "gone"
+    assert sent == [] and survivor.descriptor is None and closed == opened and len(opened) == 1
+
+
+def test_a_pid_the_kernel_does_not_know_is_gone_but_a_pin_failure_is_not(monkeypatch):
+    unknown = ProcessLookupError(errno.ESRCH, "no such process")
+    opened, _closed, sent = _survivor_world(
+        monkeypatch, stats=[None], exits=[True], open_error=unknown
+    )
+    assert support.Survivor().capture(4242) == "gone" and opened == [] and sent == []
+    denied = PermissionError(errno.EACCES, "denied")
+    opened, _closed, sent = _survivor_world(
+        monkeypatch, stats=[None], exits=[True], open_error=denied
+    )
+    with pytest.raises(AssertionError, match="cannot be pinned"):
+        support.Survivor().capture(4242)
+    assert opened == [] and sent == []
+
+
+def test_a_validated_live_orphan_is_held_killed_only_through_its_pidfd_and_closed_once(monkeypatch):
+    opened, closed, sent = _survivor_world(
+        monkeypatch, stats=[(1000, ME, "S")], exits=[False, False, True]
+    )
+    survivor = support.Survivor()
+    assert survivor.capture(4242) == "held" and survivor.descriptor == opened[0]
+    assert survivor.start == 1000
+    with pytest.raises(AssertionError, match="already holding"):
+        survivor.capture(4243)
+    assert sent == [] and closed == [] and len(opened) == 1, "capture neither signals nor closes"
+    survivor.remove(timeout=2.0)
+    assert sent == [(opened[0], signal.SIGKILL)] and closed == opened
+    assert survivor.descriptor is None
+    survivor.remove()  # nothing is held any more: a no-op, never a second signal or close
+    assert len(sent) == 1 and closed == opened
+
+
+@pytest.mark.parametrize(
+    ("exits", "kill_error", "expected"),
+    [
+        pytest.param([False], None, "still running", id="never-exits"),
+        pytest.param(
+            [False, True], PermissionError(errno.EPERM, "no"), "SIGKILL", id="kill-refused"
+        ),
+        pytest.param([False, True, True], None, "ok", id="control-completes"),
+    ],
+)
+def test_an_incomplete_outer_cleanup_is_reported_accurately_and_the_descriptor_closed(
+    monkeypatch, exits, kill_error, expected
+):
+    opened, closed, _sent = _survivor_world(monkeypatch, stats=[(1000, ME, "S")], exits=exits)
+    if kill_error is not None:
+
+        def refuse(_descriptor, _signum):
+            raise kill_error
+
+        monkeypatch.setattr(support.signal, "pidfd_send_signal", refuse)
+    survivor = support.Survivor()
+    assert survivor.capture(4242) == "held"
+    if expected == "ok":
+        survivor.remove(timeout=2.0)
+    else:
+        with pytest.raises(AssertionError) as caught:
+            survivor.remove(timeout=0.05)
+        assert expected in str(caught.value) and "pid 4242 (start 1000)" in str(caught.value)
+    assert closed == opened and survivor.descriptor is None
+
+
+def test_a_poll_error_and_a_close_error_are_reported_and_never_taken_for_an_exit(monkeypatch):
+    opened, closed, _sent = _survivor_world(monkeypatch, stats=[(1000, ME, "S")], exits=[False])
+    survivor = support.Survivor()
+    assert survivor.capture(4242) == "held"
+
+    def broken(_descriptor):
+        raise AssertionError("the pidfd cannot be polled; its exit is unknown")
+
+    monkeypatch.setattr(support, "_exited", broken)
+    with pytest.raises(AssertionError, match="cannot be polled"):
+        survivor.remove(timeout=0.05)
+    assert closed == opened, "the descriptor is closed even though the exit was never shown"
+    opened, closed, _sent = _survivor_world(monkeypatch, stats=[None], exits=[True])
+    recording = support._close
+
+    def failing_close(descriptor):
+        return [*recording(descriptor), "closing the pidfd failed (5)"]
+
+    monkeypatch.setattr(support, "_close", failing_close)
+    with pytest.raises(AssertionError, match="is gone but closing the pidfd failed"):
+        support.Survivor().capture(4243)
+    assert closed == opened and len(opened) == 1
+
+
+def test_exit_polling_reads_readiness_and_refuses_an_invalid_descriptor():
+    read_end, write_end = os.pipe()
+    try:
+        assert support._exited(read_end) is False
+        os.write(write_end, b"x")
+        assert support._exited(read_end) is True
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+    with pytest.raises(AssertionError, match="cannot be polled"):
+        support._exited(read_end)  # closed meanwhile: POLLNVAL is an error, not an exit
+
+
+def test_the_survivor_helper_has_no_numeric_pid_environment_or_foreign_walk_path():
+    import ast
+    import inspect
+
+    forbidden = {"kill", "killpg", "environ", "getenv", "listdir", "scandir", "walk", "iterdir"}
+    for source in (inspect.getsource(support.Survivor), inspect.getsource(support._judge)):
+        nodes = ast.walk(ast.parse(source))
+        used = {node.attr for node in nodes if isinstance(node, ast.Attribute)}
+        assert not used & forbidden, f"process-by-number or foreign access: {used & forbidden}"
