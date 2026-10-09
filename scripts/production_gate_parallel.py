@@ -55,7 +55,7 @@ from scripts.production_gate_parallel_cgroup import (
     kernel_ownership,
     qualification_after,
 )
-from scripts.production_gate_parallel_declaration import COVERAGE_DECLARATION
+from scripts.production_gate_parallel_declaration import COVERAGE_DECLARATION, LIMITATIONS
 from scripts.production_gate_parallel_identity import (
     expected_identity,
     identity_differences,
@@ -106,18 +106,6 @@ THREAD_VARIABLES = (
 DEFAULT_GRACE_SECONDS = 5.0
 DEFAULT_POLL_SECONDS = 0.05
 CLEANUP_SECONDS = 60.0
-LIMITATIONS = (
-    "authored controls do not close the real-ROM dual-runtime comparison; release stays PARTIAL",
-    (
-        "the sequential comparison is NOT_RUN unless a serial bundle produced by this "
-        "orchestrator for the same immutable plan is supplied and re-validated"
-    ),
-    (
-        "ports are reserved only for helpers that use the job port allocator; helpers outside "
-        "the authorized paths still release a port before the listener binds"
-    ),
-    "none of this source has been executed: new and updated controls await a Sol-admitted batch",
-)
 
 
 def _wall_now() -> datetime:

@@ -69,4 +69,23 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
     ],
 }
 
-__all__ = ("COVERAGE_DECLARATION",)
+LIMITATIONS = (
+    "authored controls do not close the real-ROM dual-runtime comparison; release stays PARTIAL",
+    (
+        "the sequential comparison is NOT_RUN unless a serial bundle produced by this "
+        "orchestrator for the same immutable plan is supplied and re-validated"
+    ),
+    "a listener that no owner leased binds normally and is not covered by the socket handoff",
+    "private runtime copies refuse ordinary writes by mode bits only: runtime_immutability is NOT_COMPLETE",
+    (
+        "the arbiter secret reaches the gate through its environment block: the MAC proves job "
+        "binding, not secrecy against a process of the same UID"
+    ),
+    (
+        "kernel ownership is proven per job from joined and emptied facts and only on a host that "
+        "delegates a cgroup; the unqualified mode is never an acceptance"
+    ),
+    "none of this source has been executed: new and updated controls await a Sol-admitted batch",
+)
+
+__all__ = ("COVERAGE_DECLARATION", "LIMITATIONS")
