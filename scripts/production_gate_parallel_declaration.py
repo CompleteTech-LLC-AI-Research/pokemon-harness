@@ -41,8 +41,10 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
             "pidfd-verified signals, parent-death signals, proof before any release or removal"
         ),
         (
-            "orchestrator subreaper adoption with kernel-attributed pidfd cleanup and an adoption "
-            "proof; a delegated per-job cgroup (kill plus populated-0 proof) where the host has one"
+            "orchestrator subreaper adoption with kernel-attributed pidfd cleanup (retention "
+            "evidence, not a closure of the escaped-orphan window); the qualified mode REQUIRES a "
+            "delegated per-job cgroup and refuses before any child without it; the explicit "
+            "unqualified mode is labelled UNQUALIFIED_COMPATIBILITY"
         ),
         "completed failures harvested before cancellation; partial evidence recovered and parsed",
         "a capacity loss reported by one child marks the one budget lost and cancels the siblings",
