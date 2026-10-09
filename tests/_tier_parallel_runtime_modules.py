@@ -6,6 +6,7 @@ PARALLEL_RUNTIME_PARTS = (
     "capacity",
     "cgroup",
     "comparison",
+    "consumers",
     "enrollment",
     "gate",
     "identity",

@@ -376,6 +376,8 @@ def _server_env(primary_asset, peer_asset, runtime_mode, peer_state_path):
                 "POKERED_PEER_STATE_SHA1": _fixture_sha1(peer_asset),
             }
         )
+    # The one inherited POKERED_ variable the server needs: its leased listening socket's address.
+    env.update(handoff_environment())
     return env
 
 
