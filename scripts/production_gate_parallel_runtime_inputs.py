@@ -101,14 +101,17 @@ def writable_entries(root: Path, limit: int = WRITABLE_REPORT_LIMIT) -> list[str
 def redirect_editable_paths(copy: Path, original: Path, snapshot: Path) -> int:
     """Point editable-install files of the private copy at the immutable snapshot checkout."""
 
-    old, new, changed = str(original).encode(), str(snapshot).encode(), 0
+    spellings = {str(original).encode(), os.path.realpath(original).encode()}
+    new, changed = str(snapshot).encode(), 0
     for path in copy.rglob("*"):
         if path.is_symlink() or not path.is_file():
             continue
         if path.suffix == ".pth" or path.name.startswith("__editable__"):
-            data = path.read_bytes()
-            if old in data:
-                path.write_bytes(data.replace(old, new))
+            data = original_data = path.read_bytes()
+            for old in spellings:
+                data = data.replace(old, new)
+            if data != original_data:
+                path.write_bytes(data)
                 changed += 1
     return changed
 
@@ -165,6 +168,21 @@ def build_private_runtimes(
                 if candidate.is_relative_to(prefix)
                 else private_prefix / "bin" / "python"
             )
+            # The default sys.path of the interpreter the job will really run, not of the original.
+            info = {**info, "path": probe_runtime(run_interpreter, pythonpath)["path"]}
+            for entry in info["path"]:
+                where = Path(entry) if entry else None
+                if (
+                    where is None
+                    or where.is_relative_to(private_prefix)
+                    or where.is_relative_to(checkout)
+                ):
+                    continue
+                if where.exists() and writable_entries(where, 1):
+                    problems.append(
+                        f"{mode}: the private interpreter's default sys.path names {entry}, which "
+                        "the executing UID can modify"
+                    )
         else:
             for site_dir in info["sites"]:
                 found = writable_entries(Path(site_dir))

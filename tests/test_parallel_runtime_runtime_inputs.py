@@ -43,7 +43,14 @@ def fake_probe(venv, **overrides):
         "libraries": [],
     }
     info.update(overrides)
-    return lambda interpreter, pythonpath: info
+
+    def probe(interpreter, pythonpath):
+        prefix = Path(interpreter).parents[
+            1
+        ]  # the original and the private copy each report their own
+        return {**info, "path": [str(prefix / "lib" / "python3" / "site-packages")]}
+
+    return probe
 
 
 @pytest.fixture
@@ -148,3 +155,27 @@ def test_writable_entries_reports_only_what_the_kernel_lets_this_uid_modify(tmp_
 def test_an_unresolvable_runtime_is_an_isolation_error_not_a_pass(tmp_path):
     with pytest.raises(IsolationError):
         inputs.probe_runtime(str(tmp_path / "missing-python"), "")
+
+
+def test_a_default_sys_path_entry_the_uid_can_modify_outside_the_copy_is_refused(
+    tmp_path, monkeypatch, protected_base
+):
+    original, snapshot, venv = make_environment(tmp_path)
+    stray = tmp_path / "stray-source"
+    stray.mkdir()
+    base = fake_probe(venv)
+    monkeypatch.setattr(
+        inputs,
+        "probe_runtime",
+        lambda interpreter, pythonpath: {**base(interpreter, pythonpath), "path": [str(stray)]},
+    )
+    try:
+        result = inputs.build_private_runtimes(
+            {"source": str(venv / "bin" / "python")},
+            project_root=original,
+            checkout=snapshot,
+            destination=tmp_path / "runtime",
+        )
+    finally:
+        thaw_and_remove(tmp_path / "runtime")
+    assert any("default sys.path names" in p for p in result["source"]["problems"])
