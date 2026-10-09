@@ -556,6 +556,15 @@ def _run_plan(
         lost = child_capacity_loss(outcome.get("capacity"))
         if not lost and not (guardian and guardian.get("phase") == "final"):
             lost = "the job's guardian was lost"
+        elif (
+            not lost
+            and guardian
+            and guardian.get("contained") is False
+            and require_kernel_ownership
+        ):
+            lost = "kernel ownership could not be established: " + str(
+                guardian.get("reason") or guardian.get("cgroup_error") or "no reason recorded"
+            )
         if (
             capacity_policy_text is not None
             and outcome["state"] == "passed"
