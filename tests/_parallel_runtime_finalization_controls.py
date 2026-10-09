@@ -28,7 +28,7 @@ def finished_deadline_case(tmp_path, monkeypatch, point):
     monkeypatch.setattr(finishing, "validate_terminal_artifact", lambda *args, **kwargs: [])
     clock.now = 1.0 if point == "boundary" else 0.5
 
-    def measure(job, *, checkpoint):
+    def measure(job, *, checkpoint, budget):
         if point == "blocking_measure":
             clock.now += 2.0
         return dict(clean_head=True, **expected_identity(plan.as_dict(), "source")), []
@@ -66,7 +66,7 @@ def worker_deadline_case(tmp_path, monkeypatch, point):
     for name in ("evidence", "out"):
         (tmp_path / name).mkdir()
     calls, measurements = [], []
-    monkeypatch.setattr(worker, "runtime_pin_problem", lambda *args: "")
+    monkeypatch.setattr(worker, "runtime_pin_problem", lambda *args, **kwargs: "")
     monkeypatch.setattr(
         worker, "time", SimpleNamespace(monotonic=clock.monotonic, time=lambda: 1000.0)
     )
@@ -169,7 +169,7 @@ def overdue_sibling_harvest_case(tmp_path, monkeypatch):
             )
         )
 
-    def measure(job, *, checkpoint):
+    def measure(job, *, checkpoint, budget):
         mode = plan.job(job)["mode"]
         if mode == "source":
             clock.now += 2.0  # B crosses its frozen deadline and exits during A's blocking call.

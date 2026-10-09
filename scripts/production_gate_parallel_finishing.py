@@ -20,6 +20,7 @@ from scripts.production_gate_parallel_identity import (
     identity_differences,
     noop_checkpoint,
 )
+from scripts.production_gate_parallel_measurement_budget import MeasurementBudget
 from scripts.production_gate_parallel_plan import ParallelPlan
 from scripts.production_gate_parallel_validation import parse_utc
 
@@ -43,11 +44,15 @@ def finish_job(
     artifact, child_capacity = None, None
     problems: list[str] = []
 
-    def measurement_checkpoint() -> None:
-        # Broadcast sibling expiry before refusing this job's expired finalization.
-        checkpoint()
-        if clock() >= running.deadline:
-            raise IdentityDeadline("completion exceeded the frozen deadline")
+    budget = MeasurementBudget(
+        running.deadline,
+        getattr(running, "cleanup_deadline", None)
+        or running.deadline + float(plan.as_dict()["deadlines"]["cleanup_seconds"]),
+        clock=clock,
+        service=checkpoint,
+        cleanup_limit=lambda: getattr(running, "cleanup_deadline", None),
+    )
+    measurement_checkpoint = budget.checkpoint
 
     try:
         measurement_checkpoint()
@@ -81,7 +86,9 @@ def finish_job(
             measurement_checkpoint()
         if measure is not None:
             measurement_checkpoint()
-            measured, measure_problems = measure(running.job_id, checkpoint=measurement_checkpoint)
+            measured, measure_problems = measure(
+                running.job_id, checkpoint=measurement_checkpoint, budget=budget
+            )
             measurement_checkpoint()
             mode = plan.job(running.job_id)["mode"]
             problems.extend(measure_problems)

@@ -41,6 +41,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
 
+from scripts.production_gate_parallel_adoption import read_subreaper, restore_adoption
 from scripts.production_gate_parallel_cgroup import JobCgroup
 from scripts.production_gate_parallel_cleanup import terminate_tree
 from scripts.production_gate_parallel_ownership import observe_cgroup_membership
@@ -132,37 +133,39 @@ class OrchestratorAdoption:
         self.reason = "" if enabled else "disabled by the caller"
         self._previous = 0
         self._libc: Any = None
+        self.restoration_pending = False
+        self.restoration_problem = ""
 
     def verify(self) -> bool:
         if self._libc is None:
             return False
-        flag = ctypes.c_int(0)
-        return (
-            self._libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(flag), 0, 0, 0) == 0
-            and flag.value == 1
-        )
+        try:
+            return read_subreaper(self._libc) == 1
+        except (OSError, AttributeError, RuntimeError):
+            return False
 
     def __enter__(self) -> Self:
+        if self.restoration_pending:
+            raise RuntimeError("prior subreaper ownership is unresolved; retry restoration first")
         if not self.enabled:
             return self
         try:
             libc = ctypes.CDLL(None, use_errno=True)
-            flag = ctypes.c_int(0)
-            if libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(flag), 0, 0, 0) != 0:
-                raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER")
-            self._previous = flag.value
+            self._previous = read_subreaper(libc)
+            self._libc = libc
+            self.restoration_pending = True
             if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
                 raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
-            self._libc = libc
             self.active = self.verify()
-        except (OSError, AttributeError) as exc:
+            if not self.active:
+                raise RuntimeError("enabled subreaper readback is unproven")
+        except (OSError, AttributeError, RuntimeError) as exc:
             self.reason = f"subreaper not established: {exc}"
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        if self._libc is not None and not self._previous:
-            self._libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
-        self.active = False
+        original = _exc[1] if len(_exc) > 1 and isinstance(_exc[1], BaseException) else None
+        restore_adoption(self, original)
 
 
 def process_table() -> dict[int, tuple[int, int, str]]:

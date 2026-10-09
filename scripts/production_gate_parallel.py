@@ -130,6 +130,8 @@ def job_environment(
     token: str = "",
     port_range: tuple[int, int] | None = None,
     deadline_epoch: float | None = None,
+    job_deadline_monotonic: float | None = None,
+    cleanup_deadline_monotonic: float | None = None,
     handoff: str | None = None,
     arbiter_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
@@ -145,6 +147,10 @@ def job_environment(
         env[JOB_TOKEN_ENV] = token
     if deadline_epoch is not None:
         env["POKERED_PARALLEL_DEADLINE_EPOCH"] = repr(deadline_epoch)
+    if job_deadline_monotonic is not None:
+        env["POKERED_PARALLEL_JOB_DEADLINE_MONOTONIC"] = repr(job_deadline_monotonic)
+    if cleanup_deadline_monotonic is not None:
+        env["POKERED_PARALLEL_CLEANUP_DEADLINE_MONOTONIC"] = repr(cleanup_deadline_monotonic)
     if handoff:
         env[HANDOFF_ENV] = handoff
     env.update(arbiter_env or {})
@@ -681,6 +687,10 @@ def _run_plan(
                     token=token,
                     port_range=ranges[job_id],
                     deadline_epoch=launched.timestamp() + float(job["deadline_seconds"]),
+                    job_deadline_monotonic=launched_monotonic + float(job["deadline_seconds"]),
+                    cleanup_deadline_monotonic=launched_monotonic
+                    + float(job["deadline_seconds"])
+                    + float(body["deadlines"]["cleanup_seconds"]),
                     handoff=handoff,
                     arbiter_env=arbiter_env,
                 ),

@@ -24,11 +24,12 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from scripts.production_gate_parallel_identity import sha256_file
+from scripts.production_gate_parallel_identity import noop_checkpoint, sha256_file
+from scripts.production_gate_parallel_io import read_evidence_bytes
 from scripts.production_gate_parallel_isolation import (
     IsolationError,
     freeze_tree,
@@ -108,7 +109,9 @@ def writable_entries(root: Path, limit: int = WRITABLE_REPORT_LIMIT) -> list[str
     return found
 
 
-def runtime_digest(prefix: Path, checkout: Path) -> str:
+def runtime_digest(
+    prefix: Path, checkout: Path, *, checkpoint: Callable[[], None] = noop_checkpoint
+) -> str:
     """Path-independent content digest of a private runtime: names, bytes and link targets.
 
     The snapshot checkout path inside editable-install files is normalised, so the same environment
@@ -117,34 +120,46 @@ def runtime_digest(prefix: Path, checkout: Path) -> str:
     """
 
     needle, outer = str(checkout).encode(), hashlib.sha256()
+    checkpoint()
     for dirpath, dirnames, filenames in os.walk(prefix, followlinks=False):
+        checkpoint()
         dirnames.sort()
         base = Path(dirpath)
         names = sorted(filenames) + [d for d in dirnames if (base / d).is_symlink()]
         dirnames[:] = [d for d in dirnames if d != "__pycache__" and not (base / d).is_symlink()]
         for name in sorted(names):
+            checkpoint()
             path = base / name
             relative = path.relative_to(prefix).as_posix()
             if path.is_symlink():
                 record = f"L {relative} {os.readlink(path)}"
             elif path.suffix == ".pth" or name.startswith("__editable__"):
-                data = path.read_bytes().replace(needle, b"<SNAPSHOT>")
+                data, _digest = read_evidence_bytes(path, checkpoint=checkpoint)
+                data = data.replace(needle, b"<SNAPSHOT>")
+                checkpoint()
                 record = f"F {relative} {hashlib.sha256(data).hexdigest()}"
             else:
-                record = f"F {relative} {sha256_file(path)}"
+                record = f"F {relative} {sha256_file(path, checkpoint=checkpoint)}"
             outer.update(record.encode("utf-8", "surrogateescape") + b"\n")
+    checkpoint()
     return outer.hexdigest()
 
 
 def runtime_pin_problem(
-    plan_body: Mapping[str, Any], mode: str, prefix: Path, checkout: Path
+    plan_body: Mapping[str, Any],
+    mode: str,
+    prefix: Path,
+    checkout: Path,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> str:
     """Empty when this runtime matches the digest the plan froze (or none was frozen for it)."""
 
+    checkpoint()
     pins = plan_body.get("runtime_inputs")
     if not isinstance(pins, dict) or mode not in pins:
         return ""
-    if runtime_digest(prefix, checkout) == pins[mode]:
+    if runtime_digest(prefix, checkout, checkpoint=checkpoint) == pins[mode]:
         return ""
     return f"the runtime under {prefix} differs from the digest the plan pinned"
 

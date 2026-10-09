@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from scripts.production_gate_parallel_processes import OrchestratorAdoption, read_stat
+from tests._parallel_runtime_nested_retention import finish_nested_cleanup, pending_nested_cleanup
 from tests._parallel_runtime_nested_startup import NESTED_CHILD_SOURCE
 
 
@@ -32,12 +33,18 @@ class NestedCleanup:
         self.token = secrets.token_hex(32)
         self.stop = threading.Event()
         self.fds, self.metadata, self.problem = {}, {}, ""
+        self.fd_bindings = {}
         self.adoption = OrchestratorAdoption()
         self.startup_mode, self.handoff_pause = startup_mode, handoff_pause
         self.reject_handoff = reject_handoff
 
     def __enter__(self):
+        if pending_nested_cleanup():
+            raise AssertionError("prior outer fixture cleanup is unresolved; admission refused")
+        self.owner_thread = threading.current_thread()
         self.directory = self.listener = self.thread = None
+        self.cleanup_deadline = None
+        self.cleanup_attempts = 0
         try:
             self.adoption.__enter__()
             self.directory = tempfile.TemporaryDirectory(prefix="poke-nested-")
@@ -52,12 +59,7 @@ class NestedCleanup:
             self.thread.start()
         except BaseException as original:
             self.problem = f"fixture setup failed: {type(original).__name__}: {original}"
-            try:
-                self._cleanup()
-            except Exception as cleanup_error:  # noqa: BLE001 - retain both failures
-                original.add_note(f"outer cleanup also failed: {cleanup_error}")
-            finally:
-                self.adoption.__exit__()
+            finish_nested_cleanup(self, original)
             raise
         return self
 
@@ -138,6 +140,8 @@ class NestedCleanup:
                     ],
                     parent=peer,
                 )
+                bindings = [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in received]
+                self.fd_bindings = dict(zip(("nested", "child"), bindings, strict=True))
                 self.fds = dict(zip(("nested", "child"), received, strict=True))
                 received = []  # ownership transferred atomically; later errors still owe outer cleanup
                 self.metadata = {k: body[k] for k in ("nested", "child", "job_root")}
@@ -148,23 +152,35 @@ class NestedCleanup:
             for fd in received:
                 os.close(fd)
 
-    def state(self, name):
+    def _held_fd(self, name):
         if name not in self.fds:
             raise AssertionError(self.problem or "fixture ownership handshake never completed")
+        fd = self.fds[name]
+        stat = os.fstat(fd)
+        assert (stat.st_dev, stat.st_ino) == self.fd_bindings[name], "owned descriptor changed"
+        return fd
+
+    def state(self, name):
         poller = select.poll()
-        poller.register(self.fds[name], select.POLLIN)
+        poller.register(self._held_fd(name), select.POLLIN)
         events = poller.poll(0)
         assert not any(flags & (select.POLLERR | select.POLLNVAL) for _, flags in events)
         return "gone" if any(flags & select.POLLIN for _, flags in events) else "held"
 
     def __exit__(self, *exc):
-        try:
-            self._cleanup()
-        finally:
-            self.adoption.__exit__(*exc)
+        original = exc[1] if len(exc) > 1 and isinstance(exc[1], BaseException) else None
+        finish_nested_cleanup(self, original)
+
+    def retry_cleanup(self):
+        """Explicit same-owner retry, without refreshing the original wait allowance."""
+
+        finish_nested_cleanup(self)
 
     def _cleanup(self):
         problems, actions = [], []
+        self.cleanup_attempts += 1
+        if self.cleanup_deadline is None:
+            self.cleanup_deadline = time.monotonic() + 2.0
         self.stop.set()
         try:
             if self.listener is not None:
@@ -173,7 +189,7 @@ class NestedCleanup:
             problems.append(f"listener close failed: {type(error).__name__}: {error}")
         try:
             if self.thread is not None and self.thread.ident is not None:
-                self.thread.join(timeout=2.0)
+                self.thread.join(timeout=max(0.0, self.cleanup_deadline - time.monotonic()))
         except Exception as error:  # noqa: BLE001
             problems.append(f"receiver join failed: {type(error).__name__}: {error}")
         if self.thread is not None and self.thread.is_alive():
@@ -187,39 +203,48 @@ class NestedCleanup:
                     before = self.state(name)
                     if before == "held":
                         signal.pidfd_send_signal(fd, signal.SIGKILL)
-                    limit = time.monotonic() + 2.0
-                    while self.state(name) != "gone" and time.monotonic() < limit:
+                    while self.state(name) != "gone" and time.monotonic() < self.cleanup_deadline:
                         time.sleep(0.01)
                     assert self.state(name) == "gone", "owned fixture survived outer cleanup"
-                    actions.append({"name": name, "before": before, "gone": True})
-                except Exception as error:  # noqa: BLE001 - keep cleanup errors separate from product facts
-                    problems.append(f"{name}: {type(error).__name__}: {error}")
-            for name, fd in self.fds.items():
-                try:
-                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
-                except ChildProcessError:
-                    pass  # its owning product holder already reaped it, or still owns the zombie
-                except OSError as error:
-                    problems.append(f"{name}: wait failed: {error}")
-                finally:
                     try:
-                        os.close(fd)
-                    except OSError as error:
-                        problems.append(f"{name}: descriptor close failed: {error}")
-            self.fds.clear()  # no stale numeric descriptors remain eligible for later cleanup
-        try:
-            if self.directory is not None:
-                self.directory.cleanup()
-        except Exception as error:  # noqa: BLE001
-            problems.append(f"directory cleanup failed: {type(error).__name__}: {error}")
+                        reaped = os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
+                        assert reaped is not None, "owned fixture reaping is still pending"
+                        reaping = "outer waitid completed"
+                    except ChildProcessError:
+                        # Exit is already proven by this held pidfd. ECHILD proves
+                        # there is no wait obligation for this test-process owner;
+                        # an external parent may still own the exited zombie.
+                        reaping = "ECHILD; no outer wait obligation"
+                    assert self._held_fd(name) == fd, "descriptor changed before release"
+                    os.close(fd)
+                    del self.fds[name]
+                    del self.fd_bindings[name]
+                    actions.append(
+                        {"name": name, "before": before, "gone": True, "reaping": reaping}
+                    )
+                except Exception as error:  # noqa: BLE001 - failed ownership is retained for explicit retry
+                    problems.append(f"{name}: {type(error).__name__}: {error}")
+        if not self.fds and (self.thread is None or not self.thread.is_alive()):
+            try:
+                if self.directory is not None:
+                    self.directory.cleanup()
+            except Exception as error:  # noqa: BLE001
+                problems.append(f"directory cleanup failed: {type(error).__name__}: {error}")
         receipt = {
             "scope": "outer fixture cleanup, never product proof",
             "metadata": self.metadata,
             "handshake_problem": self.problem,
             "actions": actions,
             "problems": problems,
+            "retained_instances": sorted(self.fds),
+            "cleanup_deadline_monotonic": self.cleanup_deadline,
+            "attempt": self.cleanup_attempts,
         }
         try:
+            with (self.root / f"outer-nested-cleanup-attempt-{self.cleanup_attempts}.json").open(
+                "x"
+            ) as stream:
+                json.dump(receipt, stream)
             (self.root / "outer-nested-cleanup.json").write_text(json.dumps(receipt))
         except Exception as error:  # noqa: BLE001 - restoration in __exit__ must still run
             problems.append(f"cleanup receipt write failed: {type(error).__name__}: {error}")

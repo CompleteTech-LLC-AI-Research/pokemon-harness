@@ -42,6 +42,10 @@ from scripts.production_gate_parallel_isolation import (
     build_snapshot,
     thaw_and_remove,
 )
+from scripts.production_gate_parallel_measurement_budget import (
+    MeasurementBudget,
+    pre_dispatch_budget,
+)
 from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan, cli_deadlines
 from scripts.production_gate_parallel_processes import interrupt_on_signals
 from scripts.production_gate_parallel_report import render_report_text, write_report
@@ -156,12 +160,13 @@ def run_parallel_cli(
             "--parallel-allow-unqualified runs on retention evidence only and is never an acceptance"
         )
         return 2
+    preflight_budget = pre_dispatch_budget()
     problems = list(configuration_problems)
     policy_text, policy_sha256, policy_problems = capture_policy(
         capacity_policy_path, capacity_policy_sha256
     )
     problems.extend(policy_problems)
-    _head, _clean, commit_problems = measure_commit(project_root)
+    _head, _clean, commit_problems = measure_commit(project_root, budget=preflight_budget)
     problems.extend(commit_problems)
     run_root = args.parallel_run_root.expanduser().resolve()
     if run_root.is_relative_to(project_root):
@@ -210,7 +215,10 @@ def run_parallel_cli(
         )
 
         def measure(
-            job_id: str, *, checkpoint: Callable[[], None] = noop_checkpoint
+            job_id: str,
+            *,
+            checkpoint: Callable[[], None] = noop_checkpoint,
+            budget: MeasurementBudget | None = None,
         ) -> tuple[dict[str, Any], list[str]]:
             mode = "cython" if job_id.startswith("cython") else "source"
             return measure_identity(
@@ -222,6 +230,7 @@ def run_parallel_cli(
                 fixture_root=snap_fixture,
                 git_root=project_root,
                 checkpoint=checkpoint,
+                budget=budget if budget is not None else preflight_budget,
             )
 
         measured = {mode: measure(f"{mode}-job") for mode in ("source", "cython")}
@@ -269,7 +278,9 @@ def run_parallel_cli(
                     capacity_policy_text=policy_text,
                     runtime_inputs={
                         mode: runtime_digest(
-                            Path(info["manifest"]["private_prefix"]), Path(snapshot["checkout"])
+                            Path(info["manifest"]["private_prefix"]),
+                            Path(snapshot["checkout"]),
+                            checkpoint=preflight_budget.checkpoint,
                         )
                         for mode, info in private.items()
                         if info["manifest"]["private_prefix"]

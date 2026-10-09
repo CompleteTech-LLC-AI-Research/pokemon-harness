@@ -16,6 +16,13 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from scripts.production_gate_parallel_measurement_budget import (
+    IdentityDeadline,  # noqa: F401 - retained public facade for existing identity consumers
+    MeasurementBudget,
+    noop_checkpoint,
+    pre_dispatch_budget,
+)
+
 CHUNK_BYTES = 1 << 20
 PROBE_TIMEOUT_SECONDS = 120
 BUILD_PROBE = (
@@ -37,14 +44,6 @@ BUILD_PROBE = (
     "'files': files}, sort_keys=True))\n"
 )
 IDENTITY_KEYS = ("commit", "clean_head", "build_identity", "input_digests", "asset_digest")
-
-
-class IdentityDeadline(RuntimeError):
-    """Measurement exhausted the original job budget; never a measured identity."""
-
-
-def noop_checkpoint() -> None:
-    """Pre-dispatch measurements have no active sibling supervision callback."""
 
 
 def sha256_file(path: Path, *, checkpoint: Callable[[], None] = noop_checkpoint) -> str:
@@ -102,8 +101,12 @@ def measure_commit(
     project_root: Path,
     *,
     checkpoint: Callable[[], None] = noop_checkpoint,
+    budget: MeasurementBudget | None = None,
 ) -> tuple[str, bool, list[str]]:
     """Return (head, clean, problems) from the checkout itself."""
+
+    budget = (budget or pre_dispatch_budget()).with_checkpoint(checkpoint)
+    checkpoint = budget.checkpoint
 
     def git(*argv: str) -> subprocess.CompletedProcess[str]:
         checkpoint()
@@ -146,9 +149,12 @@ def measure_build_identity(
     project_root: Path,
     *,
     checkpoint: Callable[[], None] = noop_checkpoint,
+    budget: MeasurementBudget | None = None,
 ) -> tuple[str, list[str]]:
     """Digest the interpreter binary plus the native extensions (cython) or vendored sources."""
 
+    budget = (budget or pre_dispatch_budget()).with_checkpoint(checkpoint)
+    checkpoint = budget.checkpoint
     try:
         interpreter_digest = sha256_file(Path(os.path.realpath(interpreter)), checkpoint=checkpoint)
     except OSError as exc:
@@ -259,13 +265,18 @@ def measure_identity(
     fixture_root: Path,
     git_root: Path | None = None,
     checkpoint: Callable[[], None] = noop_checkpoint,
+    budget: MeasurementBudget | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Measure every plan-bound identity; returns the values and every measurement problem."""
 
+    budget = (budget or pre_dispatch_budget()).with_checkpoint(checkpoint)
+    checkpoint = budget.checkpoint
     checkpoint()
-    head, clean, problems = measure_commit(git_root or project_root, checkpoint=checkpoint)
+    head, clean, problems = measure_commit(
+        git_root or project_root, checkpoint=checkpoint, budget=budget
+    )
     build, build_problems = measure_build_identity(
-        mode, interpreter, project_root, checkpoint=checkpoint
+        mode, interpreter, project_root, checkpoint=checkpoint, budget=budget
     )
     inputs, input_problems = measure_inputs(project_root, input_names, checkpoint=checkpoint)
     assets, asset_problems = measure_assets(rom_root, fixture_root, checkpoint=checkpoint)
@@ -312,4 +323,5 @@ class Measurer(Protocol):
         job_id: str,
         *,
         checkpoint: Callable[[], None] = noop_checkpoint,
+        budget: MeasurementBudget | None = None,
     ) -> tuple[dict[str, Any], list[str]]: ...

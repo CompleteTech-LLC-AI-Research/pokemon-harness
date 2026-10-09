@@ -34,6 +34,7 @@ from scripts.production_gate_parallel_identity import (
     noop_checkpoint,
 )
 from scripts.production_gate_parallel_io import read_json_evidence
+from scripts.production_gate_parallel_measurement_budget import MeasurementBudget
 from scripts.production_gate_parallel_plan import PlanError, load_plan
 from scripts.production_gate_parallel_processes import JOB_TOKEN_ENV
 from scripts.production_gate_parallel_records import build_rows, diagnostics_for_tier
@@ -253,6 +254,7 @@ def publish_artifact(
     artifact: dict[str, Any],
     *,
     checkpoint: Callable[[], None],
+    cleanup_checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> int:
     """A spent publication budget can retain failure evidence but cannot return a PASS."""
 
@@ -271,11 +273,13 @@ def publish_artifact(
             f"(gate exit status {original_status})"
         )
         # Failure diagnostics may be written after expiry; no extra success allowance is granted.
-        write_artifact(job_root, artifact)
+        write_artifact(job_root, artifact, checkpoint=cleanup_checkpoint)
+        cleanup_checkpoint()
     return artifact["child_exit_status"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    entered = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--job-id", required=True)
@@ -297,21 +301,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.rom_root is None or args.fixture_root is None:
         print("worker refused: ROM and fixture roots must be explicit", file=sys.stderr)
         return 3
-    pin_problem = runtime_pin_problem(
-        plan.as_dict(), job["mode"], Path(sys.prefix), args.project_root
-    )
-    if pin_problem:
-        print(f"worker refused: {pin_problem}", file=sys.stderr)
-        return 3
-    pinned = job.get("policy_sha256")
-    if args.capacity_policy is not None and pinned is not None:
-        problem = policy_file_problem(args.capacity_policy, pinned)
-        if problem:
-            print(f"worker refused: {problem}", file=sys.stderr)
-            return 3
     body = plan.as_dict()
-    # Freeze before either identity measurement; never grant a fresh gate allowance.
-    allowance = float(job["deadline_seconds"])
+    # Includes parsing/preflight time from entry; inherit O's exact bounds where supplied.
+    deadline = entered + float(job["deadline_seconds"])
     declared_deadline = os.environ.get("POKERED_PARALLEL_DEADLINE_EPOCH")
     if declared_deadline is not None:
         try:
@@ -321,12 +313,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError:
             print("worker refused: invalid absolute job deadline", file=sys.stderr)
             return 3
-        allowance = min(allowance, epoch - time.time())
-    deadline = time.monotonic() + allowance
-
-    def measurement_checkpoint() -> None:
-        if time.monotonic() >= deadline:
-            raise IdentityDeadline("identity measurement exceeded the frozen deadline")
+        deadline = min(deadline, time.monotonic() + epoch - time.time())
+    cleanup_deadline = deadline + float(body["deadlines"]["cleanup_seconds"])
+    try:
+        for name in ("JOB_DEADLINE_MONOTONIC", "CLEANUP_DEADLINE_MONOTONIC"):
+            inherited = os.environ.get(f"POKERED_PARALLEL_{name}")
+            if inherited is None:
+                continue
+            bound = float(inherited)
+            if not math.isfinite(bound):
+                raise ValueError("deadline must be finite")
+            if name == "JOB_DEADLINE_MONOTONIC":
+                deadline = min(deadline, bound)
+            else:
+                cleanup_deadline = min(cleanup_deadline, bound)
+    except ValueError:
+        print("worker refused: invalid inherited monotonic deadline", file=sys.stderr)
+        return 3
+    cleanup_deadline = min(cleanup_deadline, deadline + float(body["deadlines"]["cleanup_seconds"]))
+    budget = MeasurementBudget(deadline, cleanup_deadline, clock=time.monotonic)
+    measurement_checkpoint = budget.checkpoint
+    try:
+        measurement_checkpoint()
+        pin_problem = runtime_pin_problem(
+            body,
+            job["mode"],
+            Path(sys.prefix),
+            args.project_root,
+            checkpoint=measurement_checkpoint,
+        )
+        measurement_checkpoint()
+        if pin_problem:
+            print(f"worker refused: {pin_problem}", file=sys.stderr)
+            return 3
+        pinned = job.get("policy_sha256")
+        if args.capacity_policy is not None and pinned is not None:
+            problem = policy_file_problem(args.capacity_policy, pinned)
+            measurement_checkpoint()
+            if problem:
+                print(f"worker refused: {problem}", file=sys.stderr)
+                return 3
+    except IdentityDeadline as error:
+        print(f"worker refused: {error}", file=sys.stderr)
+        return TIMEOUT_EXIT_STATUS
 
     def measure() -> tuple[dict[str, Any], list[str]]:
         measurement_checkpoint()
@@ -339,6 +368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             fixture_root=args.fixture_root,
             git_root=args.git_root,
             checkpoint=measurement_checkpoint,
+            budget=budget,
         )
         measurement_checkpoint()
         return measured
@@ -364,7 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         capacity_policy=args.capacity_policy,
     )
     # All preflight/measurement time is spent from that same absolute budget.
-    timeout = deadline - time.monotonic()
+    timeout = min(deadline, budget.cleanup_bound()) - time.monotonic()
     gate_environment = {**os.environ, "POKERED_GATE_RECORD_TESTS": "1"}
     if args.git_root is not None:
         # The private snapshot is a byte copy of this checkout; the origin guard verifies that
@@ -392,7 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except IdentityDeadline:
         report, report_problem, evidence = None, "gate report exceeded the frozen deadline", {}
     after, after_problems = bounded_measure()
-    if time.monotonic() >= deadline:
+    if time.monotonic() >= min(deadline, budget.cleanup_bound()):
         if not timeout_problem:
             timeout_problem = (
                 "the job exceeded its frozen deadline during final identity verification "
@@ -415,7 +445,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         evidence=evidence,
         fresh=_fresh(args.job_root, started, evidence_was_empty),
     )
-    return publish_artifact(args.job_root, artifact, checkpoint=measurement_checkpoint)
+    return publish_artifact(
+        args.job_root,
+        artifact,
+        checkpoint=measurement_checkpoint,
+        cleanup_checkpoint=budget.cleanup_checkpoint,
+    )
 
 
 if __name__ == "__main__":

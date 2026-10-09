@@ -1,6 +1,7 @@
 """Test modules of the concurrent runtime gate (#107), kept out of the 999-line registry."""
 
 PARALLEL_RUNTIME_PARTS = (
+    "adoption",
     "arbiter",
     "artifacts",
     "capacity",
@@ -13,9 +14,15 @@ PARALLEL_RUNTIME_PARTS = (
     "identity",
     "isolation",
     "lifecycle",
+    "measurement_budget",
+    "nested_retention",
     "phases",
     "plan",
     "ports",
+    "probe_descriptors",
+    "probe_owner",
+    "probe_protocol",
+    "probe_stopping",
     "processes",
     "records",
     "runtime_inputs",
