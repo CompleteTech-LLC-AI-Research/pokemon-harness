@@ -80,26 +80,38 @@ def read_session(pid: int) -> int | None:
 def children_of(pid: int) -> list[int] | None:
     """Direct children of ``pid`` from its own per-thread ``children`` files.
 
-    Only the named process is read, never the whole process table.  None means this kernel does
-    not list children (no CONFIG_PROC_CHILDREN), which must be treated as containment unproven.
+    Only the named process is read, never the whole process table.  GONE is told apart from
+    UNREADABLE: a process whose whole /proc entry is absent, or a thread that vanished while the
+    list was read (ENOENT with its entry missing, or ESRCH), has no children and adds nothing.
+    Any other failure - a permission, I/O or resource error, a live process or thread whose
+    ``children`` list is not offered (no CONFIG_PROC_CHILDREN), or content that is not a list of
+    decimal pids - returns None: an unreadable list is never an empty one, and the caller must
+    treat the tree as containment unproven.
     """
 
     base = Path(f"/proc/{pid}/task")
     try:
         threads = os.listdir(base)
+    except (FileNotFoundError, ProcessLookupError):
+        return None if Path(f"/proc/{pid}").exists() else []
     except OSError:
-        return []
+        return None
     found: list[int] = []
     for thread in threads:
         try:
             text = (base / thread / "children").read_text(encoding="ascii")
+        except ProcessLookupError:
+            continue
         except FileNotFoundError:
             if (base / thread).exists():
                 return None
             continue
-        except OSError:
-            continue
-        found.extend(int(item) for item in text.split() if item.isdigit())
+        except (OSError, ValueError):
+            return None
+        for item in text.split():
+            if not item.isdigit():
+                return None
+            found.append(int(item))
     return found
 
 
@@ -305,12 +317,14 @@ class OwnedTree:
             if not self._parent_instance_valid(parent):
                 continue  # the pinned instance is gone: its number may already be reused
             kids = children_of(parent)
+            if not self._parent_instance_valid(parent):
+                continue  # gone or replaced while listed: neither the list nor a failure counts
             if kids is None:
                 self.contained = False
-                self.reason = "containment not established: the kernel lists no children"
+                self.reason = (
+                    "containment not established: the children of a live process cannot be read"
+                )
                 return
-            if not self._parent_instance_valid(parent):
-                continue  # the list may belong to a replacement that reused the number: discard it
             for pid in kids:
                 if pid in self._entries:
                     continue
@@ -347,7 +361,7 @@ class OwnedTree:
         kids = children_of(me)
         if kids is None:
             self.contained = False
-            self.reason = "containment not established: the kernel lists no children"
+            self.reason = "containment not established: the orchestrator's children cannot be read"
             return
         if self.status is not None:
             self.status.drain()

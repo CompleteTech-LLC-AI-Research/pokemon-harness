@@ -4,6 +4,7 @@ The worker below mimics the gate: it starts children with ``start_new_session`` 
 are outside the worker's process group, exactly like preflight/pytest/matrix children.
 """
 
+import errno
 import json
 import os
 import signal
@@ -11,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -606,3 +608,164 @@ def test_cleanup_signals_only_pinned_instances_and_never_a_replacement_by_number
 
     monkeypatch.setattr(proc.signal, "pidfd_send_signal", gone)
     assert tree._signal({777}, signal.SIGKILL) == [], "an exited instance is not signalled again"
+
+
+def _proc_standin(monkeypatch, *, listing, reads, present=()):
+    """Stand in for /proc/4242 only: the thread list (or the error listing it raises), the text or
+    error each thread's ``children`` read gives, and which /proc entries exist (others are real)."""
+
+    real_listdir, real_read, real_exists = os.listdir, Path.read_text, Path.exists
+
+    def listdir(path):
+        if str(path) != "/proc/4242/task":
+            return real_listdir(path)
+        if isinstance(listing, OSError):
+            raise listing
+        return list(listing)
+
+    def read_text(self, *args, **kwargs):
+        parts = str(self).split("/")
+        if str(self).startswith("/proc/4242/task/") and parts[-1] == "children":
+            outcome = reads[parts[4]]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        return real_read(self, *args, **kwargs)
+
+    def exists(self, *args, **kwargs):
+        if str(self).startswith("/proc/4242"):
+            return str(self) in present
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "exists", exists)
+
+
+GONE = FileNotFoundError(errno.ENOENT, "No such file or directory")
+VANISHED = ProcessLookupError(errno.ESRCH, "No such process")
+DENIED = PermissionError(errno.EACCES, "Permission denied")
+TASK, OTHER_TASK, PROCESS = "/proc/4242/task/4242", "/proc/4242/task/4243", "/proc/4242"
+LISTING_CASES = [
+    # GONE contributes nothing: the process has no /proc entry, or a thread vanished mid-read
+    pytest.param(GONE, {}, (), [], id="gone-process"),
+    pytest.param(VANISHED, {}, (), [], id="gone-process-esrch"),
+    pytest.param(["4242"], {"4242": ""}, (TASK,), [], id="live-process-without-children"),
+    pytest.param(
+        ["4242", "4243"], {"4242": "11 12\n", "4243": GONE}, (TASK,), [11, 12], id="thread-gone"
+    ),
+    pytest.param(
+        ["4242", "4243"],
+        {"4242": "11 12\n", "4243": VANISHED},
+        (TASK, OTHER_TASK),
+        [11, 12],
+        id="thread-gone-esrch",
+    ),
+    # UNREADABLE is unproven (None), never an empty or a partial list
+    pytest.param(DENIED, {}, (PROCESS,), None, id="listing-denied"),
+    pytest.param(OSError(errno.EIO, "I/O error"), {}, (PROCESS,), None, id="listing-io-error"),
+    pytest.param(GONE, {}, (PROCESS,), None, id="task-directory-missing-for-a-live-process"),
+    pytest.param(
+        ["4242", "4243"],
+        {"4242": "11 12\n", "4243": DENIED},
+        (TASK, OTHER_TASK),
+        None,
+        id="one-thread-denied",
+    ),
+    pytest.param(
+        ["4242"], {"4242": OSError(errno.EMFILE, "Too many open files")}, (TASK,), None, id="emfile"
+    ),
+    pytest.param(["4242"], {"4242": GONE}, (TASK,), None, id="live-thread-without-children-file"),
+    pytest.param(["4242"], {"4242": "11 x2\n"}, (TASK,), None, id="not-a-pid-list"),
+    pytest.param(
+        ["4242"],
+        {"4242": UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")},
+        (TASK,),
+        None,
+        id="not-ascii",
+    ),
+]
+
+
+@pytest.mark.parametrize(("listing", "reads", "present", "expected"), LISTING_CASES)
+def test_children_of_separates_a_gone_process_or_thread_from_an_unreadable_list(
+    monkeypatch, listing, reads, present, expected
+):
+    _proc_standin(monkeypatch, listing=listing, reads=reads, present=present)
+    assert children_of(4242) == expected
+
+
+def _listing_scenario(monkeypatch, *, dies_while_listing):
+    """A pinned live parent 4101 whose children cannot be read (children_of gives None).
+
+    With ``dies_while_listing`` the parent exits during that failed read, so the failure is
+    explained by its death (gone) rather than by an unreadable list of a live process.
+    """
+
+    from scripts import production_gate_parallel_processes as proc
+
+    parent = 4101
+    fds, state = {}, {"exited": False, "strangers": 0, "signals": []}
+
+    def fake_open(pid):
+        fds[pid] = os.open(os.devnull, os.O_RDONLY)
+        return fds[pid]
+
+    def fake_children(_pid):
+        state["exited"] = dies_while_listing
+        return None
+
+    def fake_stat(pid):
+        state["strangers"] += pid != parent
+        return (1000, 1, "S") if pid == parent else None
+
+    monkeypatch.setattr(proc, "_pidfd_open", fake_open)
+    monkeypatch.setattr(proc, "_exited", lambda fd: fd == fds.get(parent) and state["exited"])
+    monkeypatch.setattr(proc, "read_stat", fake_stat)
+    monkeypatch.setattr(proc, "children_of", fake_children)
+    monkeypatch.setattr(proc, "socket_ports", lambda pids: {})
+    monkeypatch.setattr(
+        proc.signal, "pidfd_send_signal", lambda fd, signum: state["signals"].append(signum)
+    )
+    tree = proc.OwnedTree(parent, "tok", observe_seconds=0.0)
+    tree.observe(force=True)
+    return tree, state, fds
+
+
+def test_a_live_pinned_parent_whose_children_cannot_be_read_is_containment_unproven(monkeypatch):
+    tree, state, fds = _listing_scenario(monkeypatch, dies_while_listing=False)
+    try:
+        assert tree.contained is False and "cannot be read" in tree.reason
+        assert tree.tracked == {4101: 1000} and set(fds) == {4101}, "nothing foreign was pinned"
+        assert state["strangers"] == 0 and state["signals"] == [], "no foreign walk, no signal"
+    finally:
+        _close_all(fds)
+
+
+def test_a_parent_that_exits_while_its_children_cannot_be_read_is_gone_not_unreadable(monkeypatch):
+    tree, state, fds = _listing_scenario(monkeypatch, dies_while_listing=True)
+    try:
+        assert tree.contained is True and tree.reason == "", "its death explains the failed read"
+        assert state["strangers"] == 0 and state["signals"] == []
+    finally:
+        _close_all(fds)
+
+
+def test_an_orchestrator_that_cannot_read_its_own_children_claims_no_adoption_containment(
+    monkeypatch,
+):
+    class Adopting:
+        enabled = True
+
+        def verify(self):
+            return True
+
+    tree, state, fds = _listing_scenario(monkeypatch, dies_while_listing=True)
+    try:
+        assert tree.contained is True
+        tree.adoption = Adopting()
+        tree.pin_orphans()
+        assert tree.contained is False and "cannot be read" in tree.reason
+        assert tree.orphans_pinned == 0 and state["signals"] == []
+    finally:
+        _close_all(fds)
