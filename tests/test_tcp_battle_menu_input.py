@@ -680,7 +680,9 @@ def test_tcp_battle_turn_post_barrier(case, monkeypatch) -> None:
         assert calls == []
         assert len(logs) == 1 and logs[0].startswith("peer battle turn completion not observed")
         return
-    assert calls == [("sync", 15, 120.0), *[("press", "a", 4), ("step", 20)] * 10, ("shutdown", 21)]
+    shot = [] if case == _POST_CASES[1] else [("shot", "06_battle_synced")]
+    drain = [("press", "a", 4), ("step", 20)] * 10
+    assert calls == [("sync", 15, 120.0), *shot, *drain, ("shutdown", 21)]
     assert "sync: post-battle shutdown drain" in logs
     expected = ("error", "RuntimeError: boom") if case == _POST_CASES[1] else (None, None)
     assert (peer.drive_status, peer.drive_error) == expected
