@@ -668,7 +668,10 @@ def _run_plan(
                     clock=clock,
                     adoption=adoption,
                     status=process.guardian_status,  # type: ignore[attr-defined]
-                    known_children=lambda: {i.process.pid for i in running},
+                    known_children=lambda: (
+                        {i.process.pid for i in running}
+                        | {pid for i in running for pid in i.owned.tracked}
+                    ),
                     cgroup=job_cgroup,
                 ),
                 launched,
