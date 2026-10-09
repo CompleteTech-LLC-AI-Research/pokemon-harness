@@ -592,6 +592,7 @@ def _run_plan(
         """Ask the guardian to contain its subtree first, then prove it from outside."""
 
         view = item.process.guardian_status  # type: ignore[attr-defined]
+        hub.expect_drop(item.job_id)  # the owner ends this connection; that alone is not a loss
         # The guardian installs its handlers before it reports readiness over the status pipe; a
         # stop signal sent earlier would kill it with the default action and leave no receipt.
         ready_limit = clock() + grace_seconds + 2.0

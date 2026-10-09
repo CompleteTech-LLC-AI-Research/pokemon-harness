@@ -230,6 +230,42 @@ def test_a_child_that_drops_its_connection_while_holding_reservations_is_reporte
     assert hub.confirm_cleanup("source-job") == ["p"] and hub.retained() == {}
 
 
+def _wait_dropped(hub, job_id):
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        with hub._lock:
+            if hub._jobs[job_id].dropped:
+                return
+        time.sleep(0.02)
+    raise AssertionError(f"{job_id}: the hub never noticed the closed connection")
+
+
+def test_a_drop_the_owner_asked_for_keeps_the_evidence_but_is_not_a_lost_arbiter(hub):
+    """The owner stops a job on its deadline or on a cancel: its connection ends, a sibling runs on."""
+
+    client = connect(hub, "source-job", 1)
+    sibling = connect(hub, "cython-job", 1)
+    assert client.reserve("p")[0] == "granted"
+    hub.expect_drop("source-job")  # what the orchestrator does before it signals the guardian
+    client._conn.close()
+    _wait_dropped(hub, "source-job")
+    assert hub.closed_reason == "" and hub.lost == []
+    assert sibling.reserve("q")[0] == "granted", "a job the owner stopped must not stop its sibling"
+    ledger = hub.unregister("source-job", cleanup_proven=False)
+    assert ledger["dropped"] is True and ledger["unreleased"] == ["p"]
+    assert ledger["retained_unproven"] == ["p"], "the held pair is still evidence, never forgotten"
+
+
+def test_an_unannounced_drop_that_holds_no_reservation_does_not_close_the_siblings(hub):
+    client = connect(hub, "source-job", 1)
+    sibling = connect(hub, "cython-job", 1)
+    client._conn.close()  # died before it reserved anything: no pair is at stake
+    _wait_dropped(hub, "source-job")
+    assert hub.closed_reason == "" and hub.lost == []
+    assert sibling.reserve("q")[0] == "granted"
+    assert hub.unregister("source-job")["unreleased"] == []
+
+
 def test_reservations_of_a_retired_job_are_freed_only_by_proven_cleanup(hub):
     client = connect(hub, "source-job", 1)
     assert client.reserve("p")[0] == "granted"

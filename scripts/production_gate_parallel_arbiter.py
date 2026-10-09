@@ -47,7 +47,7 @@ class _Job:
         self.active: set[str] = set()
         self.grants = self.denials = self.releases = self.stray_releases = self.violations = 0
         self.events: deque[dict[str, str]] = deque(maxlen=MAX_EVENTS)
-        self.hello = self.finished = self.dropped = False
+        self.hello = self.finished = self.dropped = self.owner_stopping = False
         self.dropped_holding: list[str] = []
         self.last_seen = clock
         self.peer_pid: int | None = None
@@ -127,6 +127,14 @@ class ArbiterHub:
             "events": list(job.events),
         }
 
+    def expect_drop(self, job_id: str) -> None:
+        """The owner is about to stop this job itself: its connection ending is not a lost arbiter."""
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job.owner_stopping = True
+
     def retained(self) -> dict[str, list[str]]:
         with self._lock:
             return {job_id: list(pairs) for job_id, pairs in self._retained.items()}
@@ -204,8 +212,8 @@ class ArbiterHub:
                         job.dropped = True
                         job.dropped_holding = sorted(job.active)  # evidence; `active` is KEPT
                         held = len(job.active)
-                        registered = self._jobs.get(job.job_id) is job
-                    if registered:  # a drop the owner did not cause is a lost arbiter for everyone
+                        unexpected = self._jobs.get(job.job_id) is job and not job.owner_stopping
+                    if unexpected and held:  # nobody asked for this drop and a pair is still held
                         self.lose(
                             f"{job.job_id}: the child arbiter connection dropped while holding "
                             f"{held} reservation(s)"
