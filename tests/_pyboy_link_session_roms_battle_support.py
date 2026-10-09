@@ -9,6 +9,7 @@ from __future__ import annotations
 from tests._battle_turn_evidence import (
     EVIDENCE_EVENTS,
     BattleTurnObserver,
+    battle_evidence_ready,
     install_continuation_hooks,
     verify_battle_turns,
 )
@@ -68,7 +69,7 @@ def _wait_for_settled_battle_evidence(link, counters: dict, *, budget_frames: in
     observers = counters.get("_battle_evidence")
     assert isinstance(observers, list) and len(observers) == 2
     for _ in range(0, budget_frames, 20):
-        if all(observer.snapshot()["settled"] for observer in observers):
+        if all(battle_evidence_ready(observer.snapshot()) for observer in observers):
             break
         link.step_interleaved(20, chunk_cycles=_LINK_CHUNK_CYCLES)
     _assert_settled_battle_evidence(counters)

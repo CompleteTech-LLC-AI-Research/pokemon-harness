@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 
+from tests._battle_turn_evidence import battle_evidence_ready
 from tests._tcp_trade_peer_link_menu import _TRADE_DIAG_SYMBOLS
 from tests._tcp_trade_peer_sync import _hold_at_sync_boundary
 
@@ -405,15 +406,17 @@ class _PeerDriveBattleMixin:
             f"cpu={self.cpu_snapshot()}"
         )
 
+        self._battle_turn_barrier_loop()
+        self._battle_turn_post_barrier()
+
+    def _battle_turn_barrier_loop(self) -> None:
         last_battle_log = time.monotonic()
         while time.monotonic() < self.deadline:
-            if self.counters["EndOfBattle"][0] > 0:
+            row = self.battle_observer.snapshot() if self.battle_observer is not None else None
+            settled = isinstance(row, dict) and row.get("settled") is True
+            if self.counters["EndOfBattle"][0] > 0 and not settled:
                 break
-            battle_turn_complete = (
-                self.battle_observer is not None
-                and self.battle_observer.snapshot()["settled"] is True
-            )
-            if battle_turn_complete and not self.battle_turn_announced:
+            if battle_evidence_ready(row) and not self.battle_turn_announced:
                 self.link._network_backend.announce_sync(sync_id=14)
                 self.battle_turn_announced = True
                 self.shot("05_battle_turn")
@@ -436,6 +439,8 @@ class _PeerDriveBattleMixin:
                     f"backend={self.backend_snapshot()}"
                 )
                 last_battle_log = time.monotonic()
+
+    def _battle_turn_post_barrier(self) -> None:
         if self.battle_turn_announced:
             try:
                 self.cooperative_sync(sync_id=15, timeout=120.0)

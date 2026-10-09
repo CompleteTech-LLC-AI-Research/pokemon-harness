@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 
 import pytest
 
 from tests import _battle_turn_evidence as evidence
+from tests._battle_observer_contract_support import (
+    _BYTE_CONTROL,
+    _HOOK_SHORT,
+    _MUTANTS,
+    _N3_CASES,
+    _N4_CASES,
+    FROZEN_LOCATIONS,
+    FROZEN_PINS_BY,
+    _check_peer,
+    _continuation_session,
+    _run_flow,
+    _run_mutant,
+)
 from tests.test_battle_turn_evidence import _observer, _row, verify_battle_turns
 
 
@@ -260,3 +274,228 @@ def test_terminal_cleanup_gate_preserves_frozen_turn(monkeypatch) -> None:
     assert observer.error is None
     assert observer.turn == frozen
     assert observer.snapshot()["settled"] is True
+
+
+# --- #595: verified KO-return / terminal continuation hooks (N1, N2) ----------
+
+
+@pytest.mark.parametrize("version", ("red", "blue", "yellow"))
+def test_continuation_locations_pin_terminal_and_ko_hooks_for_every_version(version) -> None:
+    session = _continuation_session(version)
+    frozen = FROZEN_LOCATIONS[version]
+    assert len(frozen) == 7
+    assert list(evidence.continuation_locations(session, version)) == frozen
+    owned = evidence.install_continuation_hooks(session, object(), version=version)
+    assert owned == [(bank, address) for _name, bank, address in frozen]
+    assert session._pyboy.registered == owned
+
+
+def _drift_cases():
+    for version in ("red", "blue", "yellow"):
+        for short, hook in _HOOK_SHORT.items():
+            for kind in ("byte", "address", "bank"):
+                yield pytest.param(version, hook, kind, id=f"{version}-{short}-{kind}")
+
+
+@pytest.mark.parametrize("version, hook, kind", tuple(_drift_cases()))
+def test_continuation_locations_reject_terminal_and_ko_signature_drift(version, hook, kind) -> None:
+    label, anchor, address, signature = FROZEN_PINS_BY[version, hook]
+    data = bytes.fromhex(signature)
+
+    def mutate(table, memory):
+        if kind == "byte":
+            index, replacement = _BYTE_CONTROL[hook]
+            assert memory[15, address + index] == data[index] != replacement
+            memory[15, address + index] = replacement
+        elif kind == "address":
+            table[label] = (15, anchor + 1)
+            for index, value in enumerate(data):
+                memory[15, address + 1 + index] = value
+        else:
+            table[label] = (14, anchor)
+            for index, value in enumerate(data):
+                memory[14, address + index] = value
+
+    session = _continuation_session(version, mutate)
+    message = (
+        f"{hook} "
+        + {"byte": "signature bytes", "address": "address", "bank": "bank"}[kind]
+        + " mismatch"
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
+        evidence.install_continuation_hooks(session, object(), version=version)
+    assert session._pyboy.registered == []
+
+
+# --- #595: local readiness and wait contract (N6 readiness, N6 local) ----------
+
+
+def _ko_rows(*, terminal=True, cleanup=True):
+    from tests.test_battle_turn_evidence import _ko_pair_without_terminal, _terminal_pair
+
+    rows = _ko_pair_without_terminal()
+    if terminal:
+        for row, full in zip(rows, _terminal_pair(), strict=True):
+            row["terminal"] = full["terminal"]
+            if cleanup:
+                row["cleanup"] = full["cleanup"]
+    return rows
+
+
+@pytest.mark.parametrize(
+    "case, row, expected",
+    (
+        pytest.param(
+            "errored",
+            {
+                "settled": True,
+                "unsupported_reason": "battle observation X: ValueError: e",
+                "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}},
+                "terminal": {"boundary": "EndOfBattle"},
+                "cleanup": {"is_in_battle": 0},
+            },
+            False,
+            id="errored",
+        ),
+        pytest.param("unsettled", {"settled": False}, False, id="unsettled"),
+        pytest.param("non-dict", None, False, id="non-dict"),
+        pytest.param(
+            "nonko-settled",
+            {"settled": True, "turn": {"local": {"hp": 5}, "enemy": {"hp": 5}}},
+            True,
+            id="nonko-settled",
+        ),
+        pytest.param(
+            "ko-no-terminal",
+            {
+                "settled": True,
+                "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}},
+                "terminal": None,
+                "cleanup": None,
+            },
+            False,
+            id="ko-no-terminal",
+        ),
+        pytest.param(
+            "ko-terminal-no-cleanup",
+            {
+                "settled": True,
+                "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}},
+                "terminal": {"boundary": "EndOfBattle"},
+                "cleanup": None,
+            },
+            False,
+            id="ko-terminal-no-cleanup",
+        ),
+        pytest.param(
+            "ko-cleanup-still-in-battle",
+            {
+                "settled": True,
+                "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}},
+                "terminal": {"boundary": "EndOfBattle"},
+                "cleanup": {"is_in_battle": 2},
+            },
+            False,
+            id="ko-cleanup-still-in-battle",
+        ),
+        pytest.param(
+            "ko-terminal-cleanup",
+            {
+                "settled": True,
+                "turn": {"local": {"hp": 5}, "enemy": {"hp": 0}},
+                "terminal": {"boundary": "EndOfBattle"},
+                "cleanup": {"is_in_battle": 0},
+            },
+            True,
+            id="ko-terminal-cleanup",
+        ),
+    ),
+)
+def test_battle_evidence_ready_contract(case, row, expected) -> None:
+    from tests._pyboy_link_session_roms_battle_support import battle_evidence_ready
+
+    assert battle_evidence_ready(row) is expected
+
+
+class _ScriptedLink:
+    def __init__(self):
+        self.calls = 0
+
+    def step_interleaved(self, frames, chunk_cycles=None):
+        self.calls += 1
+
+
+class _ScriptedObserver:
+    def __init__(self, link, rows_for_calls):
+        self.link, self.rows_for_calls = link, rows_for_calls
+
+    def snapshot(self):
+        return self.rows_for_calls(self.link.calls)
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "local-never-ready",
+        "local-nonko-ready",
+        "local-ko-cleanup-arrives",
+        "local-ko-never-cleanup",
+    ),
+)
+def test_local_battle_wait_contract(case) -> None:
+    from tests._pyboy_link_session_roms_battle_support import _wait_for_settled_battle_evidence
+
+    link = _ScriptedLink()
+    nonko = [_row(), _row(reverse=True)]
+    plans = {
+        "local-never-ready": lambda calls: [
+            {**row, "settled": False} for row in (_row(), _row(reverse=True))
+        ],
+        "local-nonko-ready": lambda calls: nonko,
+        "local-ko-cleanup-arrives": lambda calls: _ko_rows(cleanup=calls >= 2),
+        "local-ko-never-cleanup": lambda calls: _ko_rows(terminal=False),
+    }
+    rows_for = plans[case]
+    counters = {
+        "_battle_evidence": [
+            _ScriptedObserver(link, lambda calls, i=i: rows_for(calls)[i]) for i in (0, 1)
+        ]
+    }
+    if case in ("local-never-ready", "local-ko-never-cleanup"):
+        expected = (
+            "['settled snapshot is missing']"
+            if case == "local-never-ready"
+            else "['KO outcome lacks EndOfBattle evidence']"
+        )
+        with pytest.raises(AssertionError) as caught:
+            _wait_for_settled_battle_evidence(link, counters)
+        assert str(caught.value).startswith(f"battle settlement evidence failed: {expected}; rows=")
+        assert link.calls == 120
+    else:
+        _wait_for_settled_battle_evidence(link, counters)
+        assert link.calls == (0 if case == "local-nonko-ready" else 2)
+
+
+@pytest.mark.parametrize("case", _N3_CASES, ids=[case[0] for case in _N3_CASES])
+def test_peer_ko_flow_settles_before_end_of_battle(case) -> None:
+    _name, version, peer, attacker, defender, a_anchors, d_anchors = case
+    observers, completed, rows = _run_flow(version, (attacker, defender), int(peer))
+    assert verify_battle_turns(rows) == []
+    for observer, completion, anchors in zip(observers, completed, (a_anchors, d_anchors)):
+        _check_peer(observer, completion, anchors)
+
+
+@pytest.mark.parametrize("case", _N4_CASES, ids=[case[0] for case in _N4_CASES])
+def test_ko_boundary_negative_controls(case, monkeypatch) -> None:
+    _name, attacker, defender, bad, error, verdict, a_anchors, d_anchors = case
+    hook, _, cause = error.partition(":")
+    error = f"battle observation {hook}: ValueError: {cause}" if bad != "-" else None
+    expected = [] if verdict == "-" else [error if verdict == "=" else verdict]
+    observers, completed, rows = _run_flow("red", (attacker, defender))
+    assert verify_battle_turns(rows) == expected
+    for role, (observer, completion, anchors) in enumerate(
+        zip(observers, completed, (a_anchors, d_anchors))
+    ):
+        _check_peer(observer, completion, anchors, error if bad == "AD"[role] else None)
+    if _name in _MUTANTS:
+        _run_mutant(monkeypatch, _name, (attacker, defender), error)
