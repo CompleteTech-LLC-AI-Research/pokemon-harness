@@ -14,13 +14,18 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
             "a real write-denial probe; verifiable equivalent-root provenance for the native guard"
         ),
         (
-            "private frozen copy of the interpreter environment with kernel-checked protection of "
-            "the base interpreter and stdlib (a writable base is copied too), the real default sys.path and "
-            "mapped libraries; each runtime digest frozen in the plan and verified by the worker"
+            "private copy of the interpreter environment that refuses ordinary writes by mode bits "
+            "(NOT complete immutability), kernel-checked protection of other inputs, the real "
+            "default sys.path; each runtime digest frozen in the plan and verified by the worker"
         ),
         (
             "owner-held listening sockets handed to the production listeners with validation and "
             "acknowledgment; the effective child policy digests frozen in the plan"
+        ),
+        (
+            "live parent arbiter: every child row reservation, release, block, expiry and loss over "
+            "a bounded authenticated acknowledged protocol; a lost arbiter, guardian, policy or "
+            "capacity closes admission and signals every owned guardian at once"
         ),
         "phases: both additional smokes complete before any selected-tier job; both retained",
         (
@@ -52,8 +57,9 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         "operator allocation (#85/#86), #106 policy and the 18 orientation fixtures are unmet",
         "nothing in this candidate has been executed; authored controls are not gameplay evidence",
         (
-            "not implemented: writable site dirs of a non-venv interpreter, cgroup ownership without "
-            "host delegation, in-flight child admission events, arbitration of child rows"
+            "not implemented: writable site dirs of a non-venv interpreter (refused), host-enforced "
+            "immutability, a complete library inventory; the qualified mode refuses a host "
+            "without cgroup delegation and --parallel-allow-unqualified is never an acceptance"
         ),
         "release status remains PARTIAL",
     ],

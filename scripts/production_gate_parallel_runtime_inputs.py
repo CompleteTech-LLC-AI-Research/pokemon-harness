@@ -1,18 +1,20 @@
-"""Private immutable runtime inputs for concurrent jobs, or proof that the OS already protects them (#107 F2).
+"""Private runtime inputs that refuse ordinary writes, or proof the OS already protects them (#107 F2).
 
 A job must not execute against a dependency tree any process of this UID can rewrite.  For each
-runtime interpreter this module resolves what will really execute (the interpreter, its stdlib, its
-default ``sys.path``, its site directories and the shared libraries a real run maps), and then:
+runtime interpreter this module resolves what will execute (the interpreter, its stdlib, its default
+``sys.path``, its site directories and the shared libraries a *finite* probe run maps) and then:
 
-* a virtual environment is COPIED into a private tree, its editable-install ``.pth`` files are
-  redirected from the original checkout to the immutable snapshot, and the copy is frozen (every
-  write bit removed, a real write is attempted and must be refused).  The job runs the copy's
-  interpreter, so its default ``sys.path`` and site-packages are the frozen copy;
-* the base interpreter, its stdlib and every other mapped library must already be unwritable for
-  the executing UID (the kernel's own ``access`` check, not a digest taken afterwards).  If any is
-  writable no run is started: copying a base prefix is not implemented, so this fails closed.
+* a virtual environment (and a base prefix this UID could write) is COPIED into a private tree, its
+  editable-install ``.pth`` files are redirected to the snapshot, and the copy has every write bit
+  removed with a real write attempted and required to fail.  That is `private_copy_mode_bits`: it
+  refuses ordinary writes, but the owning UID can ``chmod`` it back, so it is NOT complete immutability;
+* every other input must already be unwritable for the executing UID by the kernel's access check
+  (`kernel_protected`, judged for this UID at resolution time) or the run is refused;
+* the interpreter the job will really run is resolved again and its executable, stdlib and default
+  ``sys.path`` must lie in a copy, the snapshot or a kernel-protected tree.
 
-No permission of any shared tree is changed; only this module's own copies are frozen.
+The manifest states each root's class and ``acceptance_limits``; nothing here is host-enforced
+immutability, a complete library inventory or runtime execution evidence, and none is claimed.
 """
 
 from __future__ import annotations
@@ -56,6 +58,12 @@ print(json.dumps({
     "platstdlib": paths["platstdlib"], "sites": site.getsitepackages(),
     "libraries": sorted(maps)}))
 """
+ACCEPTANCE_LIMITS = (
+    "private copies refuse ordinary writes by mode bits; the owning UID can chmod them back",
+    "mapped libraries are the finite set loaded by the probe (numpy, pyboy), not every library",
+    "kernel-protected roots are judged for this UID by the access check at resolution time only",
+    "no host-enforced immutability (read-only mount, chattr, separate UID) is established",
+)
 PROBE_TIMEOUT_SECONDS = 120
 WRITABLE_REPORT_LIMIT = 8
 
@@ -275,6 +283,11 @@ def build_private_runtimes(
                         f"{mode}: the private interpreter's default sys.path names {entry}, which "
                         "the executing UID can modify"
                     )
+        immutability: dict[str, str] = {root: "kernel_protected" for root in protected}
+        if private_prefix is not None:
+            immutability[str(private_prefix)] = "private_copy_mode_bits"
+        if private_base is not None:
+            immutability[str(private_base)] = "private_copy_mode_bits"
         libraries: list[str] = []
         for library in info["libraries"]:
             path = Path(library)
@@ -286,6 +299,7 @@ def build_private_runtimes(
                 problems.append(f"{mode}: the linked library {library} is writable by this UID")
             else:
                 libraries.append(library)
+                immutability[library] = "kernel_protected"
         results[mode] = {
             "interpreter": run_interpreter,
             "problems": problems,
@@ -298,6 +312,9 @@ def build_private_runtimes(
                 "kernel_protected": protected,
                 "protected_libraries": libraries,
                 "default_sys_path": list(info["path"]),
+                "immutability": immutability,
+                "acceptance_limits": list(ACCEPTANCE_LIMITS),
+                "evidence": "static resolution only; no runtime execution evidence",
             },
         }
     return results

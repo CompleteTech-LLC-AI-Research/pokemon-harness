@@ -42,6 +42,8 @@ def render_report_text(report: Mapping[str, Any]) -> str:
     lines.extend(f"problem: {item}" for item in report.get("problems", []))
     lines.extend(f"orchestration: {item}" for item in report.get("orchestration_problems", []))
     lines.extend(f"limitation: {item}" for item in report.get("limitations", []))
+    if report.get("runtime_immutability"):
+        lines.append(f"runtime immutability: {report['runtime_immutability']}")
     ownership = report.get("kernel_ownership")
     if isinstance(ownership, dict):
         lines.append(f"kernel ownership: {ownership.get('qualification')}")

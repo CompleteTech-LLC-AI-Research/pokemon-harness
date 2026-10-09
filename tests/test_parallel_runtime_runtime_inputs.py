@@ -82,6 +82,11 @@ def test_a_virtual_environment_is_copied_redirected_and_frozen_against_real_writ
             assert result[mode]["interpreter"].startswith(str(private))
             assert private != venv and private.is_relative_to(tmp_path / "runtime")
         assert len({r["manifest"]["private_prefix"] for r in result.values()}) == 1, "copied once"
+        manifest = result["source"]["manifest"]
+        assert manifest["immutability"][manifest["private_prefix"]] == "private_copy_mode_bits"
+        assert (
+            "chmod" in " ".join(manifest["acceptance_limits"]) and "static" in manifest["evidence"]
+        )
         copy = Path(result["source"]["manifest"]["private_prefix"])
         pth = copy / "lib" / "python3" / "site-packages" / "__editable__.project.pth"
         assert str(snapshot) in pth.read_text() and str(original) not in pth.read_text()

@@ -296,6 +296,7 @@ def run_parallel_cli(
             require_kernel_ownership=not getattr(args, "parallel_allow_unqualified", False),
         )
     report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}
+    report["runtime_immutability"] = "NOT_COMPLETE: see acceptance_limits of each runtime manifest"
     if any("cleanup unproven" in item for item in report.get("orchestration_problems", [])):
         report["snapshot_retained"] = snapshot["root"]  # never remove what cleanup has not cleared
     else:

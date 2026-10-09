@@ -1778,7 +1778,7 @@ the real-ROM qualification is a separate requirement.
 - **Phases.** With the additional early smoke each runtime has a smoke job and a selected-tier job. Both
   smokes finish and are retained before any selected-tier job starts; a failed smoke never cancels the other
   smoke, and `fail_fast` only decides whether the selected phase starts afterwards.
-- **Private immutable snapshot.** The parent copies every tracked file of the clean checkout and the resolved
+- **Private snapshot and runtime copies (mode-bit protected, not complete immutability).** The parent copies every tracked file of the clean checkout and the resolved
   ROM/fixture roots into the run root, gives the copy its own git repository (index and one commit, no
   global configuration), removes all write permission bits, and probes that the OS really refuses writes (a
   snapshot file opened for writing or a directory creation fails closed with the observed evidence). Every job
@@ -1793,8 +1793,11 @@ the real-ROM qualification is a separate requirement.
   and every other mapped library must be unwritable by the kernel's own access check, otherwise the run is
   refused. A content digest of each private runtime (names, bytes, link targets, the snapshot path
   normalised) is frozen in the plan and the worker refuses a runtime that does not match it. Permission bits
-  refuse ordinary writes by the job; they do not bind the owner against a deliberate `chmod`. No host or
-  global permission is changed.
+  refuse ordinary writes by the job; they do not bind the owner against a deliberate `chmod`. Complete
+  immutability is not claimed: the resolved library set is the finite one a probe maps, kernel protection is
+  judged for this UID at resolution time, the report says `runtime_immutability: NOT_COMPLETE` and every
+  runtime manifest lists its `acceptance_limits`; unprotected inputs are refused. No host or global
+  permission is changed.
 - **Ports.** Each job gets a disjoint loopback port range and an owner-held listener broker. A consumer
   leases a port: the orchestrator binds and listens the socket itself and keeps it, and the production
   listener (`NetworkBackend.listen`, the timed listener and its MCP owner, the serial-link listener and the
@@ -1810,8 +1813,16 @@ the real-ROM qualification is a separate requirement.
   insufficient capacity, a queued or blocked admission and a lost reservation fail closed. The effective child
   policy digests are frozen in the plan, re-proven when written and verified by the worker. A blocked or
   expired admission reported by one child marks the one budget lost and cancels the siblings even without
-  fail-fast. This is partitioned allocation with propagated loss; it is not an arbiter between the children's
-  own row admission.
+  fail-fast, as a second line only. The mechanism is live: in a concurrent job every row reservation, release,
+  block, expiry and loss of a child gate goes to an arbiter in the orchestrator over a bounded (2048 bytes),
+  HMAC-authenticated, acknowledged protocol, and a child slot exists only because the arbiter granted it
+  under the job's share, the single global pair budget and an open admission (the static share stays only the
+  child's local ceiling). A lost arbiter (silent lease, repeated violations, unreachable), a lost guardian, a
+  policy different from the plan pin or a capacity loss closes admission for every job at once and signals
+  every owned guardian immediately; a child that cannot reach its arbiter refuses to run, so there is no
+  fallback to static shares or to final-only reports. The key and socket name reach the job through its
+  environment, so the MAC proves job binding, not secrecy against a hostile process of the same UID. Ordinary
+  standalone gate use is unchanged.
 - **Owned processes.** Every job runs under a job-local guardian (a subreaper) that starts the worker in its
   own session; both guardian and worker die with their parent (`PR_SET_PDEATHSIG`), and SIGTERM/SIGHUP of the
   orchestrator become the bounded-cancel interrupt. An orphan created at any instant is re-parented to the
@@ -1829,7 +1840,11 @@ the real-ROM qualification is a separate requirement.
   delegated to the executing user (cgroup v2 with `cgroup.kill`), each job also gets its own cgroup that the
   guardian joins before it starts the worker; membership survives `setsid` and re-parenting, so cleanup is
   `cgroup.kill` plus the kernel's own `populated 0` reading. On a host without delegation (for example a
-  root-owned `0::/` cgroup) that layer is unavailable and only the adoption proof applies.
+  root-owned `0::/` cgroup) that layer is unavailable. The fully qualified mode, which is the default of
+  `--parallel-runtimes`, REQUIRES that kernel ownership: when it is unavailable the run is refused before any
+  child exists and every job is `not_started`. `--parallel-allow-unqualified` runs on adoption and retention
+  evidence only and the report says `UNQUALIFIED_COMPATIBILITY`; an observational sweep is never claimed to
+  close the escaped-orphan window, and no run claims full #107 acceptance.
 - **Strict aggregation.** The parent re-reads the referenced complete gate report itself and re-derives
   tiers, rows and verdict from it; rows come from the producer's actual per-test terminal records (all games,
   ordered `listener`/`connector` roles, per repetition) carried through the gate with
@@ -1850,6 +1865,7 @@ the real-ROM qualification is a separate requirement.
 Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
 with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy and
 the 18 orientation fixtures are not provided by this change. Also not implemented: a private copy of a
-non-venv interpreter whose site directories are writable, cgroup ownership on hosts without delegation,
-in-flight child admission events, and arbitration between the children's row admission. The authored controls drive real child processes
+non-venv interpreter whose site directories are writable (refused), host-enforced immutability, a complete
+library inventory, and kernel ownership on a host without cgroup delegation (the qualified mode refuses
+there; that is an external qualification gap). The authored controls drive real child processes
 but never run a gate or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.
