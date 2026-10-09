@@ -14,10 +14,12 @@ def _may_bypass(expression):
     """Can a comparison nested in this expression still go unchecked?
 
     ``assert x != y or True`` and ``assert True or x != y`` both parse to a
-    ``BoolOp``, and both leave the comparison unchecked: the ``or`` decides the
-    assert on its own when the other operand is truthy. The comparison node is
-    still present, so a presence-only check -- and ``_is_enforced``, which only
-    inspects ``try`` -- reports the contract as intact.
+    ``BoolOp``, and in both the comparison can no longer fail: the ``or``
+    decides the assert on its own when the other operand is truthy. (A later
+    comparison is skipped; an earlier one runs but its false result is
+    masked.) The comparison node is still present, so a presence-only check --
+    and ``_is_enforced``, which decides handlers and reachability but not
+    operand values -- reports the contract as intact.
 
     A tautological operand decides it just as effectively as a bare ``True``,
     which is why the spelling of the bypass does not matter. Recursion covers
@@ -26,13 +28,15 @@ def _may_bypass(expression):
     that was trivially true.
 
     The two operators are handled separately, because they bypass in opposite
-    conditions. Under ``or`` any deciding operand skips its sibling when
-    truthy, so every operand is a candidate. Under ``and`` a sibling is skipped
-    only when the other side is *falsy*, which no decidable-true operand can
-    establish, so a runtime value is not a bypass there. Only a tautology
-    remains a bypass under ``and``, and only in the operand positions that
-    decide the result: a leading tautology short-circuits to true and the rest
-    never runs.
+    conditions. Under ``or`` a truthy deciding operand settles the assert, so
+    every operand is a candidate: a later sibling is skipped (``True or x``)
+    and an earlier comparison runs but cannot fail (``x != 1 or True``). Under
+    ``and`` a sibling is skipped only when an earlier operand is *falsy*, and
+    then the assert itself fails, so nothing is hidden: a truthy literal --
+    ``True and x != 1`` -- still evaluates the comparison and the assert can
+    fail. Only a *nested* bypass inside an ``and`` operand that follows a
+    leading run of known tautologies -- a literal ``True`` or a count such as
+    ``len(y) >= 0`` -- is still reported.
 
     A bare ``Compare`` operand does not count as a decision by itself, so
     ``assert x != 1 and y != 2`` -- the shape the real retention sites use --
@@ -46,17 +50,18 @@ def _may_bypass(expression):
     if any(tautologies):
         if isinstance(expression.op, ast.Or):
             return True
-        # Under `and`, a tautology only decides the result when it is the
-        # first operand: `True and <comparison>` never evaluates the
-        # comparison. In any later position it is only decisive when every
-        # operand before it is itself truthy -- `a and True and <comparison>`
-        # still short-circuits to true without reaching the comparison, while
-        # `<comparison> and True` evaluates the comparison first and so is not
-        # a bypass. An earlier operand that could be falsy leaves the
-        # comparison reachable, so the tautology is not the deciding one.
+        # Under `and` a tautology skips nothing: Python continues past a truthy
+        # operand, so `True and <comparison>` evaluates the comparison (a falsy
+        # operand would fail the assert instead). Only a nested bypass can hide
+        # one, so the operands after a leading run of known tautologies -- a
+        # literal `True` or a count like `len(y) >= 0` -- are checked for that.
+        # `<comparison> and True` and `flag and True and <comparison>` stay
+        # enforced; a nested `or` bypass behind an unknown operand was never
+        # reported and is left as it was.
         return any(
-            tautology and all(_is_literal_true(operand) for operand in operands[:position])
-            for position, tautology in enumerate(tautologies)
+            _may_bypass(operand)
+            for position, operand in enumerate(operands)
+            if position and all(tautologies[:position])
         )
     if isinstance(expression.op, ast.And):
         return False
