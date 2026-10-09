@@ -232,3 +232,18 @@ def test_an_arbiter_that_stops_serving_is_a_loss_for_everyone(hub):
         time.sleep(0.02)
     hub.check_leases()
     assert "stopped serving" in hub.closed_reason and len(hub.lost) == 1
+
+
+def test_the_hello_binds_the_digest_of_the_policy_bytes_the_gate_actually_loaded(hub, tmp_path):
+    policy = tmp_path / "capacity-policy.json"
+    policy.write_text('{"max_concurrent_pairs": 1}', encoding="utf-8")
+    loaded = wire.policy_file_digest(policy)
+    assert (
+        loaded is not None and len(loaded) == 64 and wire.policy_file_digest(tmp_path / "x") is None
+    )
+    env = hub.register("source-job", 1, loaded)
+    other = hub.register("cython-job", 1, "c" * 64)
+    good = ArbiterClient.from_environment(env, policy=loaded)
+    assert good is not None and not good.closed_reason
+    forged = ArbiterClient.from_environment(other, policy=loaded)
+    assert forged is not None and forged.closed_reason and "plan-pinned" in hub.closed_reason

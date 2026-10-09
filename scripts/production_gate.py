@@ -322,7 +322,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             capacity_payload["status"] = "blocked"
             configuration_problems.append(f"capacity policy blocked: {policy_error}")
         else:
-            session_options: dict[str, object] = {}
+            # A concurrent job's parent compares this with the plan-pinned policy digest.
+            session_options: dict[str, object] = {
+                "policy_sha256": policy_file_digest(capacity_path)
+            }
             if args.parallel_runtimes and args.parallel_run_root is not None:
                 # Sample the filesystem the concurrent run actually consumes.
                 session_options["temp_root"] = args.parallel_run_root.expanduser().resolve()
@@ -645,6 +648,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 # The split modules' names are re-exported verbatim so the gate's module surface
 # (and every ``gate.<name>`` monkeypatch target the gate tests rely on) is unchanged.
+from scripts.gate_capacity_arbiter import policy_file_digest
 from scripts.production_gate_assets import (
     _path_from_env,  # noqa: F401  (retained facade attribute: gate._path_from_env)
     _path_from_project_root,

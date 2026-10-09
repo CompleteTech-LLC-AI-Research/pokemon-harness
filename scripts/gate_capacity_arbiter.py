@@ -80,6 +80,16 @@ def unseal(key: bytes, data: bytes) -> dict[str, Any]:
     return body
 
 
+def policy_file_digest(path: object) -> str | None:
+    """sha256 of the capacity policy file this process loaded, or None when it cannot be read."""
+
+    try:
+        with open(str(path), "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def clip(value: object) -> str:
     return str(value)[:MAX_TEXT]
 
@@ -115,8 +125,14 @@ class ArbiterClient:
         atexit.register(self.close)
 
     @classmethod
-    def from_environment(cls, environ: Mapping[str, str] | None = None) -> ArbiterClient | None:
-        """None outside a concurrent job; inside one, any gap or failure raises (no static fallback)."""
+    def from_environment(
+        cls, environ: Mapping[str, str] | None = None, *, policy: str | None = None
+    ) -> ArbiterClient | None:
+        """None outside a concurrent job; inside one, any gap or failure raises (no static fallback).
+
+        ``policy`` is the digest of the capacity policy bytes this process actually loaded; it is what
+        the parent compares with the plan-pinned digest (the environment's copy is only a default).
+        """
 
         source = os.environ if environ is None else environ
         name = source.get(ENV_NAME)
@@ -129,7 +145,7 @@ class ArbiterClient:
             raw = b""
         if len(raw) != 32 or not job:
             raise ArbiterError("the arbiter environment is incomplete or malformed")
-        return cls(name, raw, job, source.get(ENV_POLICY, ""))
+        return cls(name, raw, job, policy if policy is not None else source.get(ENV_POLICY, ""))
 
     def _latch(self, reason: str) -> ArbiterError:
         self.closed_reason = self.closed_reason or reason
@@ -203,6 +219,7 @@ __all__ = (
     "ArbiterClient",
     "ArbiterError",
     "peek",
+    "policy_file_digest",
     "seal",
     "sign",
     "unseal",

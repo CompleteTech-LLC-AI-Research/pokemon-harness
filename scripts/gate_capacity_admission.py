@@ -486,6 +486,7 @@ class CapacitySession:
         clock: Any | None = None,
         sampler: Any | None = None,
         temp_root: str | Path | None = None,
+        policy_sha256: str | None = None,
     ) -> None:
         self.policy = policy
         self.repo_root = Path(repo_root)
@@ -501,7 +502,7 @@ class CapacitySession:
             policy,
             clock=self.clock,
             availability=self._availability,
-            arbiter=ArbiterClient.from_environment(),
+            arbiter=ArbiterClient.from_environment(policy=policy_sha256),
         )
         self.availability_status = "unknown"
         self.availability_reasons: list[str] = []
