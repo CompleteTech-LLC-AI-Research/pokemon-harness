@@ -43,6 +43,23 @@ def note_unproven_cleanup(
     return complete
 
 
+def close_failed_status(item: Any, record: dict[str, Any]) -> str:
+    """Release the status pipe after fallback's last read; retain a failed close."""
+
+    try:
+        view = getattr(getattr(item, "process", None), "guardian_status", None)
+        if view is not None:
+            view.close()
+    except Exception as exc:  # noqa: BLE001 - a descriptor failure must not skip sibling cleanup
+        reason = f"status close failed: {type(exc).__name__}: {str(exc)[:160]}"
+        record["status_close_error"] = reason
+        tree = record.get("process_tree")
+        if isinstance(tree, dict):
+            tree["proof"] = False
+        return reason
+    return ""
+
+
 def fail_finish(
     outcome_record: Callable[..., dict[str, Any]],
     plan: Any,
@@ -101,7 +118,9 @@ def fail_finish(
     record = cleanup.get(job_id)
     if isinstance(record, dict):
         record["finish_error"] = reason  # the cleanup facts already recorded are kept as they are
+        close_failed_status(item, record)
         return
+    record = cleanup.setdefault(job_id, {})
     try:  # one more bounded, pidfd-only attempt; the guardian proof was never evaluated, so never proved
         receipt = dict(
             item.owned.terminate(grace_seconds=1.0, deadline=deadline, clock=clock, sleeper=sleeper)
@@ -109,7 +128,9 @@ def fail_finish(
         receipt.update(proof=False, reason="the guardian proof was not evaluated: " + reason)
     except Exception as again:  # noqa: BLE001
         receipt = {"proof": False, "reason": f"{reason}; the retry failed: {type(again).__name__}"}
-    cleanup[job_id] = {"process_tree": receipt, "finish_error": reason}
+    finally:
+        close_failed_status(item, record)
+    record.update(process_tree=receipt, finish_error=reason)
 
 
 def stop_safely(
@@ -145,9 +166,11 @@ def stop_safely(
         )
     except Exception as exc:  # noqa: BLE001 - keep unknown cleanup separate from a PASS
         receipt = {"reason": f"{reason}; owned sweep failed: {type(exc).__name__}"}
+    finally:
+        close_error = close_failed_status(item, record)
     receipt["proof"] = False
     record["process_tree"] = receipt
-    return reason
+    return f"{reason}; {close_error}" if close_error else reason
 
 
 def should_retain_runtime(report: Mapping[str, Any]) -> bool:

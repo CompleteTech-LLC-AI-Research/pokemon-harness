@@ -34,8 +34,6 @@ from scripts.production_gate_parallel_artifacts import (
     outcome_record,
     read_terminal_artifact,
     total_outcome,
-    validate_terminal_artifact,
-    verify_gate_report,
 )
 from scripts.production_gate_parallel_capacity import (
     CapacityError,
@@ -53,11 +51,9 @@ from scripts.production_gate_parallel_cgroup import (
     OwnershipError,
     kernel_ownership,
 )
+from scripts.production_gate_parallel_finishing import finish_job as _finish_job
 from scripts.production_gate_parallel_holder import launch_holder
-from scripts.production_gate_parallel_identity import (
-    expected_identity,
-    identity_differences,
-)
+from scripts.production_gate_parallel_identity import Measurer
 from scripts.production_gate_parallel_isolation import (
     assign_port_ranges,
     create_job_tree,
@@ -215,7 +211,6 @@ class _Running:
 
 
 WorkerArgvFactory = Callable[[ParallelPlan, str, Mapping[str, Path], Path], Sequence[str]]
-Measurer = Callable[[str], tuple[dict[str, Any], list[str]]]
 
 
 def default_worker_argv(
@@ -269,59 +264,6 @@ def _write_plan_file(run_root: Path, plan: ParallelPlan) -> Path:
     if load_plan(path.read_text(encoding="utf-8")).digest != plan.digest:
         raise PlanError("plan file read-back differs from the frozen plan")
     return path
-
-
-def _finish_job(
-    plan: ParallelPlan,
-    running: _Running,
-    exit_status: int,
-    clock: Callable[[], float],
-    wall_clock: Callable[[], datetime] = _wall_now,
-    measure: Measurer | None = None,
-    worker_pid: int | None = None,
-) -> dict[str, Any]:
-    artifact, read_problems = read_terminal_artifact(running.tree["root"])
-    problems = list(read_problems)
-    child_capacity = None
-    if artifact is not None:
-        report_problems, gate_report = verify_gate_report(
-            running.tree["root"], artifact, plan.as_dict(), plan.job(running.job_id)
-        )
-        problems.extend(report_problems)
-        if gate_report is not None and isinstance(gate_report.get("capacity"), dict):
-            child_capacity = gate_report["capacity"]
-        problems.extend(
-            validate_terminal_artifact(
-                artifact,
-                plan,
-                running.job_id,
-                child_exit_status=exit_status,
-                child_pid=worker_pid if worker_pid is not None else running.process.pid,
-                expected_token=running.token,
-                window=(running.launched_wall, wall_clock()),
-            )
-        )
-    if measure is not None:
-        measured, measure_problems = measure(running.job_id)
-        mode = plan.job(running.job_id)["mode"]
-        problems.extend(measure_problems)
-        problems.extend(identity_differences(measured, expected_identity(plan.as_dict(), mode)))
-    elapsed = clock() - running.started
-    record = outcome_record(
-        plan,
-        running.job_id,
-        "failed" if problems else "passed",
-        child_exit_status=exit_status,
-        artifact=artifact,
-        artifact_problems=problems,
-        reason="; ".join(problems[:1]),
-        elapsed_seconds=round(elapsed, 3),
-        launched_utc=running.launched_wall.isoformat(),
-        finished_utc=wall_clock().isoformat(),
-    )
-    record["launch_token"] = running.token
-    record["capacity"] = child_capacity
-    return record
 
 
 def _close_handles(running: _Running) -> None:
@@ -534,7 +476,16 @@ def _run_plan(
         outcome = total_outcome(
             plan,
             item.job_id,
-            lambda: _finish_job(plan, item, status, clock, wall_clock, measure, worker_pid),
+            lambda: _finish_job(
+                plan,
+                item,
+                status,
+                clock,
+                wall_clock,
+                measure,
+                worker_pid,
+                checkpoint=deadlines.pulse,
+            ),
             exit_status=status,
             launched_utc=item.launched_wall.isoformat(),
             finished_utc=wall_clock().isoformat(),
@@ -705,6 +656,7 @@ def _run_plan(
             worker_argv = list(worker_argv_factory(plan, job_id, tree, project_root))
             handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
+            launched_monotonic = clock()
             launched = wall_clock()
             handoff = handoffs.open(job_id, *ranges[job_id])
             arbiter_env = hub.register(job_id, job["pairs"], job.get("policy_sha256", ""))
@@ -755,8 +707,8 @@ def _run_plan(
                 job_id,
                 phase_of[job_id],
                 process,
-                clock(),
-                clock() + float(job["deadline_seconds"]),
+                launched_monotonic,
+                launched_monotonic + float(job["deadline_seconds"]),
                 tree,
                 token,
                 OwnedTree(

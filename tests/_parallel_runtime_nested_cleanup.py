@@ -21,23 +21,28 @@ import time
 from pathlib import Path
 
 from scripts.production_gate_parallel_processes import OrchestratorAdoption, read_stat
-from tests._parallel_runtime_orphan_support import ORPHAN_ARGV
+from tests._parallel_runtime_nested_startup import NESTED_CHILD_SOURCE
 
 
 class NestedCleanup:
-    def __init__(self, root, source):
+    def __init__(
+        self, root, source, *, startup_mode="normal", handoff_pause=None, reject_handoff=False
+    ):
         self.root, self.source = Path(root), source
         self.token = secrets.token_hex(32)
         self.stop = threading.Event()
         self.fds, self.metadata, self.problem = {}, {}, ""
         self.adoption = OrchestratorAdoption()
+        self.startup_mode, self.handoff_pause = startup_mode, handoff_pause
+        self.reject_handoff = reject_handoff
 
     def __enter__(self):
-        self.adoption.__enter__()
-        self.directory = tempfile.TemporaryDirectory(prefix="poke-nested-")
-        self.endpoint = str(Path(self.directory.name) / "owner.sock")
-        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.directory = self.listener = self.thread = None
         try:
+            self.adoption.__enter__()
+            self.directory = tempfile.TemporaryDirectory(prefix="poke-nested-")
+            self.endpoint = str(Path(self.directory.name) / "owner.sock")
+            self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
             if not self.adoption.verify():
                 raise AssertionError("outer fixture subreaper is not established")
             self.listener.bind(self.endpoint)
@@ -45,10 +50,14 @@ class NestedCleanup:
             self.listener.settimeout(0.05)
             self.thread = threading.Thread(target=self._receive, name="owned-nested-pidfds")
             self.thread.start()
-        except BaseException:
-            self.listener.close()
-            self.directory.cleanup()
-            self.adoption.__exit__()
+        except BaseException as original:
+            self.problem = f"fixture setup failed: {type(original).__name__}: {original}"
+            try:
+                self._cleanup()
+            except Exception as cleanup_error:  # noqa: BLE001 - retain both failures
+                original.add_note(f"outer cleanup also failed: {cleanup_error}")
+            finally:
+                self.adoption.__exit__()
             raise
         return self
 
@@ -90,6 +99,13 @@ class NestedCleanup:
                 assert len(received) == 2, "fixture must hand off both ownership descriptors"
                 body = json.loads(raw)
                 assert body["token"] == self.token, "wrong fixture handshake"
+                assert body["mode"] == self.startup_mode, "undeclared startup mode"
+                if self.handoff_pause is not None:
+                    limit = time.monotonic() + 1.5
+                    while not self.handoff_pause.wait(0.01):
+                        if self.stop.is_set() or time.monotonic() >= limit:
+                            raise AssertionError("controlled handoff pause expired")
+                assert not self.reject_handoff, "controlled rejection before ownership"
                 peer, _, _ = struct.unpack(
                     "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
                 )
@@ -98,12 +114,30 @@ class NestedCleanup:
                 assert Path(job).is_relative_to(self.root.resolve()), (
                     "fixture job is outside its root"
                 )
+                parent_argv = [sys.executable, "-c", self.source, job, self.endpoint, self.token]
+                if self.startup_mode != "normal":
+                    parent_argv.append(self.startup_mode)
                 self._validate(
                     received[0],
                     body["nested"],
-                    [sys.executable, "-c", self.source, job, self.endpoint, self.token],
+                    parent_argv,
                 )
-                self._validate(received[1], body["child"], ORPHAN_ARGV, parent=peer)
+                controls = body["control_fds"]
+                assert set(controls) == {"release", "confirm"}
+                assert all(type(value) is int and value >= 0 for value in controls.values())
+                self._validate(
+                    received[1],
+                    body["child"],
+                    [
+                        sys.executable,
+                        "-c",
+                        NESTED_CHILD_SOURCE,
+                        str(controls["release"]),
+                        str(controls["confirm"]),
+                        str(peer),
+                    ],
+                    parent=peer,
+                )
                 self.fds = dict(zip(("nested", "child"), received, strict=True))
                 received = []  # ownership transferred atomically; later errors still owe outer cleanup
                 self.metadata = {k: body[k] for k in ("nested", "child", "job_root")}
@@ -124,11 +158,25 @@ class NestedCleanup:
         return "gone" if any(flags & select.POLLIN for _, flags in events) else "held"
 
     def __exit__(self, *exc):
-        self.stop.set()
-        self.listener.close()
-        self.thread.join(timeout=2.0)
+        try:
+            self._cleanup()
+        finally:
+            self.adoption.__exit__(*exc)
+
+    def _cleanup(self):
         problems, actions = [], []
-        if self.thread.is_alive():
+        self.stop.set()
+        try:
+            if self.listener is not None:
+                self.listener.close()
+        except Exception as error:  # noqa: BLE001 - later resources still owe cleanup
+            problems.append(f"listener close failed: {type(error).__name__}: {error}")
+        try:
+            if self.thread is not None and self.thread.ident is not None:
+                self.thread.join(timeout=2.0)
+        except Exception as error:  # noqa: BLE001
+            problems.append(f"receiver join failed: {type(error).__name__}: {error}")
+        if self.thread is not None and self.thread.is_alive():
             problems.append("owned handshake thread did not stop within 2 seconds")
         else:
             for name in ("child", "nested"):
@@ -154,19 +202,26 @@ class NestedCleanup:
                 except OSError as error:
                     problems.append(f"{name}: wait failed: {error}")
                 finally:
-                    os.close(fd)
-        self.directory.cleanup()
-        self.adoption.__exit__()
-        (self.root / "outer-nested-cleanup.json").write_text(
-            json.dumps(
-                {
-                    "scope": "outer fixture cleanup, never product proof",
-                    "metadata": self.metadata,
-                    "handshake_problem": self.problem,
-                    "actions": actions,
-                    "problems": problems,
-                }
-            )
-        )
+                    try:
+                        os.close(fd)
+                    except OSError as error:
+                        problems.append(f"{name}: descriptor close failed: {error}")
+            self.fds.clear()  # no stale numeric descriptors remain eligible for later cleanup
+        try:
+            if self.directory is not None:
+                self.directory.cleanup()
+        except Exception as error:  # noqa: BLE001
+            problems.append(f"directory cleanup failed: {type(error).__name__}: {error}")
+        receipt = {
+            "scope": "outer fixture cleanup, never product proof",
+            "metadata": self.metadata,
+            "handshake_problem": self.problem,
+            "actions": actions,
+            "problems": problems,
+        }
+        try:
+            (self.root / "outer-nested-cleanup.json").write_text(json.dumps(receipt))
+        except Exception as error:  # noqa: BLE001 - restoration in __exit__ must still run
+            problems.append(f"cleanup receipt write failed: {type(error).__name__}: {error}")
         if problems:
             raise AssertionError("; ".join(problems))

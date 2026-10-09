@@ -3,9 +3,13 @@
 import __future__
 
 import ast
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from scripts import production_gate_parallel_processes as proc
 from scripts import production_gate_parallel_safety as safety
 from scripts.production_gate_parallel_capacity import PairBudget
 from scripts.production_gate_parallel_ownership import (
@@ -40,6 +44,10 @@ def finish_failure_case(point):
         raise RuntimeError("controlled receipt failure")
 
     for name in ("failed", "sibling"):
+        view = SimpleNamespace(
+            drain=lambda: None, ready=True, eof=False, read_receipts=reader, closed=False
+        )
+        view.close = lambda status=view: setattr(status, "closed", True)
         running.append(
             SimpleNamespace(
                 job_id=name,
@@ -48,9 +56,7 @@ def finish_failure_case(point):
                 process=SimpleNamespace(
                     pid=4242,
                     poll=(lambda: 0) if name == "failed" else (lambda: None),
-                    guardian_status=SimpleNamespace(
-                        drain=lambda: None, ready=True, eof=False, read_receipts=reader
-                    ),
+                    guardian_status=view,
                 ),
                 owned=SimpleNamespace(
                     root_start=987654,
@@ -108,3 +114,60 @@ def finish_failure_case(point):
     )
     namespace["harvest"]()
     return namespace, budget, hub, failed, sibling, sent, cancellations
+
+
+def actual_status_pipe_failure(path, sweep_error, close_error):
+    read_fd, write_fd = os.pipe()
+    view = None
+    try:
+        view = proc.GuardianStatus(read_fd)
+
+        def terminate(**kwargs):
+            if sweep_error:
+                raise RuntimeError("controlled fallback sweep error")
+            return {"proof": True}
+
+        def close():
+            view.close()
+            if close_error:
+                raise RuntimeError("controlled status close error")
+
+        item = SimpleNamespace(
+            job_id="failed",
+            cleanup_deadline=1.0,
+            process=SimpleNamespace(guardian_status=SimpleNamespace(close=close)),
+            owned=SimpleNamespace(terminate=terminate),
+        )
+        cleanup = {"failed": {"process_tree": {"proof": True}}} if path == "existing" else {}
+        if path == "stop":
+
+            def stop(item):
+                raise RuntimeError("controlled receipt reader error")
+
+            assert safety.stop_safely(
+                item, stop, cleanup, clock=lambda: 0.0, sleeper=lambda _: None
+            )
+        else:
+            safety.fail_finish(
+                lambda plan, job, state, **kw: dict(state=state, **kw),
+                None,
+                item,
+                0,
+                RuntimeError("controlled receipt reader error"),
+                {},
+                cleanup,
+                [item],
+                deadline=1.0,
+                clock=lambda: 0.0,
+                sleeper=lambda _: None,
+            )
+        assert view.fd == -1
+        with pytest.raises(OSError):
+            os.fstat(read_fd)
+        if close_error:
+            assert "controlled status close error" in cleanup["failed"]["status_close_error"]
+        if path != "existing" or close_error:
+            assert cleanup["failed"]["process_tree"]["proof"] is False
+    finally:
+        view.close() if view is not None else os.close(read_fd)
+        os.close(write_fd)

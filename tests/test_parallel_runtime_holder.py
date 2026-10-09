@@ -20,6 +20,7 @@ from scripts import production_gate_parallel_processes as proc
 from scripts.production_gate_parallel import PairBudget
 from scripts.production_gate_parallel_holder import HolderRef
 from tests import test_parallel_runtime_gate as gate
+from tests._parallel_runtime_nested_startup import NESTED_SOURCE
 from tests._parallel_runtime_orphan_support import SENTINEL_ARGV, Survivor, stop_owned_child
 
 GATE_FILE = Path(gate.__file__)
@@ -572,44 +573,6 @@ def test_cgroup_kill_wait_cannot_extend_an_already_shared_deadline(tmp_path):
     assert (tmp_path / "cgroup.kill").read_text() == "1"
 
 
-NESTED_SOURCE = """
-import array, ctypes, json, os, socket, subprocess, sys, time
-root = sys.argv[1]
-libc = ctypes.CDLL(None, use_errno=True)
-flag = ctypes.c_int(0)
-if libc.prctl(36, 1, 0, 0, 0) != 0 or libc.prctl(37, ctypes.byref(flag), 0, 0, 0) != 0 or flag.value != 1:
-    sys.exit(3)
-child, handed_off, descriptors = None, False, []
-def started(pid):
-    with open("/proc/%d/stat" % pid) as handle:
-        return int(handle.read().rsplit(")", 1)[1].split()[19])
-try:
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
-    for pid in (os.getpid(), child.pid):
-        descriptors.append(os.pidfd_open(pid))
-    body = {"token":sys.argv[3], "job_root":root,
-            "nested":{"pid":os.getpid(), "start":started(os.getpid())},
-            "child":{"pid":child.pid, "start":started(child.pid)}}
-    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
-        connection.settimeout(3.0)
-        connection.connect(sys.argv[2])
-        connection.sendmsg([json.dumps(body).encode()],
-                           [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", descriptors))])
-        if connection.recv(32) != b"owned":
-            raise RuntimeError("outer fixture ownership was not acknowledged")
-        handed_off = True
-    with open(os.path.join(root, "nested-child.json"), "w") as handle:
-        json.dump(body["child"], handle)
-    time.sleep(120)
-finally:
-    for descriptor in descriptors:
-        os.close(descriptor)
-    if not handed_off and child is not None:
-        child.kill()
-        child.wait(timeout=3.0)
-"""
-
-
 def test_a_real_nested_subreaper_is_swept_without_cross_job_or_foreign_signals(
     tmp_path, monkeypatch
 ):
@@ -709,7 +672,29 @@ def test_holder_loss_is_latched_and_siblings_cancel_after_actual_finish_raises(p
     assert cancellations and cancellations[0][1] == ["sibling"]
     assert namespace["outcomes"]["failed"]["state"] == "failed"
     assert namespace["cleanup"]["failed"]["process_tree"]["proof"] is False
+    assert failed.process.guardian_status.closed is True
     assert namespace["running"] == []
+
+
+@pytest.mark.parametrize(
+    "path,sweep_error,close_error",
+    [
+        ("existing", False, False),
+        ("finish", False, False),
+        ("finish", True, False),
+        ("stop", False, False),
+        ("stop", True, False),
+        ("existing", False, True),
+        ("finish", True, True),
+        ("stop", True, True),
+    ],
+)
+def test_recovered_cleanup_errors_close_the_actual_guardian_status_pipe(
+    path, sweep_error, close_error
+):
+    from tests._parallel_runtime_finish_controls import actual_status_pipe_failure
+
+    actual_status_pipe_failure(path, sweep_error, close_error)
 
 
 def test_a_stop_reader_exception_cannot_prevent_other_owned_jobs_cleanup():
@@ -897,3 +882,86 @@ def test_nested_outer_cleanup_runs_on_an_assertion_failure_after_independent_han
             except subprocess.TimeoutExpired:
                 stop_owned_child(nested)
                 raise AssertionError("nested fixture did not respect its independent startup bound")
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        "directory_setup",
+        "socket_setup",
+        "thread_setup",
+        "started_thread_setup",
+        "directory_teardown",
+        "listener_teardown",
+        "receipt_teardown",
+    ],
+)
+def test_nested_cleanup_restores_actual_subreaper_and_resources_after_faults(
+    tmp_path, monkeypatch, point
+):
+    from tests._parallel_runtime_nested_cleanup_controls import faulted_nested_cleanup
+
+    faulted_nested_cleanup(tmp_path, monkeypatch, point)
+
+
+@pytest.mark.parametrize("point", ["within", "boundary", "late_artifact", "blocking_measure"])
+def test_actual_finalization_rejects_late_completion_and_blocking_measurement(
+    tmp_path, monkeypatch, point
+):
+    from tests._parallel_runtime_finalization_controls import finished_deadline_case
+
+    finished_deadline_case(tmp_path, monkeypatch, point)
+
+
+@pytest.mark.parametrize(
+    "point",
+    ["within", "before", "after", "report", "build", "invalid_nan", "invalid_inf", "invalid_text"],
+)
+def test_actual_worker_budget_covers_both_identity_measurements(tmp_path, monkeypatch, point):
+    from tests._parallel_runtime_finalization_controls import worker_deadline_case
+
+    worker_deadline_case(tmp_path, monkeypatch, point)
+
+
+def test_actual_harvest_rejects_sibling_exit_during_blocking_identity_measurement(
+    tmp_path, monkeypatch
+):
+    from tests._parallel_runtime_finalization_controls import overdue_sibling_harvest_case
+
+    overdue_sibling_harvest_case(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "point", ["before_guard", "before_handoff", "after_sendmsg", "reject_handoff"]
+)
+def test_nested_child_cannot_outlive_early_parent_death_or_rejected_handoff(tmp_path, point):
+    from tests._parallel_runtime_nested_startup_controls import early_nested_death_case
+
+    early_nested_death_case(tmp_path, point)
+
+
+@pytest.mark.parametrize("kind", ["file", "tree"])
+def test_identity_hashing_notifies_sibling_and_closes_file_on_own_expiry(
+    tmp_path, monkeypatch, kind
+):
+    from tests._parallel_runtime_identity_controls import hashing_deadline_case
+
+    hashing_deadline_case(tmp_path, monkeypatch, kind)
+
+
+@pytest.mark.parametrize("point", ["within", "before", "serialize", "rename"])
+def test_artifact_publication_preserves_timeout_and_closes_owned_temporary(
+    tmp_path, monkeypatch, point
+):
+    from tests._parallel_runtime_publication_controls import publication_deadline_case
+
+    publication_deadline_case(tmp_path, monkeypatch, point)
+
+
+@pytest.mark.parametrize("point", ["valid", "expired", "oversize", "malformed"])
+def test_evidence_reader_hashes_same_bounded_bytes_and_closes_on_refusal(
+    tmp_path, monkeypatch, point
+):
+    from tests._parallel_runtime_publication_controls import evidence_reader_case
+
+    evidence_reader_case(tmp_path, monkeypatch, point)

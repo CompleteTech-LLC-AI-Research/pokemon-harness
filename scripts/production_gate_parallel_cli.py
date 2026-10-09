@@ -13,7 +13,7 @@ import json
 import sys
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,11 @@ from scripts.production_gate_parallel_capacity import (
 )
 from scripts.production_gate_parallel_cgroup import kernel_ownership
 from scripts.production_gate_parallel_comparison import compare_bundles
-from scripts.production_gate_parallel_identity import measure_commit, measure_identity
+from scripts.production_gate_parallel_identity import (
+    measure_commit,
+    measure_identity,
+    noop_checkpoint,
+)
 from scripts.production_gate_parallel_isolation import (
     IsolationError,
     build_snapshot,
@@ -205,7 +209,9 @@ def run_parallel_cli(
             Path(snapshot["fixture_root"]),
         )
 
-        def measure(job_id: str) -> tuple[dict[str, Any], list[str]]:
+        def measure(
+            job_id: str, *, checkpoint: Callable[[], None] = noop_checkpoint
+        ) -> tuple[dict[str, Any], list[str]]:
             mode = "cython" if job_id.startswith("cython") else "source"
             return measure_identity(
                 mode=mode,
@@ -215,6 +221,7 @@ def run_parallel_cli(
                 rom_root=snap_rom,
                 fixture_root=snap_fixture,
                 git_root=project_root,
+                checkpoint=checkpoint,
             )
 
         measured = {mode: measure(f"{mode}-job") for mode in ("source", "cython")}

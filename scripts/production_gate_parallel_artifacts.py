@@ -8,14 +8,19 @@ re-checked here, and every job outcome (including failures) is retained.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from scripts.production_gate_parallel_identity import expected_identity, sha256_file
+from scripts.production_gate_parallel_identity import (
+    IdentityDeadline,
+    expected_identity,
+    noop_checkpoint,
+    sha256_file,
+)
+from scripts.production_gate_parallel_io import read_evidence_bytes, read_json_evidence
 from scripts.production_gate_parallel_plan import ParallelPlan
 from scripts.production_gate_parallel_records import build_rows, row_problems
 from scripts.production_gate_parallel_validation import (
@@ -69,7 +74,10 @@ _is_int = is_int
 
 
 def read_terminal_artifact(
-    job_root: Path, relative: str = f"out/{TERMINAL_ARTIFACT_NAME}"
+    job_root: Path,
+    relative: str = f"out/{TERMINAL_ARTIFACT_NAME}",
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Read the planned artifact path, refusing symlinks, escapes and oversize files."""
 
@@ -91,8 +99,7 @@ def read_terminal_artifact(
     if not path.resolve().is_relative_to(root):
         return None, ["terminal artifact escapes the owned job root"]
     try:
-        text = path.read_text(encoding="utf-8")
-        body = loads_strict(text)
+        body, _, _ = read_json_evidence(path, checkpoint=checkpoint)
     except (OSError, UnicodeDecodeError, ValueError):
         return None, ["terminal artifact is malformed or truncated"]
     if not isinstance(body, dict):
@@ -463,11 +470,15 @@ def verify_gate_report(
     artifact: Mapping[str, Any],
     plan_body: Mapping[str, Any],
     job: Mapping[str, Any],
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> tuple[list[str], dict[str, Any] | None]:
-    """Total: a malformed nested value anywhere in the report is a terminal rejection, never an exception."""
+    """Reject malformed reports; deadline expiry propagates to the caller's timeout handling."""
 
     try:
-        return _verify_gate_report(job_root, artifact, plan_body, job)
+        return _verify_gate_report(job_root, artifact, plan_body, job, checkpoint=checkpoint)
+    except IdentityDeadline:
+        raise
     except Exception as exc:  # noqa: BLE001 - a verifier must fail closed, never raise
         return [
             f"the gate report failed closed on malformed nested values ({type(exc).__name__})"
@@ -536,6 +547,8 @@ def _verify_gate_report(
     artifact: Mapping[str, Any],
     plan_body: Mapping[str, Any],
     job: Mapping[str, Any],
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> tuple[list[str], dict[str, Any] | None]:
     """The parent reads the referenced complete gate report itself and re-derives the evidence.
 
@@ -555,25 +568,30 @@ def _verify_gate_report(
         or info.st_size > MAX_ARTIFACT_BYTES
     ):
         return ["the referenced gate report is not a bounded regular file"], None
-    raw = path.read_bytes()
+    try:
+        raw, raw_digest = read_evidence_bytes(path, checkpoint=checkpoint)
+    except ValueError:
+        return ["the referenced gate report grew beyond its byte bound"], None
     problems: list[str] = []
     evidence = artifact.get("evidence")
     if (
         not isinstance(evidence, dict)
         or evidence.get("gate_report_bytes") != len(raw)
-        or evidence.get("gate_report_sha256") != hashlib.sha256(raw).hexdigest()
+        or evidence.get("gate_report_sha256") != raw_digest
     ):
         problems.append("gate report bytes differ from the artifact's evidence reference")
     try:
         report = loads_strict(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return [*problems, "the referenced gate report is not strict JSON"], None
+    checkpoint()
     if not isinstance(report, dict) or not isinstance(report.get("tiers"), list):
         return [*problems, "the referenced gate report has no tier list"], None
     tiers = [tier for tier in report["tiers"] if isinstance(tier, dict)]
     if len(tiers) != len(report["tiers"]):
         problems.append("the gate report contains a non-object tier")
     for tier in tiers:
+        checkpoint()
         problems.extend(_tier_schema_problems(tier))
     keys = ("name", "status", "counts", "returncodes")
     claimed = artifact.get("tiers")
@@ -586,6 +604,7 @@ def _verify_gate_report(
     ):
         problems.append("artifact rows differ from the rows derived from the verified gate report")
     for tier in tiers:
+        checkpoint()
         if (
             tier.get("selected_nodeids")
             and not tier.get("case_results")
@@ -595,6 +614,7 @@ def _verify_gate_report(
                 f"{tier.get('name')}: the producer did not propagate its terminal test records"
             )
     for tier in tiers:
+        checkpoint()
         name = tier.get("name")
         records, selected = tier.get("test_records"), tier.get("selected_nodeids")
         if not (isinstance(records, list) and records and isinstance(selected, list)):
@@ -605,6 +625,7 @@ def _verify_gate_report(
         by_iteration: dict[int, set[str]] = {}
         malformed = False
         for record in records:
+            checkpoint()
             iteration = record.get("iteration") if isinstance(record, dict) else None
             nodeid = record.get("nodeid") if isinstance(record, dict) else None
             if type(iteration) is not int or not isinstance(nodeid, str):
@@ -637,4 +658,5 @@ def _verify_gate_report(
     runtime = report.get("runtime")
     if not isinstance(runtime, dict) or runtime != artifact.get("runtime"):
         problems.append("artifact runtime identity differs from the verified gate report")
+    checkpoint()
     return problems, report

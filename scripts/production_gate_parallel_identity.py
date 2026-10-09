@@ -14,7 +14,7 @@ import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 CHUNK_BYTES = 1 << 20
 PROBE_TIMEOUT_SECONDS = 120
@@ -39,48 +39,83 @@ BUILD_PROBE = (
 IDENTITY_KEYS = ("commit", "clean_head", "build_identity", "input_digests", "asset_digest")
 
 
-def sha256_file(path: Path) -> str:
+class IdentityDeadline(RuntimeError):
+    """Measurement exhausted the original job budget; never a measured identity."""
+
+
+def noop_checkpoint() -> None:
+    """Pre-dispatch measurements have no active sibling supervision callback."""
+
+
+def sha256_file(path: Path, *, checkpoint: Callable[[], None] = noop_checkpoint) -> str:
+    checkpoint()
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(CHUNK_BYTES), b""):
+        while True:
+            checkpoint()
+            chunk = handle.read(CHUNK_BYTES)
+            checkpoint()
+            if not chunk:
+                break
             digest.update(chunk)
+    checkpoint()
     return digest.hexdigest()
 
 
-def tree_digest(root: Path, suffixes: Sequence[str] | None = None) -> tuple[str, int]:
+def tree_digest(
+    root: Path,
+    suffixes: Sequence[str] | None = None,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> tuple[str, int]:
     """Digest every regular file (following links) under ``root`` by path, size and bytes.
 
     ``.git`` directories are repository metadata, not content, and are never digested.
     """
 
     entries: list[list[Any]] = []
+    checkpoint()
     if root.is_dir():
         for dirpath, dirnames, filenames in os.walk(root):
+            checkpoint()
             dirnames[:] = sorted(name for name in dirnames if name != ".git")
             for name in sorted(filenames):
+                checkpoint()
                 if suffixes and not name.endswith(tuple(suffixes)):
                     continue
                 path = Path(dirpath) / name
                 if not path.is_file():
                     continue
                 entries.append(
-                    [path.relative_to(root).as_posix(), path.stat().st_size, sha256_file(path)]
+                    [
+                        path.relative_to(root).as_posix(),
+                        path.stat().st_size,
+                        sha256_file(path, checkpoint=checkpoint),
+                    ]
                 )
     text = json.dumps(entries, separators=(",", ":"))
+    checkpoint()
     return hashlib.sha256(text.encode("ascii")).hexdigest(), len(entries)
 
 
-def measure_commit(project_root: Path) -> tuple[str, bool, list[str]]:
+def measure_commit(
+    project_root: Path,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> tuple[str, bool, list[str]]:
     """Return (head, clean, problems) from the checkout itself."""
 
     def git(*argv: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        checkpoint()
+        result = subprocess.run(
             ["git", "-C", str(project_root), *argv],
             capture_output=True,
             text=True,
             check=False,
             timeout=60,
         )
+        checkpoint()
+        return result
 
     try:
         head, status = (
@@ -106,12 +141,16 @@ def _relative_origin(origin: object, project_root: Path) -> str | None:
 
 
 def measure_build_identity(
-    mode: str, interpreter: str, project_root: Path
+    mode: str,
+    interpreter: str,
+    project_root: Path,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> tuple[str, list[str]]:
     """Digest the interpreter binary plus the native extensions (cython) or vendored sources."""
 
     try:
-        interpreter_digest = sha256_file(Path(os.path.realpath(interpreter)))
+        interpreter_digest = sha256_file(Path(os.path.realpath(interpreter)), checkpoint=checkpoint)
     except OSError as exc:
         return "", [f"{mode}: interpreter is unreadable: {type(exc).__name__}"]
     environment = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
@@ -122,6 +161,7 @@ def measure_build_identity(
         entries.insert(0, str((project_root / "vendor" / "pyboy-src").resolve(strict=False)))
     environment["PYTHONPATH"] = os.pathsep.join(entries)
     try:
+        checkpoint()
         probe = subprocess.run(
             [interpreter, "-c", BUILD_PROBE],
             capture_output=True,
@@ -130,6 +170,7 @@ def measure_build_identity(
             timeout=PROBE_TIMEOUT_SECONDS,
             env=environment,
         )
+        checkpoint()
         measured = json.loads(probe.stdout)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return "", [f"{mode}: build probe failed: {type(exc).__name__}"]
@@ -151,44 +192,60 @@ def measure_build_identity(
             problems.append("cython: the interpreter exposes no native pyboy extension")
     else:
         digest, count = tree_digest(
-            project_root / "vendor" / "pyboy-src" / "pyboy", (".py", ".pyx", ".pxd")
+            project_root / "vendor" / "pyboy-src" / "pyboy",
+            (".py", ".pyx", ".pxd"),
+            checkpoint=checkpoint,
         )
         record["vendored_sources"] = digest
         if count == 0:
             problems.append("source: the vendored pyboy sources are missing")
     text = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    checkpoint()
     return hashlib.sha256(text.encode("ascii")).hexdigest(), problems
 
 
-def measure_inputs(project_root: Path, names: Sequence[str]) -> tuple[dict[str, str], list[str]]:
+def measure_inputs(
+    project_root: Path,
+    names: Sequence[str],
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> tuple[dict[str, str], list[str]]:
     digests: dict[str, str] = {}
     problems: list[str] = []
     for name in names:
+        checkpoint()
         path = project_root / name
         if name.startswith("tree:"):
-            digest, count = tree_digest(project_root / name[5:])
+            digest, count = tree_digest(project_root / name[5:], checkpoint=checkpoint)
             if count:
                 digests[name] = digest
             else:
                 problems.append(f"declared input tree is empty or missing: {name}")
         elif path.is_file():
-            digests[name] = sha256_file(path)
+            digests[name] = sha256_file(path, checkpoint=checkpoint)
         else:
             problems.append(f"declared input is missing: {name}")
     return digests, problems
 
 
-def measure_assets(rom_root: Path, fixture_root: Path) -> tuple[str, list[str]]:
+def measure_assets(
+    rom_root: Path,
+    fixture_root: Path,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> tuple[str, list[str]]:
     """Digest every byte under the explicitly resolved ROM and fixture roots."""
 
     parts: dict[str, Any] = {}
     problems: list[str] = []
     for label, root in (("rom", rom_root), ("fixture", fixture_root)):
-        digest, count = tree_digest(root)
+        checkpoint()
+        digest, count = tree_digest(root, checkpoint=checkpoint)
         parts[label] = [digest, count]
         if count == 0:
             problems.append(f"no {label} files under the resolved {label} root")
     text = json.dumps(parts, sort_keys=True, separators=(",", ":"))
+    checkpoint()
     return hashlib.sha256(text.encode("ascii")).hexdigest(), problems
 
 
@@ -201,13 +258,17 @@ def measure_identity(
     rom_root: Path,
     fixture_root: Path,
     git_root: Path | None = None,
+    checkpoint: Callable[[], None] = noop_checkpoint,
 ) -> tuple[dict[str, Any], list[str]]:
     """Measure every plan-bound identity; returns the values and every measurement problem."""
 
-    head, clean, problems = measure_commit(git_root or project_root)
-    build, build_problems = measure_build_identity(mode, interpreter, project_root)
-    inputs, input_problems = measure_inputs(project_root, input_names)
-    assets, asset_problems = measure_assets(rom_root, fixture_root)
+    checkpoint()
+    head, clean, problems = measure_commit(git_root or project_root, checkpoint=checkpoint)
+    build, build_problems = measure_build_identity(
+        mode, interpreter, project_root, checkpoint=checkpoint
+    )
+    inputs, input_problems = measure_inputs(project_root, input_names, checkpoint=checkpoint)
+    assets, asset_problems = measure_assets(rom_root, fixture_root, checkpoint=checkpoint)
     problems = [*problems, *build_problems, *input_problems, *asset_problems]
     values = {
         "commit": head,
@@ -216,6 +277,7 @@ def measure_identity(
         "input_digests": inputs,
         "asset_digest": assets,
     }
+    checkpoint()
     return values, problems
 
 
@@ -244,4 +306,10 @@ def identity_differences(measured: Mapping[str, Any], expected: Mapping[str, Any
     return problems
 
 
-Measurer = Callable[[str], tuple[dict[str, Any], list[str]]]
+class Measurer(Protocol):
+    def __call__(
+        self,
+        job_id: str,
+        *,
+        checkpoint: Callable[[], None] = noop_checkpoint,
+    ) -> tuple[dict[str, Any], list[str]]: ...

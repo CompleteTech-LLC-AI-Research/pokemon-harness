@@ -11,13 +11,13 @@ unreadable gate evidence becomes a FAIL artifact, not a guess.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,12 +27,18 @@ from scripts.production_gate_parallel_artifacts import (
     TERMINAL_ARTIFACT_NAME,
 )
 from scripts.production_gate_parallel_capacity import policy_file_problem
-from scripts.production_gate_parallel_identity import IDENTITY_KEYS, measure_identity
+from scripts.production_gate_parallel_identity import (
+    IDENTITY_KEYS,
+    IdentityDeadline,
+    measure_identity,
+    noop_checkpoint,
+)
+from scripts.production_gate_parallel_io import read_json_evidence
 from scripts.production_gate_parallel_plan import PlanError, load_plan
 from scripts.production_gate_parallel_processes import JOB_TOKEN_ENV
 from scripts.production_gate_parallel_records import build_rows, diagnostics_for_tier
 from scripts.production_gate_parallel_runtime_inputs import runtime_pin_problem
-from scripts.production_gate_parallel_validation import loads_strict, parse_utc
+from scripts.production_gate_parallel_validation import parse_utc
 
 TIMEOUT_EXIT_STATUS = 124
 
@@ -74,22 +80,25 @@ def build_gate_command(
 
 
 def _utc() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
-def _load_report(job_root: Path) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
+def _load_report(
+    job_root: Path,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
     """Return (report, problem, evidence reference) for the gate's own report file."""
 
     path = job_root / "evidence" / "gate-report.json"
     empty = {"gate_report_bytes": 0, "gate_report_sha256": "0" * 64}
     try:
-        raw = path.read_bytes()
-        body = loads_strict(raw.decode("utf-8"))
+        body, raw_bytes, raw_digest = read_json_evidence(path, checkpoint=checkpoint)
     except (OSError, ValueError):
         return None, "gate report unreadable", empty
     evidence = {
-        "gate_report_bytes": len(raw),
-        "gate_report_sha256": hashlib.sha256(raw).hexdigest(),
+        "gate_report_bytes": raw_bytes,
+        "gate_report_sha256": raw_digest,
     }
     if not isinstance(body, dict):
         return None, "gate report is not an object", evidence
@@ -198,15 +207,72 @@ def build_artifact(
     }
 
 
-def write_artifact(job_root: Path, artifact: dict[str, Any]) -> Path:
+def _private_output_fd(path: str, flags: int) -> int:
+    return os.open(path, flags, 0o600)
+
+
+def write_artifact(
+    job_root: Path,
+    artifact: dict[str, Any],
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> Path:
+    """Publish complete JSON atomically; interrupted serialization leaves no owned temporary."""
+
     target = job_root / "out" / TERMINAL_ARTIFACT_NAME
     temporary = target.with_suffix(".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(artifact, handle, sort_keys=True)
-        handle.write("\n")
-    os.replace(temporary, target)
+    created = None
+    checkpoint()
+    try:
+        with open(temporary, "x", encoding="utf-8", opener=_private_output_fd) as handle:
+            created = os.fstat(handle.fileno())
+            for chunk in json.JSONEncoder(sort_keys=True).iterencode(artifact):
+                checkpoint()
+                handle.write(chunk)
+                checkpoint()
+            handle.write("\n")
+            checkpoint()
+        # Buffered flush and close are spent from the same frozen budget before publication.
+        checkpoint()
+        os.replace(temporary, target)
+    finally:
+        if created is not None:
+            try:
+                current = temporary.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if (current.st_dev, current.st_ino) != (created.st_dev, created.st_ino):
+                    raise RuntimeError("artifact temporary ownership changed; cleanup withheld")
+                temporary.unlink()
     return target
+
+
+def publish_artifact(
+    job_root: Path,
+    artifact: dict[str, Any],
+    *,
+    checkpoint: Callable[[], None],
+) -> int:
+    """A spent publication budget can retain failure evidence but cannot return a PASS."""
+
+    try:
+        checkpoint()
+        write_artifact(job_root, artifact, checkpoint=checkpoint)
+        # Detect expiry during the final atomic rename as well as serialization/flush.
+        checkpoint()
+    except IdentityDeadline:
+        original_status = artifact["child_exit_status"]
+        artifact["child_exit_status"] = TIMEOUT_EXIT_STATUS
+        artifact["overall"] = "FAIL"
+        artifact["finished_utc"] = _utc()
+        artifact["gate_problems"].append(
+            "the job exceeded its frozen deadline during artifact construction or publication "
+            f"(gate exit status {original_status})"
+        )
+        # Failure diagnostics may be written after expiry; no extra success allowance is granted.
+        write_artifact(job_root, artifact)
+    return artifact["child_exit_status"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -244,9 +310,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"worker refused: {problem}", file=sys.stderr)
             return 3
     body = plan.as_dict()
+    # Freeze before either identity measurement; never grant a fresh gate allowance.
+    allowance = float(job["deadline_seconds"])
+    declared_deadline = os.environ.get("POKERED_PARALLEL_DEADLINE_EPOCH")
+    if declared_deadline is not None:
+        try:
+            epoch = float(declared_deadline)
+            if not math.isfinite(epoch):
+                raise ValueError("deadline must be finite")
+        except ValueError:
+            print("worker refused: invalid absolute job deadline", file=sys.stderr)
+            return 3
+        allowance = min(allowance, epoch - time.time())
+    deadline = time.monotonic() + allowance
+
+    def measurement_checkpoint() -> None:
+        if time.monotonic() >= deadline:
+            raise IdentityDeadline("identity measurement exceeded the frozen deadline")
 
     def measure() -> tuple[dict[str, Any], list[str]]:
-        return measure_identity(
+        measurement_checkpoint()
+        measured = measure_identity(
             mode=job["mode"],
             interpreter=args.python_executable,
             project_root=args.project_root,
@@ -254,10 +338,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             rom_root=args.rom_root,
             fixture_root=args.fixture_root,
             git_root=args.git_root,
+            checkpoint=measurement_checkpoint,
         )
+        measurement_checkpoint()
+        return measured
+
+    def bounded_measure() -> tuple[dict[str, Any], list[str]]:
+        try:
+            return measure()
+        except IdentityDeadline as exc:
+            return {}, [str(exc)]
 
     evidence_was_empty = not any((args.job_root / "evidence").iterdir())
-    before, before_problems = measure()
+    before, before_problems = bounded_measure()
     command = build_gate_command(
         python_executable=args.python_executable,
         project_root=args.project_root,
@@ -270,14 +363,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         fixture_root=args.fixture_root,
         capacity_policy=args.capacity_policy,
     )
-    # One absolute deadline shared with the parent: measurement time is spent from the same budget.
-    timeout = float(job["deadline_seconds"])
-    try:
-        timeout = max(
-            1.0, min(timeout, float(os.environ["POKERED_PARALLEL_DEADLINE_EPOCH"]) - time.time())
-        )
-    except (KeyError, ValueError):
-        pass
+    # All preflight/measurement time is spent from that same absolute budget.
+    timeout = deadline - time.monotonic()
     gate_environment = {**os.environ, "POKERED_GATE_RECORD_TESTS": "1"}
     if args.git_root is not None:
         # The private snapshot is a byte copy of this checkout; the origin guard verifies that
@@ -286,6 +373,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = _utc()
     timeout_problem = ""
     try:
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired(command, timeout)
         exit_status = subprocess.run(
             command,
             cwd=args.project_root,
@@ -296,8 +385,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         ).returncode
     except subprocess.TimeoutExpired:
         exit_status, timeout_problem = TIMEOUT_EXIT_STATUS, "the gate exceeded the job deadline"
-    report, report_problem, evidence = _load_report(args.job_root)
-    after, after_problems = measure()
+    try:
+        report, report_problem, evidence = _load_report(
+            args.job_root, checkpoint=measurement_checkpoint
+        )
+    except IdentityDeadline:
+        report, report_problem, evidence = None, "gate report exceeded the frozen deadline", {}
+    after, after_problems = bounded_measure()
+    if time.monotonic() >= deadline:
+        if not timeout_problem:
+            timeout_problem = (
+                "the job exceeded its frozen deadline during final identity verification "
+                f"(gate exit status {exit_status})"
+            )
+        exit_status = TIMEOUT_EXIT_STATUS
     problems = [*before_problems, *after_problems, timeout_problem, report_problem]
     artifact = build_artifact(
         plan_body=body,
@@ -314,8 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         evidence=evidence,
         fresh=_fresh(args.job_root, started, evidence_was_empty),
     )
-    write_artifact(args.job_root, artifact)
-    return exit_status
+    return publish_artifact(args.job_root, artifact, checkpoint=measurement_checkpoint)
 
 
 if __name__ == "__main__":
