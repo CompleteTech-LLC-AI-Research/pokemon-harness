@@ -1763,54 +1763,63 @@ Sequential execution remains the default. `python scripts/production_gate.py --r
 --parallel-runtimes --parallel-run-root <new private directory outside the checkout> --capacity-policy
 <policy.json> [--keep-going | --fail-fast] [--parallel-serial] [--parallel-compare-to <serial report>]`
 instead starts the source and Cython gates as separate owned child processes under one immutable plan.
-**Nothing in this mode has been executed yet**: the source and its authored controls await a Sol-admitted
-test batch, and the real-ROM qualification is a separate requirement.
+**This source has not been executed yet** (a Sol-admitted test batch and fresh reviews are still owed), and
+the real-ROM qualification is a separate requirement.
 
-What the mode does:
-
-- **Frozen plan.** Before dispatch the plan pins the fresh run UUID, the exact clean commit, one
-  build identity per runtime (interpreter binary plus native extensions or vendored sources), input digests
-  (including a digest of the whole snapshot tree), the digest of every ROM and fixture byte, ordered tiers,
-  required case ids, timing repetitions (at least five), distinct finite deadlines (preflight, row, tier,
-  repetition, cleanup; each job deadline is derived from them, the gate's inner budgets are unchanged),
-  `fail_fast` and the capacity policy digest. Row identity is mandatory; the plan refuses to waive it.
+- **Frozen plan.** Before dispatch the parent measures the clean commit, one build identity per runtime
+  (interpreter binary plus every installed PyBoy file, resolved in the gate's own import environment),
+  input digests (including a digest of the whole snapshot tree), every ROM and fixture byte, and COLLECTS the
+  complete per-tier selection in each runtime from the snapshot with the gate's own collection preflight
+  (the two runtimes must agree). The plan pins that exact selection, timing repetitions (only when timing is
+  selected), `fail_fast`, the capacity policy digest and distinct finite deadlines: preflight (one bounded
+  probe plus one collection per tier), measurement, row, tier, repetition and cleanup. Each job deadline is
+  derived from them using the effective (capped) worker count and the gate's aggregate matrix override; one
+  absolute deadline is shared with the worker, so measurement time is spent from the same budget.
 - **Phases.** With the additional early smoke each runtime has a smoke job and a selected-tier job. Both
   smokes finish and are retained before any selected-tier job starts; a failed smoke never cancels the other
   smoke, and `fail_fast` only decides whether the selected phase starts afterwards.
-- **Private immutable snapshot.** The parent copies every tracked file of the clean checkout and the
-  resolved ROM/fixture roots into the run root with all write permission bits removed, then probes that the
-  OS really refuses writes (a snapshot file opened for writing or a directory creation fails closed with the
-  observed evidence). Every job runs from the snapshot. The jobs' writable areas are private trees (output,
-  temp, cache incl. the pytest cache, build, evidence, raw, ports). No host or global permission is changed.
+- **Private immutable snapshot.** The parent copies every tracked file of the clean checkout and the resolved
+  ROM/fixture roots into the run root, gives the copy its own git repository (index and one commit, no
+  global configuration), removes all write permission bits, and probes that the OS really refuses writes (a
+  snapshot file opened for writing or a directory creation fails closed with the observed evidence). Every job
+  runs from the snapshot. The native import-origin guard accepts an installation attributed to the original
+  checkout only after proving that checkout's tracked bytes are identical to the snapshot's. Shared
+  site-packages are hashed before and after every job, not write-protected. No host or global permission is
+  changed.
 - **Ports.** Each job gets a disjoint loopback port range; helpers that use the job port allocator hold an
-  `flock` reservation until the listener binds. Helpers outside the authorized paths still release a port
-  before binding; they are listed in the handoff.
-- **One live capacity authority.** The single `CapacitySession` admission plus one pair budget admit every
-  job's pairs before dispatch and are re-observed on every poll; unknown quota, a queued or blocked
-  admission, an insufficient reading or a lost reservation fails closed and is recorded. `--matrix-workers`
-  given explicitly is a per-job ceiling. Children do not receive the capacity policy.
-- **Owned processes.** Every job runs under a job-local guardian (a subreaper, `PR_SET_CHILD_SUBREAPER`)
-  that starts the worker in its own session. An orphan created at any instant is re-parented to the guardian,
-  terminated, and listed in a receipt authenticated with an HMAC key the worker never inherits and bound to
-  the guardian's pid and start time. The guardian installs its handlers and writes a readiness receipt before
-  it spawns anything, and the orchestrator waits for that receipt before it signals, so a cancel cannot kill
-  a guardian that has no receipt to leave. The orchestrator additionally pins each process by a verified pidfd
-  and signals only through it. A reservation is released only when both proofs hold (or, for a guardian that
-  left no receipt at all, when nothing was ever adopted and nothing is alive); otherwise it is retained and
-  reported. If the guardian itself is killed from outside, only the pidfd observation covers its orphans.
-- **Strict aggregation.** A job passes only with an observed zero child exit status and a terminal
-  artifact whose independently measured identity (before and after the run), per-launch token, timestamps,
-  structured rows (runtime, tier, case, game, mode, ordered roles, repetition, outcome), tiers, counts and
-  return codes match the plan. Validators are total over decoded JSON; a malformed artifact is a recorded
-  failure and never aborts the other jobs' evidence. Completed failures are harvested before any
-  cancellation and their diagnostics are preserved with a digest of the child's complete gate report.
-- **Comparison.** `--parallel-serial` produces a serial bundle from the same plan machinery;
-  `--parallel-compare-to` re-validates both bundles artifact by artifact, requires equivalent plans, and takes
-  elapsed time and resource traces from the validated artifacts.
+  `flock` reservation for the life of the allocating process. A number-only API cannot be made race-free
+  against a non-cooperating binder: the window between handing out a port and the consumer's bind remains,
+  and inline `bind(0)` uses in files outside the authorised paths still release before binding
+  (`tests/_mcp_trade_records_rom_support.py`, `tests/test_timed_remote.py`); observed listeners outside the
+  assigned range fail the run.
+- **Capacity.** One global budget is partitioned: each child gate receives a derived policy file with the
+  same limits and `max_concurrent_pairs` equal to its share, so its actual tier and matrix row admission is
+  governed, and the shares sum to at most the total. The parent's session samples the filesystem of the run
+  root and runs under its background monitoring, so observation cannot delay deadline enforcement. Unknown or
+  insufficient capacity, a queued or blocked admission and a lost reservation fail closed.
+- **Owned processes.** Every job runs under a job-local guardian (a subreaper) that starts the worker in its
+  own session; both guardian and worker die with their parent (`PR_SET_PDEATHSIG`), and SIGTERM/SIGHUP of the
+  orchestrator become the bounded-cancel interrupt. An orphan created at any instant is re-parented to the
+  guardian, terminated and listed in an HMAC-authenticated receipt bound to the guardian's pid and start time.
+  The parent also reads its own status pipe from the guardian (ready, spawn intent): a missing file proves
+  nothing, but end-of-stream without spawn intent is affirmative proof that no worker existed. A reservation
+  is released, and a temp tree or the snapshot removed, only after the parent's pidfd proof AND the guardian's
+  proof hold; a failed or interrupted job keeps its temp tree. If the guardian itself is killed from outside,
+  the job stays unproven (reservation and trees retained) and only the parent's observation covers orphans.
+- **Strict aggregation.** The parent re-reads the referenced complete gate report itself and re-derives
+  tiers, rows and verdict from it; rows come from the producer's actual per-test terminal records (all games,
+  ordered `listener`/`connector` roles, per repetition) carried through the gate with
+  `POKERED_GATE_RECORD_TESTS=1`, matrix tiers from `case_results`, and the collected selection must equal the
+  frozen one. Identity is measured by the worker before and after and by the parent after the job. Decoding is
+  bounded and total: nesting, size, duplicate keys, non-finite numbers and hostile containers are recorded
+  failures that never abort the other jobs' evidence. Completed failures are harvested before any cancellation,
+  and a cancelled job keeps its recovered terminal artifact and digested partial evidence beside its status.
+- **Comparison.** `--parallel-serial` runs the same plan one job at a time; `--parallel-compare-to` re-validates
+  both bundles and requires equivalent plans, genuinely serial (ordered, non-overlapping) and genuinely
+  concurrent (overlapping) parent-observed intervals, every smoke job ended before any selected job began,
+  measured resource traces with equal CPU affinity, no capacity loss and a lifecycle proof for every job.
 
 Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
 with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy and
-the 18 orientation fixtures are not provided by this change. Timing is attested per repetition (the gate
-exports one return code per repetition). Tests that shell out to git inside the repository root will not see
-a `.git` directory in the snapshot. The authored controls drive real child processes but never run a gate
-or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.
+the 18 orientation fixtures are not provided by this change. The authored controls drive real child processes
+but never run a gate or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.

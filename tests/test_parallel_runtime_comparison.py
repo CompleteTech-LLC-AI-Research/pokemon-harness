@@ -1,11 +1,13 @@
 """Authored controls: comparison of two complete re-validated bundles (#107.5, finding 10).
 
-The bundles are fabricated from authored artifacts.  A COMPARED result here proves the
-interface validates identities, selection and capacity and takes elapsed time from the
-validated artifacts; it is not the real-ROM six-tier comparison.
+The bundles are fabricated from authored artifacts.  A COMPARED result here proves the interface
+validates identities, selection, capacity, resources, lifecycle proofs and the REAL execution
+intervals (serial non-overlap, concurrent overlap, smoke before selected) and takes elapsed time
+from the parent-observed intervals; it is not the real-ROM six-tier comparison.
 """
 
 import copy
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,17 +15,20 @@ from scripts.production_gate_parallel_artifacts import aggregate_outcomes, outco
 from scripts.production_gate_parallel_comparison import compare_bundles, equivalence_digest
 from tests._parallel_runtime_report_support import TOKEN, good_artifact, make_plan
 
+ORIGIN = datetime(2026, 10, 9, 0, 0, 0, tzinfo=UTC)
+CONCURRENT = [(0, 10), (1, 11)]
+SERIAL = [(0, 10), (10.5, 20.5)]
 
-def bundle(mode, *, seconds, run_id, **plan_overrides):
+
+def stamp(seconds):
+    return (ORIGIN + timedelta(seconds=seconds)).isoformat()
+
+
+def bundle(mode, intervals, *, run_id, **plan_overrides):
     plan = make_plan(run_id=run_id, **plan_overrides)
-    outcomes = []
-    for job in plan.as_dict()["jobs"]:
-        artifact = good_artifact(
-            plan,
-            job["job_id"],
-            started="2026-10-09T00:00:00+00:00",
-            finished=f"2026-10-09T00:{seconds // 60:02d}:{seconds % 60:02d}+00:00",
-        )
+    outcomes, cleanup = [], {}
+    for job, (start, end) in zip(plan.as_dict()["jobs"], intervals, strict=True):
+        artifact = good_artifact(plan, job["job_id"], started=stamp(start), finished=stamp(end))
         record = outcome_record(
             plan,
             job["job_id"],
@@ -31,76 +36,154 @@ def bundle(mode, *, seconds, run_id, **plan_overrides):
             child_exit_status=0,
             artifact=artifact,
             artifact_problems=[],
+            launched_utc=stamp(start),
+            finished_utc=stamp(end),
         )
         record["launch_token"] = TOKEN
         outcomes.append(record)
+        cleanup[job["job_id"]] = {
+            "process_tree": {"proof": True, "contained": True},
+            "guardian": {"phase": "final", "proof": True, "contained": True},
+        }
     report = aggregate_outcomes(plan, outcomes)
     report.update(
         {
             "plan": plan.text,
             "execution_mode": mode,
             "orchestration_problems": [],
+            "cleanup": cleanup,
+            "capacity_observations": [{"event": "probe", "available": 2}],
             "resource_trace": {"affinity_cpus": 6, "loadavg_start": [0.1], "loadavg_end": [0.2]},
         }
     )
     return report
 
 
-def test_equivalent_complete_bundles_are_compared_from_validated_artifact_timestamps():
-    result = compare_bundles(
-        bundle("concurrent", seconds=10, run_id="1" * 32),
-        bundle("serial", seconds=20, run_id="2" * 32),
+def pair(**overrides):
+    return (
+        bundle("concurrent", CONCURRENT, run_id="1" * 32),
+        bundle("serial", overrides.pop("serial_intervals", SERIAL), run_id="2" * 32, **overrides),
     )
+
+
+def refused(concurrent, serial, needle):
+    result = compare_bundles(concurrent, serial)
+    assert result["status"] == "REFUSED", result
+    assert any(needle in item for item in result["problems"]), result["problems"]
+
+
+def test_equivalent_bundles_are_compared_from_parent_observed_intervals():
+    result = compare_bundles(*pair())
     assert result["status"] == "COMPARED"
-    assert (result["concurrent_seconds"], result["serial_seconds"], result["speedup"]) == (
-        10.0,
-        20.0,
-        2.0,
-    )
+    assert (result["concurrent_seconds"], result["serial_seconds"]) == (11.0, 20.5)
+    assert result["speedup"] == round(20.5 / 11.0, 4)
     assert set(result["resource_traces"]) == {"concurrent", "serial"}
 
 
-@pytest.mark.parametrize(
-    ("label", "overrides", "needle"),
-    [
-        ("different commit", {"commit": "9" * 40}, "plans differ"),
-        ("different selection", {"tiers": ("unit",)}, "plans differ"),
-        ("different capacity", {"policy_digest": "8" * 64}, "plans differ"),
-        ("different assets", {"asset_digest": "7" * 64}, "plans differ"),
-    ],
-)
-def test_non_equivalent_conditions_are_refused(label, overrides, needle):
-    other = bundle("serial", seconds=20, run_id="2" * 32, **overrides)
-    result = compare_bundles(bundle("concurrent", seconds=10, run_id="1" * 32), other)
-    assert result["status"] == "REFUSED" and any(needle in item for item in result["problems"]), (
-        label
+def test_a_serial_label_without_serial_intervals_is_refused():
+    concurrent = bundle("concurrent", CONCURRENT, run_id="1" * 32)
+    fake_serial = bundle("serial", [(0, 10), (0, 10)], run_id="2" * 32)  # same start for every job
+    refused(concurrent, fake_serial, "serial bundle has overlapping job intervals")
+
+
+def test_a_concurrent_label_without_overlapping_runtimes_is_refused():
+    refused(
+        bundle("concurrent", SERIAL, run_id="1" * 32),
+        bundle("serial", SERIAL, run_id="2" * 32),
+        "never overlapped",
     )
 
 
-def test_the_legacy_pass_plus_elapsed_dictionary_is_not_a_bundle():
-    legacy = {"overall": "PASS", "elapsed_seconds": 20, "commit": "a" * 40}
-    result = compare_bundles(bundle("concurrent", seconds=10, run_id="1" * 32), legacy)
-    assert result["status"] == "REFUSED"
+def test_every_smoke_job_must_end_before_any_selected_job_starts():
+    overlapping_smoke = [(0, 5), (0, 5), (3, 9), (3, 9)]
+    concurrent = bundle("concurrent", overlapping_smoke, run_id="1" * 32, early_smoke=True)
+    serial = bundle(
+        "serial", [(0, 5), (5.5, 10), (10.5, 15), (15.5, 20)], run_id="2" * 32, early_smoke=True
+    )
+    refused(concurrent, serial, "started before every smoke job had ended")
+
+
+def test_lifecycle_proofs_are_required_for_every_job():
+    concurrent, serial = pair()
+    del serial["cleanup"]["source-job"]
+    refused(concurrent, serial, "no lifecycle record")
+    concurrent, serial = pair()
+    serial["cleanup"]["cython-job"]["guardian"]["phase"] = "ready"
+    refused(concurrent, serial, "guardian's authenticated final proof is missing")
+    concurrent, serial = pair()
+    concurrent["cleanup"]["source-job"]["process_tree"]["proof"] = False
+    refused(concurrent, serial, "parent's own cleanup proof is missing")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "needle"),
+    [
+        (lambda b: b["resource_trace"].update(affinity_cpus=0), "no CPU affinity"),
+        (lambda b: b["resource_trace"].update(loadavg_start=[]), "not measured load"),
+        (lambda b: b["resource_trace"].update(loadavg_end=["x"]), "not measured load"),
+        (lambda b: b.update(resource_trace="trace"), "resource trace is missing"),
+        (lambda b: b.update(capacity_observations=[{"event": "loss"}]), "capacity was lost"),
+        (lambda b: b.update(capacity_observations="none"), "capacity observations are missing"),
+    ],
+)
+def test_resource_trace_and_capacity_observations_must_be_measured(mutate, needle):
+    concurrent, serial = pair()
+    mutate(serial)
+    refused(concurrent, serial, needle)
+
+
+def test_different_cpu_affinity_is_not_equivalent_conditions():
+    concurrent, serial = pair()
+    serial["resource_trace"]["affinity_cpus"] = 3
+    refused(concurrent, serial, "different CPU affinity")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "needle"),
+    [
+        ({"commit": "9" * 40}, "plans differ"),
+        ({"tiers": ("unit",)}, "plans differ"),
+        ({"policy_digest": "8" * 64}, "plans differ"),
+        ({"asset_digest": "7" * 64}, "plans differ"),
+    ],
+)
+def test_non_equivalent_conditions_are_refused(overrides, needle):
+    refused(
+        bundle("concurrent", CONCURRENT, run_id="1" * 32),
+        bundle("serial", SERIAL, run_id="2" * 32, **overrides),
+        needle,
+    )
+
+
+def test_hostile_bundles_are_refused_without_an_exception():
+    concurrent, serial = pair()
+    hostile = copy.deepcopy(serial)
+    hostile["jobs"].append("not an object")
+    assert compare_bundles(concurrent, hostile)["status"] == "REFUSED"
+    hostile = copy.deepcopy(serial)
+    hostile["jobs"][0]["artifact"] = ["x"]
+    assert compare_bundles(concurrent, hostile)["status"] == "REFUSED"
+    for junk in ({"overall": "PASS", "elapsed_seconds": 20}, "text", None, [], {"plan": 5}):
+        assert compare_bundles(concurrent, junk)["status"] == "REFUSED"
 
 
 def test_a_failed_job_a_tampered_artifact_or_a_wrong_mode_is_refused():
-    good = bundle("concurrent", seconds=10, run_id="1" * 32)
-    failed = copy.deepcopy(bundle("serial", seconds=20, run_id="2" * 32))
+    concurrent, serial = pair()
+    failed = copy.deepcopy(serial)
     failed["jobs"][0]["state"] = "failed"
-    tampered = copy.deepcopy(bundle("serial", seconds=20, run_id="3" * 32))
+    tampered = copy.deepcopy(serial)
     tampered["jobs"][1]["artifact"]["overall"] = "FAIL"
-    same_mode = bundle("concurrent", seconds=20, run_id="4" * 32)
-    no_trace = copy.deepcopy(bundle("serial", seconds=20, run_id="5" * 32))
-    del no_trace["resource_trace"]
-    for other in (failed, tampered, same_mode, no_trace):
-        assert compare_bundles(good, other)["status"] == "REFUSED"
+    same_mode = copy.deepcopy(serial)
+    same_mode["execution_mode"] = "concurrent"
+    for other in (failed, tampered, same_mode):
+        assert compare_bundles(concurrent, other)["status"] == "REFUSED"
 
 
 def test_the_same_run_cannot_be_compared_with_itself():
-    one = bundle("concurrent", seconds=10, run_id="1" * 32)
-    other = copy.deepcopy(one)
+    concurrent, _ = pair()
+    other = copy.deepcopy(concurrent)
     other["execution_mode"] = "serial"
-    assert any("same run" in item for item in compare_bundles(one, other)["problems"])
+    assert any("same run" in item for item in compare_bundles(concurrent, other)["problems"])
 
 
 def test_the_equivalence_digest_ignores_only_run_identity_and_time():

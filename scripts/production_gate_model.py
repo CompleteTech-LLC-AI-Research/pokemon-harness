@@ -357,6 +357,8 @@ class GateReport:
     collection_only: bool = False
     error: str = ""
     failed_records: tuple[dict[str, str], ...] = ()
+    # Every terminal test record; populated only when POKERED_GATE_RECORD_TESTS=1 (concurrent mode).
+    terminal_records: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -410,6 +412,8 @@ class TierResult:
     case_results: list[MatrixCaseResult] = field(default_factory=list)
     failure_details: list[FailureDetail] = field(default_factory=list)
     failure_details_omitted: int = 0
+    # Per-iteration terminal test records; empty unless POKERED_GATE_RECORD_TESTS=1.
+    test_records: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

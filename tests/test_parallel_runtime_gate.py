@@ -37,26 +37,28 @@ if name == "hang":
     time.sleep(120)
 if name == "slow_pass":
     time.sleep(float(argument))
+import datetime, hashlib
 def counts(total):
     return {"passed": total, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0,
             "errors": 0, "total": total}
-import datetime
-def counts(total):
-    return {"passed": total, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0,
-            "errors": 0, "total": total}
-def row(tier, case, repetition, source):
-    return {"id": mode + "/" + tier + "/" + case, "runtime": mode, "tier": tier, "case": case,
-            "game": "", "mode": mode, "roles": [], "repetition": repetition,
-            "outcome": "passed", "source": source}
-tiers, rows = [], []
+def row(tier, case, repetition):
+    suffix = "@%d" % repetition if repetition else ""
+    return {"id": mode + "/" + tier + "/" + case + suffix, "runtime": mode, "tier": tier,
+            "case": case, "games": [], "roles": [], "repetition": repetition,
+            "outcome": "passed", "source": "pytest_records"}
+report_tiers, rows = [], []
 for tier_name in job["tiers"]:
-    if tier_name == "timing":
-        tiers.append({"name": "timing", "status": "PASS", "counts": counts(5), "returncodes": [0] * 5})
-        rows += [row("timing", r, i + 1, "returncodes") for i, r in enumerate(job["timing_rep_ids"])]
-    else:
-        cases = plan["required_nodeids"].get(tier_name) or ["tests/test_%s.py::test_case" % tier_name]
-        tiers.append({"name": tier_name, "status": "PASS", "counts": counts(len(cases)), "returncodes": [0]})
-        rows += [row(tier_name, c, 0, "selected_nodeids+tier_status") for c in cases]
+    cases = plan["required_nodeids"].get(tier_name) or ["tests/test_%s.py::test_case" % tier_name]
+    repeats = len(job["timing_rep_ids"]) if tier_name == "timing" else 1
+    records = [{"iteration": it, "nodeid": c, "outcome": "passed", "when": "call", "was_xfail": False}
+               for it in range(1, repeats + 1) for c in cases]
+    report_tiers.append({"name": tier_name, "status": "PASS", "counts": counts(len(cases) * repeats),
+                         "returncodes": [0] * repeats, "selected_nodeids": list(cases),
+                         "test_records": records})
+    rows += [row(tier_name, r["nodeid"], r["iteration"] if tier_name == "timing" else 0) for r in records]
+tiers = [{k: t[k] for k in ("name", "status", "counts", "returncodes")} for t in report_tiers]
+report = {"overall": "PASS", "runtime": {"pyboy_mode": mode}, "tiers": report_tiers,
+          "gate_problems": [], "capacity": {"status": "ok"}}
 now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
 begun = now()
 identity = {"commit": plan["commit"], "clean_head": True,
@@ -68,7 +70,7 @@ artifact = {
     "build_identity": identity["build_identity"], "input_digests": identity["input_digests"],
     "asset_digest": identity["asset_digest"], "identity_after": dict(identity),
     "launch_token": os.environ.get("POKERED_PARALLEL_JOB_TOKEN", ""),
-    "evidence": {"gate_report_bytes": 10, "gate_report_sha256": "9" * 64},
+    "evidence": {"gate_report_bytes": 0, "gate_report_sha256": "0" * 64},
     "pid": os.getpid(), "child_exit_status": 0, "started_utc": begun, "finished_utc": begun,
     "fresh_run": True, "diagnostic_reuse": False,
     "runtime": {"pyboy_mode": mode}, "tiers": tiers, "rows": rows, "gate_problems": [],
@@ -76,6 +78,8 @@ artifact = {
 }
 exit_code = 0
 if name == "fail":
+    report_tiers[0]["status"] = "FAIL"
+    report["overall"] = "FAIL"
     tiers[0]["status"] = "FAIL"
     artifact.update(overall="FAIL", gate_problems=["unit failed"], child_exit_status=1)
     exit_code = 1
@@ -109,6 +113,10 @@ if name == "malformed":
     os.makedirs(os.path.join(job_root, "out"), exist_ok=True)
     open(os.path.join(job_root, "out", "terminal.json"), "w").write('{"run_id": ')
 elif name != "lost":
+    blob = json.dumps(report, sort_keys=True).encode()
+    os.makedirs(os.path.join(job_root, "evidence"), exist_ok=True)
+    open(os.path.join(job_root, "evidence", "gate-report.json"), "wb").write(blob)
+    artifact["evidence"] = {"gate_report_bytes": len(blob), "gate_report_sha256": hashlib.sha256(blob).hexdigest()}
     artifact["finished_utc"] = now()
     os.makedirs(os.path.join(job_root, "out"), exist_ok=True)
     open(os.path.join(job_root, "out", "terminal.json"), "w").write(json.dumps(artifact))
@@ -441,3 +449,20 @@ def test_a_guardian_killed_from_outside_keeps_the_reservation_and_fails_the_run(
     assert budget.reserved_total == 1, "a reservation was released without a proven cleanup"
     assert any("cleanup unproven" in item for item in report["orchestration_problems"])
     assert report["overall"] == "FAIL"
+
+
+def test_failed_and_interrupted_jobs_keep_their_temp_trees_and_recover_partial_evidence(tmp_path):
+    readings = iter([8, 8])  # admissions see full capacity; the first poll sees the loss
+    plan, root, report = run(
+        tmp_path,
+        {"source": "hang", "cython": "fail"},
+        capacity_probe=lambda: next(readings, 0),
+    )
+    for job in report["jobs"]:
+        tree = root / plan.run_id / f"{job['mode']}-job"
+        assert (tree / "tmp").exists(), "evidence in a job that did not pass must be kept"
+        if job["state"] == "interrupted":
+            evidence = job["partial_evidence"]
+            assert evidence is not None and isinstance(evidence["files"], list)
+            assert job["launched_utc"] and job["finished_utc"], "parent-observed times are retained"
+    assert report["cleanup"]["source-job"]["tmp_removed"] is False

@@ -1,9 +1,13 @@
 """Structured per-case rows built from the real gate report (#107.3, #107.6).
 
-The sequential gate already exports ``case_results``, ``selected_nodeids``, return
-codes and ``failure_details``.  A worker turns them into ordered row records; the
-validator checks every row against the frozen plan.  Row identity is mandatory: the
-plan validator refuses ``require_row_ids=False`` and there is no counts-only path.
+The pytest plugin records one terminal outcome per test; with ``POKERED_GATE_RECORD_TESTS=1``
+the gate carries every such record, per iteration, into its report (``test_records``) and the
+matrix tiers already report ``case_results``.  Rows are derived from those actual records, not
+from counts, return codes or a tier verdict.  Row identity is mandatory: the plan validator
+refuses ``require_row_ids=False`` and there is no counts-only path.  Derived fallbacks
+(``selected_nodeids+tier_status``, ``returncodes``) are still accepted by the row validator for
+fixtures, but the parent's report verification refuses them for any tier the producer could have
+recorded.
 """
 
 from __future__ import annotations
@@ -15,10 +19,24 @@ from typing import Any
 from scripts.production_gate_parallel_validation import is_int, is_text
 
 ROW_KEYS = frozenset(
-    {"case", "game", "id", "mode", "outcome", "repetition", "roles", "runtime", "source", "tier"}
+    {"case", "games", "id", "outcome", "repetition", "roles", "runtime", "source", "tier"}
 )
-ROW_SOURCES = frozenset({"case_results", "selected_nodeids+tier_status", "returncodes"})
-OUTCOMES = frozenset({"passed", "failed", "timeout", "interrupted", "unrun", "error"})
+ROW_SOURCES = frozenset(
+    {"pytest_records", "case_results", "selected_nodeids+tier_status", "returncodes"}
+)
+OUTCOMES = frozenset(
+    {
+        "passed",
+        "failed",
+        "skipped",
+        "xfailed",
+        "xpassed",
+        "timeout",
+        "interrupted",
+        "unrun",
+        "error",
+    }
+)
 DIAGNOSTIC_KEYS = (
     "failure_details",
     "failure_details_omitted",
@@ -28,21 +46,39 @@ DIAGNOSTIC_KEYS = (
     "skip_reasons",
     "case_results",
 )
+ROLE_ALIASES = {
+    "listen": "listener",
+    "listener": "listener",
+    "server": "listener",
+    "connect": "connector",
+    "connector": "connector",
+    "client": "connector",
+}
 TIMING_TIER = "timing"
 _TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
 
 
-def case_identity(nodeid: str, games: Sequence[str], roles: Sequence[str]) -> tuple[str, list[str]]:
-    """Derive (game, ordered roles) from a parametrized node id; ('', []) when absent."""
+def case_identity(
+    nodeid: str, games: Sequence[str], roles: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """Derive (ordered games, ordered normalised roles) from a parametrised node id."""
 
     _, bracket, parameters = nodeid.partition("[")
     tokens = [token for token in _TOKEN_SPLIT.split(parameters if bracket else "") if token]
-    game = next((token for token in tokens if token in games), "")
-    found = [token for token in tokens if token in roles]
-    return game, found
+    found_games = [token for token in tokens if token in games]
+    found_roles = [
+        ROLE_ALIASES[token]
+        for token in tokens
+        if token in ROLE_ALIASES and ROLE_ALIASES[token] in roles
+    ]
+    return found_games, found_roles
 
 
-def _outcome(status: object, returncode: object) -> str:
+def row_id(runtime: str, tier: str, case: str, repetition: int) -> str:
+    return f"{runtime}/{tier}/{case}" + (f"@{repetition}" if repetition else "")
+
+
+def _case_outcome(status: object, returncode: object) -> str:
     if status == "PASS":
         return "passed" if returncode in (0, None) else "failed"
     return {
@@ -52,6 +88,13 @@ def _outcome(status: object, returncode: object) -> str:
         "UNRUN": "unrun",
         "BLOCKED": "unrun",
     }.get(str(status), "error")
+
+
+def _record_outcome(record: Mapping[str, Any]) -> str:
+    outcome = record.get("outcome")
+    if record.get("was_xfail") is True:
+        return "xfailed" if outcome == "skipped" else "xpassed"
+    return outcome if isinstance(outcome, str) and outcome in OUTCOMES else "error"
 
 
 def _row(
@@ -64,15 +107,14 @@ def _row(
     games: Sequence[str],
     roles: Sequence[str],
 ) -> dict[str, Any]:
-    game, found = case_identity(case, games, roles)
+    found_games, found_roles = case_identity(case, games, roles)
     return {
-        "id": f"{mode}/{tier}/{case}",
+        "id": row_id(mode, tier, case, repetition),
         "runtime": mode,
         "tier": tier,
         "case": case,
-        "game": game,
-        "mode": mode,
-        "roles": found,
+        "games": found_games,
+        "roles": found_roles,
         "repetition": repetition,
         "outcome": outcome,
         "source": source,
@@ -87,6 +129,26 @@ def build_rows(
     rows: list[dict[str, Any]] = []
     for tier in tiers:
         name = str(tier.get("name"))
+        records = tier.get("test_records")
+        if isinstance(records, list) and records:
+            for record in records:
+                if not isinstance(record, dict) or not is_text(record.get("nodeid")):
+                    continue
+                iteration = record.get("iteration")
+                repetition = iteration if name == TIMING_TIER and is_int(iteration) else 0
+                rows.append(
+                    _row(
+                        mode,
+                        name,
+                        record["nodeid"],
+                        repetition,
+                        _record_outcome(record),
+                        "pytest_records",
+                        games,
+                        roles,
+                    )
+                )
+            continue
         codes = tier.get("returncodes")
         if name == TIMING_TIER:
             for index, code in enumerate(codes if isinstance(codes, list) else [], start=1):
@@ -108,7 +170,7 @@ def build_rows(
         if isinstance(cases, list) and cases:
             for case in cases:
                 if isinstance(case, dict) and is_text(case.get("nodeid")):
-                    outcome = _outcome(case.get("status"), case.get("returncode"))
+                    outcome = _case_outcome(case.get("status"), case.get("returncode"))
                     rows.append(
                         _row(mode, name, case["nodeid"], 0, outcome, "case_results", games, roles)
                     )
@@ -145,13 +207,14 @@ def _row_shape_problems(rows: list[Any]) -> list[str]:
         if not isinstance(row, dict) or set(row) != ROW_KEYS:
             problems.append(f"row {index} is not a structured row record")
             continue
-        texts = ("case", "game", "id", "mode", "runtime", "tier")
+        texts = ("case", "id", "runtime", "tier")
         if not all(isinstance(row[key], str) for key in texts) or not is_text(row["case"]):
             problems.append(f"row {index} has non-text identity fields")
         if not is_int(row["repetition"]) or row["repetition"] < 0:
             problems.append(f"row {index} has an invalid repetition")
-        if not isinstance(row["roles"], list) or not all(isinstance(r, str) for r in row["roles"]):
-            problems.append(f"row {index} has invalid roles")
+        for key in ("games", "roles"):
+            if not isinstance(row[key], list) or not all(isinstance(r, str) for r in row[key]):
+                problems.append(f"row {index} has invalid {key}")
         if not isinstance(row["outcome"], str) or row["outcome"] not in OUTCOMES:
             problems.append(f"row {index} has an invalid outcome")
         if not isinstance(row["source"], str) or row["source"] not in ROW_SOURCES:
@@ -179,18 +242,16 @@ def row_problems(
     elif order != sorted(order):
         problems.append("rows are not in the planned tier order")
     for row in rows:
-        game, found = case_identity(row["case"], plan["games"], plan["roles"])
-        if row["runtime"] != mode or row["mode"] != mode:
-            problems.append(f"{row['id']}: row names a different runtime or mode")
-        if row["id"] != f"{row['runtime']}/{row['tier']}/{row['case']}":
-            problems.append(f"{row['id']}: id does not match its runtime/tier/case")
-        if (row["game"], row["roles"]) != (game, found):
-            problems.append(f"{row['id']}: game or ordered roles differ from the case identity")
+        found_games, found_roles = case_identity(row["case"], plan["games"], plan["roles"])
+        if row["runtime"] != mode:
+            problems.append(f"{row['id']}: row names a different runtime")
+        if row["id"] != row_id(row["runtime"], row["tier"], row["case"], row["repetition"]):
+            problems.append(f"{row['id']}: id does not match its runtime/tier/case/repetition")
+        if (row["games"], row["roles"]) != (found_games, found_roles):
+            problems.append(f"{row['id']}: games or ordered roles differ from the case identity")
         if row["outcome"] != "passed":
             problems.append(f"{row['id']}: outcome {row['outcome']}")
-    # Timing is attested per repetition (the producer exports one return code per
-    # repetition, not one outcome per case per repetition), so only repetition rows
-    # are required for it.
+    # Timing is attested per repetition; every other tier must contain each required case.
     required = [
         (tier, case)
         for tier in planned
@@ -201,29 +262,32 @@ def row_problems(
     missing = [item for item in required if item not in present]
     if missing:
         problems.append(f"missing required rows ({len(missing)}): {missing[:3]}")
-    for rep_index, rep in enumerate(job["timing_rep_ids"], start=1):
-        match = [r for r in rows if r["tier"] == TIMING_TIER and r["case"] == rep]
-        if len(match) != 1 or match[0]["repetition"] != rep_index:
-            problems.append(f"timing repetition {rep} is missing or mis-numbered")
     if TIMING_TIER in planned:
-        extra = [
-            r["case"]
-            for r in rows
-            if r["tier"] == TIMING_TIER and r["case"] not in job["timing_rep_ids"]
-        ]
-        if extra:
-            problems.append(f"unplanned timing repetitions {extra[:3]}")
+        expected_reps = set(range(1, len(job["timing_rep_ids"]) + 1))
+        timing_rows = [r for r in rows if r["tier"] == TIMING_TIER]
+        if {r["repetition"] for r in timing_rows} != expected_reps:
+            problems.append("timing repetitions are missing, extra or mis-numbered")
+        else:
+            by_rep = {
+                rep: {r["case"] for r in timing_rows if r["repetition"] == rep}
+                for rep in expected_reps
+            }
+            if len({frozenset(cases) for cases in by_rep.values()}) != 1:
+                problems.append("timing repetitions did not run the same set of cases")
+    elif job["timing_rep_ids"]:
+        problems.append("the job declares timing repetitions without selecting the timing tier")
     for tier in tiers:
         if not isinstance(tier, dict) or tier.get("status") != "PASS":
             continue
         counts = tier.get("counts")
         total = counts.get("total") if isinstance(counts, dict) else None
         owned = [r for r in rows if r["tier"] == tier.get("name")]
-        expected = (
-            len(tier["returncodes"])
-            if tier.get("name") == TIMING_TIER and isinstance(tier.get("returncodes"), list)
-            else total
-        )
+        recorded = any(r["source"] == "pytest_records" for r in owned)
+        if tier.get("name") == TIMING_TIER and not recorded:
+            codes = tier.get("returncodes")
+            expected = len(codes) if isinstance(codes, list) else None
+        else:
+            expected = total
         if is_int(expected) and expected != len(owned):
             problems.append(
                 f"{tier.get('name')}: {len(owned)} rows but the tier reports {expected}"

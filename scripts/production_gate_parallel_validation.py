@@ -48,10 +48,24 @@ def _unique_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(items)
 
 
-def loads_strict(text: str) -> Any:
-    """Decode JSON, rejecting NaN/Infinity constants and duplicate object keys."""
+MAX_JSON_CHARS = 64 * 1024 * 1024
 
-    return json.loads(text, parse_constant=_reject_constant, object_pairs_hook=_unique_pairs)
+
+def loads_strict(text: str) -> Any:
+    """Decode JSON, rejecting NaN/Infinity, duplicate keys, oversize text and runaway nesting.
+
+    Every decoder failure is a ``ValueError`` so no caller has to know the decoder's internals.
+    """
+
+    if len(text) > MAX_JSON_CHARS:
+        raise ValueError("JSON text exceeds the size bound")
+    try:
+        return json.loads(text, parse_constant=_reject_constant, object_pairs_hook=_unique_pairs)
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exceeds the decoder's recursion bound") from exc
+
+
+loads_bounded = loads_strict
 
 
 def parse_utc(value: object) -> datetime | None:

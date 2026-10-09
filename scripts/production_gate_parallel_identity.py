@@ -21,15 +21,20 @@ PROBE_TIMEOUT_SECONDS = 120
 BUILD_PROBE = (
     "import hashlib, importlib.util, json, os, sys\n"
     "files = {}\n"
+    "origin = None\n"
     "spec = importlib.util.find_spec('pyboy')\n"
+    "origin = spec.origin if spec else None\n"
+    "SUFFIXES = ('.so', '.pyd', '.dylib', '.py', '.pyx', '.pxd', '.pxi')\n"
     "for base in (spec.submodule_search_locations or []) if spec else []:\n"
-    "    for dirpath, _, names in os.walk(base):\n"
+    "    for dirpath, dirnames, names in os.walk(base):\n"
+    "        dirnames[:] = sorted(d for d in dirnames if d != '__pycache__')\n"
     "        for name in sorted(names):\n"
-    "            if name.endswith(('.so', '.pyd', '.dylib')):\n"
+    "            if name.endswith(SUFFIXES):\n"
     "                path = os.path.join(dirpath, name)\n"
     "                with open(path, 'rb') as handle:\n"
     "                    files[os.path.relpath(path, base)] = hashlib.sha256(handle.read()).hexdigest()\n"
-    "print(json.dumps({'version': sys.version, 'files': files}, sort_keys=True))\n"
+    "print(json.dumps({'version': sys.version, 'origin': origin, 'prefix': sys.prefix, "
+    "'files': files}, sort_keys=True))\n"
 )
 IDENTITY_KEYS = ("commit", "clean_head", "build_identity", "input_digests", "asset_digest")
 
@@ -43,12 +48,15 @@ def sha256_file(path: Path) -> str:
 
 
 def tree_digest(root: Path, suffixes: Sequence[str] | None = None) -> tuple[str, int]:
-    """Digest every regular file (following links) under ``root`` by path, size and bytes."""
+    """Digest every regular file (following links) under ``root`` by path, size and bytes.
+
+    ``.git`` directories are repository metadata, not content, and are never digested.
+    """
 
     entries: list[list[Any]] = []
     if root.is_dir():
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames.sort()
+            dirnames[:] = sorted(name for name in dirnames if name != ".git")
             for name in sorted(filenames):
                 if suffixes and not name.endswith(tuple(suffixes)):
                     continue
@@ -88,6 +96,15 @@ def measure_commit(project_root: Path) -> tuple[str, bool, list[str]]:
     return head.stdout.strip(), clean, problems
 
 
+def _relative_origin(origin: object, project_root: Path) -> str | None:
+    if not isinstance(origin, str):
+        return None
+    try:
+        return Path(origin).resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return origin
+
+
 def measure_build_identity(
     mode: str, interpreter: str, project_root: Path
 ) -> tuple[str, list[str]]:
@@ -98,6 +115,12 @@ def measure_build_identity(
     except OSError as exc:
         return "", [f"{mode}: interpreter is unreadable: {type(exc).__name__}"]
     environment = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    # Resolve pyboy exactly as the gate's pytest children do (see build_test_environment):
+    # the harness source first, the vendored PyBoy first only in source mode.
+    entries = [str(project_root / "src"), str(project_root)]
+    if mode == "source":
+        entries.insert(0, str((project_root / "vendor" / "pyboy-src").resolve(strict=False)))
+    environment["PYTHONPATH"] = os.pathsep.join(entries)
     try:
         probe = subprocess.run(
             [interpreter, "-c", BUILD_PROBE],
@@ -115,12 +138,16 @@ def measure_build_identity(
         "mode": mode,
         "interpreter_sha256": interpreter_digest,
         "version": measured.get("version"),
+        "resolved_pyboy": measured.get("files")
+        if isinstance(measured.get("files"), dict)
+        else None,
+        "pyboy_origin": _relative_origin(measured.get("origin"), project_root),
     }
     if probe.returncode != 0 or not isinstance(measured.get("files"), dict):
         problems.append(f"{mode}: build probe exited {probe.returncode}")
     elif mode == "cython":
         record["extensions"] = measured["files"]
-        if not measured["files"]:
+        if not any(name.endswith((".so", ".pyd", ".dylib")) for name in measured["files"]):
             problems.append("cython: the interpreter exposes no native pyboy extension")
     else:
         digest, count = tree_digest(

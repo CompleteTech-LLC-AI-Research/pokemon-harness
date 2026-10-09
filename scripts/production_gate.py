@@ -311,7 +311,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             capacity_payload["status"] = "blocked"
             configuration_problems.append(f"capacity policy blocked: {policy_error}")
         else:
-            capacity_session = gate_capacity.CapacitySession(policy, repo_root=project_root)
+            capacity_session = gate_capacity.CapacitySession(
+                policy,
+                repo_root=project_root,
+                temp_root=(
+                    args.parallel_run_root.expanduser().resolve()
+                    if args.parallel_runtimes and args.parallel_run_root is not None
+                    else None
+                ),
+            )
             loaded_policy, loaded_policy_path = policy, capacity_path
 
     early_smoke = not (args.unit_only or args.tier or args.smoke_only)
@@ -344,6 +352,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rom_root=rom_root,
             fixture_root=fixture_root,
             capacity_session=capacity_session,
+            expected_sha1=expected_sha1,
             explicit_matrix_workers=any(
                 item == "--matrix-workers" or item.startswith("--matrix-workers=")
                 for item in (sys.argv[1:] if argv is None else argv)

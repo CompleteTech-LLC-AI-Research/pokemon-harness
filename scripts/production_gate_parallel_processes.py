@@ -24,6 +24,7 @@ guardian could not establish the subreaper never runs its worker (fail closed).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -32,10 +33,13 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from scripts.production_gate_parallel_validation import loads_strict
 
 JOB_TOKEN_ENV = "POKERED_PARALLEL_JOB_TOKEN"
 LISTEN_STATE = "0A"
@@ -273,10 +277,20 @@ for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(number, lambda signum, frame: stopped.append(signum))
 import ctypes, hashlib, hmac, json, os, subprocess, time
 
-receipt_path, grace, secret_fd, argv = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), sys.argv[5:]
+receipt_path, grace = sys.argv[1], float(sys.argv[2])
+secret_fd, status_fd, argv = int(sys.argv[3]), int(sys.argv[4]), sys.argv[6:]
+parent = os.getppid()
 secret = bytes.fromhex(os.read(secret_fd, 256).decode())
 os.close(secret_fd)
 me = os.getpid()
+
+
+def note(byte):
+    try:
+        os.write(status_fd, byte)
+    except OSError:
+        pass
+
 with open("/proc/self/stat", "rb") as handle:
     start = int(handle.read().decode("utf-8", "replace").rsplit(")", 1)[1].split()[19])
 
@@ -299,15 +313,24 @@ def final(**fields):
 
 
 libc = ctypes.CDLL(None, use_errno=True)
+libc.prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG: contain if the orchestrator dies
+if os.getppid() != parent:
+    stopped.append(signal.SIGTERM)
 if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
     final(contained=False, proof=False, reason="subreaper could not be established")
     sys.exit(70)
 write({"phase": "ready"})  # handlers and subreaper are in place: a stop signal is now handled
+note(b"R")
 if stopped:
     final(never_started=True)
     sys.exit(128 + stopped[0])
+note(b"S")  # spawn intent, written strictly before the worker can exist
 try:
-    worker = subprocess.Popen(argv, start_new_session=True)
+    worker = subprocess.Popen(
+        argv,
+        start_new_session=True,
+        preexec_fn=lambda: libc.prctl(1, signal.SIGKILL, 0, 0, 0),
+    )
 except OSError as exc:
     final(start_error=type(exc).__name__)
     sys.exit(127)
@@ -386,17 +409,61 @@ sys.exit(status if status >= 0 else 128 - status)
 """
 
 
+class GuardianStatus:
+    """The parent's own, independently observed view of the guardian's launch.
+
+    The guardian writes ``R`` (handlers and subreaper in place) and ``S`` (immediately before it
+    may spawn the worker) to a pipe only it can write.  The worker never inherits the pipe, so
+    EOF means the guardian itself is gone, and EOF without ``S`` is affirmative proof that no
+    worker was ever spawned - unlike a missing file, which anything with write access could cause.
+    """
+
+    def __init__(self, descriptor: int) -> None:
+        self.fd = descriptor
+        os.set_blocking(descriptor, False)
+        self.ready = False
+        self.spawned = False
+        self.eof = False
+        self.error = False
+
+    def drain(self) -> None:
+        while self.fd >= 0 and not self.eof and not self.error:
+            try:
+                data = os.read(self.fd, 64)
+            except BlockingIOError:
+                return
+            except OSError:
+                self.error = True
+                return
+            if not data:
+                self.eof = True
+                return
+            self.ready = self.ready or b"R" in data
+            self.spawned = self.spawned or b"S" in data
+
+    def absent_proof(self) -> bool:
+        self.drain()
+        return self.eof and not self.error and not self.spawned
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
+            self.fd = -1
+
+
 def launch_guardian(
     receipt_path: Path, grace_seconds: float, worker_argv: list[str], **popen_kwargs: Any
 ) -> tuple[subprocess.Popen[Any], bytes]:
-    """Start the guardian; its HMAC key travels over a pipe the worker never inherits."""
+    """Start the guardian; the HMAC key and the status pipe never reach the worker."""
 
     secret = os.urandom(32)
-    read_end, write_end = os.pipe()
+    secret_read, secret_write = os.pipe()
+    status_read, status_write = os.pipe()
     try:
-        os.write(write_end, secret.hex().encode())
-        os.close(write_end)
-        write_end = -1
+        os.write(secret_write, secret.hex().encode())
+        os.close(secret_write)
+        secret_write = -1
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -404,18 +471,41 @@ def launch_guardian(
                 GUARDIAN_SOURCE,
                 str(receipt_path),
                 str(grace_seconds),
-                str(read_end),
+                str(secret_read),
+                str(status_write),
                 "--",
                 *worker_argv,
             ],
-            pass_fds=(read_end,),
+            pass_fds=(secret_read, status_write),
             **popen_kwargs,
         )
+    except BaseException:
+        os.close(status_read)
+        raise
     finally:
-        os.close(read_end)
-        if write_end >= 0:
-            os.close(write_end)
+        os.close(secret_read)
+        os.close(status_write)
+        if secret_write >= 0:
+            os.close(secret_write)
+    process.guardian_status = GuardianStatus(status_read)  # type: ignore[attr-defined]
     return process, secret
+
+
+@contextlib.contextmanager
+def interrupt_on_signals(event: threading.Event) -> Any:
+    """Turn SIGTERM/SIGHUP of the orchestrator into the bounded-cancel interrupt event."""
+
+    previous: dict[int, Any] = {}
+    try:
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            previous[number] = signal.signal(number, lambda _signum, _frame: event.set())
+    except ValueError:  # not the main thread: nothing was installed
+        previous = {}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 def _authentic(
@@ -443,7 +533,7 @@ def read_guardian_receipt(
     """Read the guardian receipt; unauthenticated, missing or unproven ones fail closed."""
 
     try:
-        body = json.loads(path.read_text(encoding="utf-8"))
+        body = loads_strict(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None, ["guardian receipt is missing or malformed: containment unproven"]
     if not isinstance(body, dict):
@@ -471,17 +561,19 @@ def read_guardian_receipt(
 
 
 def cleanup_proven(
-    owned_receipt: dict[str, Any], guardian: dict[str, Any] | None, receipt_exists: bool
+    owned_receipt: dict[str, Any],
+    guardian: dict[str, Any] | None,
+    status: GuardianStatus | None,
 ) -> bool:
     """Budget may be released only with the parent's own proof AND an authenticated guardian proof.
 
-    The one exception is a guardian that never produced any receipt: the worker is spawned only
-    after the readiness receipt is written, so with no receipt file, no adopted descendant and
-    nothing alive in the parent's own pidfd measurement, no worker can have existed.
+    The single exception is an affirmative absence proof taken from the parent's own status pipe:
+    the guardian is gone (EOF) and never signalled spawn intent, so no worker can have existed.
+    A missing, removed or unauthenticated file proves nothing.
     """
 
     if owned_receipt.get("proof") is not True:
         return False
     if guardian is not None and guardian.get("phase") == "final":
         return guardian.get("contained") is True and guardian.get("proof") is True
-    return not receipt_exists and owned_receipt.get("adopted_total") == 0
+    return status is not None and status.absent_proof()

@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._parallel_runtime_port_support import reserve_port
+
 ROOT = Path(__file__).resolve().parents[1]
 CALL_BOUND = 20.0
 EXIT_BOUND = 12.0
@@ -278,9 +280,11 @@ async def _both(*calls):
 
 
 async def _connected(left, right):
-    with socket.socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
+    port = reserve_port()
+    if port is None:
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
     listen = await left.tool(
         "link_listen",
         {
@@ -376,9 +380,11 @@ async def test_authored_timed_stdio_pair_frames_and_cleanup(tmp_path, terminatio
 async def test_authored_timed_stdio_expected_peer_mismatch(tmp_path):
     """Reject a real peer's HELLO identity through the public structured error."""
     async with _pair(tmp_path) as (left, right):
-        with socket.socket() as reservation:
-            reservation.bind(("127.0.0.1", 0))
-            port = reservation.getsockname()[1]
+        port = reserve_port()
+        if port is None:
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
         listening = await left.tool(
             "link_listen",
             {

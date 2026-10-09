@@ -210,6 +210,7 @@ def run_tier(
     output_omitted = False
     baseline_nodeids: set[str] | None = None
     selected_nodeids: list[str] = []
+    test_records: list[dict[str, Any]] = []
     started = time.monotonic()
     interrupted_between_iterations = False
     try:
@@ -268,6 +269,9 @@ def run_tier(
             problems.extend(required_problems)
             problems.extend(_required_nodeid_problems(report.nodeids, required_nodeids))
             current_nodeids = set(report.nodeids)
+            test_records.extend(
+                {"iteration": iteration, **record} for record in report.terminal_records
+            )
             if baseline_nodeids is None:
                 baseline_nodeids = current_nodeids
                 selected_nodeids = list(report.nodeids)
@@ -385,6 +389,7 @@ def run_tier(
         selected_nodeids=selected_nodeids,
         failure_details=failure_details,
         failure_details_omitted=failure_details_omitted,
+        test_records=test_records,
     )
     # Durable publication before the signal handler is restored, for the same
     # reason as the matrix supervisor: otherwise a ``SIGINT`` landing between

@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +46,7 @@ def build_gate_command(
     tiers: Sequence[str] = (),
     rom_root: Path | None = None,
     fixture_root: Path | None = None,
+    capacity_policy: Path | None = None,
 ) -> list[str]:
     """Return the sequential single-runtime gate command for one job (explicit tiers)."""
 
@@ -63,6 +65,8 @@ def build_gate_command(
         command.append(f"--rom-root={rom_root}")
     if fixture_root is not None:
         command.append(f"--fixture-root={fixture_root}")
+    if capacity_policy is not None:
+        command.append(f"--capacity-policy={capacity_policy}")
     command.extend(gate_arguments)
     return command
 
@@ -193,6 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--git-root", type=Path, default=None)
     parser.add_argument("--rom-root", type=Path, default=None)
     parser.add_argument("--fixture-root", type=Path, default=None)
+    parser.add_argument("--capacity-policy", type=Path, default=None)
     parser.add_argument("--python", dest="python_executable", default=sys.executable)
     parser.add_argument("--gate-arg", action="append", default=[])
     args = parser.parse_args(argv)
@@ -230,7 +235,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         tiers=job["tiers"],
         rom_root=args.rom_root,
         fixture_root=args.fixture_root,
+        capacity_policy=args.capacity_policy,
     )
+    # One absolute deadline shared with the parent: measurement time is spent from the same budget.
+    timeout = float(job["deadline_seconds"])
+    try:
+        timeout = max(
+            1.0, min(timeout, float(os.environ["POKERED_PARALLEL_DEADLINE_EPOCH"]) - time.time())
+        )
+    except (KeyError, ValueError):
+        pass
+    gate_environment = {**os.environ, "POKERED_GATE_RECORD_TESTS": "1"}
+    if args.git_root is not None:
+        # The private snapshot is a byte copy of this checkout; the origin guard verifies that
+        # equivalence itself before it accepts an installation attributed to the original.
+        gate_environment["POKERED_IMPORT_ORIGIN_EQUIVALENT_ROOTS"] = str(args.git_root)
     started = _utc()
     timeout_problem = ""
     try:
@@ -239,7 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             cwd=args.project_root,
             stdin=subprocess.DEVNULL,
             check=False,
-            timeout=float(job["deadline_seconds"]),
+            env=gate_environment,
+            timeout=timeout,
         ).returncode
     except subprocess.TimeoutExpired:
         exit_status, timeout_problem = TIMEOUT_EXIT_STATUS, "the gate exceeded the job deadline"

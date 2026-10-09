@@ -12,6 +12,7 @@ from scripts.production_gate_parallel_plan import (
     PlanError,
     build_parallel_plan,
     canonical_json,
+    cli_deadlines,
     load_plan,
     validate_plan_body,
 )
@@ -173,3 +174,51 @@ def test_job_lookup_rejects_unknown_ids_and_lists_planned_jobs_in_order():
     assert plan.job("cython-job")["mode"] == "cython"
     with pytest.raises(PlanError):
         plan.job("other-job")
+
+
+def test_job_deadlines_are_derived_from_every_sequential_term_including_measurement():
+    body = make_plan().as_dict()
+    deadlines = body["deadlines"]
+    assert set(deadlines) == {
+        "cleanup_seconds",
+        "measurement_seconds",
+        "preflight_seconds",
+        "repetition_seconds",
+        "row_seconds",
+        "tier_seconds",
+    }
+    selected = body["jobs"][0]
+    expected = (
+        deadlines["preflight_seconds"]
+        + deadlines["cleanup_seconds"]
+        + 2 * deadlines["measurement_seconds"]
+        + deadlines["tier_seconds"]
+        + 5 * deadlines["repetition_seconds"]
+    )
+    assert selected["deadline_seconds"] == expected, (
+        "valid cumulative work exceeds one per-run allowance"
+    )
+
+
+def test_cli_deadlines_use_effective_workers_the_aggregate_override_and_one_probe_per_tier():
+    from types import SimpleNamespace
+
+    base = SimpleNamespace(timeout_seconds=1.0, matrix_timeout_seconds=None)
+    required = {"trade": [f"t{n}" for n in range(12)]}
+    wide = cli_deadlines(base, required, 6, 60.0, ("unit", "trade"))
+    capped = cli_deadlines(base, required, 1, 60.0, ("unit", "trade"))
+    assert capped["tier_seconds"] > wide["tier_seconds"], "a capped worker count needs more waves"
+    aggregate = cli_deadlines(
+        SimpleNamespace(timeout_seconds=1.0, matrix_timeout_seconds=500.0),
+        required,
+        1,
+        60.0,
+        ("trade",),
+    )
+    assert aggregate["tier_seconds"] < capped["tier_seconds"], (
+        "the override is aggregate, not per row"
+    )
+    assert (
+        cli_deadlines(base, required, 1, 60.0, ("a", "b", "c"))["preflight_seconds"]
+        > cli_deadlines(base, required, 1, 60.0, ("a",))["preflight_seconds"]
+    )

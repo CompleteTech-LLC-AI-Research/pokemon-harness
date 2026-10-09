@@ -8,15 +8,16 @@ re-checked here, and every job outcome (including failures) is retained.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from scripts.production_gate_parallel_identity import expected_identity
+from scripts.production_gate_parallel_identity import expected_identity, sha256_file
 from scripts.production_gate_parallel_plan import ParallelPlan
-from scripts.production_gate_parallel_records import row_problems
+from scripts.production_gate_parallel_records import build_rows, row_problems
 from scripts.production_gate_parallel_validation import (
     guarded,
     in_set,
@@ -279,6 +280,9 @@ def outcome_record(
     artifact_problems: Sequence[str],
     reason: str = "",
     elapsed_seconds: float | None = None,
+    launched_utc: str | None = None,
+    finished_utc: str | None = None,
+    partial_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one retained per-job outcome; failures and diagnostics are never dropped."""
 
@@ -293,8 +297,11 @@ def outcome_record(
         "reason": reason,
         "child_exit_status": child_exit_status,
         "elapsed_seconds": elapsed_seconds,
+        "launched_utc": launched_utc,
+        "finished_utc": finished_utc,
         "artifact_problems": list(artifact_problems),
         "artifact": artifact if isinstance(artifact, dict) else None,
+        "partial_evidence": dict(partial_evidence) if partial_evidence else None,
     }
 
 
@@ -341,3 +348,134 @@ def aggregate_outcomes(plan: ParallelPlan, outcomes: Sequence[Mapping[str, Any]]
         "problems": problems,
         "jobs": [dict(outcome) for outcome in outcomes],
     }
+
+
+MAX_EVIDENCE_FILES = 400
+MAX_HASHED_BYTES = 8 * 1024 * 1024
+
+
+def collect_partial_evidence(tree: Mapping[str, Path]) -> dict[str, Any]:
+    """Digest whatever a cancelled or timed-out job left behind, without trusting or deleting it."""
+
+    files: list[dict[str, Any]] = []
+    truncated = False
+    for name in ("out", "evidence", "raw", "tmp"):
+        base = tree.get(name)
+        if base is None or not Path(base).is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            for filename in sorted(filenames):
+                path = Path(dirpath) / filename
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if len(files) >= MAX_EVIDENCE_FILES:
+                    truncated = True
+                    continue
+                entry: dict[str, Any] = {
+                    "path": f"{name}/{path.relative_to(base).as_posix()}",
+                    "bytes": info.st_size,
+                }
+                if info.st_size <= MAX_HASHED_BYTES:
+                    try:
+                        entry["sha256"] = sha256_file(path)
+                    except OSError:
+                        entry["sha256"] = None
+                files.append(entry)
+    return {"files": files, "truncated": truncated}
+
+
+def verify_gate_report(
+    job_root: Path,
+    artifact: Mapping[str, Any],
+    plan_body: Mapping[str, Any],
+    job: Mapping[str, Any],
+) -> tuple[list[str], dict[str, Any] | None]:
+    """The parent reads the referenced complete gate report itself and re-derives the evidence.
+
+    The worker's artifact is only a claim: the report bytes must match the referenced digest,
+    and the tiers, rows and verdict recomputed here from the producer's own report must equal
+    what the artifact says.  Non-matrix tiers must carry the producer's actual terminal records.
+    """
+
+    path = job_root / "evidence" / "gate-report.json"
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return ["the referenced gate report is missing"], None
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_size > MAX_ARTIFACT_BYTES
+    ):
+        return ["the referenced gate report is not a bounded regular file"], None
+    raw = path.read_bytes()
+    problems: list[str] = []
+    evidence = artifact.get("evidence")
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("gate_report_bytes") != len(raw)
+        or evidence.get("gate_report_sha256") != hashlib.sha256(raw).hexdigest()
+    ):
+        problems.append("gate report bytes differ from the artifact's evidence reference")
+    try:
+        report = loads_strict(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return [*problems, "the referenced gate report is not strict JSON"], None
+    if not isinstance(report, dict) or not isinstance(report.get("tiers"), list):
+        return [*problems, "the referenced gate report has no tier list"], None
+    tiers = [tier for tier in report["tiers"] if isinstance(tier, dict)]
+    if len(tiers) != len(report["tiers"]):
+        problems.append("the gate report contains a non-object tier")
+    keys = ("name", "status", "counts", "returncodes")
+    claimed = artifact.get("tiers")
+    if not isinstance(claimed, list) or [
+        {k: t.get(k) for k in keys} if isinstance(t, dict) else None for t in claimed
+    ] != [{k: t.get(k) for k in keys} for t in tiers]:
+        problems.append("artifact tiers differ from the verified gate report")
+    if build_rows(job["mode"], tiers, plan_body["games"], plan_body["roles"]) != artifact.get(
+        "rows"
+    ):
+        problems.append("artifact rows differ from the rows derived from the verified gate report")
+    for tier in tiers:
+        if (
+            tier.get("selected_nodeids")
+            and not tier.get("case_results")
+            and not tier.get("test_records")
+        ):
+            problems.append(
+                f"{tier.get('name')}: the producer did not propagate its terminal test records"
+            )
+    for tier in tiers:
+        records, selected = tier.get("test_records"), tier.get("selected_nodeids")
+        if not (isinstance(records, list) and records and isinstance(selected, list)):
+            continue
+        by_iteration: dict[Any, set[Any]] = {}
+        for record in records:
+            if isinstance(record, dict):
+                by_iteration.setdefault(record.get("iteration"), set()).add(record.get("nodeid"))
+        if by_iteration.get(1) != set(selected) or any(
+            nodeids != by_iteration.get(1) for nodeids in by_iteration.values()
+        ):
+            problems.append(
+                f"{tier.get('name')}: terminal records differ from the exact collected selection"
+            )
+        frozen_selection = plan_body["required_nodeids"].get(tier.get("name"))
+        if (
+            isinstance(frozen_selection, list)
+            and frozen_selection
+            and set(frozen_selection) != set(selected)
+        ):
+            problems.append(
+                f"{tier.get('name')}: the collected selection differs from the frozen plan selection"
+            )
+    if report.get("overall") != artifact.get("overall"):
+        problems.append("artifact verdict differs from the verified gate report")
+    runtime = report.get("runtime")
+    if not isinstance(runtime, dict) or runtime != artifact.get("runtime"):
+        problems.append("artifact runtime identity differs from the verified gate report")
+    return problems, report

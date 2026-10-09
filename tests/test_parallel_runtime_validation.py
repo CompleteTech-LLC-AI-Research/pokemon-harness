@@ -1,13 +1,19 @@
 """Authored controls: validators are total over decoded JSON (#107.3, finding 9)."""
 
 import copy
+import json
 import math
 
 import pytest
 
-from scripts.production_gate_parallel_artifacts import validate_terminal_artifact
-from scripts.production_gate_parallel_plan import PlanError
+from scripts.production_gate_parallel_artifacts import (
+    read_terminal_artifact,
+    validate_terminal_artifact,
+)
+from scripts.production_gate_parallel_plan import PlanError, load_plan, validate_plan_body
+from scripts.production_gate_parallel_processes import read_guardian_receipt
 from scripts.production_gate_parallel_validation import (
+    MAX_JSON_CHARS,
     guarded,
     in_set,
     loads_strict,
@@ -83,3 +89,42 @@ def test_structurally_wrong_valid_json_never_aborts_validation(key, value):
 def test_plan_deadlines_must_be_finite_positive_numbers(bad):
     with pytest.raises(PlanError):
         make_plan(deadline_seconds=bad)
+
+
+DEEP = "[" * 100000 + "]" * 100000
+
+
+def test_runaway_nesting_is_a_contained_value_error_not_a_crash(tmp_path):
+    with pytest.raises(ValueError, match="recursion|nesting"):
+        loads_strict(DEEP)
+    with pytest.raises(ValueError, match="size bound"):
+        loads_strict(" " * (MAX_JSON_CHARS + 1))
+    with pytest.raises(PlanError):
+        load_plan(DEEP)
+    root = tmp_path / "job"
+    (root / "out").mkdir(parents=True)
+    (root / "out" / "terminal.json").write_text(DEEP, encoding="utf-8")
+    artifact, problems = read_terminal_artifact(root)
+    assert artifact is None and problems == ["terminal artifact is malformed or truncated"]
+    receipt = tmp_path / "guardian.json"
+    receipt.write_text(DEEP, encoding="utf-8")
+    assert read_guardian_receipt(receipt)[1]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda body: body.update(tiers=[["unit"], {"x": 1}]),
+        lambda body: body.update(games=[{"a": 1}]),
+        lambda body: body.update(required_nodeids={"unit": [["a"]]}),
+        lambda body: body.update(jobs=[["x"], 5, None]),
+        lambda body: body["deadlines"].update(tier_seconds={"a": 1}),
+        lambda body: body.update(input_digests={"a": ["b"]}),
+        lambda body: body.update(build_identity={"source": ["x"]}),
+    ],
+)
+def test_hostile_containers_in_a_decoded_plan_are_problems_never_exceptions(mutate):
+    body = json.loads(make_plan().text)
+    mutate(body)
+    problems = validate_plan_body(body)
+    assert problems and all(isinstance(item, str) for item in problems)

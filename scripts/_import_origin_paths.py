@@ -6,9 +6,13 @@ monkeypatch behavior and provenance decisions live at the public boundary.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import importlib.metadata
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -241,6 +245,53 @@ def _installed_from(distribution_name: str, project_root: Path, *, api: OriginAp
         return None
 
 
+EQUIVALENT_ROOTS_ENV = "POKERED_IMPORT_ORIGIN_EQUIVALENT_ROOTS"
+
+
+def _tracked_digest(root: Path) -> str | None:
+    """Digest of every git-tracked file's bytes under ``root``; None when it cannot be shown."""
+
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode != 0:
+        return None
+    digest = hashlib.sha256()
+    for raw in sorted(name for name in listing.stdout.split(b"\0") if name):
+        path = root / raw.decode("utf-8", "surrogateescape")
+        try:
+            data = path.read_bytes() if path.is_file() else b""
+        except OSError:
+            return None
+        digest.update(raw + b"\0" + hashlib.sha256(data).digest())
+    return digest.hexdigest()
+
+
+@functools.lru_cache(maxsize=8)
+def _verified_equivalent_roots(project_root: str, declared: str) -> tuple[Path, ...]:
+    """Declared roots whose tracked bytes are IDENTICAL to the checkout under test.
+
+    A private immutable snapshot is a byte copy of the checkout the native lane installed from.
+    The declaration is never trusted: each declared root is accepted only if its own tracked
+    files hash to exactly the same digest as ``project_root``'s, so a stale worktree, whose
+    contents differ, still cannot qualify.
+    """
+
+    roots = [Path(item).resolve() for item in declared.split(os.pathsep) if item]
+    if not roots:
+        return ()
+    mine = _tracked_digest(Path(project_root))
+    if mine is None:
+        return ()
+    return tuple(root for root in roots if _tracked_digest(root) == mine)
+
+
 def _is_this_checkout(project_root: Path, source: Path | None, *, api: OriginApi) -> bool:
     """Return whether a recorded install source belongs to this checkout.
 
@@ -269,7 +320,16 @@ def _is_this_checkout(project_root: Path, source: Path | None, *, api: OriginApi
         return False
     if source == root:
         return True
-    return api["_is_within"](source, api["_staging_root"](root), strict=True)
+    if api["_is_within"](source, api["_staging_root"](root), strict=True):
+        return True
+    declared = os.environ.get(EQUIVALENT_ROOTS_ENV, "")
+    if declared:
+        for equivalent in _verified_equivalent_roots(str(root), declared):
+            if source == equivalent or api["_is_within"](
+                source, api["_staging_root"](equivalent), strict=True
+            ):
+                return True
+    return False
 
 
 def _allowed_roots(

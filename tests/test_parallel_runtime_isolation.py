@@ -143,7 +143,7 @@ def test_the_environment_moves_every_controllable_writer_into_the_job_tree(tmp_p
         env["POKERED_PARALLEL_PORT_BASE"] == "30000" and env["POKERED_PARALLEL_PORT_COUNT"] == "500"
     )
     assert env["POKERED_PARALLEL_PORT_LOCK_DIR"] == str(tree["ports"])
-    assert env["POKERED_PARALLEL_BUILD_DIR"] == str(tree["build"])
+    assert "POKERED_PARALLEL_BUILD_DIR" not in env, "no writer consumes a build-dir variable"
 
 
 def test_the_tripwire_reports_changed_added_and_removed_files(tmp_path):
@@ -170,3 +170,24 @@ def test_nested_or_shared_job_trees_are_refused(tmp_path):
     assert distinct_tree_problems(
         {"x": {"root": tmp_path / "a"}, "y": {"root": tmp_path / "a" / "inner"}}
     )
+
+
+def test_the_snapshot_repository_serves_git_tracked_tree_checks_without_the_original(tmp_path):
+    copy = tmp_path / "checkout"
+    (copy / "scripts").mkdir(parents=True)
+    (copy / "scripts" / "a.py").write_text("x = 1\n")
+    (copy / ".gitignore").write_text("ignored.txt\n")
+    (copy / "ignored.txt").write_text("a tracked file that matches an ignore rule\n")
+    isolation._init_repository(copy)
+    listing = subprocess.run(
+        ["git", "-C", str(copy), "ls-files", "-z"], capture_output=True, check=True
+    ).stdout.split(b"\0")
+    assert sorted(item.decode() for item in listing if item) == [
+        ".gitignore",
+        "ignored.txt",
+        "scripts/a.py",
+    ], "forced add keeps tracked files that match an ignore rule"
+    head = subprocess.run(
+        ["git", "-C", str(copy), "rev-parse", "HEAD"], capture_output=True, check=True
+    )
+    assert len(head.stdout.strip()) == 40

@@ -14,8 +14,10 @@ import time
 
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
+    GuardianStatus,
     OwnedTree,
     cleanup_proven,
+    interrupt_on_signals,
     launch_guardian,
     read_guardian_receipt,
     read_stat,
@@ -254,21 +256,75 @@ def test_a_forged_or_foreign_receipt_is_never_authenticated(tmp_path):
         guardian.wait()
 
 
+class FakeStatus:
+    def __init__(self, absent):
+        self.absent = absent
+
+    def absent_proof(self):
+        return self.absent
+
+
 def test_budget_may_only_be_released_with_both_the_parent_proof_and_the_guardian_proof():
     parent_ok = {"proof": True, "adopted_total": 0}
     final_ok = {"phase": "final", "contained": True, "proof": True}
-    assert cleanup_proven(parent_ok, final_ok, True) is True
-    assert cleanup_proven({**parent_ok, "proof": False}, final_ok, True) is False
-    assert cleanup_proven(parent_ok, {**final_ok, "proof": False}, True) is False
-    assert cleanup_proven(parent_ok, {**final_ok, "contained": False}, True) is False
-    assert cleanup_proven(parent_ok, {"phase": "ready"}, True) is False
-    assert cleanup_proven(parent_ok, None, True) is False, (
+    absent, present = FakeStatus(True), FakeStatus(False)
+    assert cleanup_proven(parent_ok, final_ok, present) is True
+    assert cleanup_proven({**parent_ok, "proof": False}, final_ok, absent) is False
+    assert cleanup_proven(parent_ok, {**final_ok, "proof": False}, absent) is False
+    assert cleanup_proven(parent_ok, {**final_ok, "contained": False}, absent) is False
+    assert cleanup_proven(parent_ok, {"phase": "ready"}, present) is False
+    assert cleanup_proven(parent_ok, None, present) is False, (
         "an unauthenticated receipt proves nothing"
     )
-    assert cleanup_proven({**parent_ok, "adopted_total": 2}, None, False) is False
-    assert cleanup_proven(parent_ok, None, False) is True, (
-        "no receipt file and no descendant ever existed"
+    assert cleanup_proven(parent_ok, None, None) is False
+    assert cleanup_proven(parent_ok, None, absent) is True, (
+        "affirmative absence from the status pipe"
     )
+
+
+def test_the_status_pipe_is_an_independent_launch_record_not_a_file(tmp_path):
+    read_end, write_end = os.pipe()
+    view = GuardianStatus(read_end)
+    try:
+        assert view.absent_proof() is False, "no EOF yet: the guardian may still be alive"
+        os.write(write_end, b"R")
+        os.close(write_end)
+        assert view.absent_proof() is True and view.ready and not view.spawned
+    finally:
+        view.close()
+    read_end, write_end = os.pipe()
+    view = GuardianStatus(read_end)
+    try:
+        os.write(write_end, b"RS")
+        os.close(write_end)
+        assert view.absent_proof() is False, "spawn intent was signalled: a worker may exist"
+        assert view.spawned
+    finally:
+        view.close()
+
+
+def test_a_real_guardian_reports_ready_and_spawn_intent_over_its_status_pipe(tmp_path):
+    receipt = tmp_path / "guardian.json"
+    process, secret = launch_guardian(receipt, 1.0, [sys.executable, "-c", "pass"])
+    try:
+        process.wait(timeout=30)
+        view = process.guardian_status
+        view.drain()
+        assert view.ready and view.spawned and view.eof and view.absent_proof() is False
+        assert read_guardian_receipt(receipt, secret, process.pid)[0]["phase"] == "final"
+    finally:
+        process.guardian_status.close()
+
+
+def test_orchestrator_signals_become_the_bounded_cancel_interrupt():
+    import threading
+
+    event = threading.Event()
+    before = signal.getsignal(signal.SIGHUP)
+    with interrupt_on_signals(event):
+        os.kill(os.getpid(), signal.SIGHUP)
+        assert event.wait(timeout=5)
+    assert signal.getsignal(signal.SIGHUP) == before, "the previous handler must be restored"
 
 
 def test_a_missing_or_unproven_guardian_receipt_is_a_failed_closed_problem(tmp_path):

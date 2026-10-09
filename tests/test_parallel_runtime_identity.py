@@ -132,3 +132,11 @@ def test_identity_that_changes_during_the_run_or_a_stale_token_is_rejected():
             stale, plan, "source-job", child_exit_status=0, expected_token=TOKEN
         )
     )
+
+
+def test_repository_metadata_is_never_part_of_a_content_digest(tmp_path):
+    (tmp_path / "a.txt").write_text("1")
+    before = tree_digest(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "index").write_text("changes on every git command")
+    assert tree_digest(tmp_path) == before

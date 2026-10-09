@@ -9,11 +9,14 @@ all fail closed and are recorded as observations.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
 from collections.abc import Callable
 from typing import Any
+
+from scripts.production_gate_parallel_validation import loads_strict
 
 MAX_OBSERVATIONS = 200
 
@@ -58,6 +61,25 @@ class PairBudget:
     def reserved_total(self) -> int:
         with self._lock:
             return sum(self._reserved.values())
+
+
+def derive_job_policy(global_text: str, pairs: int) -> str:
+    """The job's partition of the ONE global capacity policy: same limits, its own pair share.
+
+    Each child gate loads this file so its actual tier and matrix row admission, telemetry and
+    pressure checks are governed by the policy; the shares sum to at most the global total
+    (enforced by the parent's single budget), so no pair is counted twice.
+    """
+
+    try:
+        body = loads_strict(global_text)
+    except ValueError as exc:
+        raise CapacityError("the global capacity policy is not strict JSON") from exc
+    total = body.get("max_concurrent_pairs") if isinstance(body, dict) else None
+    if type(total) is not int or type(pairs) is not int or not 1 <= pairs <= total:
+        raise CapacityError("a job share must be a positive integer within the global total")
+    body["max_concurrent_pairs"] = pairs
+    return json.dumps(body, sort_keys=True, indent=2) + "\n"
 
 
 def affinity_pairs() -> int:

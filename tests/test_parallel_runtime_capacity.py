@@ -1,5 +1,7 @@
 """Authored controls: one live capacity authority, fail closed (#107.2, #107.4, finding 3)."""
 
+import json
+
 import pytest
 
 from scripts.production_gate_parallel_capacity import (
@@ -7,6 +9,7 @@ from scripts.production_gate_parallel_capacity import (
     LiveCapacity,
     PairBudget,
     capacity_loss_probe,
+    derive_job_policy,
     require_parallel_capacity,
 )
 from tests._parallel_runtime_report_support import make_plan
@@ -119,3 +122,17 @@ def test_parallel_dispatch_needs_a_pair_per_job_of_the_widest_phase():
     require_parallel_capacity(plan, PairBudget(2))
     with pytest.raises(CapacityError, match="differs"):
         require_parallel_capacity(plan, PairBudget(4))
+
+
+def test_each_child_gets_its_partition_of_the_one_global_policy():
+    global_text = json.dumps({"max_concurrent_pairs": 6, "observation_seconds": 1.0, "other": [1]})
+    derived = json.loads(derive_job_policy(global_text, 3))
+    assert derived["max_concurrent_pairs"] == 3 and derived["observation_seconds"] == 1.0
+    assert derived["other"] == [1], "every other limit is carried over unchanged"
+    for bad in (0, 7, True, "3", None):
+        with pytest.raises(CapacityError):
+            derive_job_policy(global_text, bad)
+    with pytest.raises(CapacityError):
+        derive_job_policy("[1]", 1)
+    with pytest.raises(CapacityError):
+        derive_job_policy("{" * 100000, 1)

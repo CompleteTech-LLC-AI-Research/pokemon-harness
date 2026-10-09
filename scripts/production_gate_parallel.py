@@ -31,9 +31,11 @@ from typing import Any
 from scripts.production_gate_parallel_artifacts import (
     TERMINAL_ARTIFACT_NAME,
     aggregate_outcomes,
+    collect_partial_evidence,
     outcome_record,
     read_terminal_artifact,
     validate_terminal_artifact,
+    verify_gate_report,
 )
 from scripts.production_gate_parallel_capacity import (
     CapacityError,
@@ -41,24 +43,20 @@ from scripts.production_gate_parallel_capacity import (
     PairBudget,
     affinity_pairs,
     capacity_loss_probe,
+    derive_job_policy,
     require_parallel_capacity,
 )
 from scripts.production_gate_parallel_identity import (
     expected_identity,
     identity_differences,
-    measure_commit,
-    measure_identity,
 )
 from scripts.production_gate_parallel_isolation import (
-    IsolationError,
     assign_port_ranges,
-    build_snapshot,
     diff_snapshots,
     distinct_tree_problems,
     isolation_environment,
     port_range_problems,
     snapshot_tree,
-    thaw_and_remove,
 )
 from scripts.production_gate_parallel_phases import (
     barrier_decision,
@@ -66,7 +64,7 @@ from scripts.production_gate_parallel_phases import (
     may_cancel_siblings,
     phase_names,
 )
-from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, cli_deadlines, load_plan
+from scripts.production_gate_parallel_plan import ParallelPlan, PlanError, load_plan
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     OwnedTree,
@@ -114,21 +112,31 @@ COVERAGE_DECLARATION = {
     "implemented": [
         "opt-in --parallel-runtimes with sequential execution as the unchanged default",
         (
-            "immutable frozen plan: run/commit/per-runtime build/input/asset identities, tiers, "
-            "case ids, timing repetitions, derived deadlines, fail_fast and one capacity budget"
+            "immutable frozen plan: run/commit/per-runtime build/input/asset identities, the "
+            "complete collected selection, derived finite deadlines, fail_fast and one capacity budget"
         ),
-        "private immutable snapshot of the checkout and ROM/fixtures with a real write-denial probe",
+        (
+            "private immutable snapshot (own git repository) of the checkout and ROM/fixtures with "
+            "a real write-denial probe; verifiable equivalent-root provenance for the native guard"
+        ),
         "phases: both additional smokes complete before any selected-tier job; both retained",
         (
-            "structured row records, independently measured identities and per-launch tokens "
-            "validated against the plan; validators are total over decoded JSON"
+            "rows from the producer's actual per-test terminal records, re-derived by the parent "
+            "from the verified gate report; independently measured identities; bounded total JSON"
         ),
         (
-            "live capacity admission (CapacitySession + one budget) before dispatch and on every "
-            "poll; owned process-tree tracking with proof before budget release"
+            "capacity: the one global policy partitioned into per-child policies, session sampling "
+            "of the run filesystem under background monitoring, fail-closed admission and loss"
         ),
-        "completed failures are harvested before any cancellation; diagnostics are preserved",
-        "production comparison of two complete re-validated bundles (concurrent vs serial)",
+        (
+            "owned process trees: authenticated guardian, parent status-pipe absence proof, "
+            "pidfd-verified signals, parent-death signals, proof before any release or removal"
+        ),
+        "completed failures harvested before cancellation; partial evidence recovered and digested",
+        (
+            "production comparison of two re-validated bundles on parent-observed serial and "
+            "concurrent intervals, resource traces and lifecycle proofs"
+        ),
     ],
     "exclusions": [
         "full real-ROM dual-runtime run over the six tiers (#107.5) is NOT done",
@@ -168,6 +176,7 @@ def job_environment(
     project_root: Path | None = None,
     token: str = "",
     port_range: tuple[int, int] | None = None,
+    deadline_epoch: float | None = None,
 ) -> dict[str, str]:
     """Build an isolated environment: private writers, one thread per library, job token."""
 
@@ -179,6 +188,8 @@ def job_environment(
         env["PYTHONPATH"] = str(project_root)
     if token:
         env[JOB_TOKEN_ENV] = token
+    if deadline_epoch is not None:
+        env["POKERED_PARALLEL_DEADLINE_EPOCH"] = repr(deadline_epoch)
     return env
 
 
@@ -250,6 +261,7 @@ def default_worker_argv(
     git_root: Path | None = None,
     rom_root: Path | None = None,
     fixture_root: Path | None = None,
+    capacity_policy: bool = False,
 ) -> WorkerArgvFactory:
     """Return the factory that launches the real per-runtime worker module."""
 
@@ -275,6 +287,8 @@ def default_worker_argv(
         ):
             if value is not None:
                 argv.append(f"{flag}={value}")
+        if capacity_policy:
+            argv.append(f"--capacity-policy={tree['root'] / 'capacity-policy.json'}")
         argv.extend(f"--gate-arg={item}" for item in gate_arguments)
         return argv
 
@@ -304,7 +318,14 @@ def _finish_job(
 ) -> dict[str, Any]:
     artifact, read_problems = read_terminal_artifact(running.tree["root"])
     problems = list(read_problems)
+    child_capacity = None
     if artifact is not None:
+        report_problems, gate_report = verify_gate_report(
+            running.tree["root"], artifact, plan.as_dict(), plan.job(running.job_id)
+        )
+        problems.extend(report_problems)
+        if gate_report is not None and isinstance(gate_report.get("capacity"), dict):
+            child_capacity = gate_report["capacity"]
         problems.extend(
             validate_terminal_artifact(
                 artifact,
@@ -331,8 +352,11 @@ def _finish_job(
         artifact_problems=problems,
         reason="; ".join(problems[:1]),
         elapsed_seconds=round(elapsed, 3),
+        launched_utc=running.launched_wall.isoformat(),
+        finished_utc=wall_clock().isoformat(),
     )
     record["launch_token"] = running.token
+    record["capacity"] = child_capacity
     return record
 
 
@@ -366,6 +390,7 @@ def run_parallel_plan(
     interrupt: threading.Event | None = None,
     serial: bool = False,
     measure: Measurer | None = None,
+    capacity_policy_text: str | None = None,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     grace_seconds: float = DEFAULT_GRACE_SECONDS,
     clock: Callable[[], float] = time.monotonic,
@@ -413,17 +438,35 @@ def run_parallel_plan(
             },
         )
 
-    def settle(job_id: str, state: str, reason: str, status: int | None = None) -> None:
+    def settle(
+        job_id: str,
+        state: str,
+        reason: str,
+        status: int | None = None,
+        *,
+        artifact: Mapping[str, Any] | None = None,
+        partial: Mapping[str, Any] | None = None,
+        item: _Running | None = None,
+    ) -> None:
         outcomes[job_id] = outcome_record(
             plan,
             job_id,
             state,
             child_exit_status=status,
-            artifact=None,
+            artifact=artifact,
             artifact_problems=[reason],
             reason=reason,
+            launched_utc=item.launched_wall.isoformat() if item is not None else None,
+            finished_utc=wall_clock().isoformat() if item is not None else None,
+            partial_evidence=partial,
         )
         progress()
+
+    def recover(item: _Running) -> tuple[Mapping[str, Any] | None, Mapping[str, Any]]:
+        """Whatever the cancelled job already produced; kept beside, never as, a PASS."""
+
+        artifact, _problems = read_terminal_artifact(item.tree["root"])
+        return artifact, collect_partial_evidence(item.tree)
 
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
         _close_handles(item)
@@ -445,8 +488,10 @@ def run_parallel_plan(
             )
         if guardian and guardian.get("start_error"):
             outcome["reason"] = f"could not start: {guardian['start_error']}"
-        if not cleanup_proven(receipt, guardian, item.receipt.exists()):
+        view = item.process.guardian_status  # type: ignore[attr-defined]
+        if not cleanup_proven(receipt, guardian, view):
             receipt["proof"] = False
+        view.close()
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
         running.remove(item)
@@ -468,10 +513,14 @@ def run_parallel_plan(
     def stop(item: _Running) -> None:
         """Ask the guardian to contain its subtree first, then prove it from outside."""
 
-        # The guardian installs its handlers before it writes the readiness receipt; a stop
-        # signal sent earlier would kill it with the default action and leave no receipt.
+        view = item.process.guardian_status  # type: ignore[attr-defined]
+        # The guardian installs its handlers before it reports readiness over the status pipe; a
+        # stop signal sent earlier would kill it with the default action and leave no receipt.
         ready_limit = clock() + grace_seconds + 2.0
-        while item.process.poll() is None and not item.receipt.exists() and clock() < ready_limit:
+        while item.process.poll() is None and clock() < ready_limit:
+            view.drain()
+            if view.ready or view.eof:
+                break
             sleeper(0.01)
         item.owned.signal_root(signal.SIGTERM)
         limit = clock() + 3 * grace_seconds + 3.0  # the guardian's own worst case is ~3x grace + 1
@@ -481,8 +530,9 @@ def run_parallel_plan(
         guardian, _problems = read_guardian_receipt(
             item.receipt, item.secret, item.process.pid, item.owned.root_start
         )
-        if not cleanup_proven(receipt, guardian, item.receipt.exists()):
+        if not cleanup_proven(receipt, guardian, view):
             receipt["proof"] = False
+        view.close()
         cleanup[item.job_id] = {"process_tree": receipt, "guardian": guardian or {}}
         ports_seen[item.job_id] = set(item.owned.ports)
 
@@ -492,9 +542,18 @@ def run_parallel_plan(
         harvest(allow_cancel=False)  # completed failures are kept before any signal is sent
         for item in list(running):
             stop(item)
+            recovered, partial = recover(item)
             status = item.process.poll()
             _close_handles(item)
-            settle(item.job_id, "interrupted", f"cancelled: {reason}", status)
+            settle(
+                item.job_id,
+                "interrupted",
+                f"cancelled: {reason}",
+                status,
+                artifact=recovered,
+                partial=partial,
+                item=item,
+            )
             running.remove(item)
 
     def start(job: Mapping[str, Any]) -> None:
@@ -505,6 +564,10 @@ def run_parallel_plan(
             trees[job_id] = tree
             token = f"{body['run_id']}:{job_id}:{uuid.uuid4().hex}"
             receipt_path = tree["root"] / "guardian.json"
+            if capacity_policy_text is not None:
+                (tree["root"] / "capacity-policy.json").write_text(
+                    derive_job_policy(capacity_policy_text, job["pairs"]), encoding="utf-8"
+                )
             worker_argv = list(worker_argv_factory(plan, job_id, tree, project_root))
             handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115
             handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
@@ -520,13 +583,14 @@ def run_parallel_plan(
                     project_root=project_root,
                     token=token,
                     port_range=ranges[job_id],
+                    deadline_epoch=launched.timestamp() + float(job["deadline_seconds"]),
                 ),
                 stdin=subprocess.DEVNULL,
                 stdout=handles[0],
                 stderr=handles[1],
                 start_new_session=True,
             )
-        except OSError as exc:
+        except (OSError, CapacityError) as exc:
             for handle in handles:
                 handle.close()
             settle(job_id, "failed", f"could not start: {type(exc).__name__}")
@@ -568,9 +632,18 @@ def run_parallel_plan(
                 item.owned.observe()
                 if item in running and clock() > item.deadline:
                     stop(item)
+                    recovered, partial = recover(item)
                     status = item.process.poll()
                     _close_handles(item)
-                    settle(item.job_id, "timeout", "deadline exceeded", status)
+                    settle(
+                        item.job_id,
+                        "timeout",
+                        "deadline exceeded",
+                        status,
+                        artifact=recovered,
+                        partial=partial,
+                        item=item,
+                    )
                     running.remove(item)
                     if may_cancel_siblings(item.phase, body["fail_fast"]) and running:
                         cancel(f"fail_fast: {item.job_id} timed out")
@@ -627,7 +700,7 @@ def run_parallel_plan(
                         live.release(job_id)
                     else:
                         problems.append(f"{job_id}: cleanup unproven; reservation retained")
-                    if job_id in trees:
+                    if job_id in trees and proof and outcomes[job_id]["state"] == "passed":
                         shutil.rmtree(trees[job_id]["tmp"], ignore_errors=True)
             previous = [outcomes[job["job_id"]] for job in jobs if job["job_id"] in outcomes]
     except (PlanError, OSError) as exc:
@@ -645,7 +718,9 @@ def run_parallel_plan(
             if proof:
                 live.release(job_id)
         for job_id, tree in trees.items():
-            shutil.rmtree(tree["tmp"], ignore_errors=True)
+            proven = cleanup.get(job_id, {}).get("process_tree", {}).get("proof") is True
+            if proven and outcomes[job_id]["state"] == "passed":
+                shutil.rmtree(tree["tmp"], ignore_errors=True)
             cleanup.setdefault(job_id, {}).update(
                 {
                     "tmp_removed": not tree["tmp"].exists(),
@@ -794,167 +869,9 @@ INPUT_FILES = (
 )
 
 
-def run_parallel_cli(
-    *,
-    args: Any,
-    parser: Any,
-    project_root: Path,
-    python_executable: Path,
-    cython_python_executable: Path | None,
-    assets: Sequence[Any],
-    required_nodeids_by_tier: Mapping[str, Sequence[str]],
-    configuration_problems: Sequence[str],
-    capacity_policy: Any,
-    capacity_policy_path: Path | None,
-    selected: Sequence[str],
-    early_smoke: bool,
-    fail_fast: bool,
-    rom_root: Path | None = None,
-    fixture_root: Path | None = None,
-    capacity_session: Any | None = None,
-    explicit_matrix_workers: bool = False,
-) -> int:
-    """Run the opt-in concurrent mode; every refusal is explicit and non-zero."""
+def run_parallel_cli(**kwargs: Any) -> int:
+    """Run the opt-in concurrent mode (implemented in ``production_gate_parallel_cli``)."""
 
-    from scripts.production_gate_parallel_comparison import compare_bundles
-    from scripts.production_gate_parallel_plan import build_parallel_plan
+    from scripts.production_gate_parallel_cli import run_parallel_cli as run
 
-    if args.runtime_mode != "both":
-        parser.error("--parallel-runtimes requires --runtime-mode both")
-    if capacity_policy is None or capacity_policy_path is None:
-        parser.error("--parallel-runtimes requires a valid --capacity-policy")
-    if args.parallel_run_root is None:
-        parser.error("--parallel-runtimes requires --parallel-run-root")
-    problems = list(configuration_problems)
-    _head, _clean, commit_problems = measure_commit(project_root)
-    problems.extend(commit_problems)
-    run_root = args.parallel_run_root.expanduser().resolve()
-    if run_root.is_relative_to(project_root):
-        problems.append("--parallel-run-root must be outside the checkout")
-    if rom_root is None or fixture_root is None:
-        problems.append("the ROM and fixture roots must be resolved explicitly")
-    total = getattr(capacity_policy, "max_concurrent_pairs", None)
-    run_id = uuid.uuid4().hex
-    cython = cython_python_executable or python_executable
-    interpreters = {"source": str(python_executable), "cython": str(cython)}
-    snapshot: dict[str, Any] = {}
-    plan = None
-    measure: Measurer | None = None
-    if not problems:
-        run_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            snapshot = build_snapshot(
-                project_root,
-                Path(str(rom_root)),
-                Path(str(fixture_root)),
-                run_root / run_id / "snapshot",
-            )
-        except (IsolationError, OSError) as exc:
-            problems.append(f"private immutable snapshot refused: {exc}")
-    if not problems:
-        snap_root, snap_rom, snap_fixture = (
-            Path(snapshot["checkout"]),
-            Path(snapshot["rom_root"]),
-            Path(snapshot["fixture_root"]),
-        )
-
-        def measure(job_id: str) -> tuple[dict[str, Any], list[str]]:
-            mode = "cython" if job_id.startswith("cython") else "source"
-            return measure_identity(
-                mode=mode,
-                interpreter=interpreters[mode],
-                project_root=snap_root,
-                input_names=INPUT_FILES,
-                rom_root=snap_rom,
-                fixture_root=snap_fixture,
-                git_root=project_root,
-            )
-
-        measured = {mode: measure(f"{mode}-job") for mode in ("source", "cython")}
-        for _values, mode_problems in measured.values():
-            problems.extend(mode_problems)
-        first, second = measured["source"][0], measured["cython"][0]
-        if (first["commit"], first["input_digests"], first["asset_digest"]) != (
-            second["commit"],
-            second["input_digests"],
-            second["asset_digest"],
-        ):
-            problems.append("the two runtimes measured different commits, inputs or assets")
-        if not problems:
-            pairs = (total if type(total) is int else 0) // 2
-            try:
-                plan = build_parallel_plan(
-                    commit=first["commit"],
-                    build_identity={mode: measured[mode][0]["build_identity"] for mode in measured},
-                    input_digests=first["input_digests"],
-                    asset_digest=first["asset_digest"],
-                    games=("red", "blue", "yellow"),
-                    roles=("listener", "connector"),
-                    modes=("source", "cython"),
-                    tiers=tuple(selected),
-                    required_nodeids_by_tier=required_nodeids_by_tier,
-                    repetitions=args.repeat_timing,
-                    deadlines=cli_deadlines(args, required_nodeids_by_tier, pairs, CLEANUP_SECONDS),
-                    total_pairs=total if type(total) is int else 0,
-                    policy_digest=file_sha256(capacity_policy_path),
-                    early_smoke=early_smoke,
-                    fail_fast=fail_fast,
-                    matrix_workers=args.matrix_workers if explicit_matrix_workers else None,
-                    run_id=run_id,
-                )
-            except PlanError as exc:
-                problems.append(f"plan refused: {exc}")
-    if problems or plan is None:
-        if snapshot:
-            thaw_and_remove(Path(snapshot["root"]))
-        print("parallel runtime gate refused:\n" + "\n".join(f"  {item}" for item in problems))
-        return 2
-    gate_arguments = [
-        "--fail-fast" if fail_fast else "--keep-going",
-        f"--repeat-timing={args.repeat_timing}",
-        *([f"--timeout-seconds={args.timeout_seconds}"] if args.timeout_seconds else []),
-        *(
-            [f"--matrix-timeout-seconds={args.matrix_timeout_seconds}"]
-            if args.matrix_timeout_seconds
-            else []
-        ),
-    ]
-    factory = default_worker_argv(
-        gate_arguments,
-        interpreters,
-        git_root=project_root,
-        rom_root=Path(snapshot["rom_root"]),
-        fixture_root=Path(snapshot["fixture_root"]),
-    )
-    budget = PairBudget(total)
-    live = LiveCapacity(
-        budget,
-        session=capacity_session,
-        probe=capacity_loss_probe(sum(job["pairs"] for job in plan.as_dict()["jobs"][:2])),
-    )
-    try:
-        report = run_parallel_plan(
-            plan,
-            run_root=run_root,
-            project_root=Path(snapshot["checkout"]),
-            budget=budget,
-            worker_argv_factory=factory,
-            capacity=live,
-            serial=bool(getattr(args, "parallel_serial", False)),
-            measure=measure,
-        )
-    finally:
-        thaw_and_remove(Path(snapshot["root"]))
-    compare_to = getattr(args, "parallel_compare_to", None)
-    if compare_to is not None:
-        report["sequential_comparison"] = compare_bundles(
-            report, json.loads(Path(compare_to).read_text(encoding="utf-8"))
-        )
-    path = write_report(run_root, report)
-    print(
-        json.dumps(report, indent=2, sort_keys=True)
-        if args.format == "json"
-        else render_report_text(report)
-    )
-    print(f"report: {path}", file=sys.stderr)
-    return 0 if report["overall"] == "PASS" else 1
+    return run(**kwargs)

@@ -19,7 +19,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from scripts.production_gate_model import DEFAULT_TIERS, RUNTIME_MODES, TIER_EXPRESSIONS
-from scripts.production_gate_parallel_validation import is_positive_number, loads_strict
+from scripts.production_gate_parallel_validation import (
+    guarded,
+    is_positive_number,
+    loads_strict,
+)
 
 PLAN_SCHEMA_VERSION = 1
 MIN_TIMING_REPETITIONS = 5
@@ -55,7 +59,14 @@ JOB_KEYS = frozenset(
     {"deadline_seconds", "job_id", "mode", "pairs", "phase", "steps", "tiers", "timing_rep_ids"}
 )
 DEADLINE_KEYS = frozenset(
-    {"cleanup_seconds", "preflight_seconds", "repetition_seconds", "row_seconds", "tier_seconds"}
+    {
+        "cleanup_seconds",
+        "measurement_seconds",
+        "preflight_seconds",
+        "repetition_seconds",
+        "row_seconds",
+        "tier_seconds",
+    }
 )
 PHASES = ("smoke", "selected")
 STEP_KEYS = frozenset({"mode", "role", "tier"})
@@ -86,7 +97,12 @@ def derive_job_deadline(
 ) -> float:
     """Outer job bound: preflight + every step (timing = repetitions) + cleanup; inner kept."""
 
-    total = float(deadlines["preflight_seconds"]) + float(deadlines["cleanup_seconds"])
+    # The worker measures identity before and after its gate run: two measurement terms.
+    total = (
+        float(deadlines["preflight_seconds"])
+        + float(deadlines["cleanup_seconds"])
+        + 2 * float(deadlines["measurement_seconds"])
+    )
     for step in steps:
         if step["tier"] == "timing":
             total += repetitions * float(deadlines["repetition_seconds"])
@@ -168,7 +184,7 @@ def _validate_job(index: int, job: object, plan: Mapping[str, Any]) -> list[str]
     else:
         expected = [{"mode": mode, "tier": tier, "role": "selected-tier"} for tier in plan["tiers"]]
         expected_tiers = list(plan["tiers"])
-        expected_reps = timing_rep_ids(plan["repetitions"])
+        expected_reps = timing_rep_ids(plan["repetitions"]) if "timing" in plan["tiers"] else []
     if list(job["tiers"]) != expected_tiers:
         problems.append(f"{label}: tiers must equal the phase tiers in order")
     pairs = job["pairs"]
@@ -191,7 +207,7 @@ def _validate_job(index: int, job: object, plan: Mapping[str, Any]) -> list[str]
     return problems
 
 
-def validate_plan_body(body: object) -> list[str]:
+def _validate_plan_body(body: object) -> list[str]:
     """Return every problem with a decoded plan; an empty list means valid."""
 
     if not isinstance(body, dict):
@@ -296,6 +312,12 @@ def validate_plan_body(body: object) -> list[str]:
     return problems
 
 
+def validate_plan_body(body: object) -> list[str]:
+    """Total over decoded JSON: any unexpected shape becomes a problem, never an exception."""
+
+    return guarded("plan", _validate_plan_body, body)
+
+
 def load_plan(text: str) -> ParallelPlan:
     """Decode and strictly validate serialized plan text."""
 
@@ -306,7 +328,11 @@ def load_plan(text: str) -> ParallelPlan:
     problems = validate_plan_body(body)
     if problems:
         raise PlanError("; ".join(problems))
-    if canonical_json(body) != text:
+    try:
+        canonical = canonical_json(body)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise PlanError(f"plan cannot be canonicalised: {type(exc).__name__}") from exc
+    if canonical != text:
         raise PlanError("plan text is not in canonical form")
     return ParallelPlan(text=text, digest=str(body["plan_sha256"]))
 
@@ -350,7 +376,7 @@ def build_parallel_plan(
     if deadlines is None:
         if not is_positive_number(deadline_seconds):
             raise PlanError("deadline_seconds must be a finite positive number")
-        parts = len(tiers) + 2
+        parts = len(tiers) + 4
         unit = float(deadline_seconds) / parts
         deadlines = {
             "preflight_seconds": unit,
@@ -358,6 +384,7 @@ def build_parallel_plan(
             "tier_seconds": unit,
             "repetition_seconds": unit / max(int(repetitions), 1),
             "cleanup_seconds": unit,
+            "measurement_seconds": unit,
         }
     deadlines = {key: deadlines[key] for key in sorted(deadlines)}
     phases = (["smoke"] if early_smoke else []) + ["selected"]
@@ -369,7 +396,8 @@ def build_parallel_plan(
                 job_tiers, reps = ["smoke"], []
             else:
                 steps = [{"mode": mode, "tier": tier, "role": "selected-tier"} for tier in tiers]
-                job_tiers, reps = list(tiers), timing_rep_ids(repetitions)
+                job_tiers = list(tiers)
+                reps = timing_rep_ids(repetitions) if "timing" in tiers else []
             jobs.append(
                 {
                     "job_id": job_id_for(mode, phase),
@@ -409,9 +437,23 @@ def build_parallel_plan(
     return ParallelPlan(text=canonical_json(body), digest=body["plan_sha256"])
 
 
+MEASUREMENT_SECONDS = 300.0
+
+
 def cli_deadlines(
-    args: Any, required: Mapping[str, Sequence[str]], pairs: int, cleanup_seconds: float
+    args: Any,
+    required: Mapping[str, Sequence[str]],
+    pairs: int,
+    cleanup_seconds: float,
+    tiers: Sequence[str] = (),
 ) -> dict[str, float]:
+    """Finite phase/row/tier/repetition/measurement/cleanup bounds from the work actually selected.
+
+    ``pairs`` is the EFFECTIVE per-job worker count (after any explicit ``--matrix-workers``
+    ceiling); ``--matrix-timeout-seconds`` is the gate's aggregate override, not a row budget;
+    preflight covers the runtime probe plus one bounded collection per selected tier.
+    """
+
     from scripts.production_gate_model import (
         COLLECTION_TIMEOUT_SECONDS,
         DEFAULT_TIMEOUT_SECONDS,
@@ -424,15 +466,17 @@ def cli_deadlines(
         if args.timeout_seconds
         else max(DEFAULT_TIMEOUT_SECONDS.values())
     )
-    row = (
+    row = max(MATRIX_CASE_TIMEOUT_SECONDS.values())
+    largest = max((len(items) for items in required.values()), default=0)
+    aggregate = (
         float(args.matrix_timeout_seconds)
         if args.matrix_timeout_seconds
-        else max(MATRIX_CASE_TIMEOUT_SECONDS.values())
+        else row * math.ceil(max(largest, 1) / max(pairs, 1))
     )
-    largest = max((len(items) for items in required.values()), default=0)
-    matrix = row * math.ceil(max(largest, 1) / max(pairs, 1)) + MATRIX_AGGREGATE_GRACE_SECONDS
+    matrix = aggregate + MATRIX_AGGREGATE_GRACE_SECONDS
     return {
-        "preflight_seconds": float(COLLECTION_TIMEOUT_SECONDS),
+        "preflight_seconds": float(COLLECTION_TIMEOUT_SECONDS) * (1 + max(len(tiers), 1)),
+        "measurement_seconds": MEASUREMENT_SECONDS,
         "row_seconds": row,
         "tier_seconds": max(tier, matrix),
         "repetition_seconds": tier,

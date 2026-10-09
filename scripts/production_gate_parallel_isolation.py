@@ -80,7 +80,6 @@ def isolation_environment(
         "PYTHONPYCACHEPREFIX": str(cache / "pycache"),
         PYTEST_CACHE_ENV: str(cache / "pytest"),
         "POKERED_PARALLEL_JOB_ROOT": str(tree["root"]),
-        "POKERED_PARALLEL_BUILD_DIR": str(tree["build"]),
     }
 
 
@@ -151,6 +150,54 @@ def _copy_tree(source: Path, target: Path, budget: list[int]) -> int:
             if budget[0] < 0:
                 raise IsolationError("the private snapshot exceeds its byte ceiling")
     return count
+
+
+def _git_environment() -> dict[str, str]:
+    environment = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL")}
+    environment.update(
+        {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+    )
+    return environment
+
+
+def _init_repository(checkout: Path) -> None:
+    """Give the snapshot a real, independent git repository (index and one commit).
+
+    Required unit tests run ``git ls-files`` against the checkout root; a snapshot outside any
+    repository would fail them.  The repository is built from the copied tracked files only, uses
+    no global configuration, hooks or signing, and is frozen with the rest of the snapshot.
+    """
+
+    for argv in (
+        ("init", "-q"),
+        ("add", "-f", "-A"),
+        (
+            "-c",
+            "user.name=snapshot",
+            "-c",
+            "user.email=snapshot@invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "--allow-empty",
+            "-m",
+            "immutable snapshot",
+        ),
+    ):
+        done = subprocess.run(
+            ["git", "-C", str(checkout), *argv],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+            env=_git_environment(),
+        )
+        if done.returncode != 0:
+            raise IsolationError(
+                f"snapshot repository setup failed at git {argv[0]}: {done.stderr.strip()[:200]}"
+            )
 
 
 def freeze_tree(root: Path) -> None:
@@ -260,6 +307,8 @@ def build_snapshot(
             raise IsolationError(f"tracked path is missing from the working tree: {relative}")
         if budget[0] < 0:
             raise IsolationError("the private snapshot exceeds its byte ceiling")
+    if checkout.is_dir():
+        _init_repository(checkout)
     assets = destination / "assets"
     files += _copy_tree(rom_root, assets / "rom", budget)
     files += _copy_tree(fixture_root, assets / "fixtures", budget)

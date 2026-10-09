@@ -746,6 +746,19 @@ def _load_gate_report(
             for record in records
             if record["outcome"] != "passed" or record["was_xfail"]
         ),
+        terminal_records=(
+            tuple(
+                {
+                    "nodeid": record["nodeid"],
+                    "outcome": record["outcome"],
+                    "when": record["when"],
+                    "was_xfail": record["was_xfail"],
+                }
+                for record in records
+            )
+            if os.environ.get("POKERED_GATE_RECORD_TESTS") == "1"
+            else ()
+        ),
     )
 
 

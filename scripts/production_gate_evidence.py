@@ -333,6 +333,21 @@ def _safe_tier(
             case.output_tail, roots, replacements=replacements
         )
         data["case_results"].append(safe_case)
+    if tier.test_records:
+        data["test_records"] = [
+            {
+                "iteration": record["iteration"],
+                "nodeid": _safe_diagnostic(
+                    record["nodeid"], roots, replacements=replacements, limit=1000
+                ),
+                "outcome": record["outcome"],
+                "when": record["when"],
+                "was_xfail": record["was_xfail"],
+            }
+            for record in tier.test_records
+        ]
+    else:
+        data.pop("test_records", None)
     return data
 
 

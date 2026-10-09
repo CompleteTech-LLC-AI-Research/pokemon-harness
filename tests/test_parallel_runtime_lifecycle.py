@@ -84,7 +84,7 @@ def test_the_job_environment_isolates_trees_and_drops_unlisted_variables(tmp_pat
     assert env["PATH"] == "/bin"
     assert env["TMPDIR"] == str(tree["tmp"])
     assert env["XDG_CACHE_HOME"] == str(tree["cache"])
-    assert env["POKERED_PARALLEL_BUILD_DIR"] == str(tree["build"])
+    assert "POKERED_PARALLEL_BUILD_DIR" not in env, "no writer consumes a build-dir variable"
     assert env["HOME"] == str(tree["root"])
     for name in (
         "OMP_NUM_THREADS",

@@ -6,6 +6,7 @@ accepts a fully consistent artifact and rejects each listed corruption.
 """
 
 import copy
+import hashlib
 import json
 import os
 
@@ -13,12 +14,14 @@ import pytest
 
 from scripts.production_gate_parallel_artifacts import (
     aggregate_outcomes,
+    collect_partial_evidence,
     outcome_record,
     read_terminal_artifact,
     validate_terminal_artifact,
+    verify_gate_report,
 )
 from scripts.production_gate_parallel_plan import PlanError
-from tests._parallel_runtime_report_support import counts, good_artifact, make_plan
+from tests._parallel_runtime_report_support import counts, good_artifact, make_plan, report_bytes
 
 
 def problems_for(plan, artifact, job_id="source-job", **kwargs):
@@ -249,3 +252,93 @@ def test_aggregate_rejects_missing_duplicate_unknown_and_tampered_outcomes():
     report = aggregate_outcomes(plan, tampered)
     assert report["overall"] == "FAIL"
     assert any("re-validation failed" in p for p in report["problems"])
+
+
+def write_report_for(tmp_path, plan, job_id, blob=None):
+    root = tmp_path / job_id
+    (root / "evidence").mkdir(parents=True)
+    (root / "evidence" / "gate-report.json").write_bytes(
+        blob if blob is not None else report_bytes(plan, job_id)
+    )
+    return root
+
+
+def test_the_parent_re_derives_tiers_rows_and_verdict_from_the_report_bytes(tmp_path):
+    plan = make_plan()
+    artifact = good_artifact(plan, "source-job")
+    root = write_report_for(tmp_path, plan, "source-job")
+    problems, report = verify_gate_report(root, artifact, plan.as_dict(), plan.job("source-job"))
+    assert problems == [] and report["overall"] == "PASS" and report["capacity"] == {"status": "ok"}
+
+
+def test_tampered_missing_or_divergent_reports_are_refused(tmp_path):
+    plan = make_plan()
+    body, job = plan.as_dict(), plan.job("source-job")
+    artifact = good_artifact(plan, "source-job")
+    genuine = report_bytes(plan, "source-job")
+    # bytes that differ from the referenced digest
+    root = write_report_for(tmp_path / "a", plan, "source-job", genuine + b" ")
+    assert any("bytes differ" in p for p in verify_gate_report(root, artifact, body, job)[0])
+    # no report at all
+    assert any(
+        "missing" in p for p in verify_gate_report(tmp_path / "none", artifact, body, job)[0]
+    )
+    # a report that disagrees with the artifact, even with a consistent digest
+    report = json.loads(genuine)
+    report["tiers"][0]["status"] = "FAIL"
+    blob = json.dumps(report, sort_keys=True).encode()
+    liar = copy.deepcopy(artifact)
+    liar["evidence"] = {
+        "gate_report_bytes": len(blob),
+        "gate_report_sha256": hashlib.sha256(blob).hexdigest(),
+    }
+    root = write_report_for(tmp_path / "b", plan, "source-job", blob)
+    assert any("tiers differ" in p for p in verify_gate_report(root, liar, body, job)[0])
+
+
+def test_a_producer_that_did_not_propagate_terminal_records_cannot_pass(tmp_path):
+    plan = make_plan()
+    body, job = plan.as_dict(), plan.job("source-job")
+    report = json.loads(report_bytes(plan, "source-job"))
+    for tier in report["tiers"]:
+        tier.pop("test_records")
+    blob = json.dumps(report, sort_keys=True).encode()
+    artifact = good_artifact(plan, "source-job")
+    artifact["evidence"] = {
+        "gate_report_bytes": len(blob),
+        "gate_report_sha256": hashlib.sha256(blob).hexdigest(),
+    }
+    root = write_report_for(tmp_path, plan, "source-job", blob)
+    assert any("did not propagate" in p for p in verify_gate_report(root, artifact, body, job)[0])
+
+
+def test_the_collected_selection_must_equal_the_frozen_plan_selection(tmp_path):
+    plan = make_plan()
+    body, job = plan.as_dict(), plan.job("source-job")
+    report = json.loads(report_bytes(plan, "source-job"))
+    report["tiers"][0]["selected_nodeids"] = [
+        *report["tiers"][0]["selected_nodeids"],
+        "tests/test_a.py::test_extra",
+    ]
+    blob = json.dumps(report, sort_keys=True).encode()
+    artifact = good_artifact(plan, "source-job")
+    artifact["evidence"] = {
+        "gate_report_bytes": len(blob),
+        "gate_report_sha256": hashlib.sha256(blob).hexdigest(),
+    }
+    root = write_report_for(tmp_path, plan, "source-job", blob)
+    problems = verify_gate_report(root, artifact, body, job)[0]
+    assert any("exact collected selection" in p or "frozen plan selection" in p for p in problems)
+
+
+def test_partial_evidence_of_an_unfinished_job_is_digested_not_deleted(tmp_path):
+    tree = {name: tmp_path / name for name in ("out", "evidence", "raw", "tmp")}
+    for path in tree.values():
+        path.mkdir()
+    (tree["raw"] / "progress.json").write_text('{"done": 3}', encoding="utf-8")
+    (tree["tmp"] / "pytest.log").write_text("partial", encoding="utf-8")
+    found = collect_partial_evidence(tree)
+    paths = {entry["path"]: entry for entry in found["files"]}
+    assert set(paths) == {"raw/progress.json", "tmp/pytest.log"} and not found["truncated"]
+    assert paths["raw/progress.json"]["sha256"] == hashlib.sha256(b'{"done": 3}').hexdigest()
+    assert (tree["raw"] / "progress.json").exists() and (tree["tmp"] / "pytest.log").exists()
