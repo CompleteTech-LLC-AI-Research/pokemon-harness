@@ -131,23 +131,42 @@ def build_artifact(
 
     report = report or {}
     before, after = before or {}, after or {}
-    raw_tiers = [tier for tier in report.get("tiers", []) if isinstance(tier, dict)]
-    tiers = [
-        {
-            "name": tier.get("name"),
-            "status": tier.get("status"),
-            "counts": tier.get("counts"),
-            "returncodes": tier.get("returncodes"),
-            "diagnostics": diagnostics_for_tier(tier),
-        }
-        for tier in raw_tiers
-    ]
+    malformed: list[str] = []
+    raw = report.get("tiers", [])
+    if not isinstance(raw, list):
+        malformed.append("the gate report's tiers value is not a list")
+        raw = []
+    raw_tiers = [tier for tier in raw if isinstance(tier, dict)]
+    tiers = []
+    for tier in raw_tiers:
+        try:
+            diagnostics = diagnostics_for_tier(tier)
+        except Exception as exc:  # noqa: BLE001 - malformed nested values are a terminal rejection
+            diagnostics = {}
+            malformed.append(
+                f"{tier.get('name')}: diagnostics failed closed ({type(exc).__name__})"
+            )
+        tiers.append(
+            {
+                "name": tier.get("name"),
+                "status": tier.get("status"),
+                "counts": tier.get("counts"),
+                "returncodes": tier.get("returncodes"),
+                "diagnostics": diagnostics,
+            }
+        )
+    try:
+        rows = build_rows(job["mode"], raw_tiers, plan_body["games"], plan_body["roles"])
+    except Exception as exc:  # noqa: BLE001 - keep the earlier failures, reject the malformed rows
+        rows = []
+        malformed.append(f"rows failed closed on malformed nested values ({type(exc).__name__})")
     gate_problems = report.get("gate_problems", [])
     problems = (
         [str(item) for item in gate_problems]
         if isinstance(gate_problems, list)
         else ["gate_problems is not a list"]
     )
+    problems.extend(malformed)
     if problem:
         problems.append(problem)
     return {
@@ -172,7 +191,7 @@ def build_artifact(
         "diagnostic_reuse": False,
         "runtime": report.get("runtime") if isinstance(report.get("runtime"), dict) else {},
         "tiers": tiers,
-        "rows": build_rows(job["mode"], raw_tiers, plan_body["games"], plan_body["roles"]),
+        "rows": rows,
         "gate_problems": problems,
         "cancellation": str(report.get("cancellation") or ""),
         "overall": str(report.get("overall") or "FAIL") if not problems else "FAIL",

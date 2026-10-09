@@ -34,6 +34,7 @@ from scripts.production_gate_parallel_artifacts import (
     collect_partial_evidence,
     outcome_record,
     read_terminal_artifact,
+    total_outcome,
     validate_terminal_artifact,
     verify_gate_report,
 )
@@ -530,7 +531,15 @@ def _run_plan(
         }
         ports_seen[item.job_id] = set(item.owned.ports)
         worker_pid = guardian.get("worker_pid") if guardian else None
-        outcome = _finish_job(plan, item, status, clock, wall_clock, measure, worker_pid)
+        outcome = total_outcome(
+            plan,
+            item.job_id,
+            lambda: _finish_job(plan, item, status, clock, wall_clock, measure, worker_pid),
+            exit_status=status,
+            launched_utc=item.launched_wall.isoformat(),
+            finished_utc=wall_clock().isoformat(),
+            token=item.token,
+        )
         if guardian and guardian.get("worker_status") != status and status >= 0:
             guardian_problems.append("the guardian saw a different worker exit status")
         if guardian_problems or receipt["terminated"] or not receipt["proof"]:

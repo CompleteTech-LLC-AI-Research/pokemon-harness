@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -463,6 +463,79 @@ def verify_gate_report(
     plan_body: Mapping[str, Any],
     job: Mapping[str, Any],
 ) -> tuple[list[str], dict[str, Any] | None]:
+    """Total: a malformed nested value anywhere in the report is a terminal rejection, never an exception."""
+
+    try:
+        return _verify_gate_report(job_root, artifact, plan_body, job)
+    except Exception as exc:  # noqa: BLE001 - a verifier must fail closed, never raise
+        return [
+            f"the gate report failed closed on malformed nested values ({type(exc).__name__})"
+        ], None
+
+
+def total_outcome(
+    plan: ParallelPlan,
+    job_id: str,
+    finish: Callable[[], dict[str, Any]],
+    *,
+    exit_status: int | None,
+    launched_utc: str | None,
+    finished_utc: str | None,
+    token: str,
+) -> dict[str, Any]:
+    """Run one job's aggregation; any exception becomes a failed outcome, never an aborted run."""
+
+    try:
+        return finish()
+    except Exception as exc:  # noqa: BLE001 - one job's aggregation must never abort the others
+        record = outcome_record(
+            plan,
+            job_id,
+            "failed",
+            child_exit_status=exit_status,
+            artifact=None,
+            artifact_problems=[f"aggregation failed closed ({type(exc).__name__})"],
+            reason="aggregation failed closed",
+            launched_utc=launched_utc,
+            finished_utc=finished_utc,
+        )
+        record["launch_token"], record["capacity"] = token, None
+        return record
+
+
+def _tier_schema_problems(tier: Mapping[str, Any]) -> list[str]:
+    """Explicit type bounds for the nested fields the verifier then relies on."""
+
+    name = tier.get("name")
+    found = [] if isinstance(name, str) else ["a tier name is not a string"]
+    selected, records = tier.get("selected_nodeids"), tier.get("test_records")
+    counts, returncodes = tier.get("counts"), tier.get("returncodes")
+    if selected is not None and not (
+        isinstance(selected, list) and all(isinstance(item, str) for item in selected)
+    ):
+        found.append(f"{name}: selected_nodeids must be a list of strings")
+    if records is not None and not (
+        isinstance(records, list) and all(isinstance(item, dict) for item in records)
+    ):
+        found.append(f"{name}: test_records must be a list of objects")
+    if counts is not None and not (
+        isinstance(counts, dict)
+        and all(type(counts[key]) is int for key in COUNT_KEYS if key in counts)
+    ):
+        found.append(f"{name}: counts must be an object of integers")
+    if returncodes is not None and not (
+        isinstance(returncodes, list) and all(type(item) is int for item in returncodes)
+    ):
+        found.append(f"{name}: returncodes must be a list of integers")
+    return found
+
+
+def _verify_gate_report(
+    job_root: Path,
+    artifact: Mapping[str, Any],
+    plan_body: Mapping[str, Any],
+    job: Mapping[str, Any],
+) -> tuple[list[str], dict[str, Any] | None]:
     """The parent reads the referenced complete gate report itself and re-derives the evidence.
 
     The worker's artifact is only a claim: the report bytes must match the referenced digest,
@@ -499,6 +572,8 @@ def verify_gate_report(
     tiers = [tier for tier in report["tiers"] if isinstance(tier, dict)]
     if len(tiers) != len(report["tiers"]):
         problems.append("the gate report contains a non-object tier")
+    for tier in tiers:
+        problems.extend(_tier_schema_problems(tier))
     keys = ("name", "status", "counts", "returncodes")
     claimed = artifact.get("tiers")
     if not isinstance(claimed, list) or [
@@ -519,20 +594,35 @@ def verify_gate_report(
                 f"{tier.get('name')}: the producer did not propagate its terminal test records"
             )
     for tier in tiers:
+        name = tier.get("name")
         records, selected = tier.get("test_records"), tier.get("selected_nodeids")
         if not (isinstance(records, list) and records and isinstance(selected, list)):
             continue
-        by_iteration: dict[Any, set[Any]] = {}
+        if not all(isinstance(item, str) for item in selected):
+            problems.append(f"{name}: selected_nodeids holds an entry that is not a string")
+            continue
+        by_iteration: dict[int, set[str]] = {}
+        malformed = False
         for record in records:
-            if isinstance(record, dict):
-                by_iteration.setdefault(record.get("iteration"), set()).add(record.get("nodeid"))
+            iteration = record.get("iteration") if isinstance(record, dict) else None
+            nodeid = record.get("nodeid") if isinstance(record, dict) else None
+            if type(iteration) is not int or not isinstance(nodeid, str):
+                malformed = True
+                continue
+            by_iteration.setdefault(iteration, set()).add(nodeid)
+        if malformed:
+            problems.append(
+                f"{name}: a terminal record is not an object with an integer iteration and a string nodeid"
+            )
         if by_iteration.get(1) != set(selected) or any(
             nodeids != by_iteration.get(1) for nodeids in by_iteration.values()
         ):
             problems.append(
                 f"{tier.get('name')}: terminal records differ from the exact collected selection"
             )
-        frozen_selection = plan_body["required_nodeids"].get(tier.get("name"))
+        frozen_selection = (
+            plan_body["required_nodeids"].get(name) if isinstance(name, str) else None
+        )
         if (
             isinstance(frozen_selection, list)
             and frozen_selection

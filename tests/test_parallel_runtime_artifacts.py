@@ -385,3 +385,117 @@ def test_unparseable_partial_progress_is_an_explicit_error_not_an_exception(tmp_
     progress = parse_partial_progress(_progress_tree(tmp_path, '{"tiers": [NaN'))
     assert progress["terminal"] is False and progress["parse_error"] and progress["tiers"] == []
     assert parse_partial_progress(_progress_tree(tmp_path / "other"))["source"] is None
+
+
+def _report_with(tmp_path, mutate):
+    plan = make_plan()
+    report = json.loads(report_bytes(plan, "source-job"))
+    mutate(report)
+    blob = json.dumps(report, sort_keys=True).encode()
+    artifact = good_artifact(plan, "source-job")
+    artifact["evidence"] = {
+        "gate_report_bytes": len(blob),
+        "gate_report_sha256": hashlib.sha256(blob).hexdigest(),
+    }
+    root = write_report_for(tmp_path, plan, "source-job", blob)
+    return root, artifact, plan.as_dict(), plan.job("source-job")
+
+
+MALFORMED = {
+    "selection_is_an_int": lambda r: r["tiers"][0].update(selected_nodeids=5),
+    "selection_holds_a_list": lambda r: r["tiers"][0].update(selected_nodeids=[["x"]]),
+    "iteration_is_unhashable": lambda r: r["tiers"][0].update(
+        test_records=[{"iteration": [1], "nodeid": "a"}]
+    ),
+    "nodeid_is_unhashable": lambda r: r["tiers"][0].update(
+        test_records=[{"iteration": 1, "nodeid": ["a"]}]
+    ),
+    "record_is_not_an_object": lambda r: r["tiers"][0].update(test_records=["not-an-object"]),
+    "name_is_a_list": lambda r: r["tiers"][0].update(name=["unit"]),
+    "counts_is_a_string": lambda r: r["tiers"][0].update(counts="garbage"),
+    "tiers_is_a_number": lambda r: r.update(tiers=7),
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED))
+def test_malformed_nested_report_values_are_a_terminal_rejection_never_an_exception(tmp_path, case):
+    root, artifact, body, job = _report_with(tmp_path, MALFORMED[case])
+    problems, _report = verify_gate_report(root, artifact, body, job)
+    assert problems, f"{case} must be rejected with a problem, not accepted and not raised"
+
+
+def test_the_worker_keeps_the_earlier_failures_when_nested_values_are_malformed():
+    from scripts.production_gate_parallel_worker import build_artifact
+
+    plan = make_plan()
+    artifact = build_artifact(
+        plan_body=plan.as_dict(),
+        plan_digest=plan.digest,
+        job=plan.job("source-job"),
+        pid=1,
+        started="2026-10-09T00:00:00+00:00",
+        exit_status=1,
+        report={
+            "overall": "PASS",
+            "tiers": [
+                {
+                    "name": "unit",
+                    "status": "FAIL",
+                    "counts": "garbage",
+                    "selected_nodeids": 5,
+                    "test_records": [{"iteration": [1]}],
+                },
+                "not-an-object",
+            ],
+            "gate_problems": ["an earlier failure"],
+        },
+        problem="",
+    )
+    assert artifact["overall"] == "FAIL", "malformed values never become PASS"
+    assert "an earlier failure" in artifact["gate_problems"]
+    assert artifact["tiers"][0]["status"] == "FAIL", "the earlier failure status is retained"
+
+
+def test_a_non_list_tiers_value_in_the_worker_is_recorded_and_fails():
+    from scripts.production_gate_parallel_worker import build_artifact
+
+    plan = make_plan()
+    artifact = build_artifact(
+        plan_body=plan.as_dict(),
+        plan_digest=plan.digest,
+        job=plan.job("source-job"),
+        pid=1,
+        started="2026-10-09T00:00:00+00:00",
+        exit_status=0,
+        report={"overall": "PASS", "tiers": 7},
+        problem="",
+    )
+    assert artifact["overall"] == "FAIL" and any(
+        "not a list" in p for p in artifact["gate_problems"]
+    )
+
+
+def test_one_jobs_failing_aggregation_becomes_a_failed_outcome_and_aborts_nothing():
+    from scripts.production_gate_parallel_artifacts import total_outcome
+
+    plan = make_plan()
+    outcome = total_outcome(
+        plan,
+        "source-job",
+        lambda: {}["missing"],
+        exit_status=0,
+        launched_utc="2026-10-09T00:00:00+00:00",
+        finished_utc="2026-10-09T00:00:01+00:00",
+        token="tok",
+    )
+    assert outcome["state"] == "failed" and outcome["child_exit_status"] == 0
+    assert any("failed closed" in p for p in outcome["artifact_problems"])
+    assert total_outcome(
+        plan,
+        "source-job",
+        lambda: {"state": "passed"},
+        exit_status=0,
+        launched_utc=None,
+        finished_utc=None,
+        token="t",
+    ) == {"state": "passed"}
