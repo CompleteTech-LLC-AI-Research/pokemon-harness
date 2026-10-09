@@ -1,0 +1,150 @@
+"""Authored controls: private immutable runtime inputs, or kernel-proven protection (#107 F2).
+
+A tiny fake virtual environment stands in for the real one; the resolution probe is replaced by
+its result so nothing is imported or executed.  Every write-denial assertion uses the real OS.
+"""
+
+import os
+import sys
+import sysconfig
+from pathlib import Path
+
+import pytest
+
+from scripts import production_gate_parallel_runtime_inputs as inputs
+from scripts.production_gate_parallel_isolation import IsolationError, thaw_and_remove
+
+
+def make_environment(tmp_path):
+    original = tmp_path / "checkout"
+    snapshot = tmp_path / "snapshot-checkout"
+    original.mkdir()
+    snapshot.mkdir()
+    venv = tmp_path / "venv"
+    site = venv / "lib" / "python3" / "site-packages"
+    site.mkdir(parents=True)
+    (venv / "bin").mkdir()
+    (venv / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    (site / "dependency.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (site / "__editable__.project.pth").write_text(f"{original}/src\n", encoding="utf-8")
+    return original, snapshot, venv
+
+
+def fake_probe(venv, **overrides):
+    info = {
+        "real_executable": os.path.realpath(sys.executable),
+        "prefix": str(venv),
+        "base_prefix": sys.base_prefix,
+        "path": [str(venv / "lib" / "python3" / "site-packages")],
+        "stdlib": sysconfig.get_paths()["stdlib"],
+        "platstdlib": sysconfig.get_paths()["platstdlib"],
+        "sites": [str(venv / "lib" / "python3" / "site-packages")],
+        "libraries": [],
+    }
+    info.update(overrides)
+    return lambda interpreter, pythonpath: info
+
+
+@pytest.fixture
+def protected_base(monkeypatch):
+    real = inputs.writable_entries
+    base = os.path.realpath(sys.base_prefix)
+
+    def fake(root, limit=inputs.WRITABLE_REPORT_LIMIT):
+        return [] if os.path.realpath(str(root)).startswith(base) else real(root, limit)
+
+    monkeypatch.setattr(inputs, "writable_entries", fake)
+
+
+def test_a_virtual_environment_is_copied_redirected_and_frozen_against_real_writes(
+    tmp_path, monkeypatch, protected_base
+):
+    original, snapshot, venv = make_environment(tmp_path)
+    monkeypatch.setattr(inputs, "probe_runtime", fake_probe(venv))
+    result = inputs.build_private_runtimes(
+        {"source": str(venv / "bin" / "python"), "cython": str(venv / "bin" / "python")},
+        project_root=original,
+        checkout=snapshot,
+        destination=tmp_path / "runtime",
+    )
+    try:
+        for mode in ("source", "cython"):
+            assert result[mode]["problems"] == []
+            private = Path(result[mode]["manifest"]["private_prefix"])
+            assert result[mode]["interpreter"].startswith(str(private))
+            assert private != venv and private.is_relative_to(tmp_path / "runtime")
+        assert len({r["manifest"]["private_prefix"] for r in result.values()}) == 1, "copied once"
+        copy = Path(result["source"]["manifest"]["private_prefix"])
+        pth = copy / "lib" / "python3" / "site-packages" / "__editable__.project.pth"
+        assert str(snapshot) in pth.read_text() and str(original) not in pth.read_text()
+        assert (
+            str(original)
+            in (venv / "lib/python3/site-packages/__editable__.project.pth").read_text()
+        )
+        with pytest.raises(PermissionError):
+            (copy / "lib/python3/site-packages/dependency.py").write_text("VALUE = 2\n")
+        with pytest.raises(PermissionError):
+            (copy / "lib/python3/site-packages/created.py").write_text("x")
+        assert os.access(venv / "lib/python3/site-packages/dependency.py", os.W_OK), (
+            "shared tree untouched"
+        )
+    finally:
+        thaw_and_remove(tmp_path / "runtime")
+
+
+def test_a_writable_base_interpreter_or_stdlib_refuses_the_run_instead_of_claiming_protection(
+    tmp_path, monkeypatch
+):
+    original, snapshot, venv = make_environment(tmp_path)
+    writable_stdlib = tmp_path / "stdlib"
+    writable_stdlib.mkdir()
+    (writable_stdlib / "os.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(inputs, "probe_runtime", fake_probe(venv, stdlib=str(writable_stdlib)))
+    try:
+        result = inputs.build_private_runtimes(
+            {"source": str(venv / "bin" / "python")},
+            project_root=original,
+            checkout=snapshot,
+            destination=tmp_path / "runtime",
+        )
+    finally:
+        thaw_and_remove(tmp_path / "runtime")
+    assert any("stdlib is writable by the executing UID" in p for p in result["source"]["problems"])
+
+
+def test_a_mapped_library_the_executing_uid_could_replace_is_refused(
+    tmp_path, monkeypatch, protected_base
+):
+    original, snapshot, venv = make_environment(tmp_path)
+    library = tmp_path / "libshared.so"
+    library.write_bytes(b"\0")
+    monkeypatch.setattr(inputs, "probe_runtime", fake_probe(venv, libraries=[str(library)]))
+    try:
+        result = inputs.build_private_runtimes(
+            {"source": str(venv / "bin" / "python")},
+            project_root=original,
+            checkout=snapshot,
+            destination=tmp_path / "runtime",
+        )
+    finally:
+        thaw_and_remove(tmp_path / "runtime")
+    assert any("linked library" in p for p in result["source"]["problems"])
+
+
+def test_writable_entries_reports_only_what_the_kernel_lets_this_uid_modify(tmp_path):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "file").write_text("x", encoding="utf-8")
+    assert inputs.writable_entries(tree) != []
+    (tree / "file").chmod(0o444)
+    tree.chmod(0o555)
+    try:
+        assert inputs.writable_entries(tree) == []
+    finally:
+        tree.chmod(0o755)
+
+
+def test_an_unresolvable_runtime_is_an_isolation_error_not_a_pass(tmp_path):
+    with pytest.raises(IsolationError):
+        inputs.probe_runtime(str(tmp_path / "missing-python"), "")

@@ -41,6 +41,7 @@ from scripts.production_gate_parallel_isolation import (
 )
 from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan, cli_deadlines
 from scripts.production_gate_parallel_processes import interrupt_on_signals
+from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes
 from scripts.production_gate_parallel_validation import loads_strict
 
 
@@ -155,6 +156,21 @@ def run_parallel_cli(
             )
         except (IsolationError, OSError) as exc:
             problems.append(f"private immutable snapshot refused: {exc}")
+    runtime_root = run_root / run_id / "runtime"
+    if not problems:
+        try:
+            private = build_private_runtimes(
+                interpreters,
+                project_root=project_root,
+                checkout=Path(snapshot["checkout"]),
+                destination=runtime_root,
+            )
+        except (IsolationError, OSError) as exc:
+            problems.append(f"private immutable runtime refused: {exc}")
+        else:
+            interpreters = {mode: info["interpreter"] for mode, info in private.items()}
+            for info in private.values():
+                problems.extend(info["problems"])
     if not problems:
         snap_root, snap_rom, snap_fixture = (
             Path(snapshot["checkout"]),
@@ -227,6 +243,7 @@ def run_parallel_cli(
     if problems or plan is None:
         if snapshot:
             thaw_and_remove(Path(snapshot["root"]))
+        thaw_and_remove(runtime_root)
         print("parallel runtime gate refused:\n" + "\n".join(f"  {item}" for item in problems))
         return 2
     gate_arguments = [
@@ -275,6 +292,7 @@ def run_parallel_cli(
         report["snapshot_retained"] = snapshot["root"]  # never remove what cleanup has not cleared
     else:
         thaw_and_remove(Path(snapshot["root"]))
+        thaw_and_remove(runtime_root)
     compare_to = getattr(args, "parallel_compare_to", None)
     if compare_to is not None:
         try:
