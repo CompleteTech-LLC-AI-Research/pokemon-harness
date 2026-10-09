@@ -61,7 +61,8 @@ REAL_ROM_MODULES = frozenset(
 # collection path.  This is deliberately a little repetitive: the manifest is
 # a guard against a test silently falling into the wrong production tier.
 _FRAME_ADMISSION_PARTS = ("invariants", "overrun", "rows", "span", "state_table", "validator")
-_PARALLEL_RUNTIME_PARTS = ("artifacts", "gate", "lifecycle", "plan")
+_PARALLEL_HELPER = Path(__file__).with_name("_tier_parallel_runtime_modules.py")
+_PARALLEL_RUNTIME_MODULES = runpy.run_path(str(_PARALLEL_HELPER))["PARALLEL_RUNTIME_MODULES"]
 UNIT_MODULES = frozenset(
     {
         "test_normal_red_profile_support.py",
@@ -253,7 +254,7 @@ UNIT_MODULES = frozenset(
         "test_timed_battle_probe_action_economy.py",
         "test_timed_battle_probe_admission.py",
         *(f"test_timed_frame_admission_{part}.py" for part in _FRAME_ADMISSION_PARTS),
-        *(f"test_parallel_runtime_{part}.py" for part in _PARALLEL_RUNTIME_PARTS),
+        *_PARALLEL_RUNTIME_MODULES,
         "test_timed_battle_probe_ownership.py",
         "test_timed_battle_probe_terminal.py",
         "test_timed_input_observation.py",

@@ -1,0 +1,220 @@
+"""Independent identity measurement for concurrent runtime jobs (#107.1, #107.3).
+
+The parent measures once to freeze the plan; every worker measures again before and
+after its gate run; the parent measures a third time after the job.  Nothing here
+copies an identity from a plan: each value is computed from the checkout, the
+interpreter build and the real ROM/fixture bytes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+CHUNK_BYTES = 1 << 20
+PROBE_TIMEOUT_SECONDS = 120
+BUILD_PROBE = (
+    "import hashlib, importlib.util, json, os, sys\n"
+    "files = {}\n"
+    "spec = importlib.util.find_spec('pyboy')\n"
+    "for base in (spec.submodule_search_locations or []) if spec else []:\n"
+    "    for dirpath, _, names in os.walk(base):\n"
+    "        for name in sorted(names):\n"
+    "            if name.endswith(('.so', '.pyd', '.dylib')):\n"
+    "                path = os.path.join(dirpath, name)\n"
+    "                with open(path, 'rb') as handle:\n"
+    "                    files[os.path.relpath(path, base)] = hashlib.sha256(handle.read()).hexdigest()\n"
+    "print(json.dumps({'version': sys.version, 'files': files}, sort_keys=True))\n"
+)
+IDENTITY_KEYS = ("commit", "clean_head", "build_identity", "input_digests", "asset_digest")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_digest(root: Path, suffixes: Sequence[str] | None = None) -> tuple[str, int]:
+    """Digest every regular file (following links) under ``root`` by path, size and bytes."""
+
+    entries: list[list[Any]] = []
+    if root.is_dir():
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for name in sorted(filenames):
+                if suffixes and not name.endswith(tuple(suffixes)):
+                    continue
+                path = Path(dirpath) / name
+                if not path.is_file():
+                    continue
+                entries.append(
+                    [path.relative_to(root).as_posix(), path.stat().st_size, sha256_file(path)]
+                )
+    text = json.dumps(entries, separators=(",", ":"))
+    return hashlib.sha256(text.encode("ascii")).hexdigest(), len(entries)
+
+
+def measure_commit(project_root: Path) -> tuple[str, bool, list[str]]:
+    """Return (head, clean, problems) from the checkout itself."""
+
+    def git(*argv: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(project_root), *argv],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+
+    try:
+        head, status = (
+            git("rev-parse", "HEAD"),
+            git("status", "--porcelain", "--untracked-files=all"),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", False, [f"the checkout commit could not be read: {type(exc).__name__}"]
+    if head.returncode != 0 or status.returncode != 0:
+        return "", False, ["the checkout commit could not be read"]
+    clean = not status.stdout.strip()
+    problems = [] if clean else ["the checkout is not clean: an exact clean commit is required"]
+    return head.stdout.strip(), clean, problems
+
+
+def measure_build_identity(
+    mode: str, interpreter: str, project_root: Path
+) -> tuple[str, list[str]]:
+    """Digest the interpreter binary plus the native extensions (cython) or vendored sources."""
+
+    try:
+        interpreter_digest = sha256_file(Path(os.path.realpath(interpreter)))
+    except OSError as exc:
+        return "", [f"{mode}: interpreter is unreadable: {type(exc).__name__}"]
+    environment = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    try:
+        probe = subprocess.run(
+            [interpreter, "-c", BUILD_PROBE],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            env=environment,
+        )
+        measured = json.loads(probe.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return "", [f"{mode}: build probe failed: {type(exc).__name__}"]
+    problems: list[str] = []
+    record: dict[str, Any] = {
+        "mode": mode,
+        "interpreter_sha256": interpreter_digest,
+        "version": measured.get("version"),
+    }
+    if probe.returncode != 0 or not isinstance(measured.get("files"), dict):
+        problems.append(f"{mode}: build probe exited {probe.returncode}")
+    elif mode == "cython":
+        record["extensions"] = measured["files"]
+        if not measured["files"]:
+            problems.append("cython: the interpreter exposes no native pyboy extension")
+    else:
+        digest, count = tree_digest(
+            project_root / "vendor" / "pyboy-src" / "pyboy", (".py", ".pyx", ".pxd")
+        )
+        record["vendored_sources"] = digest
+        if count == 0:
+            problems.append("source: the vendored pyboy sources are missing")
+    text = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("ascii")).hexdigest(), problems
+
+
+def measure_inputs(project_root: Path, names: Sequence[str]) -> tuple[dict[str, str], list[str]]:
+    digests: dict[str, str] = {}
+    problems: list[str] = []
+    for name in names:
+        path = project_root / name
+        if name.startswith("tree:"):
+            digest, count = tree_digest(project_root / name[5:])
+            if count:
+                digests[name] = digest
+            else:
+                problems.append(f"declared input tree is empty or missing: {name}")
+        elif path.is_file():
+            digests[name] = sha256_file(path)
+        else:
+            problems.append(f"declared input is missing: {name}")
+    return digests, problems
+
+
+def measure_assets(rom_root: Path, fixture_root: Path) -> tuple[str, list[str]]:
+    """Digest every byte under the explicitly resolved ROM and fixture roots."""
+
+    parts: dict[str, Any] = {}
+    problems: list[str] = []
+    for label, root in (("rom", rom_root), ("fixture", fixture_root)):
+        digest, count = tree_digest(root)
+        parts[label] = [digest, count]
+        if count == 0:
+            problems.append(f"no {label} files under the resolved {label} root")
+    text = json.dumps(parts, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("ascii")).hexdigest(), problems
+
+
+def measure_identity(
+    *,
+    mode: str,
+    interpreter: str,
+    project_root: Path,
+    input_names: Sequence[str],
+    rom_root: Path,
+    fixture_root: Path,
+    git_root: Path | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Measure every plan-bound identity; returns the values and every measurement problem."""
+
+    head, clean, problems = measure_commit(git_root or project_root)
+    build, build_problems = measure_build_identity(mode, interpreter, project_root)
+    inputs, input_problems = measure_inputs(project_root, input_names)
+    assets, asset_problems = measure_assets(rom_root, fixture_root)
+    problems = [*problems, *build_problems, *input_problems, *asset_problems]
+    values = {
+        "commit": head,
+        "clean_head": clean,
+        "build_identity": build,
+        "input_digests": inputs,
+        "asset_digest": assets,
+    }
+    return values, problems
+
+
+def expected_identity(plan_body: Mapping[str, Any], mode: str) -> dict[str, Any]:
+    """The frozen identity one runtime job must reproduce (build identity is per runtime)."""
+
+    builds = plan_body["build_identity"]
+    return {
+        "commit": plan_body["commit"],
+        "build_identity": builds.get(mode) if isinstance(builds, dict) else None,
+        "input_digests": plan_body["input_digests"],
+        "asset_digest": plan_body["asset_digest"],
+    }
+
+
+def identity_differences(measured: Mapping[str, Any], expected: Mapping[str, Any]) -> list[str]:
+    """Name every identity whose measured value differs from the frozen expectation."""
+
+    problems = [
+        f"{key} measured by the job differs from the frozen plan"
+        for key in ("commit", "build_identity", "input_digests", "asset_digest")
+        if measured.get(key) != expected.get(key)
+    ]
+    if measured.get("clean_head") is not True:
+        problems.append("the job did not measure a clean checkout head")
+    return problems
+
+
+Measurer = Callable[[str], tuple[dict[str, Any], list[str]]]

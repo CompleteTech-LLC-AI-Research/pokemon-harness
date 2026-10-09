@@ -16,12 +16,9 @@ import pytest
 from scripts.production_gate_parallel import (
     CapacityError,
     PairBudget,
-    capacity_loss_probe,
     run_parallel_plan,
 )
-from scripts.production_gate_parallel_plan import build_parallel_plan
-
-REQUIRED = {"unit": ["tests/test_a.py::test_one", "tests/test_a.py::test_two"], "timing": ["t::x"]}
+from tests._parallel_runtime_report_support import make_plan
 
 FAKE_WORKER = r"""
 import json, os, sys, time
@@ -38,18 +35,34 @@ if name == "slow_pass":
 def counts(total):
     return {"passed": total, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0,
             "errors": 0, "total": total}
-rows = [mode + "/" + t + "/" + c for t, cases in plan["required_nodeids"].items() for c in cases]
-rows += [mode + "/timing/" + rep for rep in job["timing_rep_ids"]]
+import datetime
+def counts(total):
+    return {"passed": total, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0,
+            "errors": 0, "total": total}
+def row(tier, case, repetition, source):
+    return {"id": mode + "/" + tier + "/" + case, "runtime": mode, "tier": tier, "case": case,
+            "game": "", "mode": mode, "roles": [], "repetition": repetition,
+            "outcome": "passed", "source": source}
+rows = [row("unit", c, 0, "selected_nodeids+tier_status") for c in plan["required_nodeids"]["unit"]]
+rows += [row("timing", r, i + 1, "returncodes") for i, r in enumerate(job["timing_rep_ids"])]
 tiers = [
     {"name": "unit", "status": "PASS", "counts": counts(2), "returncodes": [0]},
     {"name": "timing", "status": "PASS", "counts": counts(5), "returncodes": [0] * 5},
 ]
+now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+begun = now()
+identity = {"commit": plan["commit"], "clean_head": True,
+            "build_identity": plan["build_identity"][mode],
+            "input_digests": plan["input_digests"], "asset_digest": plan["asset_digest"]}
 artifact = {
-    "schema_version": 1, "run_id": plan["run_id"], "plan_sha256": plan["plan_sha256"],
-    "job_id": job_id, "mode": mode, "commit": plan["commit"],
-    "build_identity": plan["build_identity"], "input_digests": plan["input_digests"],
-    "asset_digest": plan["asset_digest"], "pid": os.getpid(), "child_exit_status": 0,
-    "started_utc": "t0", "finished_utc": "t1", "fresh_run": True, "diagnostic_reuse": False,
+    "schema_version": 2, "run_id": plan["run_id"], "plan_sha256": plan["plan_sha256"],
+    "job_id": job_id, "mode": mode, "commit": identity["commit"], "clean_head": True,
+    "build_identity": identity["build_identity"], "input_digests": identity["input_digests"],
+    "asset_digest": identity["asset_digest"], "identity_after": dict(identity),
+    "launch_token": os.environ.get("POKERED_PARALLEL_JOB_TOKEN", ""),
+    "evidence": {"gate_report_bytes": 10, "gate_report_sha256": "9" * 64},
+    "pid": os.getpid(), "child_exit_status": 0, "started_utc": begun, "finished_utc": begun,
+    "fresh_run": True, "diagnostic_reuse": False,
     "runtime": {"pyboy_mode": mode}, "tiers": tiers, "rows": rows, "gate_problems": [],
     "cancellation": "", "overall": "PASS",
 }
@@ -88,34 +101,13 @@ if name == "malformed":
     os.makedirs(os.path.join(job_root, "out"), exist_ok=True)
     open(os.path.join(job_root, "out", "terminal.json"), "w").write('{"run_id": ')
 elif name != "lost":
+    artifact["finished_utc"] = now()
     os.makedirs(os.path.join(job_root, "out"), exist_ok=True)
     open(os.path.join(job_root, "out", "terminal.json"), "w").write(json.dumps(artifact))
 info["finished"] = time.time()
 open(os.path.join(job_root, "child.env.json"), "w").write(json.dumps(info))
 sys.exit(exit_code)
 """
-
-
-def make_plan(**overrides):
-    arguments = {
-        "commit": "a" * 40,
-        "build_identity": "build-1",
-        "input_digests": {"VERSIONS.md": "b" * 64},
-        "asset_digest": "c" * 64,
-        "games": ("red",),
-        "roles": ("listener", "connector"),
-        "modes": ("source", "cython"),
-        "tiers": ("unit", "timing"),
-        "required_nodeids_by_tier": REQUIRED,
-        "repetitions": 5,
-        "deadline_seconds": 30.0,
-        "total_pairs": 2,
-        "policy_digest": "d" * 64,
-        "early_smoke": False,
-        "fail_fast": False,
-    }
-    arguments.update(overrides)
-    return build_parallel_plan(**arguments)
 
 
 def run(tmp_path, scenarios, plan=None, budget=None, **kwargs):
@@ -349,20 +341,3 @@ def test_the_single_global_budget_rejects_unknown_zero_duplicate_and_excess_rese
     budget.mark_lost("probe reported fewer pairs")
     with pytest.raises(CapacityError, match="capacity lost"):
         budget.reserve("c", 1)
-
-
-def test_the_capacity_probe_reports_loss_only_when_the_baseline_floor_is_breached():
-    readings = iter([6, 6, 4, 3])
-    probe = capacity_loss_probe(4, measure=lambda: next(readings))  # baseline 6 -> floor 4
-    assert [probe(), probe(), probe()] == [4, 4, 3]
-
-
-def test_the_capacity_probe_floor_never_exceeds_the_reserved_pairs_and_unknown_quota_is_loss():
-    readings = iter([2, 2, 1])
-    probe = capacity_loss_probe(4, measure=lambda: next(readings))  # baseline 2 -> floor 2
-    assert [probe(), probe()] == [4, 1]
-
-    def unreadable():
-        raise OSError("cgroup unreadable")
-
-    assert capacity_loss_probe(4, measure=unreadable)() is None

@@ -210,6 +210,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="existing private directory outside the checkout for per-job trees and the report",
     )
+    parser.add_argument(
+        "--parallel-serial",
+        action="store_true",
+        help=(
+            "with --parallel-runtimes, run the same frozen plan one job at a time to produce "
+            "the serial bundle used by --parallel-compare-to"
+        ),
+    )
+    parser.add_argument(
+        "--parallel-compare-to",
+        type=Path,
+        help=(
+            "with --parallel-runtimes, a serial bundle (parallel-report.json) to re-validate "
+            "and compare elapsed time against"
+        ),
+    )
     return parser
 
 
@@ -230,8 +246,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--smoke-only cannot be combined with --unit-only or --tier")
     if args.cython_python_executable is not None and args.runtime_mode != "both":
         parser.error("--cython-python requires --runtime-mode both")
-    if args.parallel_run_root is not None and not args.parallel_runtimes:
-        parser.error("--parallel-run-root requires --parallel-runtimes")
+    if (
+        args.parallel_run_root is not None
+        or args.parallel_serial
+        or args.parallel_compare_to is not None
+    ) and not args.parallel_runtimes:
+        parser.error(
+            "--parallel-run-root/--parallel-serial/--parallel-compare-to require --parallel-runtimes"
+        )
     if args.parallel_runtimes and (
         args.raw_output_dir is not None or args.evidence_dir is not None
     ):
@@ -319,6 +341,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             selected=selected,
             early_smoke=early_smoke,
             fail_fast=fail_fast,
+            rom_root=rom_root,
+            fixture_root=fixture_root,
+            capacity_session=capacity_session,
+            explicit_matrix_workers=any(
+                item == "--matrix-workers" or item.startswith("--matrix-workers=")
+                for item in (sys.argv[1:] if argv is None else argv)
+            ),
         )
     accumulated_runtime_results: list[RuntimeGateResult] = []
     try:

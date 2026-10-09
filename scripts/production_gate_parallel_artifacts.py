@@ -8,16 +8,24 @@ re-checked here, and every job outcome (including failures) is retained.
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from scripts.production_gate_parallel_identity import expected_identity
 from scripts.production_gate_parallel_plan import ParallelPlan
+from scripts.production_gate_parallel_records import row_problems
+from scripts.production_gate_parallel_validation import (
+    guarded,
+    in_set,
+    is_int,
+    loads_strict,
+    timestamp_problems,
+)
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 TERMINAL_ARTIFACT_NAME = "terminal.json"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 TIER_STATUSES = frozenset({"PASS", "FAIL", "INTERRUPTED", "BLOCKED", "UNRUN", "TIMEOUT"})
@@ -30,13 +38,17 @@ ARTIFACT_KEYS = frozenset(
         "build_identity",
         "cancellation",
         "child_exit_status",
+        "clean_head",
         "commit",
         "diagnostic_reuse",
         "finished_utc",
+        "evidence",
         "fresh_run",
         "gate_problems",
+        "identity_after",
         "input_digests",
         "job_id",
+        "launch_token",
         "mode",
         "overall",
         "pid",
@@ -52,8 +64,7 @@ ARTIFACT_KEYS = frozenset(
 COUNT_KEYS = ("passed", "failed", "skipped", "xfailed", "xpassed", "errors", "total")
 
 
-def _is_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+_is_int = is_int
 
 
 def read_terminal_artifact(
@@ -80,7 +91,7 @@ def read_terminal_artifact(
         return None, ["terminal artifact escapes the owned job root"]
     try:
         text = path.read_text(encoding="utf-8")
-        body = json.loads(text)
+        body = loads_strict(text)
     except (OSError, UnicodeDecodeError, ValueError):
         return None, ["terminal artifact is malformed or truncated"]
     if not isinstance(body, dict):
@@ -106,8 +117,8 @@ def _tier_problems(
     for tier in tiers:
         name = tier.get("name")
         status = tier.get("status")
-        if status not in TIER_STATUSES:
-            problems.append(f"{name}: invalid status {status!r}")
+        if not in_set(status, TIER_STATUSES):
+            problems.append(f"{name}: invalid status {str(status)[:40]!r}")
             continue
         if status != "PASS":
             problems.append(f"{name}: status {status}")
@@ -131,67 +142,76 @@ def _tier_problems(
     return problems
 
 
-def _row_problems(
-    job: Mapping[str, Any], plan: Mapping[str, Any], artifact: Mapping[str, Any]
-) -> list[str]:
-    """Check unique ordered runtime-tier-case-rep IDs against the frozen requirements."""
+def _evidence_problems(artifact: Mapping[str, Any]) -> list[str]:
+    evidence = artifact["evidence"]
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "gate_report_bytes",
+        "gate_report_sha256",
+    }:
+        return ["evidence must reference the child's complete gate report"]
+    digest = evidence["gate_report_sha256"]
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or not _is_int(evidence["gate_report_bytes"])
+    ):
+        return ["evidence reference is not an authenticated gate report digest"]
+    return []
 
-    rows = artifact["rows"]
-    if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
-        return ["rows must be a list of strings"]
+
+def _identity_problems(
+    artifact: Mapping[str, Any], body: Mapping[str, Any], mode: str
+) -> list[str]:
     problems: list[str] = []
-    if len(set(rows)) != len(rows):
-        problems.append(f"duplicate row ids {sorted({r for r in rows if rows.count(r) > 1})[:5]}")
-    if not plan["require_row_ids"]:
-        return problems
-    mode = job["mode"]
-    prefix_ok = [row for row in rows if row.startswith(f"{mode}/")]
-    if len(prefix_ok) != len(rows):
-        problems.append("a row id names a different runtime")
-    expected = [
-        f"{mode}/{tier}/{case}"
-        for tier in job["tiers"]
-        for case in plan["required_nodeids"].get(tier, [])
-    ]
-    for rep in job["timing_rep_ids"]:
-        expected.append(f"{mode}/timing/{rep}")
-    missing = sorted(set(expected) - set(rows))
-    extra = sorted(set(rows) - set(expected))
-    if missing:
-        problems.append(f"missing required rows ({len(missing)}): {missing[:3]}")
-    if extra:
-        problems.append(f"unplanned rows ({len(extra)}): {extra[:3]}")
+    expected = expected_identity(body, mode)
+    for key in ("commit", "build_identity", "asset_digest", "input_digests"):
+        if artifact[key] != expected[key]:
+            problems.append(f"{key} measured by the job differs from the frozen plan")
+    if artifact["clean_head"] is not True:
+        problems.append("the job did not measure a clean checkout head")
+    after = artifact["identity_after"]
+    expected_after = {
+        "commit": artifact["commit"],
+        "clean_head": artifact["clean_head"],
+        "build_identity": artifact["build_identity"],
+        "input_digests": artifact["input_digests"],
+        "asset_digest": artifact["asset_digest"],
+    }
+    if after != expected_after:
+        problems.append("identity measured after the run differs from the one before it")
     return problems
 
 
-def validate_terminal_artifact(
-    artifact: object,
+def _validate(
+    artifact: Mapping[str, Any],
     plan: ParallelPlan,
     job_id: str,
-    *,
     child_exit_status: int | None,
-    child_pid: int | None = None,
+    child_pid: int | None,
+    expected_token: str | None,
+    window: tuple[Any, Any] | None,
 ) -> list[str]:
-    """Return every reason the artifact cannot authorize this job's PASS."""
-
-    if not isinstance(artifact, dict):
-        return ["artifact is not an object"]
     body = plan.as_dict()
     job = plan.job(job_id)
-    problems: list[str] = []
     extra = sorted(set(artifact) - ARTIFACT_KEYS)
     missing = sorted(ARTIFACT_KEYS - set(artifact))
     if extra or missing:
         return [f"artifact keys differ (unknown {extra}, missing {missing})"]
+    problems: list[str] = []
     if artifact["schema_version"] != ARTIFACT_SCHEMA_VERSION:
         problems.append("artifact schema version mismatch")
-    for key in ("run_id", "commit", "build_identity", "asset_digest", "input_digests"):
-        if artifact[key] != body[key]:
-            problems.append(f"{key} does not match the frozen plan (stale or wrong identity)")
+    if artifact["run_id"] != body["run_id"]:
+        problems.append("run_id does not match the frozen plan (stale or wrong identity)")
     if artifact["plan_sha256"] != plan.digest:
         problems.append("plan_sha256 does not match the frozen plan")
+    problems.extend(_identity_problems(artifact, body, job["mode"]))
     if artifact["job_id"] != job_id or artifact["mode"] != job["mode"]:
         problems.append("job or runtime identity does not match the plan")
+    if expected_token is not None and artifact["launch_token"] != expected_token:
+        problems.append("launch token does not bind this artifact to this execution")
+    if not isinstance(artifact["launch_token"], str) or not artifact["launch_token"]:
+        problems.append("launch token is missing")
+    problems.extend(timestamp_problems(artifact["started_utc"], artifact["finished_utc"], window))
     if artifact["fresh_run"] is not True or artifact["diagnostic_reuse"] is not False:
         problems.append("artifact is not a fresh run (diagnostic reuse)")
     runtime = artifact["runtime"]
@@ -210,12 +230,43 @@ def validate_terminal_artifact(
     if not isinstance(artifact["gate_problems"], list) or artifact["gate_problems"]:
         problems.append(f"gate problems present: {str(artifact['gate_problems'])[:200]}")
     if artifact["cancellation"]:
-        problems.append(f"cancelled: {artifact['cancellation']}")
+        problems.append(f"cancelled: {str(artifact['cancellation'])[:100]}")
     if artifact["overall"] != "PASS":
-        problems.append(f"overall {artifact['overall']!r}")
-    problems.extend(_tier_problems(job, body, artifact))
-    problems.extend(_row_problems(job, body, artifact))
+        problems.append(f"overall {str(artifact['overall'])[:40]!r}")
+    problems.extend(_evidence_problems(artifact))
+    problems.extend(guarded("tiers", _tier_problems, job, body, artifact))
+    if isinstance(artifact["tiers"], list):
+        problems.extend(
+            guarded("rows", row_problems, artifact["rows"], job, body, artifact["tiers"])
+        )
     return problems
+
+
+def validate_terminal_artifact(
+    artifact: object,
+    plan: ParallelPlan,
+    job_id: str,
+    *,
+    child_exit_status: int | None,
+    child_pid: int | None = None,
+    expected_token: str | None = None,
+    window: tuple[Any, Any] | None = None,
+) -> list[str]:
+    """Return every reason the artifact cannot authorize this job's PASS; never raises."""
+
+    if not isinstance(artifact, dict):
+        return ["artifact is not an object"]
+    return guarded(
+        "artifact",
+        _validate,
+        artifact,
+        plan,
+        job_id,
+        child_exit_status,
+        child_pid,
+        expected_token,
+        window,
+    )
 
 
 def outcome_record(
@@ -237,6 +288,7 @@ def outcome_record(
     return {
         "job_id": job_id,
         "mode": job["mode"],
+        "phase": job["phase"],
         "state": state,
         "reason": reason,
         "child_exit_status": child_exit_status,
@@ -274,6 +326,7 @@ def aggregate_outcomes(plan: ParallelPlan, outcomes: Sequence[Mapping[str, Any]]
             plan,
             str(outcome.get("job_id")),
             child_exit_status=outcome.get("child_exit_status"),
+            expected_token=outcome.get("launch_token"),
         )
         if recheck:
             problems.append(
@@ -287,45 +340,4 @@ def aggregate_outcomes(plan: ParallelPlan, outcomes: Sequence[Mapping[str, Any]]
         "overall": "FAIL" if problems else "PASS",
         "problems": problems,
         "jobs": [dict(outcome) for outcome in outcomes],
-    }
-
-
-def compare_with_sequential(
-    parallel: Mapping[str, Any], sequential: Mapping[str, Any], plan: ParallelPlan
-) -> dict[str, Any]:
-    """Compare elapsed time only when both runs share the frozen identities and conditions.
-
-    ``sequential`` must be a summary captured for the same commit, build, inputs, assets,
-    tiers, repetitions and capacity; anything else is refused instead of compared.
-    """
-
-    body = plan.as_dict()
-    required = {
-        "commit": body["commit"],
-        "build_identity": body["build_identity"],
-        "asset_digest": body["asset_digest"],
-        "input_digests": body["input_digests"],
-        "tiers": body["tiers"],
-        "repetitions": body["repetitions"],
-        "total_pairs": body["capacity"]["total_pairs"],
-        "policy_digest": body["capacity"]["policy_digest"],
-    }
-    problems = [
-        f"sequential {key} differs from the frozen plan"
-        for key, value in required.items()
-        if sequential.get(key) != value
-    ]
-    if parallel.get("overall") != "PASS" or sequential.get("overall") != "PASS":
-        problems.append("both runs must be PASS to compare elapsed time")
-    p_elapsed, s_elapsed = parallel.get("elapsed_seconds"), sequential.get("elapsed_seconds")
-    for label, value in (("parallel", p_elapsed), ("sequential", s_elapsed)):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            problems.append(f"{label} elapsed_seconds missing or not positive")
-    if problems:
-        return {"status": "REFUSED", "problems": problems}
-    return {
-        "status": "COMPARED",
-        "parallel_seconds": p_elapsed,
-        "sequential_seconds": s_elapsed,
-        "speedup": round(s_elapsed / p_elapsed, 4),
     }

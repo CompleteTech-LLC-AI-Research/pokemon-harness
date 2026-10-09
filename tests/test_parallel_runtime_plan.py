@@ -25,7 +25,7 @@ REQUIRED = {
 def make_plan(**overrides):
     arguments = {
         "commit": "a" * 40,
-        "build_identity": "build-1",
+        "build_identity": {"source": "e" * 64, "cython": "f" * 64},
         "input_digests": {"VERSIONS.md": "b" * 64},
         "asset_digest": "c" * 64,
         "games": ("red", "blue"),
@@ -48,7 +48,7 @@ def test_the_frozen_plan_pins_every_identity_before_dispatch():
     body = make_plan(run_id="1" * 32).as_dict()
     assert body["run_id"] == "1" * 32
     assert body["commit"] == "a" * 40
-    assert body["build_identity"] == "build-1"
+    assert body["build_identity"] == {"cython": "f" * 64, "source": "e" * 64}
     assert body["asset_digest"] == "c" * 64
     assert body["input_digests"] == {"VERSIONS.md": "b" * 64}
     assert body["tiers"] == ["unit", "timing"]
@@ -152,10 +152,12 @@ def test_one_global_pair_budget_must_cover_every_job_share():
 
 def test_the_additional_smoke_keeps_its_role_and_order_before_the_selected_tiers():
     plan = make_plan(tiers=("unit", "timing"), early_smoke=True).as_dict()
-    steps = plan["jobs"][0]["steps"]
-    assert steps[0] == {"mode": "source", "tier": "smoke", "role": "additional-probe"}
-    assert [step["tier"] for step in steps[1:]] == ["unit", "timing"]
-    assert all(step["role"] == "selected-tier" for step in steps[1:])
+    smoke, selected = plan["jobs"][0], plan["jobs"][2]
+    assert (smoke["job_id"], smoke["phase"]) == ("source-smoke-job", "smoke")
+    assert smoke["steps"] == [{"mode": "source", "tier": "smoke", "role": "additional-probe"}]
+    assert (selected["job_id"], selected["phase"]) == ("source-job", "selected")
+    assert [step["tier"] for step in selected["steps"]] == ["unit", "timing"]
+    assert all(step["role"] == "selected-tier" for step in selected["steps"])
     with pytest.raises(PlanError, match="smoke"):
         make_plan(tiers=("smoke", "unit"), early_smoke=True)
 

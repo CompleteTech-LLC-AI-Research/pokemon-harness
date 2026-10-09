@@ -1761,35 +1761,51 @@ current TCP API must remain restricted to loopback.
 
 Sequential execution remains the default. `python scripts/production_gate.py --runtime-mode both
 --parallel-runtimes --parallel-run-root <new private directory outside the checkout> --capacity-policy
-<policy.json> [--keep-going | --fail-fast]` instead starts the source and Cython gates as two separate
-owned child processes under one immutable plan.
+<policy.json> [--keep-going | --fail-fast] [--parallel-serial] [--parallel-compare-to <serial report>]`
+instead starts the source and Cython gates as separate owned child processes under one immutable plan.
+**Nothing in this mode has been executed yet**: the source and its authored controls await a Sol-admitted
+test batch, and the real-ROM qualification is a separate requirement.
 
 What the mode does:
 
-- **Frozen plan.** Before dispatch the plan pins the fresh run UUID, the exact clean commit, the build
-  identity, input and asset digests, the ordered tiers and required case ids, the timing repetitions
-  (at least five), per-job deadlines, `fail_fast` and the capacity policy digest. Children re-validate the
-  canonical plan text and its digest; nothing trusts a mutable caller claim.
-- **Isolation.** Each job gets private output, temp, cache, build, evidence and raw trees below the
-  run root, its own environment (one thread per numerical library) and its own process group. The parent
-  signals only process groups it started.
-- **One global pair budget.** `max_concurrent_pairs` from the capacity policy is the single budget. A
-  job's share is reserved up front, parallel dispatch is refused unless it admits one pair per job, and
-  an unknown, zero or lost capacity fails closed. Children do not receive the capacity policy, so the
-  budget is never cloned or double counted.
+- **Frozen plan.** Before dispatch the plan pins the fresh run UUID, the exact clean commit, one
+  build identity per runtime (interpreter binary plus native extensions or vendored sources), input digests
+  (including a digest of the whole snapshot tree), the digest of every ROM and fixture byte, ordered tiers,
+  required case ids, timing repetitions (at least five), distinct finite deadlines (preflight, row, tier,
+  repetition, cleanup; each job deadline is derived from them, the gate's inner budgets are unchanged),
+  `fail_fast` and the capacity policy digest. Row identity is mandatory; the plan refuses to waive it.
+- **Phases.** With the additional early smoke each runtime has a smoke job and a selected-tier job. Both
+  smokes finish and are retained before any selected-tier job starts; a failed smoke never cancels the other
+  smoke, and `fail_fast` only decides whether the selected phase starts afterwards.
+- **Private immutable snapshot.** The parent copies every tracked file of the clean checkout and the
+  resolved ROM/fixture roots into the run root with all write permission bits removed, then probes that the
+  OS really refuses writes (a snapshot file opened for writing or a directory creation fails closed with the
+  observed evidence). Every job runs from the snapshot. The jobs' writable areas are private trees (output,
+  temp, cache incl. the pytest cache, build, evidence, raw, ports). No host or global permission is changed.
+- **Ports.** Each job gets a disjoint loopback port range; helpers that use the job port allocator hold an
+  `flock` reservation until the listener binds. Helpers outside the authorized paths still release a port
+  before binding; they are listed in the handoff.
+- **One live capacity authority.** The single `CapacitySession` admission plus one pair budget admit every
+  job's pairs before dispatch and are re-observed on every poll; unknown quota, a queued or blocked
+  admission, an insufficient reading or a lost reservation fails closed and is recorded. `--matrix-workers`
+  given explicitly is a per-job ceiling. Children do not receive the capacity policy.
+- **Owned processes.** Each job's descendants are pinned by pidfds after their identity was verified,
+  signalled only through those pidfds, and proven gone before the reservation is released; unrelated
+  processes and other processes' environments are never touched. A descendant that is created and orphaned
+  between two observations cannot be attributed without a subreaper launcher, which is not provided.
 - **Strict aggregation.** A job passes only with an observed zero child exit status and a terminal
-  artifact that matches the plan: run, plan digest, commit, build, inputs, assets, runtime identity
-  (no source fallback in native), tier order, integer counts with no skip, xfail, error or failure, five
-  timing return codes, and a fresh run. Missing, malformed, duplicate, stale and partial artifacts, and
-  symlinked or escaping paths, are failures. Every job outcome is retained; one runtime cannot mask the
-  other's failure.
-- **Failure policy.** With `--keep-going` (and `fail_fast` false) an ordinary failure lets the other job
-  finish. With `--fail-fast`, an interrupt, a deadline or capacity loss the parent cancels only its own
-  child process groups with bounded cleanup, and marks interrupted or unstarted jobs explicitly.
+  artifact whose independently measured identity (before and after the run), per-launch token, timestamps,
+  structured rows (runtime, tier, case, game, mode, ordered roles, repetition, outcome), tiers, counts and
+  return codes match the plan. Validators are total over decoded JSON; a malformed artifact is a recorded
+  failure and never aborts the other jobs' evidence. Completed failures are harvested before any
+  cancellation and their diagnostics are preserved with a digest of the child's complete gate report.
+- **Comparison.** `--parallel-serial` produces a serial bundle from the same plan machinery;
+  `--parallel-compare-to` re-validates both bundles artifact by artifact, requires equivalent plans, and takes
+  elapsed time and resource traces from the validated artifacts.
 
 Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
-with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy
-and the 18 orientation fixtures are not provided by this change. Real runs aggregate tier counts and return
-codes (the sequential gate does not report per-row ids), so row-level identity is enforced only for
-authored controls. The authored controls drive real child processes but never run a gate or ROM and are
-not gameplay or performance evidence. Release status remains PARTIAL.
+with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy and
+the 18 orientation fixtures are not provided by this change. Timing is attested per repetition (the gate
+exports one return code per repetition). Tests that shell out to git inside the repository root will not see
+a `.git` directory in the snapshot. The authored controls drive real child processes but never run a gate
+or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.

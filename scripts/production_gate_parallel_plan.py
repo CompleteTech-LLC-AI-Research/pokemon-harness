@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from scripts.production_gate_model import DEFAULT_TIERS, RUNTIME_MODES, TIER_EXPRESSIONS
+from scripts.production_gate_parallel_validation import is_positive_number, loads_strict
 
 PLAN_SCHEMA_VERSION = 1
 MIN_TIMING_REPETITIONS = 5
@@ -33,6 +34,7 @@ PLAN_KEYS = frozenset(
         "capacity",
         "commit",
         "created_utc",
+        "deadlines",
         "early_smoke",
         "fail_fast",
         "games",
@@ -49,8 +51,12 @@ PLAN_KEYS = frozenset(
     }
 )
 JOB_KEYS = frozenset(
-    {"deadline_seconds", "job_id", "mode", "pairs", "steps", "tiers", "timing_rep_ids"}
+    {"deadline_seconds", "job_id", "mode", "pairs", "phase", "steps", "tiers", "timing_rep_ids"}
 )
+DEADLINE_KEYS = frozenset(
+    {"cleanup_seconds", "preflight_seconds", "repetition_seconds", "row_seconds", "tier_seconds"}
+)
+PHASES = ("smoke", "selected")
 STEP_KEYS = frozenset({"mode", "role", "tier"})
 CAPACITY_KEYS = frozenset({"policy_digest", "total_pairs"})
 
@@ -70,8 +76,22 @@ def _digest_of(body: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(unsigned).encode("ascii")).hexdigest()
 
 
-def job_id_for(mode: str) -> str:
-    return f"{mode}-job"
+def job_id_for(mode: str, phase: str = "selected") -> str:
+    return f"{mode}-job" if phase == "selected" else f"{mode}-{phase}-job"
+
+
+def derive_job_deadline(
+    deadlines: Mapping[str, float], steps: Sequence[Mapping[str, Any]], repetitions: int
+) -> float:
+    """Outer job bound: preflight + every step (timing = repetitions) + cleanup; inner kept."""
+
+    total = float(deadlines["preflight_seconds"]) + float(deadlines["cleanup_seconds"])
+    for step in steps:
+        if step["tier"] == "timing":
+            total += repetitions * float(deadlines["repetition_seconds"])
+        else:
+            total += float(deadlines["tier_seconds"])
+    return total
 
 
 def timing_rep_ids(repetitions: int) -> list[str]:
@@ -132,31 +152,41 @@ def _validate_job(index: int, job: object, plan: Mapping[str, Any]) -> list[str]
     problems = _unknown(label, job, JOB_KEYS)
     if problems:
         return problems
-    mode = job["mode"]
+    mode, phase = job["mode"], job["phase"]
     if mode not in RUNTIME_MODES:
         problems.append(f"{label}: unknown runtime mode {mode!r}")
-    if job["job_id"] != job_id_for(str(mode)):
-        problems.append(f"{label}: job_id must be {job_id_for(str(mode))!r}")
-    if list(job["tiers"]) != list(plan["tiers"]):
-        problems.append(f"{label}: tiers must equal the plan tiers in order")
-    deadline = job["deadline_seconds"]
-    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or deadline <= 0:
-        problems.append(f"{label}: deadline_seconds must be a positive number")
+    if phase not in PHASES or (phase == "smoke" and not plan["early_smoke"]):
+        problems.append(f"{label}: phase {phase!r} is not declared by the plan")
+        return problems
+    if job["job_id"] != job_id_for(str(mode), phase):
+        problems.append(f"{label}: job_id must be {job_id_for(str(mode), phase)!r}")
+    if phase == "smoke":
+        expected = [{"mode": mode, "tier": "smoke", "role": "additional-probe"}]
+        expected_tiers = ["smoke"]
+        expected_reps: list[str] = []
+    else:
+        expected = [{"mode": mode, "tier": tier, "role": "selected-tier"} for tier in plan["tiers"]]
+        expected_tiers = list(plan["tiers"])
+        expected_reps = timing_rep_ids(plan["repetitions"])
+    if list(job["tiers"]) != expected_tiers:
+        problems.append(f"{label}: tiers must equal the phase tiers in order")
     pairs = job["pairs"]
     if not _is_int(pairs) or pairs < 1:
         problems.append(f"{label}: pairs must be a positive integer")
-    if job["timing_rep_ids"] != timing_rep_ids(plan["repetitions"]):
+    if job["timing_rep_ids"] != expected_reps:
         problems.append(f"{label}: timing_rep_ids must match the declared repetitions")
-    steps = job["steps"]
-    expected = [
-        {"mode": mode, "tier": tier, "role": role}
-        for role in ("selected-tier",)
-        for tier in plan["tiers"]
-    ]
-    if plan["early_smoke"]:
-        expected = [{"mode": mode, "tier": "smoke", "role": "additional-probe"}, *expected]
-    if not isinstance(steps, list) or steps != expected:
+    if not isinstance(job["steps"], list) or job["steps"] != expected:
         problems.append(f"{label}: steps do not match the declared tiers and smoke role")
+    deadlines = plan["deadlines"]
+    if not is_positive_number(job["deadline_seconds"]):
+        problems.append(f"{label}: deadline_seconds must be a finite positive number")
+    elif (
+        isinstance(deadlines, dict)
+        and not _unknown("deadlines", deadlines, DEADLINE_KEYS)
+        and all(is_positive_number(v) for v in deadlines.values())
+        and job["deadline_seconds"] != derive_job_deadline(deadlines, expected, plan["repetitions"])
+    ):
+        problems.append(f"{label}: deadline_seconds is not derived from the plan deadlines")
     return problems
 
 
@@ -174,8 +204,17 @@ def validate_plan_body(body: object) -> list[str]:
         problems.append("run_id must be a 32 character lowercase hex UUID")
     if not COMMIT_RE.match(str(body["commit"])):
         problems.append("commit must be an exact 40 character lowercase sha")
-    if not isinstance(body["build_identity"], str) or not body["build_identity"]:
-        problems.append("build_identity must be a non-empty string")
+    builds = body["build_identity"]
+    if (
+        not isinstance(builds, dict)
+        or not builds
+        or not all(isinstance(k, str) and SHA256_RE.match(str(v)) for k, v in builds.items())
+    ):
+        problems.append("build_identity must map each runtime to a lowercase sha256")
+    elif isinstance(body["jobs"], list):
+        used = {job.get("mode") for job in body["jobs"] if isinstance(job, dict)}
+        if used - set(builds):
+            problems.append("build_identity lacks a runtime used by the jobs")
     if not SHA256_RE.match(str(body["asset_digest"])):
         problems.append("asset_digest must be a lowercase sha256")
     problems.extend(_validate_digests("input_digests", body["input_digests"]))
@@ -203,6 +242,16 @@ def validate_plan_body(body: object) -> list[str]:
     for name in ("early_smoke", "fail_fast", "require_row_ids"):
         if type(body[name]) is not bool:
             problems.append(f"{name} must be a boolean")
+    if body["require_row_ids"] is not True:
+        problems.append("require_row_ids must be true: row identity is mandatory")
+    deadlines = body["deadlines"]
+    if not isinstance(deadlines, dict):
+        problems.append("deadlines must be an object")
+    else:
+        problems.extend(_unknown("deadlines", deadlines, DEADLINE_KEYS))
+        for name, value in sorted(deadlines.items()):
+            if not is_positive_number(value):
+                problems.append(f"deadlines[{name!r}] must be a finite positive number")
     if body["early_smoke"] and "smoke" in tiers:
         problems.append("an additional smoke cannot also be a selected tier")
     required = body["required_nodeids"]
@@ -229,15 +278,18 @@ def validate_plan_body(body: object) -> list[str]:
     if not isinstance(jobs, list) or not jobs:
         problems.append("jobs must be a non-empty list")
         return problems
-    modes = [job.get("mode") if isinstance(job, dict) else None for job in jobs]
-    if len(set(map(str, modes))) != len(modes):
-        problems.append("jobs must not repeat a runtime mode")
+    keys = [(job.get("mode"), job.get("phase")) if isinstance(job, dict) else None for job in jobs]
+    if len(set(map(str, keys))) != len(keys):
+        problems.append("jobs must not repeat a runtime mode within a phase")
     for index, job in enumerate(jobs):
         problems.extend(_validate_job(index, job, body))
     if isinstance(capacity, dict) and _is_int(capacity.get("total_pairs")):
-        shares = [job.get("pairs") for job in jobs if isinstance(job, dict)]
-        if all(_is_int(share) for share in shares) and sum(shares) > capacity["total_pairs"]:
-            problems.append("job pair shares exceed the single global pair budget")
+        for phase in PHASES:
+            shares = [
+                j.get("pairs") for j in jobs if isinstance(j, dict) and j.get("phase") == phase
+            ]
+            if all(_is_int(share) for share in shares) and sum(shares) > capacity["total_pairs"]:
+                problems.append("job pair shares exceed the single global pair budget")
     if body["plan_sha256"] != _digest_of(body):
         problems.append("plan_sha256 does not match the plan contents")
     return problems
@@ -247,7 +299,7 @@ def load_plan(text: str) -> ParallelPlan:
     """Decode and strictly validate serialized plan text."""
 
     try:
-        body = json.loads(text)
+        body = loads_strict(text)
     except (TypeError, ValueError) as exc:
         raise PlanError(f"plan is not valid JSON: {type(exc).__name__}") from exc
     problems = validate_plan_body(body)
@@ -261,7 +313,7 @@ def load_plan(text: str) -> ParallelPlan:
 def build_parallel_plan(
     *,
     commit: str,
-    build_identity: str,
+    build_identity: Mapping[str, str],
     input_digests: Mapping[str, str],
     asset_digest: str,
     games: Sequence[str],
@@ -270,13 +322,15 @@ def build_parallel_plan(
     tiers: Sequence[str] = DEFAULT_TIERS,
     required_nodeids_by_tier: Mapping[str, Sequence[str]] | None = None,
     repetitions: int = MIN_TIMING_REPETITIONS,
-    deadline_seconds: float,
+    deadline_seconds: float | None = None,
+    deadlines: Mapping[str, float] | None = None,
     total_pairs: int,
     pairs_per_job: Mapping[str, int] | None = None,
     policy_digest: str,
     early_smoke: bool,
     fail_fast: bool,
     require_row_ids: bool = True,
+    matrix_workers: int | None = None,
     run_id: str | None = None,
     created_utc: str | None = None,
 ) -> ParallelPlan:
@@ -286,30 +340,52 @@ def build_parallel_plan(
     if not modes or len(set(modes)) != len(modes):
         raise PlanError("plan requires distinct explicit runtime modes")
     tiers = tuple(tiers)
-    shares = {mode: (pairs_per_job or {}).get(mode, total_pairs // len(modes)) for mode in modes}
+    ceiling = total_pairs // len(modes)
+    if matrix_workers is not None:
+        ceiling = min(ceiling, matrix_workers)
+    shares = {mode: (pairs_per_job or {}).get(mode, ceiling) for mode in modes}
     required_source = required_nodeids_by_tier or {}
     required = {tier: sorted(set(map(str, required_source.get(tier, ())))) for tier in tiers}
+    if deadlines is None:
+        if not is_positive_number(deadline_seconds):
+            raise PlanError("deadline_seconds must be a finite positive number")
+        parts = len(tiers) + 2
+        unit = float(deadline_seconds) / parts
+        deadlines = {
+            "preflight_seconds": unit,
+            "row_seconds": unit,
+            "tier_seconds": unit,
+            "repetition_seconds": unit / max(int(repetitions), 1),
+            "cleanup_seconds": unit,
+        }
+    deadlines = {key: deadlines[key] for key in sorted(deadlines)}
+    phases = (["smoke"] if early_smoke else []) + ["selected"]
     jobs = []
-    for mode in modes:
-        steps = [{"mode": mode, "tier": tier, "role": "selected-tier"} for tier in tiers]
-        if early_smoke:
-            steps = [{"mode": mode, "tier": "smoke", "role": "additional-probe"}, *steps]
-        jobs.append(
-            {
-                "job_id": job_id_for(mode),
-                "mode": mode,
-                "tiers": list(tiers),
-                "steps": steps,
-                "deadline_seconds": deadline_seconds,
-                "pairs": shares[mode],
-                "timing_rep_ids": timing_rep_ids(repetitions),
-            }
-        )
+    for phase in phases:
+        for mode in modes:
+            if phase == "smoke":
+                steps = [{"mode": mode, "tier": "smoke", "role": "additional-probe"}]
+                job_tiers, reps = ["smoke"], []
+            else:
+                steps = [{"mode": mode, "tier": tier, "role": "selected-tier"} for tier in tiers]
+                job_tiers, reps = list(tiers), timing_rep_ids(repetitions)
+            jobs.append(
+                {
+                    "job_id": job_id_for(mode, phase),
+                    "mode": mode,
+                    "phase": phase,
+                    "tiers": job_tiers,
+                    "steps": steps,
+                    "deadline_seconds": derive_job_deadline(deadlines, steps, repetitions),
+                    "pairs": shares[mode],
+                    "timing_rep_ids": reps,
+                }
+            )
     body: dict[str, Any] = {
         "schema_version": PLAN_SCHEMA_VERSION,
         "run_id": run_id or uuid.uuid4().hex,
         "commit": commit,
-        "build_identity": build_identity,
+        "build_identity": dict(sorted(build_identity.items())),
         "input_digests": dict(sorted(input_digests.items())),
         "asset_digest": asset_digest,
         "games": list(games),
@@ -321,6 +397,7 @@ def build_parallel_plan(
         "fail_fast": fail_fast,
         "require_row_ids": require_row_ids,
         "capacity": {"total_pairs": total_pairs, "policy_digest": policy_digest},
+        "deadlines": deadlines,
         "jobs": jobs,
         "created_utc": created_utc or datetime.now(UTC).isoformat(timespec="seconds"),
     }

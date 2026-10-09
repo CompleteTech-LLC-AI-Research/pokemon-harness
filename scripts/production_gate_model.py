@@ -8,6 +8,7 @@ on the loaded gate module stay visible.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from collections.abc import Iterable, Sequence
@@ -215,6 +216,13 @@ GATE_CONTROLLED_ENVIRONMENT = (
 # The gate must not inherit arbitrary pytest plugins or configuration.  The
 # async integration tests still need their pinned plugin, so load that plugin
 # explicitly alongside the gate report plugin in every child process.
+def _pytest_cache_arguments() -> tuple[str, ...]:
+    """Relocate pytest's cache only when a concurrent job names a private directory."""
+
+    directory = os.environ.get("POKERED_GATE_PYTEST_CACHE_DIR", "")
+    return ("-o", f"cache_dir={directory}") if directory else ()
+
+
 PYTEST_GATE_ARGUMENTS = (
     "--strict-config",
     "--strict-markers",
@@ -222,6 +230,7 @@ PYTEST_GATE_ARGUMENTS = (
     "pytest_asyncio.plugin",
     "-p",
     "tests._gate_report",
+    *_pytest_cache_arguments(),
 )
 
 

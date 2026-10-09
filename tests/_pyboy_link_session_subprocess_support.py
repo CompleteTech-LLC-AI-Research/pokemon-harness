@@ -120,6 +120,11 @@ def _noncython_python() -> Path:
 
 
 def _free_port() -> int:
+    from tests._parallel_runtime_port_support import reserve_port
+
+    reserved = reserve_port()
+    if reserved is not None:
+        return reserved
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     try:

@@ -63,7 +63,7 @@ def test_job_trees_are_private_new_and_refuse_symlinked_or_existing_roots(tmp_pa
     root = tmp_path / "runs"
     root.mkdir()
     tree = prepare_job_tree(root, "1" * 32, "source-job")
-    assert set(tree) == {"root", "out", "tmp", "cache", "build", "evidence", "raw"}
+    assert set(tree) == {"root", "out", "tmp", "cache", "build", "evidence", "raw", "ports"}
     assert all((path.stat().st_mode & 0o777) == 0o700 for path in tree.values())
     with pytest.raises(FileExistsError):
         prepare_job_tree(root, "1" * 32, "source-job")

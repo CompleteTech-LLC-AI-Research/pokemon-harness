@@ -13,85 +13,12 @@ import pytest
 
 from scripts.production_gate_parallel_artifacts import (
     aggregate_outcomes,
-    compare_with_sequential,
     outcome_record,
     read_terminal_artifact,
     validate_terminal_artifact,
 )
-from scripts.production_gate_parallel_plan import build_parallel_plan
-
-REQUIRED = {"unit": ["tests/test_a.py::test_one", "tests/test_a.py::test_two"], "timing": ["t::x"]}
-
-
-def make_plan(**overrides):
-    arguments = {
-        "commit": "a" * 40,
-        "build_identity": "build-1",
-        "input_digests": {"VERSIONS.md": "b" * 64},
-        "asset_digest": "c" * 64,
-        "games": ("red",),
-        "roles": ("listener", "connector"),
-        "modes": ("source", "cython"),
-        "tiers": ("unit", "timing"),
-        "required_nodeids_by_tier": REQUIRED,
-        "repetitions": 5,
-        "deadline_seconds": 30.0,
-        "total_pairs": 2,
-        "policy_digest": "d" * 64,
-        "early_smoke": False,
-        "fail_fast": False,
-    }
-    arguments.update(overrides)
-    return build_parallel_plan(**arguments)
-
-
-def counts(total):
-    return {
-        "passed": total,
-        "failed": 0,
-        "skipped": 0,
-        "xfailed": 0,
-        "xpassed": 0,
-        "errors": 0,
-        "total": total,
-    }
-
-
-def good_artifact(plan, job_id, *, pid=4242):
-    body = plan.as_dict()
-    mode = plan.job(job_id)["mode"]
-    rows = [
-        f"{mode}/{tier}/{case}"
-        for tier, cases in body["required_nodeids"].items()
-        for case in cases
-    ]
-    rows += [f"{mode}/timing/{rep}" for rep in plan.job(job_id)["timing_rep_ids"]]
-    return {
-        "schema_version": 1,
-        "run_id": body["run_id"],
-        "plan_sha256": plan.digest,
-        "job_id": job_id,
-        "mode": mode,
-        "commit": body["commit"],
-        "build_identity": body["build_identity"],
-        "input_digests": body["input_digests"],
-        "asset_digest": body["asset_digest"],
-        "pid": pid,
-        "child_exit_status": 0,
-        "started_utc": "2026-10-09T00:00:00+00:00",
-        "finished_utc": "2026-10-09T00:00:01+00:00",
-        "fresh_run": True,
-        "diagnostic_reuse": False,
-        "runtime": {"pyboy_mode": mode},
-        "tiers": [
-            {"name": "unit", "status": "PASS", "counts": counts(2), "returncodes": [0]},
-            {"name": "timing", "status": "PASS", "counts": counts(5), "returncodes": [0] * 5},
-        ],
-        "rows": rows,
-        "gate_problems": [],
-        "cancellation": "",
-        "overall": "PASS",
-    }
+from scripts.production_gate_parallel_plan import PlanError
+from tests._parallel_runtime_report_support import counts, good_artifact, make_plan
 
 
 def problems_for(plan, artifact, job_id="source-job", **kwargs):
@@ -172,27 +99,23 @@ def set_tier(index, **changes):
             "timing repetitions",
         ),
         ("missing returncodes", set_tier(0, returncodes=None), "returncodes"),
-        (
-            "missing required row",
-            lambda a: a["rows"].remove("source/unit/tests/test_a.py::test_one"),
-            "missing required rows",
-        ),
+        ("missing required row", lambda a: a["rows"].pop(0), "missing required rows"),
         ("duplicate row", lambda a: a["rows"].append(a["rows"][0]), "duplicate row"),
         (
-            "unplanned row",
-            lambda a: a["rows"].append("source/unit/tests/other.py::x"),
-            "unplanned rows",
+            "row beyond the tier total",
+            lambda a: a["rows"].append(
+                {**a["rows"][0], "id": "source/unit/tests/other.py::x", "case": "tests/other.py::x"}
+            ),
+            "rows but the tier reports",
         ),
         (
             "row from another runtime",
-            lambda a: a["rows"].append("cython/unit/x"),
+            lambda a: a["rows"].append({**a["rows"][0], "runtime": "cython"}),
             "different runtime",
         ),
-        (
-            "missing timing repetition row",
-            lambda a: a["rows"].remove("source/timing/timing-rep-5"),
-            "missing required rows",
-        ),
+        ("missing timing repetition row", lambda a: a["rows"].pop(), "timing repetition"),
+        ("counts-only artifact", set_key("rows", []), "non-empty list"),
+        ("string rows", set_key("rows", ["source/unit/x"]), "structured row record"),
         ("unknown key", set_key("extra", 1), "keys differ"),
         ("missing key", lambda a: a.pop("tiers"), "keys differ"),
     ],
@@ -231,11 +154,9 @@ def test_totals_alone_cannot_authorise_a_pass_when_row_identity_is_required():
     artifact = good_artifact(plan, "source-job")
     artifact["rows"] = []
     found = problems_for(plan, artifact)
-    assert any("missing required rows" in item for item in found)
-    relaxed = make_plan(require_row_ids=False)
-    relaxed_artifact = good_artifact(relaxed, "source-job")
-    relaxed_artifact["rows"] = []
-    assert problems_for(relaxed, relaxed_artifact) == []
+    assert any("non-empty list" in item for item in found)
+    with pytest.raises(PlanError, match="require_row_ids"):
+        make_plan(require_row_ids=False)
 
 
 def write_artifact(root, body, name="terminal.json"):
@@ -328,53 +249,3 @@ def test_aggregate_rejects_missing_duplicate_unknown_and_tampered_outcomes():
     report = aggregate_outcomes(plan, tampered)
     assert report["overall"] == "FAIL"
     assert any("re-validation failed" in p for p in report["problems"])
-
-
-def sequential_summary(plan, **changes):
-    body = plan.as_dict()
-    summary = {
-        "commit": body["commit"],
-        "build_identity": body["build_identity"],
-        "asset_digest": body["asset_digest"],
-        "input_digests": body["input_digests"],
-        "tiers": body["tiers"],
-        "repetitions": body["repetitions"],
-        "total_pairs": body["capacity"]["total_pairs"],
-        "policy_digest": body["capacity"]["policy_digest"],
-        "overall": "PASS",
-        "elapsed_seconds": 100.0,
-    }
-    summary.update(changes)
-    return summary
-
-
-def test_the_sequential_comparison_requires_identical_identities_and_two_passes():
-    plan = make_plan()
-    parallel = {"overall": "PASS", "elapsed_seconds": 50.0}
-    compared = compare_with_sequential(parallel, sequential_summary(plan), plan)
-    assert compared == {
-        "status": "COMPARED",
-        "parallel_seconds": 50.0,
-        "sequential_seconds": 100.0,
-        "speedup": 2.0,
-    }
-    for changes in (
-        {"commit": "f" * 40},
-        {"repetitions": 6},
-        {"total_pairs": 4},
-        {"tiers": ["unit"]},
-    ):
-        refused = compare_with_sequential(parallel, sequential_summary(plan, **changes), plan)
-        assert refused["status"] == "REFUSED"
-    assert (
-        compare_with_sequential(
-            {"overall": "FAIL", "elapsed_seconds": 5.0}, sequential_summary(plan), plan
-        )["status"]
-        == "REFUSED"
-    )
-    assert (
-        compare_with_sequential(parallel, sequential_summary(plan, elapsed_seconds=0), plan)[
-            "status"
-        ]
-        == "REFUSED"
-    )
