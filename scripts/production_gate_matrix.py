@@ -866,18 +866,22 @@ def run_matrix_tier(
             failure_details_omitted=failure_details_omitted,
         )
         # Publish the assembled tier while signal deferral is still installed.  If
-        # the restored handler raises (``default_int_handler`` or a raising custom
-        # callable), a ``SIGINT`` delivered between ``restore()`` and the caller's
-        # receipt of the return value surfaces as ``KeyboardInterrupt`` and the
-        # value never reaches the caller; without a durable copy the orchestrator
-        # would then replace an executed tier with an empty ``INTERRUPTED`` row.
-        # A handler that ignores or merely runs on the signal never raises there,
-        # and ``SIG_DFL`` ends the process.  The sink is the runtime's
-        # ``completed_tiers`` mapping, which every cancellation handoff already
-        # consults, so the loaded evidence survives that window in the raising
-        # case.  Restoration is best effort (``restore()`` suppresses
-        # ``ValueError``/``OSError``), and a real assembly or publication error
-        # takes precedence over a recorded deferred cancellation.
+        # the restored handler raises, a ``SIGINT`` delivered between ``restore()``
+        # and the caller's receipt of the return value interrupts the return with
+        # that handler's own exception (``default_int_handler`` raises
+        # ``KeyboardInterrupt``; a custom callable may raise anything) and the value
+        # never reaches the caller; without a durable copy a ``KeyboardInterrupt``
+        # would make the orchestrator replace an executed tier with an empty
+        # ``INTERRUPTED`` row.  A handler that ignores or merely runs on the signal
+        # never raises there, and ``SIG_DFL`` ends the process.  The sink is the
+        # runtime's ``completed_tiers`` mapping, which the ``KeyboardInterrupt``
+        # cancellation handoffs consult, so the loaded evidence is recoverable in
+        # that case; an ordinary exception from a custom handler (for example
+        # ``ValueError``) may bypass the typed cancellation handling, so the stored
+        # copy is not a universal recovery.  Restoration is best effort
+        # (``restore()`` suppresses ``ValueError``/``OSError``), and a real
+        # assembly or publication error takes precedence over a recorded deferred
+        # cancellation.
         if publish is not None:
             publish(tier_result)
     finally:

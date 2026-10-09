@@ -207,10 +207,12 @@ class _DeferredSigintGuard:
     re-installs the saved handler on a best-effort basis (``ValueError`` and
     ``OSError`` are suppressed), so the guard promises neither a successful
     operating-system restoration nor any protection outside this window.  What
-    a later SIGINT does follows the restored handler: a raising handler such as
-    ``default_int_handler`` raises ``KeyboardInterrupt``, ``SIG_IGN`` drops the
-    signal, ``SIG_DFL`` ends the process, and a non-raising callable merely
-    runs.  Dispatch and teardown keep their ordinary immediate cancellation
+    a later SIGINT does follows the restored handler: ``default_int_handler``
+    raises ``KeyboardInterrupt``, a custom callable raises whatever it raises or
+    merely runs, ``SIG_IGN`` drops the signal and ``SIG_DFL`` ends the process;
+    only a ``KeyboardInterrupt`` (or a subclass) reaches the cancellation
+    handoffs that recover published tiers, so any other exception may bypass
+    them.  Dispatch and teardown keep their ordinary immediate cancellation
     behavior.
 
     A previous handler that Python cannot hand back (``signal.getsignal`` reports
