@@ -100,14 +100,35 @@ def test_a_virtual_environment_is_copied_redirected_and_frozen_against_real_writ
         thaw_and_remove(tmp_path / "runtime")
 
 
-def test_a_writable_base_interpreter_or_stdlib_refuses_the_run_instead_of_claiming_protection(
+def test_a_writable_base_prefix_is_copied_frozen_and_the_venv_is_rebased_onto_it(
     tmp_path, monkeypatch
 ):
     original, snapshot, venv = make_environment(tmp_path)
-    writable_stdlib = tmp_path / "stdlib"
-    writable_stdlib.mkdir()
-    (writable_stdlib / "os.py").write_text("", encoding="utf-8")
-    monkeypatch.setattr(inputs, "probe_runtime", fake_probe(venv, stdlib=str(writable_stdlib)))
+    base = tmp_path / "managed-python"
+    (base / "bin").mkdir(parents=True)
+    (base / "lib" / "python3").mkdir(parents=True)
+    (base / "bin" / "python3").write_text("#!interpreter\n", encoding="utf-8")
+    (base / "lib" / "python3" / "os.py").write_text("", encoding="utf-8")
+    (venv / "bin" / "python").unlink()
+    (venv / "bin" / "python").symlink_to(base / "bin" / "python3")
+    (venv / "pyvenv.cfg").write_text(f"home = {base}/bin\n", encoding="utf-8")
+
+    def probe(interpreter, pythonpath):
+        private = str(tmp_path / "runtime") in interpreter
+        root = Path(interpreter).parents[1]
+        home = next((tmp_path / "runtime").glob("base-*"), base) if private else base
+        return {
+            "real_executable": str(home / "bin" / "python3"),
+            "prefix": str(root),
+            "base_prefix": str(base),
+            "path": [str(root / "lib" / "python3" / "site-packages")],
+            "stdlib": str(home / "lib" / "python3"),
+            "platstdlib": str(home / "lib" / "python3"),
+            "sites": [str(root / "lib" / "python3" / "site-packages")],
+            "libraries": [],
+        }
+
+    monkeypatch.setattr(inputs, "probe_runtime", probe)
     try:
         result = inputs.build_private_runtimes(
             {"source": str(venv / "bin" / "python")},
@@ -115,9 +136,21 @@ def test_a_writable_base_interpreter_or_stdlib_refuses_the_run_instead_of_claimi
             checkout=snapshot,
             destination=tmp_path / "runtime",
         )
+        info = result["source"]
+        assert info["problems"] == [], info["problems"]
+        private_base = Path(info["manifest"]["private_base"])
+        private_env = Path(info["manifest"]["private_prefix"])
+        assert (private_base / "lib" / "python3" / "os.py").is_file()
+        assert str(private_base) in (private_env / "pyvenv.cfg").read_text()
+        assert str(base) not in (private_env / "pyvenv.cfg").read_text()
+        assert os.readlink(private_env / "bin" / "python").startswith(str(private_base))
+        with pytest.raises(PermissionError):
+            (private_base / "lib" / "python3" / "os.py").write_text("tampered")
+        assert os.access(base / "lib" / "python3" / "os.py", os.W_OK), (
+            "the shared base is untouched"
+        )
     finally:
         thaw_and_remove(tmp_path / "runtime")
-    assert any("stdlib is writable by the executing UID" in p for p in result["source"]["problems"])
 
 
 def test_a_mapped_library_the_executing_uid_could_replace_is_refused(

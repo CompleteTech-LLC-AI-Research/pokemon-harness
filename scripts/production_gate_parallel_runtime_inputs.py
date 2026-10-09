@@ -159,6 +159,30 @@ def redirect_editable_paths(copy: Path, original: Path, snapshot: Path) -> int:
     return changed
 
 
+def rebase_links(copy: Path, old: Path, new: Path) -> int:
+    """Point absolute links and ``pyvenv.cfg`` text of a private venv copy at the private base."""
+
+    changed, old_text = 0, str(old)
+    bin_dir = copy / "bin"
+    for path in bin_dir.iterdir() if bin_dir.is_dir() else ():
+        if path.is_symlink() and os.readlink(path).startswith(old_text):
+            target = str(new) + os.readlink(path)[len(old_text) :]
+            path.unlink()
+            path.symlink_to(target)
+            changed += 1
+    cfg = copy / "pyvenv.cfg"
+    if cfg.is_file() and old_text in cfg.read_text(encoding="utf-8"):
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace(old_text, str(new)), encoding="utf-8"
+        )
+        changed += 1
+    return changed
+
+
+def _copy_frozen(source: Path, target: Path) -> None:
+    shutil.copytree(source, target, symlinks=True, ignore=shutil.ignore_patterns("__pycache__"))
+
+
 def build_private_runtimes(
     interpreters: Mapping[str, str],
     *,
@@ -166,7 +190,13 @@ def build_private_runtimes(
     checkout: Path,
     destination: Path,
 ) -> dict[str, dict[str, Any]]:
-    """Resolve, classify and (for virtual environments) copy and freeze each runtime."""
+    """Resolve, classify and copy-and-freeze whatever the executing UID could modify.
+
+    The base prefix (interpreter, stdlib) is copied only when the UID can write it; the virtual
+    environment is always copied.  Afterwards the interpreter the job will really run is resolved
+    again and every default sys.path entry, its stdlib and its executable must lie in a frozen copy,
+    in the snapshot, or in a tree this UID cannot write.
+    """
 
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     pythonpath = os.pathsep.join(str(checkout / part) for part in ("src", "vendor/pyboy-src", "."))
@@ -177,30 +207,34 @@ def build_private_runtimes(
         prefix, base = Path(info["prefix"]), Path(info["base_prefix"])
         problems: list[str] = []
         protected: list[str] = []
-        for label, root in (
-            ("interpreter", info["real_executable"]),
-            ("stdlib", info["stdlib"]),
-            ("platstdlib", info["platstdlib"]),
-        ):
-            if not Path(root).exists():
-                continue
-            found = writable_entries(Path(root))
-            if found:
-                problems.append(
-                    f"{mode}: the {label} is writable by the executing UID and a private copy of "
-                    f"the base prefix is not implemented: {found[:3]}"
-                )
+        base_writable = False
+        for root in (info["real_executable"], info["stdlib"], info["platstdlib"]):
+            if Path(root).exists():
+                if writable_entries(Path(root)):
+                    base_writable = True
+                else:
+                    protected.append(str(root))
+        private_base: Path | None = None
+        if base_writable:
+            if not Path(info["real_executable"]).is_relative_to(base):
+                problems.append(f"{mode}: the writable interpreter lies outside its base prefix")
             else:
-                protected.append(str(root))
+                if f"base:{base}" not in copies:
+                    target = destination / f"base-{len(copies)}"
+                    _copy_frozen(base, target)
+                    freeze_tree(target)
+                    problems.extend(f"{mode}: {item}" for item in write_denied_problems(target))
+                    copies[f"base:{base}"] = target
+                private_base = copies[f"base:{base}"]
         private_prefix: Path | None = None
         run_interpreter = interpreter
         if prefix != base:
             if str(prefix) not in copies:
                 target = destination / f"env-{len(copies)}"
-                shutil.copytree(
-                    prefix, target, symlinks=True, ignore=shutil.ignore_patterns("__pycache__")
-                )
+                _copy_frozen(prefix, target)
                 redirect_editable_paths(target, project_root, checkout)
+                if private_base is not None:
+                    rebase_links(target, base, private_base)
                 freeze_tree(target)
                 problems.extend(f"{mode}: {item}" for item in write_denied_problems(target))
                 copies[str(prefix)] = target
@@ -211,21 +245,8 @@ def build_private_runtimes(
                 if candidate.is_relative_to(prefix)
                 else private_prefix / "bin" / "python"
             )
-            # The default sys.path of the interpreter the job will really run, not of the original.
-            info = {**info, "path": probe_runtime(run_interpreter, pythonpath)["path"]}
-            for entry in info["path"]:
-                where = Path(entry) if entry else None
-                if (
-                    where is None
-                    or where.is_relative_to(private_prefix)
-                    or where.is_relative_to(checkout)
-                ):
-                    continue
-                if where.exists() and writable_entries(where, 1):
-                    problems.append(
-                        f"{mode}: the private interpreter's default sys.path names {entry}, which "
-                        "the executing UID can modify"
-                    )
+        elif private_base is not None:
+            run_interpreter = str(private_base / Path(info["real_executable"]).relative_to(base))
         else:
             for site_dir in info["sites"]:
                 found = writable_entries(Path(site_dir))
@@ -234,11 +255,33 @@ def build_private_runtimes(
                         f"{mode}: a non-venv interpreter with writable site directories needs a "
                         f"private copy: {found[:3]}"
                     )
+        frozen = [root for root in (private_prefix, private_base) if root is not None]
+        if run_interpreter != interpreter:
+            # What the job will really run, not what was originally resolved.
+            final = probe_runtime(run_interpreter, pythonpath)
+            info = {**info, "path": final["path"]}
+            if private_base is not None:
+                for label in ("real_executable", "stdlib"):
+                    if not Path(final[label]).is_relative_to(private_base):
+                        problems.append(
+                            f"{mode}: the private interpreter's {label} is not in the copy"
+                        )
+            for entry in final["path"]:
+                where = Path(entry) if entry else None
+                if where is None or any(where.is_relative_to(r) for r in [*frozen, checkout]):
+                    continue
+                if where.exists() and writable_entries(where, 1):
+                    problems.append(
+                        f"{mode}: the private interpreter's default sys.path names {entry}, which "
+                        "the executing UID can modify"
+                    )
         libraries: list[str] = []
         for library in info["libraries"]:
             path = Path(library)
-            if private_prefix is not None and path.is_relative_to(prefix):
-                continue  # served from the frozen private copy
+            if (private_prefix is not None and path.is_relative_to(prefix)) or (
+                private_base is not None and path.is_relative_to(base)
+            ):
+                continue  # served from a frozen private copy
             if writable_entries(path, 1) or os.access(path.parent, os.W_OK):
                 problems.append(f"{mode}: the linked library {library} is writable by this UID")
             else:
@@ -251,6 +294,7 @@ def build_private_runtimes(
                 "prefix": str(prefix),
                 "base_prefix": str(base),
                 "private_prefix": str(private_prefix) if private_prefix else None,
+                "private_base": str(private_base) if private_base else None,
                 "kernel_protected": protected,
                 "protected_libraries": libraries,
                 "default_sys_path": list(info["path"]),
@@ -262,6 +306,7 @@ def build_private_runtimes(
 __all__ = (
     "build_private_runtimes",
     "probe_runtime",
+    "rebase_links",
     "redirect_editable_paths",
     "runtime_digest",
     "runtime_pin_problem",

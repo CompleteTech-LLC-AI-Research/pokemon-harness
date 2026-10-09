@@ -15,7 +15,8 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         ),
         (
             "private frozen copy of the interpreter environment with kernel-checked protection of "
-            "the base interpreter, stdlib and mapped libraries (a writable base refuses the run)"
+            "the base interpreter and stdlib (a writable base is copied too), the real default sys.path and "
+            "mapped libraries; each runtime digest frozen in the plan and verified by the worker"
         ),
         (
             "owner-held listening sockets handed to the production listeners with validation and "
@@ -51,8 +52,8 @@ COVERAGE_DECLARATION: dict[str, list[str]] = {
         "operator allocation (#85/#86), #106 policy and the 18 orientation fixtures are unmet",
         "nothing in this candidate has been executed; authored controls are not gameplay evidence",
         (
-            "not implemented: private copy of a writable base interpreter prefix, cgroup ownership "
-            "without host delegation, runtime manifest pinned in the plan, arbitration of child rows"
+            "not implemented: writable site dirs of a non-venv interpreter, cgroup ownership without "
+            "host delegation, in-flight child admission events, arbitration of child rows"
         ),
         "release status remains PARTIAL",
     ],

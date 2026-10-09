@@ -1787,10 +1787,14 @@ the real-ROM qualification is a separate requirement.
   environment is resolved too (interpreter, stdlib, default `sys.path`, site directories, shared libraries a
   real run maps): a virtual environment is copied into a private tree whose editable installs are redirected
   to the snapshot and which is frozen like the snapshot, and every job runs the copy's interpreter. The base
-  interpreter, its stdlib and every other mapped library must already be unwritable for the executing UID by
-  the kernel's own access check, otherwise the run is refused (copying a base prefix is not implemented).
-  Permission bits refuse ordinary writes by the job; they do not bind the owner against a deliberate `chmod`.
-  No host or global permission is changed.
+  interpreter and stdlib that the executing UID could write are copied and frozen too (the copied venv is
+  rebased onto the private base), the interpreter the job will really run is resolved again and its default
+  `sys.path`, executable and stdlib must lie in a frozen copy, the snapshot or a tree the UID cannot write,
+  and every other mapped library must be unwritable by the kernel's own access check, otherwise the run is
+  refused. A content digest of each private runtime (names, bytes, link targets, the snapshot path
+  normalised) is frozen in the plan and the worker refuses a runtime that does not match it. Permission bits
+  refuse ordinary writes by the job; they do not bind the owner against a deliberate `chmod`. No host or
+  global permission is changed.
 - **Ports.** Each job gets a disjoint loopback port range and an owner-held listener broker. A consumer
   leases a port: the orchestrator binds and listens the socket itself and keeps it, and the production
   listener (`NetworkBackend.listen`, the timed listener and its MCP owner, the serial-link listener and the
@@ -1846,6 +1850,6 @@ the real-ROM qualification is a separate requirement.
 Exclusions that remain: the full real-ROM dual-runtime run over the six tiers, the elapsed-time comparison
 with sequential execution on equivalent conditions, the operator allocation (#85/#86), the #106 policy and
 the 18 orientation fixtures are not provided by this change. Also not implemented: a private copy of a
-writable base interpreter prefix, cgroup ownership on hosts without delegation, pinning the runtime manifest
-in the plan, and arbitration between the children's row admission. The authored controls drive real child processes
+non-venv interpreter whose site directories are writable, cgroup ownership on hosts without delegation,
+in-flight child admission events, and arbitration between the children's row admission. The authored controls drive real child processes
 but never run a gate or ROM and are not gameplay or performance evidence. Release status remains PARTIAL.
