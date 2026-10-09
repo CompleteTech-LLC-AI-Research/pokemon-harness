@@ -251,7 +251,10 @@ def _nothing_listens(port):
     return False
 
 
-def test_the_mcp_and_serial_listeners_fail_closed_in_a_configured_job_for_an_unleased_port(owner):
+def test_the_mcp_serial_and_network_backend_listeners_fail_closed_in_a_configured_job_for_an_unleased_port(
+    owner,
+):
+    from pokered_harness.link.network_backend import NetworkBackend
     from pokered_harness.link.serial_link import TcpSerialLink
     from pokered_harness.mcp_server_remote_contract import _bind_listener
 
@@ -263,4 +266,8 @@ def test_the_mcp_and_serial_listeners_fail_closed_in_a_configured_job_for_an_unl
     port = _unused_port()
     with pytest.raises(handoff.HandoffError):
         TcpSerialLink.listen(port, "blue", accept_timeout_s=0.2)
+    assert _nothing_listens(port)
+    port = _unused_port()
+    with pytest.raises(handoff.HandoffError):
+        NetworkBackend.listen(port, accept_timeout_s=0.2)
     assert _nothing_listens(port)
