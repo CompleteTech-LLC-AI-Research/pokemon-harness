@@ -865,13 +865,19 @@ def run_matrix_tier(
             failure_details=failure_details,
             failure_details_omitted=failure_details_omitted,
         )
-        # Publish the assembled tier while signal deferral is still installed.  A
-        # ``SIGINT`` delivered between ``restore()`` and the caller's receipt of the
-        # return value is raised by the restored handler, so the value never reaches
-        # the caller; without a durable copy the orchestrator would then replace an
-        # executed tier with an empty ``INTERRUPTED`` row.  The sink is the runtime's
+        # Publish the assembled tier while signal deferral is still installed.  If
+        # the restored handler raises (``default_int_handler`` or a raising custom
+        # callable), a ``SIGINT`` delivered between ``restore()`` and the caller's
+        # receipt of the return value surfaces as ``KeyboardInterrupt`` and the
+        # value never reaches the caller; without a durable copy the orchestrator
+        # would then replace an executed tier with an empty ``INTERRUPTED`` row.
+        # A handler that ignores or merely runs on the signal never raises there,
+        # and ``SIG_DFL`` ends the process.  The sink is the runtime's
         # ``completed_tiers`` mapping, which every cancellation handoff already
-        # consults, so the loaded evidence survives that window.
+        # consults, so the loaded evidence survives that window in the raising
+        # case.  Restoration is best effort (``restore()`` suppresses
+        # ``ValueError``/``OSError``), and a real assembly or publication error
+        # takes precedence over a recorded deferred cancellation.
         if publish is not None:
             publish(tier_result)
     finally:

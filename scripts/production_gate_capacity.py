@@ -200,9 +200,18 @@ class _DeferredSigintGuard:
     cancellation delivered inside that short, in-memory window used to escape
     with the evidence unreachable, so the orchestrator replaced an executed
     failure with an empty ``INTERRUPTED`` row.  The window performs no I/O and
-    no cleanup, so the signal is recorded and re-raised as a typed cancellation
-    once the complete tier result exists.  Dispatch and teardown keep their
-    ordinary immediate cancellation behavior.
+    no cleanup, so the signal is recorded and, once the complete tier result
+    exists, the supervisor re-raises it as a typed cancellation.  That holds
+    only while finalization completes: a real assembly or publication error
+    takes precedence and the recorded cancellation is dropped.  ``restore()``
+    re-installs the saved handler on a best-effort basis (``ValueError`` and
+    ``OSError`` are suppressed), so the guard promises neither a successful
+    operating-system restoration nor any protection outside this window.  What
+    a later SIGINT does follows the restored handler: a raising handler such as
+    ``default_int_handler`` raises ``KeyboardInterrupt``, ``SIG_IGN`` drops the
+    signal, ``SIG_DFL`` ends the process, and a non-raising callable merely
+    runs.  Dispatch and teardown keep their ordinary immediate cancellation
+    behavior.
 
     A previous handler that Python cannot hand back (``signal.getsignal`` reports
     ``None``: a handler installed outside Python) is never replaced.  Deferral is

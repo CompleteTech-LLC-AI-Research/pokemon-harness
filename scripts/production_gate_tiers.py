@@ -393,9 +393,13 @@ def run_tier(
             failure_details_omitted=failure_details_omitted,
         )
         # Durable publication before the signal handler is restored, for the same
-        # reason as the matrix supervisor: otherwise a ``SIGINT`` landing between
-        # ``restore()`` and the caller's receipt of the return value loses every
-        # accumulated timing iteration.
+        # reason as the matrix supervisor: if the restored handler raises
+        # (``default_int_handler`` or a raising custom callable), a ``SIGINT``
+        # landing between ``restore()`` and the caller's receipt of the return
+        # value would lose every accumulated timing iteration.  A handler that
+        # ignores or merely runs on the signal never raises there, ``SIG_DFL``
+        # ends the process, and a real assembly or publication error takes
+        # precedence over a recorded deferred cancellation.
         if publish is not None:
             publish(tier_result)
     finally:
