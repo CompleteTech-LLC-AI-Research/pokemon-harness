@@ -29,6 +29,7 @@ from scripts.production_gate_parallel_capacity import (
     PairBudget,
     capacity_loss_probe,
 )
+from scripts.production_gate_parallel_cgroup import kernel_ownership
 from scripts.production_gate_parallel_comparison import compare_bundles
 from scripts.production_gate_parallel_identity import measure_commit, measure_identity
 from scripts.production_gate_parallel_isolation import (
@@ -128,6 +129,15 @@ def run_parallel_cli(
         parser.error("--parallel-runtimes requires a valid --capacity-policy")
     if args.parallel_run_root is None:
         parser.error("--parallel-runtimes requires --parallel-run-root")
+    ownership = kernel_ownership(not getattr(args, "parallel_allow_unqualified", False))
+    if not ownership["admitted"]:
+        # Before any snapshot, probe, measurement or child: the qualified mode needs kernel ownership.
+        print(
+            "parallel runtime gate refused:\n  the qualified mode requires kernel ownership of each "
+            f"job's whole process tree and it is unavailable here ({ownership['reason']}); "
+            "--parallel-allow-unqualified runs on retention evidence only and is never an acceptance"
+        )
+        return 2
     problems = list(configuration_problems)
     _head, _clean, commit_problems = measure_commit(project_root)
     problems.extend(commit_problems)
