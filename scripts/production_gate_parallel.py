@@ -466,7 +466,7 @@ def run_parallel_plan(
         """Ask the guardian to contain its subtree first, then prove it from outside."""
 
         item.owned.signal_root(signal.SIGTERM)
-        limit = clock() + 2 * grace_seconds + 3.0
+        limit = clock() + 3 * grace_seconds + 3.0  # the guardian's own worst case is ~3x grace + 1
         while item.process.poll() is None and clock() < limit:
             sleeper(0.02)
         receipt = item.owned.terminate(grace_seconds=grace_seconds, clock=clock, sleeper=sleeper)
