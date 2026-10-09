@@ -76,3 +76,98 @@ def test_callee_module_restriction_remains_authoritative():
     other = ast.parse("from other_context import nullcontext").body[0]
     assert support._binding_is_the_callee_import(canonical, "nullcontext") is True
     assert support._binding_is_the_callee_import(other, "nullcontext") is False
+
+
+# --- #604: literal and/or folding returns Python's operand value AND type ------
+
+
+def _fold(expression):
+    return support._literal_value(ast.parse(expression, mode="eval").body)
+
+
+def _python(expression):
+    return eval(expression, {"__builtins__": {}})  # fixed literal-only test oracle
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "2 or 0",
+        "0 and 3",
+        "[] or [1]",
+        "[1] and []",
+        "(2 or 0) == 1",
+        "(2 and 3) == 3",
+        "(0 or 2) == 2",
+        "None or 'x'",
+        "'' and 5",
+        "0.0 or None",
+        "1 and 2 and 3",
+        "1 and 0 and 3",
+        "0 or '' or []",
+        "0 or '' or [7]",
+        "(1, 2) and {3: 4}",
+        "{} or {5}",
+        "not (0 or 2)",
+        "(0 or 2) + 1",
+        "1 and (0 or 2)",
+        "(1 and 0) or 7",
+        "3 or 4 or 5",
+        "(1 == 1) and 'ok'",
+        "b'' or b'z'",
+        "0 and 0.5",
+        "1.5 or 0",
+        # decisive operand first: the unreached operand is never evaluated by Python either
+        "0 and missing",
+        "2 or missing",
+        "[] and call()",
+        "'x' or other.attr",
+        "0 and (1 / 0)",
+        "1 or items[0]",
+        "(0 or 2) or missing",
+    ),
+)
+def test_literal_boolop_matches_independent_python_value_and_type(expression):
+    expected = _python(expression)
+    folded = _fold(expression)
+    assert type(folded) is type(expected)
+    assert folded == expected
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "missing and 1",
+        "missing or 1",
+        "1 and missing",
+        "0 or missing",
+        "[] or call()",
+        "1 and other.attr",
+        "x[0] or 2",
+        "(1 and 1) and missing",
+        "0 or (1 / 0)",
+        "1 and (1 / 0)",
+        "1 and 'a' + 1",
+        "(missing or 1) and 2",
+    ),
+)
+def test_boolop_with_an_unresolved_evaluated_operand_stays_conservative(expression):
+    assert _fold(expression) is support._NOT_LITERAL
+
+
+def test_boolop_fold_never_executes_runtime_code():
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return 1
+
+    assert _fold("probe() or 1") is support._NOT_LITERAL
+    assert calls == []
+    tree = ast.parse(inspect.getsource(support._literal_value))
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert not called & {"eval", "exec", "compile", "__import__"}
