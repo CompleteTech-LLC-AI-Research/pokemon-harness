@@ -1,7 +1,29 @@
 """Integration of the separate holder and guardian identities into job ownership."""
 
+import signal
 from collections.abc import Mapping
 from typing import Any
+
+
+def signal_guardians(running: list[Any], problems: list[str]) -> None:
+    """A failed sibling notification cannot undo a latched containment loss."""
+
+    for item in tuple(running):
+        try:
+            view = item.process.guardian_status
+            view.drain()
+            if view.ready:
+                item.owned.signal_root(signal.SIGTERM)
+        except Exception as exc:  # noqa: BLE001 - retain failure and continue other owned jobs
+            problems.append(f"{item.job_id}: stop notification failed: {type(exc).__name__}")
+
+
+def latch_holder_loss(budget: Any, hub: Any, job_id: str, reason: str) -> None:
+    """Commit loss before cleanup or receipt reading can raise; admission cannot reopen."""
+
+    detail = f"{job_id}: {reason}"
+    budget.mark_lost(detail)
+    hub.lose(detail)
 
 
 def observe_cgroup_membership(tree: Any) -> None:
@@ -41,6 +63,38 @@ def receipt_loss(
     if not (guardian and guardian.get("phase") == "final"):
         return "the job's guardian was lost"
     return None
+
+
+def record_cgroup_receipt(tree: Any, guardian: Any, problems: list[str]) -> bool:
+    """Keep authenticated G join evidence after a fast exit, before kernel cleanup.
+
+    The caller has authenticated the final receipt against G's recorded instance.
+    G's existing producer attempts and reads back the exact allocated cgroup before
+    launching W. An empty error on that final receipt records that completed step;
+    this does not assert that the cgroup was emptied or that H supplied G's identity.
+    """
+
+    if problems or not isinstance(guardian, Mapping) or tree.cgroup is None:
+        return False
+    expected = tree.status.guardian if tree.holder_mode else (tree.root_pid, tree.root_start)
+    if (
+        expected is None
+        or expected != (guardian.get("guardian_pid"), guardian.get("guardian_start"))
+        or tree.cgroup.path is None
+        or guardian.get("phase") != "final"
+        or guardian.get("contained") is not True
+        or guardian.get("cgroup") != str(tree.cgroup.path)
+        or guardian.get("cgroup_error") != ""
+    ):
+        return False
+    tree.cgroup_joined = True
+    tree.cgroup_membership_evidence = {
+        "source": "authenticated-guardian-final",
+        "guardian_pid": expected[0],
+        "guardian_start": expected[1],
+        "path": str(tree.cgroup.path),
+    }
+    return True
 
 
 def holder_loss(status: Any, root: Mapping[str, Any]) -> str | None:

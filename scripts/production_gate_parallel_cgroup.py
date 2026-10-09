@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -172,7 +172,10 @@ class OwnershipError(RuntimeError):
 
 
 def qualification_after(
-    ownership: Mapping[str, object], cleanup: Mapping[str, Mapping[str, object]]
+    ownership: Mapping[str, object],
+    cleanup: Mapping[str, Mapping[str, object]],
+    *,
+    started_jobs: Collection[str] | None = None,
 ) -> dict[str, object]:
     """Final kernel-ownership truth from per-job facts, never from a label or a probe alone.
 
@@ -182,7 +185,8 @@ def qualification_after(
     """
 
     jobs: dict[str, dict[str, bool]] = {}
-    for job_id, entry in cleanup.items():
+    for job_id in cleanup if started_jobs is None else started_jobs:
+        entry = cleanup.get(job_id)
         tree = entry.get("process_tree") if isinstance(entry, Mapping) else None
         adoption = tree.get("adoption") if isinstance(tree, Mapping) else None
         group = adoption.get("cgroup") if isinstance(adoption, Mapping) else None

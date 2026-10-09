@@ -299,9 +299,13 @@ def _authentic(
 ) -> list[str]:
     mac = body.pop("mac", None)
     text = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    if not isinstance(mac, str) or not hmac.compare_digest(
-        mac, hmac.new(secret, text, hashlib.sha256).hexdigest()
+    if (
+        not isinstance(mac, str)
+        or len(mac) != 64
+        or any(character not in "0123456789abcdef" for character in mac)
     ):
+        return ["holder receipt is not authenticated by the producer's key"]
+    if not hmac.compare_digest(mac, hmac.new(secret, text, hashlib.sha256).hexdigest()):
         return ["holder receipt is not authenticated by the producer's key"]
     if (
         pid is None

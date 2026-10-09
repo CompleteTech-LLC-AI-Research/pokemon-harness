@@ -75,6 +75,7 @@ def terminate_tree(
             "available": bool(tree.cgroup is not None and tree.cgroup.available),
             "reason": tree.cgroup.reason if tree.cgroup is not None else "not configured",
             "joined": tree.cgroup_joined,
+            "membership_evidence": getattr(tree, "cgroup_membership_evidence", None),
             "emptied": emptied,
         },
     }

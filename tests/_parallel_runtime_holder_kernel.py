@@ -31,14 +31,25 @@ class Clock:
 class Kernel:
     """Only H's direct children are visible; a killed nested child can be reparented."""
 
-    def __init__(self, children=(), *, listing="normal", unpinnable=False, nested=False):
+    def __init__(
+        self,
+        children=(),
+        *,
+        listing="normal",
+        unpinnable=False,
+        nested=False,
+        unreadable_stat=False,
+    ):
         self.clock = Clock()
         self.children = {pid: True for pid in children}
         self.listing, self.unpinnable, self.nested = listing, unpinnable, nested
         self.signals, self.reaped, self.closed = [], [], []
         self.exhausted = True
+        self.unreadable_stat = unreadable_stat
 
     def stat(self, pid, field):
+        if self.unreadable_stat and pid in self.children:
+            return None
         if field == 19:
             return pid + 10
         return 4242 if pid in self.children else 100
@@ -153,7 +164,7 @@ class Kernel:
         return result
 
 
-def startup(tmp_path, *, owner_present=True, pdeath=True, subreaper=True):
+def startup(tmp_path, *, owner_present=True, owner_parents=(), pdeath=True, subreaper=True):
     """Run actual startup through its pre-fork checks, with Popen prohibited."""
 
     nodes = ast.parse(HOLDER_SOURCE).body
@@ -173,6 +184,7 @@ def startup(tmp_path, *, owner_present=True, pdeath=True, subreaper=True):
         and not (isinstance(node, ast.FunctionDef) and node.name == "stat_field")
     ]
     flag, calls = ctypes.c_int(0), []
+    parents = iter(owner_parents)
 
     def prctl(number, *args):
         calls.append(number)
@@ -208,7 +220,7 @@ def startup(tmp_path, *, owner_present=True, pdeath=True, subreaper=True):
             byref=ctypes.byref,
         ),
         "os": SimpleNamespace(
-            getppid=lambda: 100 if owner_present else 1,
+            getppid=lambda: next(parents, 100 if owner_present else 1),
             getpid=lambda: 4242,
             read=lambda *a: b"6b" * 32,
             close=lambda fd: None,

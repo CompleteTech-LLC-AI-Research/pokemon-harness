@@ -859,7 +859,13 @@ def _authentic(
     expected = hmac.new(
         secret, json.dumps(body, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
     ).hexdigest()
-    if not isinstance(mac, str) or not hmac.compare_digest(mac, expected):
+    if (
+        not isinstance(mac, str)
+        or len(mac) != 64
+        or any(character not in "0123456789abcdef" for character in mac)
+    ):
+        return ["guardian receipt is not authenticated by the producer's key"]
+    if not hmac.compare_digest(mac, expected):
         return ["guardian receipt is not authenticated by the producer's key"]
     if expected_pid is not None and body.get("guardian_pid") != expected_pid:
         return ["guardian receipt names a different producer process"]

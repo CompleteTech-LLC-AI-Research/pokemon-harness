@@ -30,7 +30,6 @@ from scripts import production_gate_parallel_safety as safety
 from scripts.production_gate_parallel_arbiter import ArbiterHub
 from scripts.production_gate_parallel_artifacts import (
     TERMINAL_ARTIFACT_NAME,
-    aggregate_outcomes,
     collect_partial_evidence,
     outcome_record,
     read_terminal_artifact,
@@ -53,7 +52,6 @@ from scripts.production_gate_parallel_cgroup import (
     JobCgroup,
     OwnershipError,
     kernel_ownership,
-    qualification_after,
 )
 from scripts.production_gate_parallel_holder import launch_holder
 from scripts.production_gate_parallel_identity import (
@@ -69,7 +67,13 @@ from scripts.production_gate_parallel_isolation import (
     port_range_problems,
     snapshot_tree,
 )
-from scripts.production_gate_parallel_ownership import holder_loss, receipt_loss
+from scripts.production_gate_parallel_ownership import (
+    holder_loss,
+    latch_holder_loss,
+    receipt_loss,
+    record_cgroup_receipt,
+    signal_guardians,
+)
 from scripts.production_gate_parallel_phases import (
     barrier_decision,
     jobs_in_phase,
@@ -86,8 +90,8 @@ from scripts.production_gate_parallel_processes import (
     launch_guardian,
     read_guardian_receipt,
 )
-from scripts.production_gate_parallel_reporting import _report_extras, _write_progress
-from scripts.production_gate_parallel_stopping import prepare_stops, stop_process
+from scripts.production_gate_parallel_reporting import completed_report, write_running_progress
+from scripts.production_gate_parallel_stopping import DeadlineWatch, prepare_stops, stop_process
 
 __all__ = [
     "CapacityError",
@@ -417,16 +421,20 @@ def _run_plan(
     problems.extend(port_range_problems(ranges))
     handoffs = HandoffRegistry()
 
-    def signal_guardians(_reason: str) -> None:
-        for item in tuple(
-            running
-        ):  # ready siblings are told at once; cancel waits for early startup
-            view = item.process.guardian_status  # type: ignore[attr-defined]
-            view.drain()
-            if view.ready:
-                item.owned.signal_root(signal.SIGTERM)
-
-    hub = ArbiterHub(budget.total_pairs, on_loss=signal_guardians)
+    hub = ArbiterHub(
+        budget.total_pairs, on_loss=lambda _reason: signal_guardians(running, problems)
+    )
+    deadlines = DeadlineWatch(
+        running,
+        hub,
+        body["deadlines"]["cleanup_seconds"],
+        lambda item: may_cancel_siblings(item.phase, body["fail_fast"]),
+        grace_seconds=grace_seconds,
+        clock=clock,
+        sleeper=sleeper,
+        problems=problems,
+    )
+    sleeper = deadlines.sleep
     ownership = kernel_ownership(require_kernel_ownership)
 
     def close_handoff(job_id: str) -> dict[str, Any] | None:
@@ -449,19 +457,8 @@ def _run_plan(
     load_before = os.getloadavg() if hasattr(os, "getloadavg") else ()
 
     def progress() -> None:
-        states = {
-            job_id: outcomes[job_id]["state"]
-            if job_id in outcomes
-            else ("running" if any(i.job_id == job_id for i in running) else "pending")
-            for job_id in phase_of
-        }
-        _write_progress(
-            progress_path,
-            {
-                "updated_utc": wall_clock().isoformat(),
-                "cancellation": cancel_reason,
-                "jobs": states,
-            },
+        write_running_progress(
+            progress_path, phase_of, outcomes, running, cancel_reason, wall_clock
         )
 
     def settle(
@@ -501,6 +498,7 @@ def _run_plan(
         )
         early_loss = holder_loss(view, {"pid": item.process.pid, "start": item.owned.root_start})
         if early_loss and allow_cancel:
+            latch_holder_loss(budget, hub, item.job_id, early_loss)
             prepare_stops(
                 [other for other in running if other is not item],
                 hub,
@@ -509,18 +507,19 @@ def _run_plan(
                 clock=clock,
                 sleeper=sleeper,
             )
-        receipt = item.owned.terminate(
-            grace_seconds=grace_seconds,
-            clock=clock,
-            sleeper=sleeper,
-            deadline=item.cleanup_deadline,
-        )
         guardian, guardian_problems = view.read_receipts(
             item.receipt,
             item.secret,
             item.process.pid,
             item.owned.root_start,
             reader=read_guardian_receipt,
+        )
+        record_cgroup_receipt(item.owned, guardian, guardian_problems)
+        receipt = item.owned.terminate(
+            grace_seconds=grace_seconds,
+            clock=clock,
+            sleeper=sleeper,
+            deadline=item.cleanup_deadline,
         )
         proven = cleanup_proven(receipt, guardian, view)
         ledger = hub.unregister(item.job_id, cleanup_proven=proven)
@@ -584,8 +583,7 @@ def _run_plan(
         if lost:
             outcome["state"] = "failed"
             outcome["artifact_problems"].append(f"the child reported a loss: {lost}")
-            budget.mark_lost(f"{item.job_id}: {lost}")
-            hub.lose(f"{item.job_id}: {lost}")
+            latch_holder_loss(budget, hub, item.job_id, lost)
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
         running.remove(item)
@@ -621,6 +619,8 @@ def _run_plan(
                         clock=clock,
                         sleeper=sleeper,
                     )
+                    if allow_cancel and hub.closed_reason and running:
+                        cancel(f"containment lost before finish failed: {hub.closed_reason}")
 
     def stop(item: _Running) -> None:
         """Ask the guardian to contain its subtree first, then prove it from outside."""
@@ -632,18 +632,19 @@ def _run_plan(
         stop_process(
             item, view, deadline, grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
         )
-        receipt = item.owned.terminate(
-            grace_seconds=grace_seconds,
-            clock=clock,
-            sleeper=sleeper,
-            deadline=item.cleanup_deadline or clock() + body["deadlines"]["cleanup_seconds"],
-        )
         guardian, _problems = view.read_receipts(
             item.receipt,
             item.secret,
             item.process.pid,
             item.owned.root_start,
             reader=read_guardian_receipt,
+        )
+        record_cgroup_receipt(item.owned, guardian, _problems)
+        receipt = item.owned.terminate(
+            grace_seconds=grace_seconds,
+            clock=clock,
+            sleeper=sleeper,
+            deadline=item.cleanup_deadline,
         )
         if not cleanup_proven(receipt, guardian, view):
             receipt["proof"] = False
@@ -670,14 +671,14 @@ def _run_plan(
             allow_cancel=False
         )  # completed jobs were never signalled; failures remain their own rows
         for item in list(running):
-            stop(item)
+            stop_error = safety.stop_safely(item, stop, cleanup, clock=clock, sleeper=sleeper)
             recovered, partial = recover(item)
             status = item.process.poll()
             _close_handles(item)
             settle(
                 item.job_id,
-                "interrupted",
-                f"cancelled: {reason}",
+                "timeout" if item.job_id in deadlines.expired else "interrupted",
+                f"cancelled: {reason}" + (f"; {stop_error}" if stop_error else ""),
                 status,
                 artifact=recovered,
                 partial=partial,
@@ -804,15 +805,21 @@ def _run_plan(
                 break
             for item in list(running):
                 item.owned.observe()
-                if item in running and clock() > item.deadline:
-                    stop(item)
+                deadlines.pulse()
+                if deadlines.fail_fast_reason:
+                    cancel(deadlines.fail_fast_reason)
+                    break
+                if item in running and item.job_id in deadlines.expired:
+                    stop_error = safety.stop_safely(
+                        item, stop, cleanup, clock=clock, sleeper=sleeper
+                    )
                     recovered, partial = recover(item)
                     status = item.process.poll()
                     _close_handles(item)
                     settle(
                         item.job_id,
                         "timeout",
-                        "deadline exceeded",
+                        "deadline exceeded" + (f"; {stop_error}" if stop_error else ""),
                         status,
                         artifact=recovered,
                         partial=partial,
@@ -935,23 +942,21 @@ def _run_plan(
         problems.extend(diff_snapshots(shared_before, snapshot_tree(project_root, excluded)))
     complete = safety.note_unproven_cleanup(launched_jobs, cleanup, problems)
     ordered = [outcomes[job["job_id"]] for job in body["jobs"]]
-    report = aggregate_outcomes(plan, ordered)
-    report.update(
-        _report_extras(
-            plan,
-            started,
-            clock,
-            cancel_reason,
-            cleanup,
-            problems,
-            observations=live.observations,
-            serial=serial,
-            load=(load_before, os.getloadavg() if hasattr(os, "getloadavg") else ()),
-        )
+    return completed_report(
+        plan,
+        ordered,
+        started,
+        clock,
+        cancel_reason,
+        cleanup,
+        problems,
+        ownership,
+        launched_jobs,
+        complete,
+        observations=live.observations,
+        serial=serial,
+        load=(load_before, os.getloadavg() if hasattr(os, "getloadavg") else ()),
     )
-    report["kernel_ownership"] = qualification_after(ownership, cleanup)
-    report["cleanup_complete"] = complete
-    return report
 
 
 def terminal_artifact_path(tree: Mapping[str, Path]) -> Path:

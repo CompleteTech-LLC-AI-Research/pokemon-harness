@@ -46,7 +46,9 @@ def render_report_text(report: Mapping[str, Any]) -> str:
         lines.append(f"runtime immutability: {report['runtime_immutability']}")
     ownership = report.get("kernel_ownership")
     if isinstance(ownership, dict):
-        lines.append(f"kernel ownership: {ownership.get('qualification')}")
+        lines.append(
+            f"kernel ownership: {ownership.get('qualification_final', ownership.get('qualification'))}"
+        )
     lines.append(f"overall: {report.get('overall')}")
     return "\n".join(lines)
 

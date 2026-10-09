@@ -116,6 +116,22 @@ def test_a_missing_or_forged_holder_receipt_always_withholds_the_proof(tmp_path)
     assert other.verdict(PID, START)["authentic"] is False
 
 
+@pytest.mark.parametrize(
+    "mac",
+    [None, 7, [], {}, "", "0" * 63, "0" * 65, "A" * 64, "g" * 64, "\u00e9" * 64],
+)
+def test_malformed_mac_is_unproven_without_raising(tmp_path, mac):
+    ref = _receipt(tmp_path)
+    body = json.loads(ref.path.read_text())
+    body["mac"] = mac
+    ref.path.write_text(json.dumps(body), encoding="utf-8")
+    verdict = ref.verdict(PID, START)
+    assert verdict["present"] is True
+    assert verdict["authentic"] is False
+    assert verdict["proof"] is False
+    assert verdict["problems"] == ["holder receipt is not authenticated by the producer's key"]
+
+
 def test_an_adopted_instance_that_is_not_proven_absent_withholds_the_proof(tmp_path, monkeypatch):
     ref = _receipt(tmp_path, adopted=[[777, 5]], reaped=[[777, 5]])
     for answer in (False, None):
@@ -435,6 +451,62 @@ def test_actual_startup_never_reaches_fork_after_original_owner_or_setup_loss(tm
         assert record["proof"] is False and record["contained"] is False
 
 
+def test_actual_startup_rechecks_owner_after_the_first_check_succeeded(tmp_path):
+    from tests._parallel_runtime_holder_kernel import startup
+
+    with pytest.raises(SystemExit):
+        startup(tmp_path, owner_parents=(100, 1))
+    record = json.loads((tmp_path / "holder.json").read_text())
+    assert record["never_started"] is True
+    assert record["forks"] == [] and record["guardian"] is None
+
+
+def test_actual_producer_withholds_proof_for_a_live_child_with_unreadable_stat():
+    from tests._parallel_runtime_holder_kernel import Kernel
+
+    kernel = Kernel([7001], unreadable_stat=True)
+    result = kernel.sweep()
+    assert result["unknown"] and all(pid == 7001 for pid, start in result["unknown"])
+    assert result["proof"] is False and result["echild"] is False
+    assert result["adopted"] == [] and kernel.signals == []
+
+
+@pytest.mark.parametrize("branch", ["_adopt", "observe", "pin_orphans"])
+@pytest.mark.parametrize("state", ["unknown", "exited"])
+def test_unreadable_child_is_not_equated_with_an_exit_in_actual_owned_tree_branches(
+    monkeypatch, branch, state
+):
+    from types import SimpleNamespace
+
+    closed = []
+    monkeypatch.setattr(proc, "os", SimpleNamespace(getpid=lambda: 100, close=closed.append))
+    monkeypatch.setattr(proc, "_pidfd_open", lambda pid: 11)
+    monkeypatch.setattr(proc, "_exited", lambda descriptor: False)
+    monkeypatch.setattr(proc, "proc_state", lambda *args: state)
+    monkeypatch.setattr(proc, "children_of", lambda pid: [7001])
+    monkeypatch.setattr(proc, "read_stat", lambda pid: (START, 100, "S") if pid == PID else None)
+    monkeypatch.setattr(proc, "socket_ports", lambda pids: {})
+    tree = object.__new__(proc.OwnedTree)
+    tree._entries = {PID: (7, START)}
+    tree.root_pid, tree.root_start = PID, START
+    tree.contained, tree.unknown_live, tree.reason = True, [], ""
+    tree.adopted_total, tree.ports = 0, set()
+    tree._clock, tree._last, tree._observe_seconds = lambda: 1.0, 0.0, 0.01
+    tree.cgroup, tree.cgroup_joined, tree.status = None, False, None
+    tree.adoption = SimpleNamespace(verify=lambda: True)
+    tree._known_children = lambda: set()
+    if branch == "_adopt":
+        assert tree._adopt(7001, 9) is False
+        assert closed == [11]
+    elif branch == "observe":
+        tree.observe(force=True)
+    else:
+        tree.pin_orphans()
+    assert tree.contained is (state == "exited")
+    assert tree.unknown_live == ([7001] if state == "unknown" else [])
+    assert tree.tracked == {PID: START}
+
+
 def test_all_siblings_are_told_before_waiting_and_share_one_cleanup_deadline():
     from types import SimpleNamespace
 
@@ -501,18 +573,40 @@ def test_cgroup_kill_wait_cannot_extend_an_already_shared_deadline(tmp_path):
 
 
 NESTED_SOURCE = """
-import ctypes, json, os, subprocess, sys, time
+import array, ctypes, json, os, socket, subprocess, sys, time
 root = sys.argv[1]
 libc = ctypes.CDLL(None, use_errno=True)
 flag = ctypes.c_int(0)
 if libc.prctl(36, 1, 0, 0, 0) != 0 or libc.prctl(37, ctypes.byref(flag), 0, 0, 0) != 0 or flag.value != 1:
     sys.exit(3)
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
-with open("/proc/%d/stat" % child.pid) as handle:
-    started = int(handle.read().rsplit(")", 1)[1].split()[19])
-with open(os.path.join(root, "nested-child.json"), "w") as handle:
-    json.dump({"pid": child.pid, "start": started}, handle)
-time.sleep(120)
+child, handed_off, descriptors = None, False, []
+def started(pid):
+    with open("/proc/%d/stat" % pid) as handle:
+        return int(handle.read().rsplit(")", 1)[1].split()[19])
+try:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
+    for pid in (os.getpid(), child.pid):
+        descriptors.append(os.pidfd_open(pid))
+    body = {"token":sys.argv[3], "job_root":root,
+            "nested":{"pid":os.getpid(), "start":started(os.getpid())},
+            "child":{"pid":child.pid, "start":started(child.pid)}}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as connection:
+        connection.settimeout(3.0)
+        connection.connect(sys.argv[2])
+        connection.sendmsg([json.dumps(body).encode()],
+                           [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", descriptors))])
+        if connection.recv(32) != b"owned":
+            raise RuntimeError("outer fixture ownership was not acknowledged")
+        handed_off = True
+    with open(os.path.join(root, "nested-child.json"), "w") as handle:
+        json.dump(body["child"], handle)
+    time.sleep(120)
+finally:
+    for descriptor in descriptors:
+        os.close(descriptor)
+    if not handed_off and child is not None:
+        child.kill()
+        child.wait(timeout=3.0)
 """
 
 
@@ -523,16 +617,22 @@ def test_a_real_nested_subreaper_is_swept_without_cross_job_or_foreign_signals(
 
     import contextlib
     import subprocess
-    import sys
 
-    nested_scenario = f"""
+    from tests._parallel_runtime_nested_cleanup import NestedCleanup
+
+    with contextlib.ExitStack() as cleanup:
+        sentinel = subprocess.Popen(SENTINEL_ARGV)
+        cleanup.callback(stop_owned_child, sentinel)
+        outer = cleanup.enter_context(NestedCleanup(tmp_path, NESTED_SOURCE))
+        nested_scenario = f"""
 if name == "holder_peer_live":
     open(os.path.join(job_root, "peer.running.json"), "w").write(json.dumps(
         {{"worker_pid": os.getpid(), "guardian_pid": os.getppid()}}))
     time.sleep(30)
 if name == "nested_subreaper_orphan":
     import signal as _signal, subprocess as _subprocess
-    nested = _subprocess.Popen([sys.executable, "-c", {NESTED_SOURCE!r}, job_root], start_new_session=True)
+    nested = _subprocess.Popen([sys.executable, "-c", {NESTED_SOURCE!r}, job_root,
+                               {outer.endpoint!r}, {outer.token!r}], start_new_session=True)
     open(os.path.join(job_root, "orphan.pid"), "w").write(str(nested.pid))
     ready = os.path.join(job_root, "nested-child.json")
     peer = os.path.join(os.path.dirname(job_root), "cython-job", "peer.running.json")
@@ -545,17 +645,11 @@ if name == "nested_subreaper_orphan":
     time.sleep(0.3)
     os._exit(0)
 """
-    anchor = 'if name == "arbiter_loss":'
-    assert gate.FAKE_WORKER.count(anchor) == 1
-    monkeypatch.setattr(
-        gate, "FAKE_WORKER", gate.FAKE_WORKER.replace(anchor, nested_scenario + anchor)
-    )
-    nested_survivor, child_survivor = Survivor(), Survivor()
-    sentinel = subprocess.Popen(SENTINEL_ARGV)
-    with contextlib.ExitStack() as cleanup:
-        cleanup.callback(stop_owned_child, sentinel)
-        cleanup.callback(nested_survivor.remove)
-        cleanup.callback(child_survivor.remove)
+        anchor = 'if name == "arbiter_loss":'
+        assert gate.FAKE_WORKER.count(anchor) == 1
+        monkeypatch.setattr(
+            gate, "FAKE_WORKER", gate.FAKE_WORKER.replace(anchor, nested_scenario + anchor)
+        )
         budget = PairBudget(2)
         plan, root, report = gate.run(
             tmp_path,
@@ -563,13 +657,9 @@ if name == "nested_subreaper_orphan":
             budget=budget,
         )
         job = root / plan.run_id / "source-job"
-        nested_pid = int((job / "orphan.pid").read_text())
         child = json.loads((job / "nested-child.json").read_text())
-        assert (
-            nested_survivor.capture(nested_pid, [sys.executable, "-c", NESTED_SOURCE, str(job)])
-            == "gone"
-        )
-        assert child_survivor.capture(child["pid"]) == "gone"
+        assert outer.state("nested") == "gone"
+        assert outer.state("child") == "gone"
         assert gate.states(report) == {"source": "failed", "cython": "interrupted"}
         assert report["cleanup"]["source-job"]["process_tree"]["proof"] is True
         holder = json.loads((job / "holder.json").read_text())
@@ -606,3 +696,204 @@ def test_a_second_stop_request_cannot_extend_an_existing_cleanup_deadline():
         sleeper=clock.sleep,
     )
     assert item.cleanup_deadline == 0.25 and clock.now == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("point", ["terminate", "receipt"])
+def test_holder_loss_is_latched_and_siblings_cancel_after_actual_finish_raises(point):
+    from tests._parallel_runtime_finish_controls import finish_failure_case
+
+    namespace, budget, hub, failed, sibling, sent, cancellations = finish_failure_case(point)
+    assert budget.lost_reason and hub.closed_reason
+    assert sibling.stop_requested is True and sibling.cleanup_deadline == failed.cleanup_deadline
+    assert "sibling" in sent
+    assert cancellations and cancellations[0][1] == ["sibling"]
+    assert namespace["outcomes"]["failed"]["state"] == "failed"
+    assert namespace["cleanup"]["failed"]["process_tree"]["proof"] is False
+    assert namespace["running"] == []
+
+
+def test_a_stop_reader_exception_cannot_prevent_other_owned_jobs_cleanup():
+    from types import SimpleNamespace
+
+    from scripts.production_gate_parallel_safety import stop_safely
+    from tests._parallel_runtime_holder_kernel import Clock
+
+    clock, cleanup, attempts = Clock(), {}, []
+    clock.now = 0.2
+
+    def stop(item):
+        raise RuntimeError("controlled reader exception")
+
+    def terminate(name, **kwargs):
+        attempts.append((name, kwargs["deadline"]))
+        if name == "first":
+            raise RuntimeError("controlled owned-sweep exception")
+        return {"proof": True, "remaining": []}
+
+    for name in ("first", "second"):
+        item = SimpleNamespace(
+            job_id=name,
+            cleanup_deadline=0.25,
+            owned=SimpleNamespace(terminate=lambda n=name, **kw: terminate(n, **kw)),
+        )
+        assert stop_safely(item, stop, cleanup, clock=clock.monotonic, sleeper=clock.sleep)
+    assert attempts == [("first", 0.25), ("second", 0.25)]
+    assert all(record["process_tree"]["proof"] is False for record in cleanup.values())
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+def test_timeout_stops_are_broadcast_before_any_cleanup_wait(fail_fast):
+    from tests._parallel_runtime_deadline_controls import watched_jobs
+
+    watch, clock, jobs, sent = watched_jobs((1.0, 1.0), fail_fast=fail_fast)
+    clock.now = 1.0
+    watch.pulse()
+    assert sent == [("first", 1.0), ("second", 1.0)]
+    assert watch.expired == {"first", "second"}
+    assert all(item.cleanup_deadline == 1.25 for item in jobs)
+    clock.now = 1.24
+    watch.pulse()
+    assert all(item.cleanup_deadline == 1.25 for item in jobs)
+
+
+def test_a_sibling_deadline_is_enforced_during_another_jobs_cleanup_sleep():
+    from tests._parallel_runtime_deadline_controls import watched_jobs
+
+    watch, clock, jobs, sent = watched_jobs((1.0, 1.05))
+    clock.now = 1.0
+    watch.pulse()
+    assert sent == [("first", 1.0)]
+    clock.now = 1.049
+    watch.sleep(0.02)  # a requested wait cannot cross the sibling's still-live deadline
+    assert sent == [("first", 1.0), ("second", 1.05)]
+    assert jobs[0].cleanup_deadline == 1.25
+    assert jobs[1].cleanup_deadline == pytest.approx(1.3)
+
+
+def test_fail_fast_timeout_stops_other_jobs_before_wait_and_does_not_call_them_timeouts():
+    from tests._parallel_runtime_deadline_controls import watched_jobs
+
+    watch, clock, jobs, sent = watched_jobs((1.0, 20.0), fail_fast=True)
+    clock.now = 1.0
+    watch.pulse()
+    assert sent == [("first", 1.0), ("second", 1.0)]
+    assert watch.expired == {"first"} and watch.fail_fast_reason
+    assert all(item.cleanup_deadline == 1.25 for item in jobs)
+
+
+def test_authenticated_final_cgroup_evidence_survives_guardian_exit_before_observation(tmp_path):
+    from scripts.production_gate_parallel_ownership import record_cgroup_receipt
+    from tests._parallel_runtime_cgroup_controls import final_cgroup_receipt
+
+    tree, guardian, problems = final_cgroup_receipt(tmp_path)
+    assert tree._entries == {} and not tree._parent_instance_valid(5000)
+    assert record_cgroup_receipt(tree, guardian, problems) is True
+    assert tree.cgroup_joined is True
+    assert tree.cgroup_membership_evidence["guardian_start"] == 111
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"guardian_pid": 5001},
+        {"guardian_start": 112},
+        {"cgroup": "/different/group"},
+        {"cgroup_error": "join failed"},
+        {"cgroup_error": "omit"},
+        {"phase": "ready"},
+        {"contained": False},
+        {"proof": False},
+    ],
+)
+def test_cgroup_join_cannot_be_inferred_from_wrong_or_incomplete_evidence(tmp_path, changes):
+    from scripts.production_gate_parallel_ownership import record_cgroup_receipt
+    from tests._parallel_runtime_cgroup_controls import final_cgroup_receipt
+
+    tree, guardian, problems = final_cgroup_receipt(tmp_path, **changes)
+    assert record_cgroup_receipt(tree, guardian, problems) is False
+    assert tree.cgroup_joined is False
+
+
+def test_required_final_ownership_fails_report_and_lists_missing_started_jobs(monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts import production_gate_parallel_reporting as reporting
+    from scripts.production_gate_parallel_report import render_report_text
+
+    monkeypatch.setattr(reporting, "aggregate_outcomes", lambda *a: {"overall": "PASS"})
+    plan = SimpleNamespace(as_dict=lambda: {"fail_fast": False, "capacity": {}}, text="{}")
+    cleanup = {
+        "first": {"process_tree": {"adoption": {"cgroup": {"joined": True, "emptied": True}}}}
+    }
+    report = reporting.completed_report(
+        plan,
+        [],
+        0.0,
+        lambda: 1.0,
+        "",
+        cleanup,
+        [],
+        {"required": True, "qualified": True, "qualification": "initial probe passed"},
+        {"first", "missing"},
+        True,
+    )
+    assert report["overall"] == "FAIL"
+    assert report["kernel_ownership"]["jobs"]["missing"] == {"joined": False, "emptied": False}
+    text = render_report_text(report)
+    assert "UNQUALIFIED" in text and "initial probe passed" not in text
+
+
+@pytest.mark.parametrize("mac", ["\u00e9" * 64, [], {}, None, "A" * 64, "0" * 63])
+def test_malformed_guardian_mac_returns_unproven_instead_of_raising(tmp_path, mac):
+    path = tmp_path / "guardian.json"
+    path.write_text(json.dumps({"phase": "final", "mac": mac}))
+    body, problems = proc.read_guardian_receipt(path, SECRET, 5000, 111)
+    assert body is None and problems == [
+        "guardian receipt is not authenticated by the producer's key"
+    ]
+
+
+def test_nested_outer_cleanup_runs_on_an_assertion_failure_after_independent_handoff(tmp_path):
+    """Real-kernel negative control, authored only: no product PASS from outer signals."""
+
+    import subprocess
+    import sys
+
+    from tests._parallel_runtime_nested_cleanup import NestedCleanup
+
+    job = tmp_path / "standalone-owned-fixture"
+    job.mkdir()
+    nested = None
+    outer = NestedCleanup(tmp_path, NESTED_SOURCE)
+    try:
+        with pytest.raises(AssertionError, match="intentional assertion after ownership"), outer:
+            nested = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    NESTED_SOURCE,
+                    str(job),
+                    outer.endpoint,
+                    outer.token,
+                ],
+                start_new_session=True,
+            )
+            limit = time.monotonic() + 5.0
+            while not outer.metadata and not outer.problem and time.monotonic() < limit:
+                time.sleep(0.01)
+            assert set(outer.fds) == {"nested", "child"}, outer.problem
+            assert outer.state("nested") == outer.state("child") == "held"
+            raise AssertionError("intentional assertion after ownership")
+        receipt = json.loads((tmp_path / "outer-nested-cleanup.json").read_text())
+        assert receipt["problems"] == []
+        assert {item["name"] for item in receipt["actions"]} == {"nested", "child"}
+        assert all(item["gone"] for item in receipt["actions"])
+    finally:
+        if nested is not None:
+            try:
+                nested.wait(
+                    timeout=8.0
+                )  # rejected handshakes kill/reap the direct child before exiting
+            except subprocess.TimeoutExpired:
+                stop_owned_child(nested)
+                raise AssertionError("nested fixture did not respect its independent startup bound")

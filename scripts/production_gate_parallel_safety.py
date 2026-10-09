@@ -112,6 +112,44 @@ def fail_finish(
     cleanup[job_id] = {"process_tree": receipt, "finish_error": reason}
 
 
+def stop_safely(
+    item: Any,
+    stop: Callable[[Any], None],
+    cleanup: dict[str, dict[str, Any]],
+    *,
+    clock: Callable[[], float],
+    sleeper: Callable[[float], None],
+) -> str:
+    """Keep cancellation total when one job's stop or receipt reader raises.
+
+    An additional owned-tree attempt shares the original deadline. Its result cannot
+    supply the missing authenticated guardian/holder proof; admission stays closed
+    and that job's reservation remains retained.
+    """
+
+    try:
+        stop(item)
+        return ""
+    except Exception as exc:  # noqa: BLE001 - continue bounded cleanup of other owned jobs
+        reason = f"stop failed closed: {type(exc).__name__}: {str(exc)[:160]}"
+    record = cleanup.setdefault(item.job_id, {})
+    record["stop_error"] = reason
+    try:
+        receipt = dict(
+            item.owned.terminate(
+                grace_seconds=1.0,
+                deadline=item.cleanup_deadline if item.cleanup_deadline is not None else clock(),
+                clock=clock,
+                sleeper=sleeper,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - keep unknown cleanup separate from a PASS
+        receipt = {"reason": f"{reason}; owned sweep failed: {type(exc).__name__}"}
+    receipt["proof"] = False
+    record["process_tree"] = receipt
+    return reason
+
+
 def should_retain_runtime(report: Mapping[str, Any]) -> bool:
     """Runtime files are removed only on explicit, complete cleanup proof; anything else retains."""
 
