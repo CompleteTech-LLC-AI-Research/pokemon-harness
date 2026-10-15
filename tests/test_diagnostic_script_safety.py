@@ -227,3 +227,21 @@ def test_derived_state_producers_reject_mismatched_rom_pin(path, args, monkeypat
 
     with pytest.raises(ValueError, match="does not match"):
         module._validated_pins(*args)
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit], ids=['case00-KeyboardInterrupt', 'case01-SystemExit'])
+def test_battle_cleanup_process_control_retains_owner_and_considers_peer(monkeypatch, failure):
+    module = _load_script(SCRIPTS / "live_battle_demo.py", monkeypatch)
+    first, second = _Closable(), _Closable()
+    error = failure("first close interrupted")
+    primary = RuntimeError("operation")
+    def close():
+        first.closed = True
+        raise error
+    first.close = close
+    with pytest.raises(BaseExceptionGroup) as caught:
+        module._close_sessions(("first", first), ("second", second), active_error=primary)
+    assert first.closed and second.closed
+    assert caught.value.__cause__ is primary
+    assert caught.value.exceptions == (error,)
+    assert caught.value.cleanup_owner.sessions == [("first", first), ("second", second)]

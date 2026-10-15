@@ -50,31 +50,32 @@ PARTY_OT_SIZE = 11
 PARTY_NICK_SIZE = 11
 
 
+def _pair_helpers():
+    """Load the exact adjacent helper without an ambient scripts import path."""
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("_live_battle_demo_pair.py")
+    name = "_diagnostic_battle_pair_" + str(path)
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load diagnostic helper: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    return sys.modules[name]
+
+
 def _close_sessions(
     *labeled_sessions: tuple[str, object | None],
     active_error: BaseException | None = None,
 ) -> None:
-    """Close every session, then surface all teardown failures."""
-    failures: list[Exception] = []
-    for label, session in labeled_sessions:
-        if session is None:
-            continue
-        try:
-            session.close()  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001 - cleanup must continue
-            exc.add_note(f"diagnostic cleanup failed for session {label}")
-            failures.append(exc)
-            print(
-                f"[diagnostic cleanup] failed to close session {label}: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-    if failures:
-        cleanup_error = ExceptionGroup("diagnostic cleanup failed", failures)
-        if active_error is not None:
-            raise cleanup_error from active_error
-        raise cleanup_error
+    """Attempt every owned close and retain unresolved identities on failure."""
+    _pair_helpers().DemoResources(*labeled_sessions).cleanup(active_error=active_error)
 
 
 def _open_validated_session(
@@ -94,10 +95,11 @@ def _open_validated_session(
     pins = load_versions(_REPO / "VERSIONS.md")
     expected_rom_sha1 = pins.sha1_for_path(rom)
     expected_symbol_sha1 = pins.symbol_sha1_for_path(sym)
-    if expected_rom_sha1 is None:
-        raise ValueError(f"ROM is not pinned in VERSIONS.md: {rom}")
-    if expected_symbol_sha1 is None:
-        raise ValueError(f"symbol file is not pinned in VERSIONS.md: {sym}")
+    helpers = _pair_helpers()
+    expected_rom_sha1 = helpers.required_hash(expected_rom_sha1, "ROM SHA-1")
+    expected_symbol_sha1 = helpers.required_hash(expected_symbol_sha1, "symbol SHA-1")
+    expected_version = helpers.required_version(pins.pyboy_version)
+    expected_revision = helpers.required_hash(pins.pyboy_revision, "PyBoy revision")
 
     if view and window_pos is not None:
         os.environ["SDL_VIDEO_WINDOW_POS"] = f"{window_pos[0]},{window_pos[1]}"
@@ -117,8 +119,8 @@ def _open_validated_session(
             sym,
             expected_rom_sha1=expected_rom_sha1,
             expected_symbol_sha1=expected_symbol_sha1,
-            expected_pyboy_version=pins.pyboy_version,
-            expected_pyboy_revision=pins.pyboy_revision,
+            expected_pyboy_version=expected_version,
+            expected_pyboy_revision=expected_revision,
             view=view,
             pyboy_factory=_factory,
         )
@@ -292,14 +294,18 @@ def main() -> int:
 
     t_start = time.perf_counter()
 
+    resources = _pair_helpers().DemoResources()
     a = b = None
     active_error: BaseException | None = None
     try:
         a, b = _open_battle_sessions(version_a, version_b, view=args.view)
 
+        resources.sessions = [("A", a), ("B", b)]
         link = PyBoyLinkSession.local(view=args.view)
+        resources.provider = link
         link.attach(a._pyboy)
         link.attach(b._pyboy)
+        progress = _pair_helpers().PairProgress(link, a, b, view=args.view)
 
         ow_a = a.read_game_state().overworld
         ow_b = b.read_game_state().overworld
@@ -328,12 +334,10 @@ def main() -> int:
                 _install_hook_counter(sess, sym, bucket, idx)
 
         def tick_both_coarse(frames: int) -> None:
-            for _ in range(frames):
-                a.step(1)
-                b.step(1)
+            progress.advance(frames)
 
         def tick_both_fine(frames: int) -> None:
-            link.step_interleaved(frames)
+            progress.advance(frames)
 
         for _ in range(3):
             a.press("up", duration=6)
@@ -531,8 +535,7 @@ def main() -> int:
             hold_s = args.hold_after_s
             print(f"[diagnostic-only] post-battle hold for {hold_s}s...")
             for _ in range(hold_s * 60):
-                a.step(1)
-                b.step(1)
+                progress.advance(1)
 
         t_total = time.perf_counter() - t_start
         print(f"[diagnostic-only total wall-clock] {t_total:.2f}s")
@@ -541,7 +544,7 @@ def main() -> int:
         active_error = exc
         raise
     finally:
-        _close_sessions(("A", a), ("B", b), active_error=active_error)
+        resources.cleanup(active_error=active_error)
 
 
 if __name__ == "__main__":
