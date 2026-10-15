@@ -807,73 +807,77 @@ def run_matrix_tier(
     # the in-memory finalization below is deferred so the assembled tier still
     # carries its counts, diagnostics, output, and rows.
     finalization_guard = _defer_sigint_while_finalizing()
-    case_results = [case_results_by_nodeid[nodeid] for nodeid in sorted(nodeids)]
-    unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
-    capacity_only = (
-        bool(capacity_blocked)
-        and not failures
-        and not unexpected
-        and aggregate.total + len(capacity_blocked) == len(nodeids)
-        and aggregate.skipped == 0
-        and aggregate.failed + aggregate.errors == 0
-    )
-    status = (
-        "INTERRUPTED"
-        if interrupted
-        else "BLOCKED"
-        if capacity_only
-        else "PASS"
-        if not failures
-        and not unexpected
-        and len(case_results) == len(nodeids)
-        and aggregate.total == len(nodeids)
-        and aggregate.skipped == 0
-        and aggregate.passed == len(nodeids)
-        else "FAIL"
-    )
-    tier_result = TierResult(
-        name=name,
-        description=TIER_DESCRIPTIONS[name],
-        expression=TIER_EXPRESSIONS[name],
-        required=required,
-        status=status,
-        counts=aggregate,
-        returncodes=[case.returncode for case in case_results if case.returncode is not None],
-        duration_seconds=time.monotonic() - started,
-        skip_reasons=dict(sorted(aggregate_reasons.items())),
-        command=[
-            str(python_executable),
-            "-m",
-            "pytest",
-            "<one-required-nodeid-per-worker>",
-            "-m",
-            TIER_EXPRESSIONS[name],
-            f"--matrix-workers={max_workers}",
-            f"--case-timeout={timeout:.1f}",
-            f"--aggregate-timeout={aggregate_timeout:.1f}",
-        ],
-        output_tail="\n\n".join(output_tails)[-8000:],
-        iteration_failures=failures,
-        reason=(
-            "capacity could not admit every required row: " + "; ".join(capacity_blocked[:3])
+    try:
+        case_results = [case_results_by_nodeid[nodeid] for nodeid in sorted(nodeids)]
+        unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
+        capacity_only = (
+            bool(capacity_blocked)
+            and not failures
+            and not unexpected
+            and aggregate.total + len(capacity_blocked) == len(nodeids)
+            and aggregate.skipped == 0
+            and aggregate.failed + aggregate.errors == 0
+        )
+        status = (
+            "INTERRUPTED"
+            if interrupted
+            else "BLOCKED"
             if capacity_only
-            else ""
-        ),
-        selected_nodeids=list(nodeids),
-        case_results=case_results,
-        failure_details=failure_details,
-        failure_details_omitted=failure_details_omitted,
-    )
-    # Publish the assembled tier while signal deferral is still installed.  A
-    # ``SIGINT`` delivered between ``restore()`` and the caller's receipt of the
-    # return value is raised by the restored handler, so the value never reaches
-    # the caller; without a durable copy the orchestrator would then replace an
-    # executed tier with an empty ``INTERRUPTED`` row.  The sink is the runtime's
-    # ``completed_tiers`` mapping, which every cancellation handoff already
-    # consults, so the loaded evidence survives that window.
-    if publish is not None:
-        publish(tier_result)
-    if finalization_guard.restore():
+            else "PASS"
+            if not failures
+            and not unexpected
+            and len(case_results) == len(nodeids)
+            and aggregate.total == len(nodeids)
+            and aggregate.skipped == 0
+            and aggregate.passed == len(nodeids)
+            else "FAIL"
+        )
+        tier_result = TierResult(
+            name=name,
+            description=TIER_DESCRIPTIONS[name],
+            expression=TIER_EXPRESSIONS[name],
+            required=required,
+            status=status,
+            counts=aggregate,
+            returncodes=[case.returncode for case in case_results if case.returncode is not None],
+            duration_seconds=time.monotonic() - started,
+            skip_reasons=dict(sorted(aggregate_reasons.items())),
+            command=[
+                str(python_executable),
+                "-m",
+                "pytest",
+                "<one-required-nodeid-per-worker>",
+                "-m",
+                TIER_EXPRESSIONS[name],
+                f"--matrix-workers={max_workers}",
+                f"--case-timeout={timeout:.1f}",
+                f"--aggregate-timeout={aggregate_timeout:.1f}",
+            ],
+            output_tail="\n\n".join(output_tails)[-8000:],
+            iteration_failures=failures,
+            reason=(
+                "capacity could not admit every required row: " + "; ".join(capacity_blocked[:3])
+                if capacity_only
+                else ""
+            ),
+            selected_nodeids=list(nodeids),
+            case_results=case_results,
+            failure_details=failure_details,
+            failure_details_omitted=failure_details_omitted,
+        )
+        # Publish the assembled tier while signal deferral is still installed.  A
+        # ``SIGINT`` delivered between ``restore()`` and the caller's receipt of the
+        # return value is raised by the restored handler, so the value never reaches
+        # the caller; without a durable copy the orchestrator would then replace an
+        # executed tier with an empty ``INTERRUPTED`` row.  The sink is the runtime's
+        # ``completed_tiers`` mapping, which every cancellation handoff already
+        # consults, so the loaded evidence survives that window.
+        if publish is not None:
+            publish(tier_result)
+    finally:
+        # Assembly and publication failures must not retain our process handler.
+        finalization_interrupted = finalization_guard.restore()
+    if finalization_interrupted:
         # The evidence is complete; carry it out and record the cancellation
         # separately instead of letting the orchestrator synthesize an empty row.
         raise TierInterruptedDuringCleanup(
