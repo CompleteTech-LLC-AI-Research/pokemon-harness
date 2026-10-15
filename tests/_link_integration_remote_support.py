@@ -465,6 +465,181 @@ def _drive_remote_to_link_menu(
             runner.set_before_step(None)
 
 
+class _RemoteTradeInputSchedule:
+    """Drive one Cable Club session independently on its owner thread."""
+
+    def __init__(
+        self,
+        session: Session,
+        role: str,
+        stop_inputs: threading.Event,
+        input_lock: threading.Lock,
+        rng_done: dict[str, threading.Event],
+    ) -> None:
+        self._session = session
+        self._role = role
+        self._stop_inputs = stop_inputs
+        self._input_lock = input_lock
+        self._rng_done = rng_done
+        self.start_tick: int | None = None
+        self.trade_tick: int | None = None
+        self.last_tick: int | None = None
+        self.stage = "initial_settle"
+        self.next_tick: int | None = None
+        self.move_due: int | None = None
+        self.menu_presses = 0
+        self.movement_cycles = 0
+        self.rng_presses = 0
+        self.failure: str | None = None
+
+    def _press(self, button: str, duration: int) -> bool:
+        with self._input_lock:
+            if self._stop_inputs.is_set() or all(
+                event.is_set() for event in self._rng_done.values()
+            ):
+                return False
+            self._session.press(button, duration=duration)
+        return True
+
+    def _fail(self, reason: str) -> None:
+        with self._input_lock:
+            self.failure = reason
+            self._stop_inputs.set()
+
+    def before_step(self) -> None:
+        """Run only on the owning runner thread before its next chunk."""
+        if self._stop_inputs.is_set():
+            return
+        tick = self._session.current_tick()
+        self.last_tick = tick
+        if self.start_tick is None:
+            self.start_tick = tick
+            self.stage = "menu"
+            self.next_tick = tick + 60
+            return
+
+        state = self._session.read_game_state().overworld
+        if self.stage == "menu":
+            if state.map_id == 0xEF:
+                self.trade_tick = tick
+                self.stage = "trade_settle"
+                return
+            if self.next_tick is None or tick < self.next_tick:
+                return
+            if self.menu_presses >= 120:
+                self._fail("Trade Center not reached within 120 A presses")
+                return
+            if not self._press("a", duration=4):
+                return
+            self.menu_presses += 1
+            self.next_tick = tick + 8
+            return
+
+        if self.stage == "trade_settle":
+            if self.trade_tick is None or tick < self.trade_tick + 240:
+                return
+            self.stage = "movement"
+            self.move_due = tick
+
+        if self.stage == "movement":
+            if self.movement_cycles < 4:
+                if self.move_due is None or tick < self.move_due:
+                    return
+                button = "right" if state.x < 4 else "left" if state.x > 5 else None
+                if button is not None and not self._press(button, duration=8):
+                    return
+                self.movement_cycles += 1
+                self.move_due = tick + 24
+                return
+            if self.move_due is None or tick < self.move_due:
+                return
+            self.stage = "rng"
+            self.next_tick = tick
+
+        if self.stage == "rng":
+            if self._rng_done[self._role].is_set():
+                self.stage = "done"
+                return
+            if self.next_tick is None or tick < self.next_tick:
+                return
+            if self.rng_presses >= 200:
+                self._fail("matching RNG return not reached within 200 A presses")
+                return
+            if not self._press("a", duration=4):
+                return
+            self.rng_presses += 1
+            self.next_tick = tick + 12
+
+
+def _drive_remote_trade_to_rng(
+    runners: tuple[_SessionRunner, _SessionRunner],
+    schedules: tuple[_RemoteTradeInputSchedule, _RemoteTradeInputSchedule],
+    rng_done: dict[str, threading.Event],
+    stop_inputs: threading.Event,
+    input_lock: threading.Lock,
+    *,
+    no_progress_timeout_s: float = 120.0,
+    outer_timeout_s: float = 600.0,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Start owner schedules and wait for both map and matched-RNG proofs.
+
+    The coordinator reads only runner bookkeeping and shared events/state;
+    it never calls ``current_tick`` or reads either emulator. Teardown remains
+    with the caller so it can close both links before joining the runners.
+    """
+    for runner, schedule in zip(runners, schedules, strict=True):
+        runner.set_before_step(schedule.before_step)
+    started_at = monotonic()
+    try:
+        for runner in runners:
+            runner.start()
+        while True:
+            now = monotonic()
+            if now - started_at >= outer_timeout_s:
+                raise TimeoutError(
+                    f"remote trade drive exceeded {outer_timeout_s:.1f}s outer budget"
+                )
+            with input_lock:
+                failures = [schedule.failure for schedule in schedules if schedule.failure]
+            if failures:
+                raise RuntimeError("remote trade input schedule failed: " + "; ".join(failures))
+            if all(event.is_set() for event in rng_done.values()):
+                with input_lock:
+                    if all(event.is_set() for event in rng_done.values()):
+                        failures = [schedule.failure for schedule in schedules if schedule.failure]
+                        if failures:
+                            raise RuntimeError(
+                                "remote trade input schedule failed: " + "; ".join(failures)
+                            )
+                        missing_map = [
+                            schedule._role for schedule in schedules if schedule.trade_tick is None
+                        ]
+                        if missing_map:
+                            raise AssertionError(
+                                f"Trade Center map was not observed for: {missing_map}"
+                            )
+                        stop_inputs.set()
+                return
+            for runner in runners:
+                last_progress, exc, alive = runner.progress_status()
+                if exc is not None:
+                    raise exc
+                if not alive:
+                    raise RuntimeError(f"{runner._thread.name} stopped before RNG completion")
+                if now - last_progress >= no_progress_timeout_s:
+                    raise TimeoutError(
+                        f"{runner._thread.name} made no progress for {no_progress_timeout_s:.1f}s"
+                    )
+            sleep(0.01)
+    finally:
+        with input_lock:
+            stop_inputs.set()
+        for runner in runners:
+            runner.set_before_step(None)
+
+
 # --- end-to-end trade protocol over TCP ----------------------------------
 
 

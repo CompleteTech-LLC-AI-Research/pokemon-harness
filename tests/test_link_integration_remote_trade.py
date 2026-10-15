@@ -19,17 +19,18 @@ from tests._link_integration_remote_support import (
     _FIXTURES_WITH_WALKABLE_PLAYER,
     _cable_club_state,
     _drive_remote_to_link_menu,
+    _drive_remote_trade_to_rng,
     _ensure_fixture_is_walkable,
     _install_autoselect_trade_hook,
     _install_hook_counter,
     _open_session,
+    _RemoteTradeInputSchedule,
     _roms_present,
     _SessionRunner,
     _start_remote_runners,
     _stop_remote_runners,
     _tcp_pair,
 )
-from tests._link_orchestrator import LockstepOrchestrator
 
 
 @pytest.mark.parametrize(
@@ -162,28 +163,14 @@ def test_remote_trade_reaches_link_menu_via_tcp(version_listen: str, version_con
 
 
 def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
-    """Prove Serial_ExchangeBytes RPCs flow over TCP against real
-    ROM code inside CableClub_DoBattleOrTradeAgain.
+    """Observe the first post-menu data exchange over a real TCP pair.
 
-    Drives blue↔blue through the full Cable Club protocol over TCP:
-    attendant → menu → auto-select-TRADE → warp to TRADE_CENTER →
-    CableClub_DoBattleOrTradeAgain. Uses the LockstepOrchestrator
-    for per-frame sync across the two daemon threads (so their
-    auto-select hooks fire close in game-time) and observes the
-    link.exchange RPC stream for ``exchange_bytes/*`` kinds.
-
-    Assertion: the first of the three post-menu exchanges
-    (``exchange_bytes/wSerialRandomNumberListBlock``) fires on both
-    sides. That's the strongest milestone we can reliably drive
-    two-process: it proves CableClub_DoBattleOrTradeAgain's
-    ``Serial_ExchangeBytes`` codepath round-trips its
-    symbol-translated kind over TCP with real ROM code issuing the
-    RPC. (The 2nd and 3rd exchanges — PlayerDataBlock at ~428 bytes
-    and PartyMonsPatchList — frequently desync between the two
-    daemon threads after the auto-select bypass leaves each side's
-    wLinkState in slightly different shapes; re-converging the rest
-    is agent-policy work, covered transitively by the in-process
-    trade_roundtrip test.)
+    The test-only auto-select hook is a diagnostic shortcut, not natural
+    gameplay qualification. Each session gets an independent owner-thread
+    schedule with the original per-phase input caps, cadence, and 30s RPC
+    timeout. Success requires both sides to be observed in Trade Center and
+    to return a matching-length ``wSerialRandomNumberListBlock`` exchange.
+    It does not establish completion of the later trade data exchanges.
     """
     if not _roms_present("blue"):
         pytest.skip("Blue ROM not present")
@@ -193,6 +180,16 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
 
     session_a = _open_session("blue")
     session_b = _open_session("blue")
+    links = []
+    runners = []
+    input_lock = threading.Lock()
+    stop_inputs = threading.Event()
+    rng_done = {"listener": threading.Event(), "connector": threading.Event()}
+    schedules = {}
+    attempts = {"listener": [], "connector": []}
+    returns = {"listener": [], "connector": []}
+    rng_returns = {"listener": [], "connector": []}
+    observed_maps = {}
     try:
         session_a.load_state(state.read_bytes())
         session_b.load_state(state.read_bytes())
@@ -200,125 +197,105 @@ def test_remote_exchange_bytes_fires_in_trade_center_blue_blue() -> None:
         _ensure_fixture_is_walkable("blue", session_b)
 
         link_a, link_b, endpoint_a, endpoint_b = _tcp_pair(session_a, "blue", session_b, "blue")
+        links = [link_a, link_b]
         try:
-            # Instrument link.exchange on both sides to record every
-            # RPC kind that crosses TCP.
-            kinds_a: list[str] = []
-            kinds_b: list[str] = []
+            schedules = {
+                "listener": _RemoteTradeInputSchedule(
+                    session_a, "listener", stop_inputs, input_lock, rng_done
+                ),
+                "connector": _RemoteTradeInputSchedule(
+                    session_b, "connector", stop_inputs, input_lock, rng_done
+                ),
+            }
+            rng_kind = "exchange_bytes/wSerialRandomNumberListBlock"
 
-            # Bump timeout to 30s per exchange — the 428-byte
-            # wSerialPlayerDataBlock exchange is slow over TCP and
-            # causes a 5s-default timeout desync between the two
-            # sides' serial state.
-            def _wrap(sink, inner):
+            def _wrap(role, inner):
                 def exchange(kind, my_bytes, *, timeout_ms=30000):
-                    sink.append(kind)
-                    return inner(kind, my_bytes, timeout_ms=timeout_ms)
+                    attempts[role].append(kind)
+                    response = inner(kind, my_bytes, timeout_ms=timeout_ms)
+                    returns[role].append(kind)
+                    if kind == rng_kind:
+                        row = {
+                            "send_length": len(my_bytes),
+                            "receive_length": len(response),
+                            "matched_length": len(my_bytes) == len(response),
+                            "after_trade_center": schedules[role].trade_tick is not None,
+                        }
+                        rng_returns[role].append(row)
+                        if row["matched_length"] and row["after_trade_center"]:
+                            with input_lock:
+                                rng_done[role].set()
+                    return response
 
                 return exchange
 
-            link_a.exchange = _wrap(kinds_a, link_a.exchange)  # type: ignore[method-assign]
-            link_b.exchange = _wrap(kinds_b, link_b.exchange)  # type: ignore[method-assign]
-
-            # Force menu vote to TRADE via the auto-select hook on both
-            # sides (same mechanism LinkPair uses for its in-process
-            # trade_roundtrip test).
+            link_a.exchange = _wrap("listener", link_a.exchange)  # type: ignore[method-assign]
+            link_b.exchange = _wrap("connector", link_b.exchange)  # type: ignore[method-assign]
             _install_autoselect_trade_hook(session_a)
             _install_autoselect_trade_hook(session_b)
-
-            ork = LockstepOrchestrator(session_a, endpoint_a, session_b, endpoint_b)
-            ork.start()
-            try:
-                # Phase 1: settle map script, walk UP to receptionist,
-                # press A through attendant dialog → SaveGameData →
-                # nybble sync → LinkMenu entry.
-                ork.step(60)
-                # Press A repeatedly until both sides land in TRADE_CENTER.
-                # Menu auto-select hook forces TRADE when the menu's
-                # exchange-selection-loop reads the receive buffer.
-                TRADE_CENTER = 0xEF
-                for _ in range(120):
-                    if (
-                        session_a.read_game_state().overworld.map_id == TRADE_CENTER
-                        and session_b.read_game_state().overworld.map_id == TRADE_CENTER
-                    ):
-                        break
-                    ork.press_both("a", duration=4)
-                    ork.step(8)
-                assert session_a.read_game_state().overworld.map_id == TRADE_CENTER
-                assert session_b.read_game_state().overworld.map_id == TRADE_CENTER
-
-                # Phase 2: let the TRADE_CENTER map init run (palette
-                # fade, NPC spawn, etc.) before driving the players.
-                ork.step(240)
-                px_a, py_a = (
-                    session_a.read_game_state().overworld.x,
-                    session_a.read_game_state().overworld.y,
-                )
-                px_b, py_b = (
-                    session_b.read_game_state().overworld.x,
-                    session_b.read_game_state().overworld.y,
-                )
-                sys.stderr.write(f"\n[trade-center-spawn] a=({px_a},{py_a}) b=({px_b},{py_b})\n")
-
-                # Phase 3: walk both players toward the trade table
-                # (tiles (4,4) and (5,4) on TRADE_CENTER map). Spawn
-                # positions depend on clock role — one side lands at
-                # (3,4) and walks right; the other lands at (6,4) and
-                # walks left.
-                for _ in range(4):
-                    x_a = session_a.read_game_state().overworld.x
-                    x_b = session_b.read_game_state().overworld.x
-                    if x_a < 4:
-                        ork.press_a("right", duration=8)
-                    elif x_a > 5:
-                        ork.press_a("left", duration=8)
-                    if x_b < 4:
-                        ork.press_b("right", duration=8)
-                    elif x_b > 5:
-                        ork.press_b("left", duration=8)
-                    ork.step(24)  # let the tile walk complete
-
-                # Phase 4: press A on both sides (frame-synchronous via
-                # press_both) to trigger the hidden-event tiles →
-                # CableClub_DoBattleOrTradeAgain and its three
-                # Serial_ExchangeBytes blocks.
-                # First-exchange milestone: RandomNumberListBlock is
-                # the first exchange inside CableClub_DoBattleOrTradeAgain.
-                # Its appearance on both sides proves the game reached
-                # the full post-menu data-exchange codepath and at
-                # least the first round-trip completed.
-                rng_kind = "exchange_bytes/wSerialRandomNumberListBlock"
-                for _ in range(200):
-                    seen_a = set(kinds_a)
-                    seen_b = set(kinds_b)
-                    if rng_kind in seen_a and rng_kind in seen_b:
-                        break
-                    ork.press_both("a", duration=4)
-                    ork.step(12)
-            finally:
-                ork.stop()
-
-            bytes_a = [k for k in kinds_a if k.startswith("exchange_bytes/")]
-            bytes_b = [k for k in kinds_b if k.startswith("exchange_bytes/")]
-            map_a = session_a.read_game_state().overworld.map_id
-            map_b = session_b.read_game_state().overworld.map_id
-            diag = f"map_a=0x{map_a:02x} map_b=0x{map_b:02x} bytes_a={bytes_a} bytes_b={bytes_b}"
-            assert rng_kind in kinds_a, (
-                f"listener never issued RandomNumberListBlock exchange — "
-                f"CableClub_DoBattleOrTradeAgain didn't run over TCP; "
-                f"{diag}"
+            runners = [
+                _SessionRunner(session_a, endpoint_a, chunk=4),
+                _SessionRunner(session_b, endpoint_b, chunk=4),
+            ]
+            _drive_remote_trade_to_rng(
+                (runners[0], runners[1]),
+                (schedules["listener"], schedules["connector"]),
+                rng_done,
+                stop_inputs,
+                input_lock,
             )
-            assert rng_kind in kinds_b, (
-                f"connector never issued RandomNumberListBlock exchange; {diag}"
-            )
-            sys.stderr.write(f"\n[exchange-bytes blue↔blue] {diag}\n")
         finally:
-            link_a.close()
-            link_b.close()
+            with input_lock:
+                stop_inputs.set()
+            for runner in runners:
+                runner.set_before_step(None)
+                runner._stop.set()
+            teardown_errors = []
+            for link in links:
+                try:
+                    link.close()
+                except Exception as exc:  # noqa: BLE001
+                    teardown_errors.append(f"link close: {exc!r}")
+            live = []
+            for runner in runners:
+                if runner._thread.ident is not None:
+                    runner._thread.join(timeout=5.0)
+                    if runner._thread.is_alive():
+                        live.append(runner._thread.name)
+                    if runner.exc is not None:
+                        teardown_errors.append(f"{runner._thread.name}: {runner.exc!r}")
+            if live:
+                teardown_errors.append(f"owner runners still alive: {live}")
+            else:
+                observed_maps = {
+                    "listener": session_a.read_game_state().overworld.map_id,
+                    "connector": session_b.read_game_state().overworld.map_id,
+                }
+            if teardown_errors:
+                raise RuntimeError("remote trade teardown failed: " + "; ".join(teardown_errors))
     finally:
-        session_a.close()
-        session_b.close()
+        if not any(runner._thread.is_alive() for runner in runners):
+            session_a.close()
+            session_b.close()
+
+    trade_center = 0xEF
+    diag = (
+        f"maps={observed_maps} trade_ticks="
+        f"{{listener: {schedules['listener'].trade_tick}, "
+        f"connector: {schedules['connector'].trade_tick}}} "
+        f"rng_returns={rng_returns} attempts={attempts} returns={returns}"
+    )
+    assert all(schedule.trade_tick is not None for schedule in schedules.values()), (
+        f"Trade Center was not observed independently on both sides; {diag}"
+    )
+    assert all(map_id == trade_center for map_id in observed_maps.values()), (
+        f"both sessions did not end in Trade Center; {diag}"
+    )
+    for role in ("listener", "connector"):
+        assert any(
+            row["matched_length"] and row["after_trade_center"] for row in rng_returns[role]
+        ), f"{role} did not return a matching RNG exchange after Trade Center; {diag}"
+    sys.stderr.write(f"\n[trade-center exchange-bytes blue↔blue] {diag}\n")
 
 
 # Investigation notes (continued): forced-cursor + AgentSync rendezvous
@@ -420,10 +397,10 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
     frame-synced as two independent Python processes can get without
     a shared tick broker.
 
-    Assertion: after the coordinated A-press, both sides' LinkMenu
-    exits cleanly (no deadlock) and the first post-menu serial
-    exchange (``exchange_bytes/wSerialRandomNumberListBlock``) fires
-    over TCP on both sides.
+    Assertions: both sides complete the ``about_to_press_a`` rendezvous,
+    receive the peer's offered tick, and issue a menu-selection RPC over
+    TCP. This test does not prove that both sides reach the trade event or
+    complete a post-menu ``exchange_bytes`` round-trip.
 
     This is the T7 deployment pattern in action — proof that two
     independent agents can complete a coordinated action over the
@@ -511,10 +488,12 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
                         # also reached its menu. Timeout generous
                         # enough to outlast peer's menu-reach deadline
                         # under heavy parallel-suite load.
-                        tick_bytes = str(session.current_tick()).encode("ascii")
+                        offered_tick = session.current_tick()
+                        tick_bytes = str(offered_tick).encode("ascii")
                         peer_tick_bytes = sync.rendezvous(
                             "about_to_press_a", tick_bytes, timeout_ms=120000
                         )
+                        result["offered_tick"] = offered_tick
                         result["peer_tick"] = peer_tick_bytes.decode("ascii")
                         result["my_tick"] = session.current_tick()
                         # Coordinated action: burst of A-presses now.
@@ -555,7 +534,7 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             assert "error" not in result_b, result_b.get("error")
             # Both agents completed the rendezvous successfully.
             assert "peer_tick" in result_a and "peer_tick" in result_b
-            # And the game-level serial flow progressed past the menu.
+            # Both sessions issued the menu-selection RPC over TCP.
             menu_kind = "menu_selection/wLinkMenuSelectionSendBuffer"
             diag = (
                 f"result_a={result_a} result_b={result_b} "
@@ -564,11 +543,12 @@ def test_remote_agent_sync_coordinates_link_menu_vote_blue_blue() -> None:
             assert menu_kind in kinds_a and menu_kind in kinds_b, (
                 f"menu RPC didn't flow on both sides: {diag}"
             )
-            # Both agents successfully exchanged their current tick
-            # through the agent_sync/ kind — proves the rendezvous
-            # pattern works over the existing SerialLink transport.
-            assert result_a["peer_tick"] == str(result_b["my_tick"])
-            assert result_b["peer_tick"] == str(result_a["my_tick"])
+            # Both agents received the tick value the peer offered before
+            # entering rendezvous. The live clocks keep advancing while the
+            # peer call returns, so compare against the offered value rather
+            # than the post-rendezvous tick sample.
+            assert result_a["peer_tick"] == str(result_b["offered_tick"])
+            assert result_b["peer_tick"] == str(result_a["offered_tick"])
             map_a = session_a.read_game_state().overworld.map_id
             map_b = session_b.read_game_state().overworld.map_id
             sys.stderr.write(

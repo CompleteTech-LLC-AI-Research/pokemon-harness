@@ -98,6 +98,7 @@ import base64
 import json
 import os
 import shutil
+import stat
 
 import pytest
 
@@ -179,6 +180,7 @@ def test_battle_fixture_is_admitted_against_its_manifest_row(tmp_path, monkeypat
     tampered_root = tmp_path / "fixtures"
     shutil.copytree(original_root, tampered_root)
     battle = tampered_root / family / "cable_club-battle.state"
+    battle.chmod(battle.stat().st_mode | stat.S_IWUSR)
     battle.write_bytes(battle.read_bytes() + b"\x00")
     monkeypatch.setenv("POKERED_FIXTURE_ROOT", str(tampered_root))
 
