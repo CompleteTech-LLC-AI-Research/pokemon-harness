@@ -389,6 +389,35 @@ def test_bootstrap_timeout_terminates_posix_process_descendants(tmp_path) -> Non
             return False
         except PermissionError:
             return True
+        proc_root = Path("/proc")
+        if proc_root.is_dir():
+            try:
+                raw = (proc_root / str(pid) / "stat").read_text(encoding="ascii")
+            except FileNotFoundError:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return False
+                except OSError:
+                    return True
+                return True
+            except (OSError, UnicodeError):
+                return True
+            closing = raw.rfind(")")
+            if closing < 0:
+                return True
+            fields = raw[closing + 1 :].split()
+            if (
+                len(fields) < 3
+                or len(fields[0]) != 1
+                or fields[0] not in "RSDZTtXxKWPI"
+                or not fields[1].isdigit()
+                or not fields[2].isdigit()
+            ):
+                return True
+            # The outer child subreaper owns this exited child until pytest exits.
+            # Do not reap it here; a zombie consumes no execution capacity.
+            return fields[0] != "Z"
         return True
 
     try:
