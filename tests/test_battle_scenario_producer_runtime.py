@@ -156,3 +156,59 @@ def test_measured_request_accepts_same_environment_aliases(
     assert identity["pyboy_version_observed"] == "observed-version"
     assert identity["pyboy_revision_observed"] == "observed-revision"
     assert identity["measured"] is True
+
+
+def test_producer_measures_the_unmocked_running_runtime(capsys, request) -> None:
+    import hashlib
+    import importlib.machinery
+    import json
+
+    import pyboy
+    import pyboy.pyboy
+    import pyboy.utils
+
+    from pokered_harness.config import load_versions
+
+    selected = (pyboy, pyboy.pyboy, pyboy.utils)
+    module_paths = {module.__name__: Path(module.__file__).resolve() for module in selected}
+    compiled = bool(pyboy.utils.cython_compiled)
+    expected = "cython" if compiled else "source"
+    for name in ("pyboy.pyboy", "pyboy.utils"):
+        path = str(module_paths[name])
+        native = any(path.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)
+        assert native == compiled, module_paths
+        if not compiled:
+            assert path.endswith(".py"), module_paths
+    exact_request = sys.executable
+    identity = producer.measure_runtime_identity(
+        runtime=expected, python=exact_request, repo_root=ROOT
+    )
+    payload = {
+        "request": {"runtime": expected, "python": exact_request},
+        "identity": identity,
+        "observed_compiled_flag": compiled,
+        "sys_version": sys.version,
+        "modules": {
+            name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for name, path in module_paths.items()
+        },
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    request.node.user_properties.append(("producer_real_runtime_identity", serialized))
+    # Raw output survives passing tests and the existing gate's captured log.
+    with capsys.disabled():
+        print("PRODUCER_REAL_RUNTIME_IDENTITY=" + serialized, flush=True)
+    pins = load_versions(ROOT / "VERSIONS.md")
+    assert identity["measured"] is True
+    assert identity["mode"] == expected
+    assert identity["requested_python"] == exact_request
+    assert identity["executable_path"] == sys.executable
+    assert identity["executable"] == str(Path(sys.executable).resolve())
+    assert identity["environment"] == sys.prefix
+    assert identity["base_environment"] == sys.base_prefix
+    assert identity["isolated_environment"] == (sys.prefix != sys.base_prefix)
+    assert identity["python_version"] == sys.version.split()[0]
+    assert identity["pyboy_version_observed"] == pins.pyboy_version
+    assert identity["pyboy_revision_observed"] == pins.pyboy_revision
+    assert identity["pyboy_version"] == pins.pyboy_version
+    assert identity["pyboy_revision"] == pins.pyboy_revision
