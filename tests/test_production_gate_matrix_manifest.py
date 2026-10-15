@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import io
 import json
 import os
 import shutil
-import signal
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
 
 import pytest
 
@@ -701,48 +697,25 @@ def test_standalone_matrix_collection_environment_is_controlled(tmp_path, monkey
 
 
 def test_standalone_matrix_collection_timeout_reaps_process_group(tmp_path, monkeypatch):
-    class _HangingCollectionPopen:
-        instances: ClassVar[list] = []
+    from scripts import _matrix_collection_process as owned
+    from tests.test_matrix_collection_process import CollectionModel
 
-        def __init__(self, command, **kwargs):
-            self.command = command
-            self.kwargs = kwargs
-            self.pid = 31337
-            self.returncode = None
-            self.stdout = io.StringIO("partial collection output")
-            self.instances.append(self)
-
-        def communicate(self, timeout=None):
-            del timeout
-            raise subprocess.TimeoutExpired(self.command, 1.0, output="partial collection output")
-
-        def poll(self):
-            return self.returncode
-
-        def wait(self, timeout=None):
-            del timeout
-            self.returncode = -signal.SIGTERM
-            return self.returncode
-
-        def terminate(self):
-            self.returncode = -signal.SIGTERM
-
-        def kill(self):
-            self.returncode = -signal.SIGKILL
-
-    killed_groups = []
-    monkeypatch.setattr(matrix.subprocess, "Popen", _HangingCollectionPopen)
-    monkeypatch.setattr(matrix.os, "killpg", lambda pid, sig: killed_groups.append((pid, sig)))
-
-    audit, command = matrix.collect_nodeids(tmp_path, Path("python"), timeout_seconds=1.0)
-
+    model = CollectionModel(monkeypatch, terminal=False, writer=True)
+    audit, command = matrix.collect_nodeids(
+        tmp_path,
+        Path("python"),
+        timeout_seconds=1.0,
+        ownership_policy=owned.OWNERSHIP_POLICY,
+    )
     assert command[:3] == ["python", "-m", "pytest"]
     assert audit["structural_pass"] is False
     assert any("timed out after 1.0s" in error for error in audit["collection_errors"])
-    assert killed_groups == [(31337, signal.SIGTERM)]
-    process = _HangingCollectionPopen.instances[0]
-    assert process.kwargs["start_new_session"] is True
-    assert process.poll() is not None
+    # Intentional replacement: leader exit cannot suppress owned-group KILL.
+    assert [name for name, _ in model.events] == ["SIGTERM", "SIGKILL", "reap"]
+    assert model.creation_kwargs["start_new_session"] is True
+    assert model.process.returncode is not None
+    assert not model.descendant and audit["collection_cleanup"]["pipe_eof"]
+    assert audit["collection_cleanup"]["group_quiescence"] == "UNPROVEN"
 
 
 def test_strict_acceptance_gap_report_has_an_entrypoint_for_each_ordered_case():

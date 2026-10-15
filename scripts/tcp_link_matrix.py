@@ -15,15 +15,39 @@ hidden by an aggregate test count.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
-import time
 from collections.abc import Iterable
 from pathlib import Path
+
+# Registry runpy loading needs declarations only, with no ambient scripts path.
+_COLLECTION_PROCESS = None
+
+
+def _load_collection_process():
+    """Load lifecycle code only when needed, for CLI, package and runpy use."""
+    global _COLLECTION_PROCESS
+    if _COLLECTION_PROCESS is None:
+        if __package__:
+            from . import _matrix_collection_process
+
+            _COLLECTION_PROCESS = _matrix_collection_process
+        else:
+            path = Path(__file__).with_name("_matrix_collection_process.py")
+            spec = importlib.util.spec_from_file_location(
+                "_pokered_matrix_collection_process", path
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError("Standalone collection lifecycle helper is unavailable.")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _COLLECTION_PROCESS = module
+    return _COLLECTION_PROCESS
+
 
 SUPPORTED_VERSIONS = ("red", "blue", "yellow")
 SUPPORTED_VERSION_PAIRS = tuple(
@@ -490,77 +514,9 @@ def _terminate_collection_process(
     *,
     deadline: float | None = None,
 ) -> bool:
-    """Terminate and reap a collection child and its process group."""
+    """Deprecated: attributed leader reap only; never signals a supplied PID."""
 
-    pid = getattr(process, "pid", None)
-    if pid is None:
-        return False
-    cleanup_deadline = deadline
-    if cleanup_deadline is None:
-        cleanup_deadline = time.monotonic() + COLLECTION_CLEANUP_TIMEOUT_SECONDS
-
-    def wait_for_exit() -> bool:
-        if process.poll() is not None:
-            return True
-        remaining = cleanup_deadline - time.monotonic()
-        if remaining <= 0:
-            return process.poll() is not None
-        try:
-            process.wait(timeout=remaining)
-        except (OSError, subprocess.TimeoutExpired):
-            return process.poll() is not None
-        return process.poll() is not None
-
-    if os.name == "posix":
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except OSError:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-    else:
-        if process.poll() is None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-
-    if not wait_for_exit():
-        if os.name == "posix":
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except OSError:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-        else:
-            remaining = cleanup_deadline - time.monotonic()
-            if remaining > 0:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=remaining,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-            try:
-                process.kill()
-            except OSError:
-                pass
-
-    reaped = wait_for_exit()
-    stream = getattr(process, "stdout", None)
-    if stream is not None:
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
-    return reaped
+    return _load_collection_process().reap_leader_only(process, deadline)
 
 
 def _text_output(value: object) -> str:
@@ -679,8 +635,13 @@ def collect_nodeids(
     python_executable: Path,
     *,
     timeout_seconds: float = 300.0,
+    ownership_policy: str | None = None,
 ) -> tuple[dict[str, object], list[str]]:
-    """Run the gate plugin's collection-only report in a temporary directory."""
+    """Collect on admitted Linux supervisors, not unrestricted embeddings.
+
+    Imported callers must declare exclusive wait ownership explicitly. This
+    structural audit never establishes descendant quiescence or lease release.
+    """
 
     command = [
         str(python_executable),
@@ -691,61 +652,62 @@ def collect_nodeids(
         "-q",
         *PYTEST_COLLECTION_ARGUMENTS,
     ]
-    with tempfile.TemporaryDirectory(prefix="pokered-matrix-") as directory:
-        report_path = Path(directory) / "collection.json"
-        environment = _collection_environment(project_root)
-        environment["POKERED_GATE_REPORT"] = str(report_path)
+    _collection_process = _load_collection_process()
+    scope = _collection_process.CancellationScope(ownership_policy)
+    owner = _collection_process.OwnedCollection(scope)
+    audit = None
+    try:
+        with scope:
+            directory = None
+            try:
+                scope.checkpoint()
+                directory = tempfile.TemporaryDirectory(prefix="pokered-matrix-")
+                report_path = Path(directory.name) / "collection.json"
+                environment = _collection_environment(project_root)
+                environment["POKERED_GATE_REPORT"] = str(report_path)
+                returncode = owner.run(
+                    command, cwd=project_root, env=environment, timeout=timeout_seconds
+                )
+                scope.checkpoint()
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+                nodeids, errors, skips, problems = _collection_report_details(
+                    payload, returncode=returncode
+                )
+                errors.extend(problems)
+                audit = audit_collection(
+                    (str(nodeid) for nodeid in nodeids),
+                    collection_errors=errors,
+                    collection_skips=skips,
+                )
+                scope.checkpoint()
+            except BaseException as exc:  # noqa: BLE001 - preserve primary through owned cleanup
+                scope.select(exc)
+            finally:
+                if directory is not None:
+                    try:
+                        directory.cleanup()
+                    except BaseException as exc:  # noqa: BLE001 - preserve primary through owned cleanup
+                        scope.select(exc)
+                scope.checkpoint(raise_primary=False)
+    except (
+        _collection_process.UnsupportedCollection,
+        OSError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as exc:
+        error = f"collection command: {type(exc).__name__}: {exc}"
+        if isinstance(exc, subprocess.TimeoutExpired):
+            error = f"collection command timed out after {timeout_seconds:.1f}s"
+        audit = audit_collection((), collection_errors=(error, *scope.secondary))
+    except BaseException as exc:
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=project_root,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                **_process_creation_kwargs(),
-            )
-            _, _ = process.communicate(timeout=timeout_seconds)
-            raw_returncode = process.returncode
-            returncode = int(raw_returncode) if raw_returncode is not None else 125
-        except OSError as exc:
-            audit = audit_collection(
-                (), collection_errors=(f"collection command: {type(exc).__name__}: {exc}",)
-            )
-            return audit, command
-        except subprocess.TimeoutExpired as exc:
-            cleanup_ok = _terminate_collection_process(process)
-            partial_output = _text_output(exc.output)
-            timeout_error = f"collection command timed out after {timeout_seconds:.1f}s" + (
-                "; collection process did not terminate after cleanup" if not cleanup_ok else ""
-            )
-            if partial_output:
-                timeout_error += f"; output={partial_output[-4000:]}"
-            audit = audit_collection((), collection_errors=(timeout_error,))
-            return audit, command
-
-        try:
-            payload = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            audit = audit_collection(
-                (),
-                collection_errors=(
-                    f"collection report: {type(exc).__name__}: {exc}",
-                    f"pytest return code: {returncode}",
-                ),
-            )
-            return audit, command
-
-        nodeids, error_text, skip_text, report_problems = _collection_report_details(
-            payload,
-            returncode=returncode,
-        )
-        error_text.extend(report_problems)
-        return audit_collection(
-            (str(nodeid) for nodeid in nodeids),
-            collection_errors=error_text,
-            collection_skips=skip_text,
-        ), command
+            exc.add_note("Collection ownership: " + json.dumps(owner.evidence(), sort_keys=True))
+        except BaseException:  # noqa: BLE001 - evidence must not replace the primary
+            owner.result["note_failed"] = True
+        raise
+    audit["collection_cleanup"] = owner.evidence()
+    audit["collection_cleanup"]["secondary"] = scope.secondary
+    return audit, command
 
 
 def _case_label(case: tuple[str, str, str]) -> str:
@@ -791,6 +753,15 @@ def render_text(audit: dict[str, object], command: Iterable[str]) -> str:
             f"  trade={pair['trade']} battle={pair['battle']}: "
             f"listener={pair['listener']} connector={pair['connector']}"
         )
+    cleanup = audit.get("collection_cleanup")
+    if cleanup:
+        lines.append(
+            f"collection cleanup: {cleanup['cleanup_status']}; descendant quiescence: UNPROVEN"
+        )
+        if cleanup["recovery_required"]:
+            lines.append(
+                "cleanup remains unresolved; do not release a runner allocation on this audit"
+            )
     lines.append("runtime: NOT RUN")
     return "\n".join(lines)
 
@@ -818,6 +789,7 @@ def main(argv: list[str] | None = None) -> int:
         project_root,
         python_executable,
         timeout_seconds=args.timeout_seconds,
+        ownership_policy=_load_collection_process().OWNERSHIP_POLICY,
     )
     if args.format == "json":
         print(json.dumps(audit, indent=2, sort_keys=True))
