@@ -677,3 +677,99 @@ def test_matrix_reader_start_interrupt_retains_output_from_a_real_pipe(tmp_path,
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
             process.stdout.close()
+
+
+@pytest.mark.parametrize("modes", [("source",), ("cython",), ("source", "cython")])
+@pytest.mark.parametrize("early_smoke", [False, True])
+@pytest.mark.parametrize("fail_fast", [False, True])
+@pytest.mark.parametrize("selected", [QUALIFICATION_TIERS, QUALIFICATION_TIERS[::-1]])
+def test_full_plan_scope_requires_additional_early_smoke(modes, early_smoke, fail_fast, selected):
+    """Authored NOTRUN: policy labels never invent an unrequested smoke."""
+    plan = gate.build_execution_plan(modes, selected, early_smoke=early_smoke, fail_fast=fail_fast)
+    assert plan["schema_version"] == 1
+    assert plan["scope"] == ("full" if early_smoke else "selected-tiers")
+    assert plan["selected_tiers"] == list(selected)
+    assert plan["runtime_modes"] == list(modes)
+    assert plan["early_smoke"] is early_smoke and plan["fail_fast"] is fail_fast
+    assert plan["smoke_role"] == ("additional-probe" if early_smoke else "not-selected")
+    assert plan["steps"] == (
+        [{"mode": mode, "tier": "smoke", "role": "additional-probe"} for mode in modes]
+        if early_smoke
+        else []
+    ) + [
+        {"mode": mode, "tier": tier, "role": "selected-tier"} for mode in modes for tier in selected
+    ]
+    assert gate._valid_execution_plan(plan)
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+@pytest.mark.parametrize("selected", [QUALIFICATION_TIERS, QUALIFICATION_TIERS[::-1]])
+def test_explicit_all_tiers_without_smoke_keep_dispatch_and_selected_scope(
+    scenario, fail_fast, selected
+):
+    """Authored NOTRUN: a selected-scope pass stays a selected-scope pass."""
+    run, calls, probes, _outcomes, _problems = scenario
+    results = run(selected=selected, early_smoke=False, fail_fast=fail_fast)
+    assert [key for key, _ in calls] == [
+        (mode, tier) for mode in ("source", "cython") for tier in selected
+    ]
+    assert probes == ["source", "cython"]
+    for result in results:
+        assert result.execution_plan["scope"] == "selected-tiers"
+        assert result.execution_plan["smoke_role"] == "not-selected"
+        assert [tier.name for tier in result.tiers] == list(selected)
+        assert gate.runtime_gate_passes(result)
+    assert gate.runtime_gates_pass(results)
+    assert all(kwargs["repeat"] == 5 for _key, kwargs in calls)
+
+
+def test_no_smoke_full_label_is_invalid_for_gate_and_sanitized_plan(scenario):
+    """Authored NOTRUN: legacy misclassification cannot authenticate as full."""
+    run, _calls, _probes, _outcomes, _problems = scenario
+    results = run(early_smoke=False, fail_fast=False)
+    plan = results[0].execution_plan
+    assert plan["scope"] == "selected-tiers"
+    forged = dict(plan, scope="full")
+    results[0].execution_plan = forged
+    assert not gate._valid_execution_plan(forged)
+    assert not gate.runtime_gate_passes(results[0])
+    assert not gate.runtime_gates_pass(results)
+    assert gate._safe_execution_plan(forged) == {"schema_version": 1, "scope": "invalid"}
+
+
+def test_no_smoke_all_tiers_evidence_retains_accurate_selected_scope(scenario, tmp_path):
+    """Authored NOTRUN: successful report evidence must not claim qualification."""
+    run, _calls, _probes, _outcomes, _problems = scenario
+    results = run(early_smoke=False, fail_fast=False)
+    payload = gate.build_dual_evidence_payload(
+        project_root=tmp_path,
+        rom_root=tmp_path / "rom",
+        fixture_root=tmp_path / "fixtures",
+        assets=[],
+        runtime_results=results,
+        overall="PASS",
+    )
+    for item, result in zip(payload["runtimes"], results, strict=True):
+        assert item["overall"] == "PASS"
+        assert item["execution_plan"] == result.execution_plan
+        assert item["execution_plan"]["scope"] == "selected-tiers"
+        lines = gate._execution_plan_lines(result.execution_plan)
+        assert "execution-scope: selected-tiers" in lines
+        assert "smoke-role: not-selected" in lines
+        assert "execution-scope: full" not in lines
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+def test_selected_all_tiers_failure_still_refuses_pass_without_smoke(scenario, fail_fast):
+    """Authored NOTRUN: correcting scope never launders an executed failure."""
+    run, calls, _probes, outcomes, _problems = scenario
+    outcomes[("source", "unit")] = "FAIL"
+    results = run(early_smoke=False, fail_fast=fail_fast)
+    assert all(result.execution_plan["scope"] == "selected-tiers" for result in results)
+    assert results[0].tiers[0].name == "unit" and results[0].tiers[0].status == "FAIL"
+    assert not gate.runtime_gates_pass(results)
+    assert all(key[1] != "smoke" for key, _kwargs in calls)
+    if fail_fast:
+        assert [key for key, _kwargs in calls] == [("source", "unit")]
+    else:
+        assert len(calls) == 2 * len(QUALIFICATION_TIERS)
