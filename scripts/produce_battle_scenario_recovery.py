@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from scripts.produce_battle_scenario_model import ScenarioRefusal, _note
+from scripts.produce_battle_scenario_transaction import normal_guard
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,9 @@ class _ReportRecovery:
 
     def read_verified(self) -> bytes:
         """Read the retained file afresh and refuse changed/incomplete bytes."""
+        normal_guard("recovery verification")
         payload = self.path.read_bytes()
+        normal_guard("recovery verification")
         if len(payload) != self.size or hashlib.sha256(payload).hexdigest() != self.sha256:
             raise ScenarioRefusal(
                 f"prior report recovery failed size/hash verification: {self.path}"
@@ -100,11 +103,13 @@ class _WithdrawalResult:
 
 def _sync_recovery_directory(directory: Path) -> None:
     """Require directory fsync support before replacing an existing report."""
+    normal_guard("recovery directory sync")
     descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    normal_guard("recovery directory sync")
 
 
 def _report_stamp(entry: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -131,6 +136,7 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
     replacement. Entries are never automatically removed. This is not power-loss
     certification: subsequent replacement/rollback is not a synced journal.
     """
+    normal_guard("prior report inspection")
     try:
         before = os.lstat(target)
     except FileNotFoundError:
@@ -154,12 +160,20 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
             size = 0
             backup_fd = os.open(prior, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(backup_fd, "wb") as backup:
-                while chunk := source.read(1024 * 1024):
+                while True:
+                    normal_guard("prior report copy")
+                    chunk = source.read(1024 * 1024)
+                    normal_guard("prior report copy")
+                    if not chunk:
+                        break
                     backup.write(chunk)
                     digest.update(chunk)
                     size += len(chunk)
+                    normal_guard("prior report copy")
                 backup.flush()
+                normal_guard("prior report payload sync")
                 os.fsync(backup.fileno())
+                normal_guard("prior report payload sync")
             if (
                 _report_stamp(os.fstat(source.fileno())) != _report_stamp(before)
                 or _report_stamp(os.lstat(target)) != _report_stamp(before)
@@ -187,7 +201,9 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
                 json.dump(data, stream, indent=2, sort_keys=True)
                 stream.write("\n")
                 stream.flush()
+                normal_guard("prior report manifest sync")
                 os.fsync(stream.fileno())
+                normal_guard("prior report manifest sync")
             # Verify persisted bytes before permitting replacement, not merely
             # the digest of the source stream used to create the copy.
             recovery.read_verified()

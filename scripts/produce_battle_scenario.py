@@ -167,7 +167,12 @@ from scripts.produce_battle_scenario_runtime import (
     measure_runtime_identity,  # noqa: F401  (retained facade attribute: producer.measure_runtime_identity)
 )
 
+from scripts.produce_battle_scenario_transaction import (
+    active_scope, bind_operation, normal_guard, operation_entry, track_publication,
+)
 
+
+@operation_entry("run")
 def run(
     *,
     scenario_id: str,
@@ -201,6 +206,7 @@ def run(
         ),
         max_inputs=declared["max_inputs"] if max_inputs is None else max_inputs,
     )
+    bind_operation(bounds["max_wall_seconds"])
     if report is not None:
         # The catalog is an input as well: a report written over it would replace
         # the very declarations this capture was validated against.
@@ -234,7 +240,8 @@ def run(
         "capture_bounds": bounds,
         "output": str(output),
     }
-    deadline = clock() + bounds["max_wall_seconds"]
+    normal_guard("capture preflight")
+    deadline = active_scope().timing.deadline
     ownership: dict[str, Any] = {}
     capture_record = capture(
         scenario=scenario,
@@ -255,28 +262,17 @@ def run(
     )
     if isinstance(capture_record, dict):
         plan = {**plan, "capture": capture_record}
-    fixture_publication: _OwnedPublication | None = ownership.get("publication")
+    track_publication(ownership.get("publication"))
     if report is not None:
-        guard = _deadline_guard(deadline, clock)
-        report_publication: _OwnedPublication | None = None
-        try:
-            guard("report preparation")
-            report_publication = write_report(report, plan)
-            guard("report finalization")
-        except BaseException as exc:
-            # A requested report that could not be written must not leave the
-            # fixture behind as if the capture had been fully recorded, and a
-            # report this capture published must not survive a rolled-back
-            # fixture.  Only entries this capture owns are ever withdrawn.
-            _withdraw_all(exc, report_publication, fixture_publication)
-            raise
-        if clock() >= deadline:
-            refusal = CaptureBoundsExceeded(
-                f"capture exceeded max_wall_seconds ({bounds['max_wall_seconds']}) while "
-                "finalizing the requested report; refusing to admit the pair"
-            )
-            _withdraw_all(refusal, report_publication, fixture_publication)
-            raise refusal
+        prepared_at = normal_guard("report preparation")
+        plan = {**plan, "report_timing": {
+            "wall_seconds": round(prepared_at - active_scope().timing.started, 6),
+            "scope": "operation origin through report preparation",
+            "final_total_observed": False,
+        }}
+        report_publication = write_report(report, plan)
+        track_publication(report_publication)
+        normal_guard("report finalization")
     return plan
 
 

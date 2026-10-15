@@ -54,6 +54,11 @@ from scripts.produce_battle_scenario_recovery import (
     _WithdrawalResult,
 )
 
+from scripts.produce_battle_scenario_transaction import (
+    active_scope, bind_operation, failure_cleanup, normal_guard, operation_entry,
+    track_publication,
+)
+
 
 @dataclass(frozen=True)
 class _InputStep:
@@ -125,6 +130,9 @@ class _CaptureBudget:
         self._check_wall(phase)
 
     def _check_wall(self, phase: str) -> None:
+        if active_scope() is not None:
+            normal_guard(phase)
+            return
         if self._clock() >= self._deadline:
             raise CaptureBoundsExceeded(
                 f"capture exceeded max_wall_seconds during {phase}; "
@@ -291,9 +299,11 @@ def _write_bytes_atomically(path: Path, payload: bytes) -> None:
     try:
         descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
+            normal_guard("payload staging")
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+            normal_guard("payload staging")
         os.replace(staged, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -321,6 +331,7 @@ def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
     directory before replacement and retained across every later disposition.
     Replacing/withdrawing still requires exclusive namespace access (R3-01).
     """
+    normal_guard("report preparation")
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = target.with_name(f".{target.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
@@ -328,22 +339,29 @@ def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
     publication: _OwnedPublication | None = None
     try:
         displaced = _secure_prior_report(target)
+        normal_guard("report recovery preparation")
         encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        normal_guard("report encoding")
         descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
+            normal_guard("report staging")
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
+        normal_guard("report staging close")
         # Retain the identity before the rename: an interrupt delivered inside
         # ``os.replace`` (after the entry exists, before it returns) must still
         # be recognisable as this capture's own publication.
         publication = _OwnedPublication(target, *_entry_identity(staged), displaced)
+        normal_guard("report publication")
         os.replace(staged, target)
+        normal_guard("report publication")
         return publication
     except BaseException as exc:
         if displaced is not None:
             _note(exc, displaced.describe())
-        _withdraw_all(exc, publication)
+        with failure_cleanup():
+            _withdraw_all(exc, publication)
         staging_error = _remove_staged(staged)
         if staging_error is not None:
             _note(exc, staging_error)
@@ -541,9 +559,11 @@ def _write_fixture_exclusive(
     try:
         descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
+            normal_guard("payload staging")
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+            normal_guard("payload staging")
         if guard is not None:
             guard("fixture staging")
         # Retained before the link: once the entry exists the staging path may
@@ -572,6 +592,7 @@ def _write_fixture_exclusive(
         raise
 
 
+@operation_entry("capture")
 def capture_battle_scenario(
     *,
     scenario: dict[str, Any],
@@ -598,6 +619,7 @@ def capture_battle_scenario(
     history, the runtime identity, or the output hashes.
     """
     del report
+    bind_operation(bounds["max_wall_seconds"], deadline)
     scenario_id = scenario["scenario_id"]
     validate_scenario_metadata(scenario, scenario_id)
     boundary = scenario["capture_boundary"]
@@ -631,11 +653,14 @@ def capture_battle_scenario(
     if measured and isinstance(plan, dict):
         # Measure and enforce the executing identity *before* the emulator opens,
         # so a requested runtime or interpreter is never recorded as observed.
+        normal_guard("runtime measurement")
         plan["runtime_identity"] = _entry.measure_runtime_identity(
             runtime=runtime, python=python, repo_root=repo_root
         )
+        normal_guard("runtime measurement")
     output_path = Path(output)
-    started = clock()
+    started = active_scope().timing.started
+    deadline = active_scope().timing.deadline
     budget = _CaptureBudget(bounds, clock=clock, deadline=deadline)
     session: Any | None = None
     failure: BaseException | None = None
@@ -729,7 +754,7 @@ def capture_battle_scenario(
         "python": str(python) if measured and python is not None else None,
         "role": role,
         "captured_at_utc": datetime.now(UTC).isoformat(),
-        "wall_seconds": round(clock() - started, 6),
+        "wall_seconds": round(normal_guard("capture record timing") - started, 6),
         "declared_bounds": effective_bounds,
         "declared_producer": plan.get("producer_identity") if isinstance(plan, dict) else None,
         "inputs_used": budget.inputs,
@@ -754,24 +779,8 @@ def capture_battle_scenario(
     }
     budget.check_wall("record preparation")
     _entry.validate_capture_record(record, scenario_id)
-    publication: _OwnedPublication | None = None
-    try:
-        publication = _write_fixture_exclusive(output_path, payload, guard=budget.check_wall)
-        budget.check_wall("fixture publication")
-    except BaseException as exc:
-        _withdraw_all(exc, publication)
-        raise
-    # The recorded duration now covers the publication too, and an operation that
-    # crossed the declared bound regardless removes its own pair before refusing.
-    elapsed = round(clock() - started, 6)
-    if elapsed > effective_bounds["max_wall_seconds"]:
-        refusal = CaptureBoundsExceeded(
-            f"capture exceeded max_wall_seconds ({effective_bounds['max_wall_seconds']}) before "
-            f"admitting the fixture; observed {elapsed}s"
-        )
-        _withdraw_all(refusal, publication)
-        raise refusal
-    record["wall_seconds"] = elapsed
+    publication = _write_fixture_exclusive(output_path, payload, guard=budget.check_wall)
+    track_publication(publication)
     if ownership is not None:
         ownership["publication"] = publication
     return record
