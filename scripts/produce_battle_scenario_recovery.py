@@ -10,6 +10,7 @@ replacement or restoration; deleting them is an explicit operator decision.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -134,6 +135,8 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
         before = os.lstat(target)
     except FileNotFoundError:
         return None
+    if stat.S_ISDIR(before.st_mode):
+        raise IsADirectoryError(errno.EISDIR, "report target is a directory", str(target))
     if not stat.S_ISREG(before.st_mode):
         raise ScenarioRefusal(f"refusing to replace a non-regular prior report: {target}")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
