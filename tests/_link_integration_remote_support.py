@@ -351,12 +351,14 @@ class _RemoteInputSchedule:
         session: Session,
         ready: Callable[[], bool],
         stop_inputs: threading.Event,
+        input_lock: threading.Lock,
         *,
         attempts: int,
     ) -> None:
         self._session = session
         self._ready = ready
         self._stop_inputs = stop_inputs
+        self._input_lock = input_lock
         self._attempts = max(0, attempts)
         self._start_tick: int | None = None
         self._next_tick: int | None = None
@@ -364,6 +366,19 @@ class _RemoteInputSchedule:
         self._up_count = 0
         self._a_count = 0
         self.done = threading.Event()
+
+    def _press_if_active(self, button: str, duration: int) -> bool:
+        if self._ready():
+            with self._input_lock:
+                self._stop_inputs.set()
+            self.done.set()
+            return False
+        with self._input_lock:
+            if self._stop_inputs.is_set():
+                self.done.set()
+                return False
+            self._session.press(button, duration=duration)
+        return True
 
     def before_step(self) -> None:
         if self.done.is_set() or self._stop_inputs.is_set():
@@ -380,18 +395,16 @@ class _RemoteInputSchedule:
             self.done.set()
             return
         if self._up_count < 3:
-            self._session.press("up", duration=6)
+            if not self._press_if_active("up", 6):
+                return
             self._up_count += 1
             self._next_tick = tick + 20
-            return
-        if self._ready():
-            self._stop_inputs.set()
-            self.done.set()
             return
         if self._a_count >= self._attempts:
             self.done.set()
             return
-        self._session.press("a", duration=4)
+        if not self._press_if_active("a", 4):
+            return
         self._a_count += 1
         self._next_tick = tick + 20
         if self._a_count == self._attempts:
@@ -416,9 +429,10 @@ def _drive_remote_to_link_menu(
     thread-safe, non-blocking predicate over shared progress counters only.
     """
     stop_inputs = threading.Event()
+    input_lock = threading.Lock()
     schedules = (
-        _RemoteInputSchedule(runner_a.session, ready, stop_inputs, attempts=attempts),
-        _RemoteInputSchedule(runner_b.session, ready, stop_inputs, attempts=attempts),
+        _RemoteInputSchedule(runner_a.session, ready, stop_inputs, input_lock, attempts=attempts),
+        _RemoteInputSchedule(runner_b.session, ready, stop_inputs, input_lock, attempts=attempts),
     )
     runners = (runner_a, runner_b)
     for runner, schedule in zip(runners, schedules, strict=True):
@@ -438,13 +452,15 @@ def _drive_remote_to_link_menu(
                         f"{_REMOTE_RUNNER_WINDOW_TIMEOUT:.1f}s"
                     )
             if ready():
-                stop_inputs.set()
+                with input_lock:
+                    stop_inputs.set()
                 return
             if all(schedule.done.is_set() for schedule in schedules):
                 return
             time.sleep(0.01)
     finally:
-        stop_inputs.set()
+        with input_lock:
+            stop_inputs.set()
         for runner in runners:
             runner.set_before_step(None)
 

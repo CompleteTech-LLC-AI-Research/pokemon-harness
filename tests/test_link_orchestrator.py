@@ -260,6 +260,48 @@ def test_remote_menu_driver_progresses_peer_while_one_runner_is_blocked(monkeypa
     assert blocked_session.button_calls == []
 
 
+def test_remote_menu_schedule_skips_press_after_synchronized_cancellation():
+    session = _FakeRemoteSession()
+    stop_inputs = threading.Event()
+    input_lock = threading.Lock()
+    ready_checked = threading.Event()
+    release_ready = threading.Event()
+    thread_errors: list[Exception] = []
+
+    def ready() -> bool:
+        ready_checked.set()
+        if not release_ready.wait(timeout=2.0):
+            raise TimeoutError("test did not release the readiness check")
+        return False
+
+    schedule = remote_support._RemoteInputSchedule(
+        session, ready, stop_inputs, input_lock, attempts=1
+    )
+    schedule.before_step()
+    session.tick = 180
+
+    def run_before_step() -> None:
+        try:
+            schedule.before_step()
+        except Exception as exc:  # noqa: BLE001 - assert owner failures on the test thread
+            thread_errors.append(exc)
+
+    owner = threading.Thread(target=run_before_step)
+    owner.start()
+    try:
+        assert ready_checked.wait(timeout=2.0)
+        with input_lock:
+            stop_inputs.set()
+    finally:
+        release_ready.set()
+        owner.join(timeout=2.0)
+
+    assert not owner.is_alive(), "owner callback did not finish"
+    assert thread_errors == []
+    assert session.button_calls == []
+    assert schedule.done.is_set()
+
+
 def test_remote_menu_driver_keeps_each_side_action_budget_bounded():
     session_a = _FakeRemoteSession()
     session_b = _FakeRemoteSession()
