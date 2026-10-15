@@ -16,12 +16,13 @@ import json
 import os
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from scripts.produce_battle_scenario_model import ScenarioRefusal, _note
-from scripts.produce_battle_scenario_transaction import normal_guard
+from scripts.produce_battle_scenario_transaction import normal_guard, resource_scope
 
 
 @dataclass(frozen=True)
@@ -104,14 +105,33 @@ class _WithdrawalResult:
         return self.error
 
 
+@contextmanager
+def _recovery_stream(path: Path, flags: int, mode: str, *, encoding=None):
+    """Own the returned descriptor until fdopen succeeds, then own its stream.
+
+    The scope claims each close before invoking it. A body/fdopen failure stays
+    primary even if close raises; with no earlier failure, close prevents success.
+    """
+    with resource_scope() as scope:
+        descriptor = os.open(path, flags, 0o600)
+        raw = scope.action(object(), path, "recovery descriptor close",
+                           lambda: os.close(descriptor))
+        stream = os.fdopen(descriptor, mode, encoding=encoding)
+        scope.disarm(raw)  # fdopen has returned successfully; ownership transferred
+        wrapped = scope.action(object(), path, "recovery stream close", stream.close)
+        yield stream
+        scope.perform(wrapped)
+
+
 def _sync_recovery_directory(directory: Path) -> None:
-    """Require directory fsync support before replacing an existing report."""
+    """Require directory fsync support; preserve its failure across close."""
     normal_guard("recovery directory sync")
-    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
+    with resource_scope() as scope:
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        close = scope.action(object(), directory, "recovery directory close",
+                             lambda: os.close(descriptor))
         os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        scope.perform(close)
     normal_guard("recovery directory sync")
 
 
@@ -149,20 +169,19 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
     if not stat.S_ISREG(before.st_mode):
         raise ScenarioRefusal(f"refusing to replace a non-regular prior report: {target}")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(target, flags)
-    with os.fdopen(descriptor, "rb") as source:
-        if _report_stamp(os.fstat(source.fileno())) != _report_stamp(before):
-            raise ScenarioRefusal(f"prior report changed before recovery read: {target}")
-        directory = Path(
-            tempfile.mkdtemp(prefix=f".{target.name}.recovery-", dir=target.parent)
-        ).absolute()
-        manifest = directory / "manifest.json"
-        try:
+    directory = None
+    try:
+        with _recovery_stream(target, flags, "rb") as source:
+            if _report_stamp(os.fstat(source.fileno())) != _report_stamp(before):
+                raise ScenarioRefusal(f"prior report changed before recovery read: {target}")
+            directory = Path(
+                tempfile.mkdtemp(prefix=f".{target.name}.recovery-", dir=target.parent)
+            ).absolute()
+            manifest = directory / "manifest.json"
             prior = directory / "prior-report"
             digest = hashlib.sha256()
             size = 0
-            backup_fd = os.open(prior, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(backup_fd, "wb") as backup:
+            with _recovery_stream(prior, os.O_CREAT | os.O_EXCL | os.O_WRONLY, "wb") as backup:
                 while True:
                     normal_guard("prior report copy")
                     chunk = source.read(1024 * 1024)
@@ -199,8 +218,9 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
                 "sync_protocol": ["payload", "manifest", "recovery-directory", "parent"],
                 "sync_status": "pre-directory-sync manifest; not a completion receipt",
             }
-            manifest_fd = os.open(manifest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(manifest_fd, "w", encoding="utf-8") as stream:
+            with _recovery_stream(
+                manifest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, "w", encoding="utf-8"
+            ) as stream:
                 json.dump(data, stream, indent=2, sort_keys=True)
                 stream.write("\n")
                 stream.flush()
@@ -213,10 +233,11 @@ def _secure_prior_report(target: Path) -> _ReportRecovery | None:
             _sync_recovery_directory(directory)
             _sync_recovery_directory(target.parent)
             return recovery
-        except BaseException as exc:
+    except BaseException as exc:
+        if directory is not None:
             _note(
                 exc,
                 f"prior report recovery preparation incomplete at {directory}; "
-                f"original target was not replaced; inspect {manifest} and prior-report",
+                f"original target was not replaced; inspect {directory / 'manifest.json'} and prior-report",
             )
-            raise
+        raise

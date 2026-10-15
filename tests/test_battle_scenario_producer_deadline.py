@@ -270,3 +270,66 @@ def test_nonfinite_explicit_deadline_refuses(tmp_path, limit):
             tmp_path, _writable_scenario(), deadline=limit,
             session_factory=lambda **_kwargs: _FakeSession()))
     assert not (tmp_path / "out.state").exists()
+
+
+@pytest.mark.parametrize("inner_failure", [False, True], ids=["inner-success", "caught-inner-failure"])
+@pytest.mark.parametrize("outer_time", [80.0, 120.0], ids=["backward-refused", "timely-positive"])
+def test_reentrant_every_observation_survives_caught_failure(
+    tmp_path, inner_failure, outer_time
+):
+    """F2: real nested runs share observations, never origins or resource lists."""
+    from scripts import produce_battle_scenario_capture as capture_module
+
+    outer_dir, inner_dir = tmp_path / "outer", tmp_path / "inner"
+    outer_dir.mkdir()
+    inner_dir.mkdir()
+    outer, inner = _prepared(outer_dir, False), _prepared(inner_dir, False)
+    extra = outer_dir / "separately-owned"
+    clock = _Clock()
+    primary = RuntimeError("inner operation failed after observing 100")
+    scopes, inner_results = [], []
+
+    def inner_capture(**kwargs):
+        scopes.append(transaction.active_scope())
+        result = producer.capture_battle_scenario(
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession())
+        clock.now = 100.0
+        transaction.normal_guard("inner observation before possible failure")
+        if inner_failure:
+            raise primary
+        return result
+
+    def outer_capture(**kwargs):
+        parent = transaction.active_scope()
+        scopes.append(parent)
+        capture_module._write_fixture_exclusive(extra, b"outer resource")
+        clock.now = 30.0
+        try:
+            inner_results.append(_run_with_fake_session(
+                inner, clock=clock, capture=inner_capture))
+        except RuntimeError as caught:
+            assert inner_failure and caught is primary
+        assert transaction.active_scope() is parent
+        assert scopes[0] is not scopes[1] and scopes[0].actions is not scopes[1].actions
+        assert parent.timing.started == 0.0 and parent.timing.deadline == 180.0
+        assert scopes[1].timing.started == 30.0 and scopes[1].timing.deadline == 180.0
+        assert parent.timing.observations is scopes[1].timing.observations
+        assert parent.timing.observations.last == 100.0
+        clock.now = outer_time
+        return producer.capture_battle_scenario(
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession())
+
+    if outer_time < 100.0:
+        with pytest.raises(producer.ScenarioRefusal, match="backward"):
+            _run_with_fake_session(outer, clock=clock, capture=outer_capture)
+        assert not outer["out"].exists() and not extra.exists()
+    else:
+        plan = _run_with_fake_session(outer, clock=clock, capture=outer_capture)
+        assert plan["operation_timing"]["wall_seconds"] == 120.0
+        assert outer["out"].read_bytes() == b"fake-bounded-capture-state"
+        assert extra.read_bytes() == b"outer resource"
+    assert inner["out"].exists() is (not inner_failure)
+    if not inner_failure:
+        assert inner["out"].read_bytes() == b"fake-bounded-capture-state"
+        assert inner_results[0]["operation_timing"]["wall_seconds"] == 70.0
+    assert transaction.active_scope() is None

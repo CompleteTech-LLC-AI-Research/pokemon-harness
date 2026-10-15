@@ -23,16 +23,23 @@ from scripts.produce_battle_scenario_model import CaptureBoundsExceeded, Scenari
 
 
 @dataclass
+class _ObservationWatermark:
+    last: float | None = None
+
+
+@dataclass
 class _OperationClock:
     clock: Callable[[], float]
     started: float = field(init=False)
     last: float = field(init=False)
     deadline: float | None = None
+    observations: _ObservationWatermark = field(default_factory=_ObservationWatermark)
 
     def __post_init__(self) -> None:
         value = self.clock()
         if isinstance(value, bool) or not math.isfinite(value):
             raise ScenarioRefusal("operation clock origin must be finite")
+        self._observe(value, "operation origin")
         self.started = self.last = value
         if self.deadline is not None and not math.isfinite(self.deadline):
             raise ScenarioRefusal("operation deadline must be finite")
@@ -50,10 +57,17 @@ class _OperationClock:
                 limit = min(limit, candidate)
         self.deadline = limit
 
+    def _observe(self, value: float, phase: str) -> None:
+        previous = self.observations.last
+        if (isinstance(value, bool) or not math.isfinite(value)
+                or (previous is not None and value < previous)):
+            raise ScenarioRefusal(f"nonfinite or backward operation clock during {phase}")
+        # Shared by same-clock related operations, even when an inner failure is caught.
+        self.observations.last = value
+
     def sample(self, phase: str) -> float:
         value = self.clock()
-        if isinstance(value, bool) or not math.isfinite(value) or value < self.last:
-            raise ScenarioRefusal(f"nonfinite or backward operation clock during {phase}")
+        self._observe(value, phase)
         self.last = value
         return value
 
@@ -334,7 +348,9 @@ def operation_entry(kind: str):
                 raise ScenarioRefusal("nested operation clock domain differs from its owner")
             borrowed = kind == "capture" and parent is not None and parent.timing is not None
             timing = parent.timing if borrowed else _OperationClock(
-                clock, deadline=parent.timing.deadline if parent is not None and parent.timing is not None else None
+                clock,
+                deadline=parent.timing.deadline if parent is not None and parent.timing is not None else None,
+                observations=parent.timing.observations if parent is not None and parent.timing is not None else _ObservationWatermark(),
             )
             if parent is not None and parent.timing is not None and not borrowed:
                 if timing.started < parent.timing.last:

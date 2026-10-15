@@ -11,6 +11,7 @@ import pytest
 from scripts import produce_battle_scenario as producer
 from scripts import produce_battle_scenario_capture as capture
 from scripts import produce_battle_scenario_transaction as transaction
+from scripts import produce_battle_scenario_recovery as recovery_module
 from scripts.produce_battle_scenario_recovery import _ReportRecovery
 from tests._battle_scenario_fixtures_support import (
     _capture_kwargs,
@@ -718,3 +719,172 @@ def test_normal_recovery_guards_bracket_real_blocking_work(tmp_path, monkeypatch
     assert prepared["report"].read_bytes() == PRIOR
     assert not prepared["out"].exists()
     assert transaction.active_scope() is None
+
+
+def _recovery_handle_faults(monkeypatch, report, *, close_roles=(), fdopen_role=None,
+                            close_type=SystemExit):
+    """Real handles, with a shim that closes once then reports an injected failure."""
+    real_open, real_fdopen, real_close = os.open, os.fdopen, os.close
+    handles, attempts = {}, []
+    wrapping_failure = OSError("fdopen failed before ownership transfer")
+
+    def role(path):
+        path = Path(path)
+        if path == report:
+            return "source"
+        if path.name == "prior-report":
+            return "backup"
+        if path.name == "manifest.json":
+            return "manifest"
+        if ".recovery-" in path.name and path.is_dir():
+            return "directory"
+        return "other"
+
+    def opening(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        handles[descriptor] = role(path)
+        return descriptor
+
+    class Stream:
+        def __init__(self, wrapped, name):
+            self.wrapped, self.name = wrapped, name
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+        def close(self):
+            attempts.append((self.name, "stream"))
+            self.wrapped.close()
+            if self.name in close_roles:
+                error = close_type(f"{self.name} close failed")
+                handles.setdefault("close_failures", []).append(error)
+                raise error
+
+    def wrapping(descriptor, *args, **kwargs):
+        name = handles.get(descriptor, "other")
+        if name == fdopen_role:
+            raise wrapping_failure
+        stream = real_fdopen(descriptor, *args, **kwargs)
+        return Stream(stream, name) if name in {"source", "backup", "manifest"} else stream
+
+    def closing(descriptor):
+        name = handles.get(descriptor, "other")
+        attempts.append((name, "descriptor"))
+        real_close(descriptor)
+        if name in close_roles:
+            error = close_type(f"{name} descriptor close failed")
+            handles.setdefault("close_failures", []).append(error)
+            raise error
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "fdopen", wrapping)
+    monkeypatch.setattr(os, "close", closing)
+    return handles, attempts, wrapping_failure
+
+
+def _recovery_run(tmp_path):
+    prepared = _prepared_run(tmp_path)
+    prepared.update(out=tmp_path / "out.state", root=tmp_path, report=tmp_path / "report.json")
+    prepared["report"].write_bytes(PRIOR)
+    return prepared
+
+
+@pytest.mark.parametrize("name,phase", [
+    ("backup", "prior report copy"), ("manifest", "prior report manifest sync"),
+])
+@pytest.mark.parametrize("close_type", [OSError, KeyboardInterrupt, SystemExit])
+def test_guard_primary_survives_recovery_stream_and_source_close(
+    tmp_path, monkeypatch, name, phase, close_type
+):
+    """F1: actual absolute admission failure, followed by two failing closes."""
+    prepared = _recovery_run(tmp_path)
+    _, attempts, _ = _recovery_handle_faults(
+        monkeypatch, prepared["report"], close_roles=(name, "source"), close_type=close_type)
+    now, original = [0.0], []
+    real_guard = recovery_module.normal_guard
+
+    def guard(label):
+        if label == phase:
+            now[0] = 180.0
+        try:
+            return real_guard(label)
+        except producer.CaptureBoundsExceeded as error:
+            original.append(error)
+            raise
+
+    monkeypatch.setattr(recovery_module, "normal_guard", guard)
+    with pytest.raises(producer.CaptureBoundsExceeded) as caught:
+        _run_with_fake_session(prepared, clock=lambda: now[0])
+    assert original and caught.value is original[0]
+    assert attempts.count((name, "stream")) == attempts.count(("source", "stream")) == 1
+    assert not prepared["out"].exists() and prepared["report"].read_bytes() == PRIOR
+    retained = list(tmp_path.glob(".*.recovery-*"))
+    assert len(retained) == 1
+    assert any(str(retained[0]) in note for note in caught.value.__notes__)
+    rows = caught.value.producer_cleanup
+    assert sum(row.get("exception_type") == close_type.__name__ for row in rows) >= 2
+    assert any(row["path"] == str(prepared["report"]) for row in rows)
+    if name == "manifest":
+        _reopen(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["source", "backup", "manifest"])
+def test_recovery_close_without_earlier_failure_becomes_primary(tmp_path, monkeypatch, name):
+    """F1 positive body: a first close failure prevents report replacement."""
+    prepared = _recovery_run(tmp_path)
+    handles, attempts, _ = _recovery_handle_faults(
+        monkeypatch, prepared["report"], close_roles=(name,), close_type=KeyboardInterrupt)
+    with pytest.raises(KeyboardInterrupt, match=f"{name} close failed") as caught:
+        _run_with_fake_session(prepared)
+    assert caught.value is handles["close_failures"][0]
+    assert attempts.count((name, "stream")) == 1
+    assert prepared["report"].read_bytes() == PRIOR and not prepared["out"].exists()
+    retained = list(tmp_path.glob(".*.recovery-*"))
+    assert len(retained) == 1 and any(str(retained[0]) in n for n in caught.value.__notes__)
+    if name == "source":
+        _reopen(tmp_path)
+
+
+@pytest.mark.parametrize("fsync_failure", [False, True])
+def test_recovery_directory_fsync_and_close_keep_first_failure(tmp_path, monkeypatch, fsync_failure):
+    prepared = _recovery_run(tmp_path)
+    handles, attempts, _ = _recovery_handle_faults(
+        monkeypatch, prepared["report"], close_roles=("directory",), close_type=SystemExit)
+    real_sync = os.fsync
+    primary = OSError("directory fsync failed")
+
+    def sync(descriptor):
+        if fsync_failure and handles.get(descriptor) == "directory":
+            raise primary
+        return real_sync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", sync)
+    with pytest.raises(OSError if fsync_failure else SystemExit) as caught:
+        _run_with_fake_session(prepared)
+    if fsync_failure:
+        assert caught.value is primary
+        assert any(row.get("exception_type") == "SystemExit"
+                   for row in primary.producer_cleanup)
+    else:
+        assert caught.value is handles["close_failures"][0]
+    assert attempts.count(("directory", "descriptor")) == 1
+    assert attempts.count(("source", "stream")) == 1
+    assert prepared["report"].read_bytes() == PRIOR and not prepared["out"].exists()
+    _reopen(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["source", "backup", "manifest"])
+def test_fdopen_failure_keeps_raw_descriptor_owned_until_once_close(tmp_path, monkeypatch, name):
+    prepared = _recovery_run(tmp_path)
+    _, attempts, primary = _recovery_handle_faults(
+        monkeypatch, prepared["report"], fdopen_role=name, close_roles=(name,),
+        close_type=SystemExit)
+    with pytest.raises(OSError) as caught:
+        _run_with_fake_session(prepared)
+    assert caught.value is primary
+    assert attempts.count((name, "descriptor")) == 1
+    assert attempts.count((name, "stream")) == 0
+    assert any(row.get("exception_type") == "SystemExit" for row in primary.producer_cleanup)
+    assert prepared["report"].read_bytes() == PRIOR and not prepared["out"].exists()
+    retained = list(tmp_path.glob(".*.recovery-*"))
+    assert len(retained) == (0 if name == "source" else 1)
+    if retained:
+        assert any(str(retained[0]) in note for note in primary.__notes__)
