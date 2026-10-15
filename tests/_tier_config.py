@@ -54,10 +54,8 @@ REAL_ROM_MODULES = frozenset(
     }
 )
 
-# Keep the ROM-free side explicit as well.  A new ``test_*.py`` file must be
-# reviewed and added to exactly one of these sets before it can enter pytest's
-# collection path.  This is deliberately a little repetitive: the manifest is
-# a guard against a test silently falling into the wrong production tier.
+# Keep ROM-free modules explicit: review each new ``test_*.py`` file into exactly one
+# set before collection; this repetitive manifest guards against the wrong production tier.
 UNIT_MODULES = frozenset(
     {
         "test_normal_red_profile_support.py",
@@ -83,6 +81,8 @@ UNIT_MODULES = frozenset(
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_catalog.py",
         "test_battle_scenario_producer_capture.py",
+        "test_battle_scenario_producer_cleanup.py",
+        "test_battle_scenario_producer_deadline.py",
         "test_battle_scenario_producer_recovery.py",
         "test_battle_scenario_producer_run.py",
         "test_battle_scenario_producer_runtime.py",
@@ -882,7 +882,6 @@ TIMING_SENSITIVE_TESTS = frozenset(
     }
 )
 
-
 def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     """Return all production-gate markers for one collected test.
 
@@ -900,6 +899,7 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
         return frozenset()
 
     marks: set[str] = set()
+
     if filename in REAL_ROM_MODULES:
         marks.add("real_rom")
     elif filename in UNIT_MODULES:
