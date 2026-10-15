@@ -40,6 +40,20 @@ Asset-backed validation and final guest bootstrap/qualification remain pending.
 Required Tier B is five ROM variants × two runtimes (10 runs, 80 cases,
 40 per runtime); strict acceptance needs 43 trade and 19 battle rows per runtime, full required tests, immutable allocation, and final exact-commit evidence.
 
+**Dedicated guest checkpoint (2026-10-15, candidate `8debf6385a9cc714f0d2e4f4e6da62c74104e460`).**
+Fresh source/native bootstrap and a clean-wheel MCP startup/step/EOF probe passed.
+The live allocation check passed on a dedicated four-vCPU guest; this records
+exclusivity within that guest, not reserved physical Windows host cores.
+The retained allocation packet is
+`evidence/local-completion-20261014/guest-allocation-evidence-v2/`.
+The source suite recorded 1,613 passes, two Red/Yellow remote-menu failures,
+and four optional skips before supervisor interruption; 7,152 of the 8,771
+collected cases were not executed. Teardown and lease release were verified.
+The failed run does not qualify this candidate. The later external independent
+input control passed the Red/Yellow diagnostic with unchanged assertions and
+transport timeouts; it is causal evidence for a test-driver fix, not a full
+gate result. Final qualification must name and test the resulting clean commit.
+
 **Historical unit-only run (2026-09-11, candidate `3c96537`).** That
 resumed candidate passed the isolated dual-runtime unit-only gate:
 source and native/Cython each completed `4508/4508` unit tests and

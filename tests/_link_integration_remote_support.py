@@ -12,6 +12,7 @@ import queue
 import socket
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,8 @@ class _SessionRunner:
         self._stop = threading.Event()
         self._press_queue: queue.Queue[tuple[str, int, threading.Event]] = queue.Queue()
         self._progress = threading.Condition()
+        self._before_step: Callable[[], None] | None = None
+        self._last_progress_at = time.monotonic()
         self.exc: Exception | None = None
         self._thread = threading.Thread(
             target=self._run,
@@ -108,7 +111,19 @@ class _SessionRunner:
         )
 
     def start(self) -> None:
+        with self._progress:
+            self._last_progress_at = time.monotonic()
         self._thread.start()
+
+    def set_before_step(self, callback: Callable[[], None] | None) -> None:
+        """Set owner-thread work to run immediately before the next step."""
+        with self._progress:
+            self._before_step = callback
+
+    def progress_status(self) -> tuple[float, Exception | None, bool]:
+        """Return runner bookkeeping without reading the emulator state."""
+        with self._progress:
+            return self._last_progress_at, self.exc, self._thread.is_alive()
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -158,12 +173,17 @@ class _SessionRunner:
                         break
                     self.session.press(button, duration=duration)
                     applied.set()
+                with self._progress:
+                    before_step = self._before_step
+                if before_step is not None:
+                    before_step()
                 self.endpoint.step(self.chunk)
                 with self._progress:
+                    self._last_progress_at = time.monotonic()
                     self._progress.notify_all()
         except Exception as exc:  # noqa: BLE001
-            self.exc = exc
             with self._progress:
+                self.exc = exc
                 self._progress.notify_all()
 
 
@@ -323,6 +343,61 @@ def _press_remote_both(
     )
 
 
+class _RemoteInputSchedule:
+    """Apply one side's bounded menu inputs on its owner thread."""
+
+    def __init__(
+        self,
+        session: Session,
+        ready: Callable[[], bool],
+        stop_inputs: threading.Event,
+        *,
+        attempts: int,
+    ) -> None:
+        self._session = session
+        self._ready = ready
+        self._stop_inputs = stop_inputs
+        self._attempts = max(0, attempts)
+        self._start_tick: int | None = None
+        self._next_tick: int | None = None
+        self._finish_tick: int | None = None
+        self._up_count = 0
+        self._a_count = 0
+        self.done = threading.Event()
+
+    def before_step(self) -> None:
+        if self.done.is_set() or self._stop_inputs.is_set():
+            self.done.set()
+            return
+        tick = self._session.current_tick()
+        if self._start_tick is None:
+            self._start_tick = tick
+            self._next_tick = tick + 180
+            return
+        if self._next_tick is None or tick < self._next_tick:
+            return
+        if self._finish_tick is not None:
+            self.done.set()
+            return
+        if self._up_count < 3:
+            self._session.press("up", duration=6)
+            self._up_count += 1
+            self._next_tick = tick + 20
+            return
+        if self._ready():
+            self._stop_inputs.set()
+            self.done.set()
+            return
+        if self._a_count >= self._attempts:
+            self.done.set()
+            return
+        self._session.press("a", duration=4)
+        self._a_count += 1
+        self._next_tick = tick + 20
+        if self._a_count == self._attempts:
+            self._finish_tick = self._next_tick
+
+
 def _drive_remote_to_link_menu(
     runner_a: _SessionRunner,
     runner_b: _SessionRunner,
@@ -332,20 +407,46 @@ def _drive_remote_to_link_menu(
 ) -> None:
     """Advance a TCP pair to a caller-defined LinkMenu milestone.
 
-    Progress is measured in emulator frames, not host wall-clock sleeps.
-    Each command is applied only after the previous command has reached both
-    independent runners, and each bounded barrier raises if either serial
-    hook stops making progress. This keeps the diagnostic useful on slow
-    hosts without accepting an arbitrary A-press flood as evidence of
-    gameplay.
+    Each runner schedules its own bounded inputs on its emulator-owning
+    thread, so a serial RPC blocking one side does not prevent the other side
+    from receiving its next command. The caller only observes readiness,
+    runner exceptions, and per-runner step-progress timestamps; it never
+    reads emulator state from the coordinating thread. ``ready`` is evaluated
+    concurrently by the coordinator and owner threads, so it must be a
+    thread-safe, non-blocking predicate over shared progress counters only.
     """
-    _advance_remote_runners(runner_a, runner_b, 180)
-    for _ in range(3):
-        _press_remote_both(runner_a, runner_b, "up", duration=6)
-    for _ in range(attempts):
-        if ready():
-            return
-        _press_remote_both(runner_a, runner_b, "a", duration=4)
+    stop_inputs = threading.Event()
+    schedules = (
+        _RemoteInputSchedule(runner_a.session, ready, stop_inputs, attempts=attempts),
+        _RemoteInputSchedule(runner_b.session, ready, stop_inputs, attempts=attempts),
+    )
+    runners = (runner_a, runner_b)
+    for runner, schedule in zip(runners, schedules, strict=True):
+        runner.set_before_step(schedule.before_step)
+    try:
+        while True:
+            now = time.monotonic()
+            for runner in runners:
+                last_progress, exc, alive = runner.progress_status()
+                if exc is not None:
+                    raise exc
+                if not alive:
+                    raise RuntimeError(f"{runner._thread.name} stopped unexpectedly")
+                if now - last_progress > _REMOTE_RUNNER_WINDOW_TIMEOUT:
+                    raise TimeoutError(
+                        f"{runner._thread.name} made no step progress within "
+                        f"{_REMOTE_RUNNER_WINDOW_TIMEOUT:.1f}s"
+                    )
+            if ready():
+                stop_inputs.set()
+                return
+            if all(schedule.done.is_set() for schedule in schedules):
+                return
+            time.sleep(0.01)
+    finally:
+        stop_inputs.set()
+        for runner in runners:
+            runner.set_before_step(None)
 
 
 # --- end-to-end trade protocol over TCP ----------------------------------

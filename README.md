@@ -43,6 +43,13 @@ a direct internal import cycle in `scripts/native_unit_ci.py`; see the v6
 status and log at `evidence/local-completion-20261014/current-candidate-ci-v6/status.json`
 and `evidence/local-completion-20261014/current-candidate-ci-v6/native-unit.log`. Asset-backed and guest qualification remain pending; release still requires 10 Tier B runs (five ROM variants × two runtimes, 80 cases, 40 per runtime), 43 trade and 19 battle rows per runtime, full tests, immutable allocation, and terminal evidence for the exact clean commit. See the [release checklist](docs/RELEASE_CHECKLIST.md#current-audit-snapshot).
 
+The later dedicated guest checkpoint at `8debf638` passed bootstrap, a wheel
+startup/step/EOF probe, and allocation admission, then found two Red/Yellow remote-menu
+diagnostic failures in an incomplete source suite. Its teardown was verified;
+full qualification remains pending. See the dated
+[release checkpoint](docs/RELEASE_CHECKLIST.md#current-audit-snapshot) for scope
+and retained evidence.
+
 **Historical unit-only run (2026-09-11, candidate `3c96537`).** That candidate
 passed the isolated dual-runtime unit-only gate: source and native/Cython each
 passed `4,508/4,508` unit tests and `1,910/1,910` timing cases over five

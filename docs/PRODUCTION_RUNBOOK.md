@@ -863,9 +863,17 @@ ROM-derived inputs requires separate operator authorization; this procedure
 does not grant it. A prepared runner is not a passing gate: keep provisioning
 status, test status, and release qualification separate.
 
-### 3b. Current host provisioning status (BLOCKED, not a pass)
+### 3b. Historical shared-host provisioning status (BLOCKED, not a pass)
 
-The shared Linux host this repository currently runs on does not provide an
+Sections 3b and 3c retain the earlier shared-host observations and their
+blocked qualification status. They do not describe every later runner. On
+2026-10-15, the dedicated campaign guest passed live allocation admission for
+candidate `8debf6385a9cc714f0d2e4f4e6da62c74104e460`; its subsequent source
+suite failed two Red/Yellow diagnostic cases and was stopped before completion.
+See the dated [release checkpoint](RELEASE_CHECKLIST.md#current-audit-snapshot).
+Passing allocation admission alone does not establish release qualification.
+
+The shared Linux host observed in this historical record does not provide an
 exclusive allocation, and the above checks correctly report that. Observed,
 sanitized facts from `qualification_runner.py --report` on this host:
 

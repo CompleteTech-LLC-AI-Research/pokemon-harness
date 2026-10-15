@@ -210,11 +210,10 @@ def test_remote_rpc_flow_past_link_menu_over_tcp(version_listen: str, version_co
             def _wrap(sink, inner):
                 def exchange(kind, my_bytes, *, timeout_ms=5000):
                     sink.append(kind)
-                    # Nybble exchanges are retried by the game and need a
-                    # short timeout to let independently paced runners
-                    # recover. The menu exchange is the milestone under
-                    # observation and can carry the slower cross-version
-                    # branch once both sides reach it.
+                    # Preserve the endpoint's nybble timeout. A transport
+                    # timeout closes the link, so independent input
+                    # scheduling must let both games reach the exchange.
+                    # Retain the menu milestone's existing 30-second limit.
                     effective_timeout_ms = (
                         30000
                         if kind == "menu_selection/wLinkMenuSelectionSendBuffer"
