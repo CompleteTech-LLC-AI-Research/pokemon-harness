@@ -36,6 +36,17 @@ finish() {
         || "$(cat "$evidence/final-head.txt")" != "$initial_head" ]]; then
         [[ "$status" -ne 0 ]] || status=2
     fi
+    # A zero gate exit is not terminal evidence by itself: require the retained
+    # report bundle to prove the exact Cython unit + five-repeat timing scope.
+    # Keep every earlier nonzero status unchanged.
+    if [[ "$status" -eq 0 ]]; then
+        "$native_python" scripts/native_unit_ci.py terminal-check "$NATIVE_UNIT_OUTPUT" \
+            > "$evidence/terminal-check.log" 2>&1
+        terminal_status=$?
+        if [[ "$terminal_status" -ne 0 ]]; then
+            status="$terminal_status"
+        fi
+    fi
     printf '%s\n' "$status" > "$evidence/exit-code.txt"
     printf 'Native unit lane exit %s; evidence retained at: %s\n' "$status" "$evidence"
     exit "$status"

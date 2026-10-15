@@ -358,19 +358,22 @@ def _process_group_members(pgid: int) -> list[int]:
                 "command's process group"
             )
             continue
-        if fields[0] == "Z":
-            # An exited descendant awaiting reaping holds no CPU capacity.
-            _reap_zombie(pid)
-            continue
         try:
-            if int(fields[2]) == pgid:
-                members.append(pid)
+            belongs_to_group = int(fields[2]) == pgid
         except ValueError:
             _note_proc_enumeration_failure(
                 f"the process-group id of live process {pid} was unreadable while sweeping "
                 "the command's process group"
             )
             continue
+        if not belongs_to_group:
+            continue
+        if fields[0] == "Z":
+            # Only reap this command's group; other children have their own
+            # waiters, which must retain the child's real exit status.
+            _reap_zombie(pid)
+            continue
+        members.append(pid)
     return sorted(members)
 
 

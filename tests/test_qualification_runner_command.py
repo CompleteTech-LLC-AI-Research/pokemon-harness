@@ -28,6 +28,30 @@ from tests._qualification_runner_support import (
 )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux process-group observation")
+@pytest.mark.parametrize("same_group", (False, True))
+def test_process_group_sweep_reaps_only_its_own_zombies(same_group):
+    """Sweeping one command must preserve another child's real exit status."""
+    child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(23)"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not runner._pid_is_zombie(child.pid):
+            assert time.monotonic() < deadline, "child did not reach its exit boundary"
+            time.sleep(0.01)
+        group = child.pid if same_group else os.getpgrp()
+        assert child.pid not in runner._process_group_members(group)
+        if same_group:
+            with pytest.raises(ChildProcessError):
+                os.waitpid(child.pid, os.WNOHANG)
+            child.returncode = 23  # The owning sweep already reaped this child.
+        else:
+            assert child.wait(timeout=5) == 23
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+
+
 def test_recover_refuses_while_the_recorded_job_still_runs(tmp_path: Path):
     """A dead holder is not free capacity while its recorded job is alive."""
 

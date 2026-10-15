@@ -219,18 +219,191 @@ def verify(root: Path, output: Path) -> None:
         raise ValueError("; ".join(proof["problems"]))
 
 
+def _read_json_object(path: Path, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read {description}: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{description} root is not an object")
+    return value
+
+
+def _require_gate_success(report: dict[str, Any]) -> dict[str, Any]:
+    """Require the exact successful native unit plus five-repeat timing scope."""
+    if report.get("overall") != "PASS":
+        raise ValueError("production gate report overall status is not PASS")
+    runtime = report.get("runtime")
+    if not isinstance(runtime, dict) or runtime.get("pyboy_mode") != "cython":
+        raise ValueError("production gate report does not prove the Cython runtime")
+    if report.get("gate_problems") != [] or report.get("cancellation") != "":
+        raise ValueError("production gate report contains gate problems or cancellation")
+
+    plan = report.get("execution_plan")
+    expected_steps = [
+        {"mode": "cython", "tier": "unit", "role": "selected-tier"},
+        {"mode": "cython", "tier": "timing", "role": "selected-tier"},
+    ]
+    if (
+        not isinstance(plan, dict)
+        or plan.get("schema_version") != 1
+        or plan.get("scope") != "selected-tiers"
+        or plan.get("runtime_modes") != ["cython"]
+        or plan.get("selected_tiers") != ["unit", "timing"]
+        or plan.get("early_smoke") is not False
+        or plan.get("smoke_role") != "not-selected"
+        or plan.get("steps") != expected_steps
+    ):
+        raise ValueError("production gate report does not contain the requested native scope")
+
+    collections = report.get("collections")
+    if (
+        not isinstance(collections, list)
+        or not collections
+        or any(not isinstance(item, dict) or item.get("status") != "PASS" for item in collections)
+    ):
+        raise ValueError("production gate collection preflight is incomplete or not PASS")
+
+    tiers = report.get("tiers")
+    if (
+        not isinstance(tiers, list)
+        or len(tiers) != 2
+        or any(not isinstance(item, dict) for item in tiers)
+        or [item.get("name") for item in tiers] != ["unit", "timing"]
+    ):
+        raise ValueError("production gate report does not contain exactly unit and timing tiers")
+    repeat_counts = {"unit": 1, "timing": 5}
+    retained_counts: dict[str, dict[str, int]] = {}
+    for tier in tiers:
+        if (
+            tier.get("required") is not True
+            or tier.get("status") != "PASS"
+            or tier.get("reason") != ""
+            or tier.get("iteration_failures") != []
+        ):
+            raise ValueError(
+                f"production gate tier {tier.get('name')!r} is not a clean required PASS"
+            )
+        name = tier["name"]
+        returncodes = tier.get("returncodes")
+        if (
+            not isinstance(returncodes, list)
+            or len(returncodes) != repeat_counts[name]
+            or any(type(code) is not int or code != 0 for code in returncodes)
+        ):
+            raise ValueError(
+                f"production gate tier {name!r} does not retain its expected successful runs"
+            )
+        counts = tier.get("counts")
+        required_count_fields = (
+            "total",
+            "passed",
+            "failed",
+            "skipped",
+            "xfailed",
+            "xpassed",
+            "errors",
+        )
+        if not isinstance(counts, dict):
+            raise ValueError(f"production gate tier {name!r} has no counts object")
+        normalized: dict[str, int] = {}
+        for field in required_count_fields:
+            value = counts.get(field)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"production gate tier {name!r} has invalid {field} count")
+            normalized[field] = value
+        if (
+            normalized["total"] <= 0
+            or normalized["passed"] != normalized["total"]
+            or any(normalized[field] for field in required_count_fields[2:])
+        ):
+            raise ValueError(f"production gate tier {name!r} contains incomplete test outcomes")
+        retained_counts[name] = normalized
+    return {
+        "overall": "PASS",
+        "runtime_mode": "cython",
+        "selected_tiers": ["unit", "timing"],
+        "tier_counts": retained_counts,
+        "timing_repetitions": 5,
+    }
+
+
+def finalize(root: Path, output: Path) -> None:
+    """Retain a terminal receipt only after the complete native gate is proven."""
+    root = root.resolve()
+    output = output.resolve()
+    if output == root or root in output.parents:
+        raise ValueError("native evidence and environments must be outside the checkout")
+    evidence = output / "evidence"
+    receipt_path = evidence / "native-terminal.json"
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "scope": "native-unit-terminal-receipt-not-release-qualification",
+        "status": "FAIL",
+        "harness_head": None,
+        "gate": None,
+        "problems": [],
+    }
+    try:
+        preflight = _read_json_object(evidence / "preflight.json", "native preflight")
+        head = _git(root, "rev-parse", "HEAD")
+        if preflight.get("status") != "READY":
+            raise ValueError("native prerequisites were not READY")
+        if preflight.get("harness_head") != head:
+            raise ValueError("checkout HEAD differs from the native preflight")
+        receipt["harness_head"] = head
+        if _git(root, "status", "--porcelain", "--untracked-files=all"):
+            raise ValueError("checkout is dirty at native finalization")
+
+        build = _read_json_object(evidence / "native-build.json", "native build evidence")
+        if build.get("mode") != "cython" or build.get("status") != "complete":
+            raise ValueError("native build evidence is not a complete Cython build")
+        proof = _read_json_object(evidence / "pinball-native.json", "native pinball proof")
+        if proof.get("status") != "PASS" or proof.get("harness_head") != head:
+            raise ValueError("native pinball proof is missing, failed, or tied to another HEAD")
+
+        # Import only for finalization, after the environment and checkout are ready.
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from scripts import production_gate_evidence
+
+        gate_dir = evidence / "gate"
+        production_gate_evidence.verify_evidence_bundle(gate_dir)
+        report = _read_json_object(gate_dir / "gate-report.json", "production gate report")
+        if report.get("schema_version") != production_gate_evidence.EVIDENCE_SCHEMA_VERSION:
+            raise ValueError("production gate report schema version is unsupported")
+        receipt["gate"] = _require_gate_success(report)
+        receipt["harness_head"] = head
+        receipt["status"] = "PASS"
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        ImportError,
+        subprocess.SubprocessError,
+    ) as exc:
+        receipt["problems"] = [f"{type(exc).__name__}: {exc}"]
+    evidence.mkdir(parents=True, exist_ok=True)
+    _write_json(receipt_path, receipt)
+    if receipt["status"] != "PASS":
+        raise ValueError(receipt["problems"][0])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("prepare", "verify"))
+    parser.add_argument("operation", choices=("prepare", "verify", "terminal-check"))
     parser.add_argument("output", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.operation == "prepare":
             prepare(ROOT, args.output)
-        else:
+        elif args.operation == "verify":
             verify(ROOT, args.output.resolve())
+        else:
+            finalize(ROOT, args.output)
     except (OSError, ValueError, KeyError, ImportError, subprocess.SubprocessError) as exc:
-        print(f"native unit prerequisite/proof failed: {exc}", file=sys.stderr)
+        print(f"native unit prerequisite/proof/finalization failed: {exc}", file=sys.stderr)
         return 2
     return 0
 

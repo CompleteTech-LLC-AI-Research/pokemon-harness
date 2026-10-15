@@ -271,6 +271,143 @@ def native_ci_modules(native_ci, tmp_path, monkeypatch):
     return tmp_path, modules, facade, data
 
 
+def _write_native_terminal_inputs(native_ci, root, output, *, variant="valid"):
+    if str(PROJECT_ROOT) not in native_ci.sys.path:
+        native_ci.sys.path.insert(0, str(PROJECT_ROOT))
+    evidence_module = native_ci.importlib.import_module("scripts.production_gate_evidence")
+    evidence = output / "evidence"
+    (evidence / "gate").mkdir(parents=True)
+    head = native_ci._git(root, "rev-parse", "HEAD")
+    for name, payload in (
+        (
+            "preflight.json",
+            {"status": "READY", "harness_head": head},
+        ),
+        (
+            "native-build.json",
+            {"mode": "cython", "status": "complete"},
+        ),
+        (
+            "pinball-native.json",
+            {"status": "PASS", "harness_head": head},
+        ),
+    ):
+        (evidence / name).write_text(json.dumps(payload), encoding="utf-8")
+
+    tiers = []
+    for name, repetitions in (("unit", 1), ("timing", 5)):
+        if variant == "incomplete_timing" and name == "timing":
+            repetitions = 1
+        tiers.append(
+            {
+                "name": name,
+                "required": True,
+                "status": "PASS",
+                "reason": "",
+                "iteration_failures": [],
+                "returncodes": [0] * repetitions,
+                "counts": {
+                    "total": 10,
+                    "passed": 10,
+                    "failed": 0,
+                    "skipped": 0,
+                    "xfailed": 0,
+                    "xpassed": 0,
+                    "errors": 0,
+                },
+                "duration_seconds": 1.0,
+                "skip_reasons": {},
+                "failure_details": [],
+                "failure_details_omitted": 0,
+                "case_results": [],
+                "output_tail": "",
+            }
+        )
+    report = {
+        "schema_version": evidence_module.EVIDENCE_SCHEMA_VERSION,
+        "generated_at": "2026-10-14T00:00:00Z",
+        "project_root": "<project-root>",
+        "rom_root": "<rom-root>",
+        "fixture_root": "<fixture-root>",
+        "runtime": {"pyboy_mode": "source" if variant == "wrong_runtime" else "cython"},
+        "collections": [
+            {
+                "name": "production-gate",
+                "status": "PASS",
+                "returncode": 0,
+                "duration_seconds": 1.0,
+                "command": [],
+                "reason": "",
+                "output_tail": "",
+            }
+        ],
+        "assets": [],
+        "tiers": tiers,
+        "gate_problems": [],
+        "cancellation": "",
+        "overall": "FAIL" if variant == "failed_report" else "PASS",
+        "execution_plan": {
+            "schema_version": 1,
+            "scope": "selected-tiers",
+            "runtime_modes": ["cython"],
+            "selected_tiers": ["unit", "timing"],
+            "early_smoke": False,
+            "fail_fast": False,
+            "smoke_role": "not-selected",
+            "steps": [
+                {"mode": "cython", "tier": name, "role": "selected-tier"}
+                for name in ("unit", "timing")
+            ],
+        },
+        "capacity": {},
+        "safety": {},
+    }
+    evidence_module.write_evidence_bundle(evidence / "gate", report)
+    if variant == "corrupt_bundle":
+        report_path = evidence / "gate" / evidence_module.EVIDENCE_REPORT_FILENAME
+        report_path.write_text(report_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "valid",
+        "missing_bundle",
+        "incomplete_timing",
+        "corrupt_bundle",
+        "wrong_runtime",
+        "failed_report",
+    ],
+)
+def test_native_ci_terminal_receipt_requires_complete_passing_gate(
+    native_ci, native_ci_repo, tmp_path, monkeypatch, variant
+):
+    monkeypatch.setattr(native_ci, "host_facts", lambda: ({}, []))
+    output = tmp_path / "native-output"
+    native_ci.prepare(native_ci_repo, output)
+    evidence = output / "evidence"
+    (evidence / "native-build.json").write_text(
+        json.dumps({"mode": "cython", "status": "complete"}), encoding="utf-8"
+    )
+    head = native_ci._git(native_ci_repo, "rev-parse", "HEAD")
+    (evidence / "pinball-native.json").write_text(
+        json.dumps({"status": "PASS", "harness_head": head}), encoding="utf-8"
+    )
+    if variant != "missing_bundle":
+        _write_native_terminal_inputs(native_ci, native_ci_repo, output, variant=variant)
+    if variant == "valid":
+        native_ci.finalize(native_ci_repo, output)
+        receipt = json.loads((evidence / "native-terminal.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "PASS"
+        assert receipt["gate"]["timing_repetitions"] == 5
+    else:
+        with pytest.raises(ValueError):
+            native_ci.finalize(native_ci_repo, output)
+        receipt = json.loads((evidence / "native-terminal.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "FAIL"
+        assert receipt["problems"]
+
+
 def test_native_ci_accepts_matching_native_pinball_identity(native_ci, native_ci_modules):
     root, _, _, _ = native_ci_modules
     proof = native_ci.inspect_pinball(root)
@@ -454,6 +591,7 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
     assert "--mode cython --check" in script
     assert "--build-evidence" in script
     assert "--runtime-mode cython --tier unit --tier timing --repeat-timing 5" in script
+    assert "native_unit_ci.py terminal-check" in script
     commands = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
     for bypass in (
         "--timeout-seconds",
@@ -468,7 +606,18 @@ def test_native_ci_workflow_preserves_public_only_native_gate():
     assert "trap finish EXIT" in script
 
 
-@pytest.mark.parametrize("failure,expected", [("none", 0), ("build", 7), ("gate", 9), ("head", 2)])
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        ("none", 0),
+        ("build", 7),
+        ("gate", 9),
+        ("head", 2),
+        ("terminal-missing", 2),
+        ("terminal-incomplete", 2),
+        ("terminal-corrupt", 2),
+    ],
+)
 def test_native_ci_shell_preserves_failures_and_final_head(
     native_ci_repo, tmp_path, failure, expected
 ):
@@ -492,6 +641,8 @@ def test_native_ci_shell_preserves_failures_and_final_head(
         "      git -c user.name=Test -c user.email=test@example.invalid "
         "commit --allow-empty -qm changed\n"
         "    fi ;;\n"
+        '  *"native_unit_ci.py terminal-check"*)\n'
+        '    case "$FAKE_FAILURE" in terminal-*) printf "%s\\n" "$FAKE_FAILURE" >&2; exit 2 ;; esac ;;\n'
         "esac\n",
         encoding="utf-8",
     )
@@ -533,6 +684,9 @@ def test_native_ci_shell_preserves_failures_and_final_head(
     assert (output / "evidence" / "exit-code.txt").read_text().strip() == str(expected)
     invocations = calls.read_text()
     assert ("production_gate.py" in invocations) is (failure != "build")
+    terminal_called = failure not in {"build", "gate", "head"}
+    assert ("native_unit_ci.py terminal-check" in invocations) is terminal_called
+    assert (output / "evidence" / "terminal-check.log").exists() is terminal_called
     if failure == "build":
         assert "native_unit_ci.py verify" not in invocations
 
