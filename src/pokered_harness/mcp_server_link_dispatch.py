@@ -14,6 +14,7 @@ from typing import Any
 
 from pokered_harness.link.network_backend import NetworkBackendError
 from pokered_harness.link.serial_link import SerialLinkError
+from pokered_harness.mcp_server_local_custody import cleanup_local, pair_native
 
 # Direct names this module calls; cyclic back-edges go through _entry.
 from pokered_harness.mcp_server_model import (
@@ -41,7 +42,14 @@ def _dispatch_link_tool(
         peer = _require_peer(link)
         with link.state():
             _entry._require_remote_idle_locked(link)
-            if link._local_pair_in_progress or link._pending_local_link_session is not None:
+            if (
+                link._local_pair_in_progress
+                or link._pending_local_link_session is not None
+                or (
+                    link._local_setup_attempt is not None
+                    and not link._local_setup_attempt.committed
+                )
+            ):
                 raise McpHarnessError(
                     "link_busy",
                     "local setup cleanup is pending; call link_disconnect "
@@ -74,6 +82,9 @@ def _dispatch_link_tool(
         else:
             _entry._reject_semantic_pair_on_native_runtime(pair, session, peer)
 
+        if pair is None and primary_supports_native and peer_supports_native:
+            return pair_native(link, session, peer)
+
         # Reserve a local setup generation only after all admission checks.
         # ``link_disconnect`` can then cancel attach/pair setup without
         # acquiring the operation lock or touching a completed local pair.
@@ -82,131 +93,6 @@ def _dispatch_link_tool(
             link._local_generation = local_generation
             link._local_pair_in_progress = True
             link._local_setup_done.clear()
-
-        if pair is None and primary_supports_native and peer_supports_native:
-            local_link_session: _entry.PyBoyLinkSession | None = None
-            lock_deadline = time.monotonic() + _entry._DEFAULT_CLEANUP_TIMEOUT_S
-            try:
-                local_link_session = _entry.PyBoyLinkSession.local()
-                with link.state():
-                    link._pending_local_link_session = local_link_session
-                    link._local_setup_deadline = lock_deadline
-                # Use a stable lock order; both sessions are owned by this
-                # MCP server and no callback is invoked while attaching.
-                with (
-                    locked_sessions(
-                        session,
-                        peer,
-                        timeout_s=_entry._remaining(lock_deadline),
-                    ),
-                    link._pair_lock,
-                ):
-                    local_link_session.attach(session._pyboy)
-                    local_link_session.attach(peer._pyboy)
-                    if link._local_generation != local_generation:
-                        raise McpHarnessError("link_cancelled", "local link pairing cancelled")
-            except Exception as exc:
-                cleanup_errors: list[Exception] = []
-                if local_link_session is not None:
-                    try:
-                        _entry._detach_local_link_session(
-                            link,
-                            session,
-                            local_link_session,
-                            timeout_s=_entry._remaining(lock_deadline),
-                        )
-                    except Exception as cleanup_error:  # noqa: BLE001
-                        cleanup_errors.append(cleanup_error)
-                        # Preserve the attach failure; a later unpair/close
-                        # can retry if restoration itself was interrupted.
-                        exc.add_note(f"local attach cleanup failed: {cleanup_error!r}")
-                try:
-                    hook_errors = _entry._deactivate_link_hooks(
-                        session,
-                        peer,
-                        timeout_s=_entry._remaining(lock_deadline),
-                    )
-                    cleanup_errors.extend(hook_errors)
-                except Exception as cleanup_error:  # noqa: BLE001
-                    cleanup_errors.append(cleanup_error)
-                    exc.add_note(f"local hook cleanup failed: {cleanup_error!r}")
-                if cleanup_errors:
-                    with link.state():
-                        # Keep ownership visible when restoration failed; the
-                        # provider remains inspectable for a bounded retry.
-                        link._pending_local_link_session = local_link_session
-                        link._local_pair_in_progress = False
-                        link._local_setup_deadline = None
-                else:
-                    with link.state():
-                        if link._pending_local_link_session is local_link_session:
-                            link._pending_local_link_session = None
-                        if link._local_pair_in_progress:
-                            link._local_pair_in_progress = False
-                        if link._local_setup_deadline == lock_deadline:
-                            link._local_setup_deadline = None
-                link._local_setup_done.set()
-                raise
-            assert local_link_session is not None
-            with link.state():
-                if link._local_generation != local_generation:
-                    cancelled = True
-                else:
-                    cancelled = False
-                    link.local_link_session = local_link_session
-                    if link._pending_local_link_session is local_link_session:
-                        link._pending_local_link_session = None
-                    if link._local_pair_in_progress:
-                        link._local_pair_in_progress = False
-                    if link._local_setup_deadline == lock_deadline:
-                        link._local_setup_deadline = None
-                    link._local_setup_done.set()
-            if cancelled:
-                cleanup_errors: list[Exception] = []
-                try:
-                    _entry._detach_local_link_session(
-                        link,
-                        session,
-                        local_link_session,
-                        timeout_s=_entry._remaining(lock_deadline),
-                    )
-                except Exception as cleanup_error:  # noqa: BLE001
-                    cleanup_errors.append(cleanup_error)
-                finally:
-                    try:
-                        cleanup_errors.extend(
-                            _entry._deactivate_link_hooks(
-                                session,
-                                peer,
-                                timeout_s=_entry._remaining(lock_deadline),
-                            )
-                        )
-                    except Exception as cleanup_error:  # noqa: BLE001
-                        cleanup_errors.append(cleanup_error)
-                with link.state():
-                    if not cleanup_errors:
-                        if link._pending_local_link_session is local_link_session:
-                            link._pending_local_link_session = None
-                        if link.local_link_session is local_link_session:
-                            link.local_link_session = None
-                        if link._local_pair_in_progress:
-                            link._local_pair_in_progress = False
-                        if link._local_setup_deadline == lock_deadline:
-                            link._local_setup_deadline = None
-                    else:
-                        # Keep the provider published for a later bounded
-                        # retry; disconnect must not report idle while
-                        # attached cores remain.
-                        link._pending_local_link_session = local_link_session
-                        link._local_pair_in_progress = False
-                        link._local_setup_deadline = None
-                link._local_setup_done.set()
-                raise McpHarnessError("link_cancelled", "local link pairing cancelled")
-            return {
-                "paired": True,
-                "primary_version": link.primary_version,
-                "peer_version": link.peer_version,
-            }
 
         pair_deadline = time.monotonic() + _entry._DEFAULT_CLEANUP_TIMEOUT_S
         try:
@@ -276,6 +162,8 @@ def _dispatch_link_tool(
         }
 
     if name == "link_unpair":
+        if cleanup_local(link, session, disconnect=False):
+            return {"paired": False}
         with link.state():
             if link._local_pair_in_progress:
                 raise McpHarnessError(

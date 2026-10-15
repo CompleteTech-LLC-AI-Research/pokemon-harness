@@ -144,6 +144,7 @@ UNIT_MODULES = frozenset(
         "test_mcp_local_runtime_contract.py",
         "test_mcp_main_cleanup.py",
         "test_mcp_mode_exclusion.py",
+        "test_mcp_native_local_custody.py",
         "test_mcp_remote_runtime_contract.py",
         "test_mcp_runtime_errors.py",
         "test_link_transport.py",
@@ -298,7 +299,6 @@ UNIT_MODULES = frozenset(
         "test_timed_trade_probe.py",
     }
 )
-
 # Reviewed opt-in modules.  These tests need assets the gate environment does
 # not provision - a local pinned upstream checkout, for example - and skip when
 # it is absent.  A required tier fails closed on any skip, so these modules

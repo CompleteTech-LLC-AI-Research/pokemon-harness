@@ -294,6 +294,7 @@ class LinkState:
         # published local pair.
         self._local_generation = 0
         self._local_pair_in_progress = False
+        self._local_setup_attempt = None
         self._local_setup_deadline: float | None = None
         self._local_setup_done = threading.Event()
         self._local_setup_done.set()

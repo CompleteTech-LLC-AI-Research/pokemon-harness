@@ -74,17 +74,19 @@ def _require_remote_idle(link: LinkState) -> None:
 
 def _require_pair_inactive_locked(link: LinkState) -> None:
     """Validate the in-process mode while ``link.state()`` is held."""
-    with link._pair_lock:
-        if (
-            (link.pair is not None and link.pair.paired)
-            or (link.local_link_session is not None)
-            or link._local_pair_in_progress
-            or (link._pending_local_link_session is not None)
-        ):
-            raise McpHarnessError(
-                "pair_active",
-                "in-process pair is active; call link_unpair before using remote link tools",
-            )
+    # Called under state_lock: never wait for pair/owner/provider here.
+    # Semantic pair.paired is its existing metadata flag, not an owner call.
+    if (
+        (link.pair is not None and link.pair.paired)
+        or link.local_link_session is not None
+        or link._local_pair_in_progress
+        or link._pending_local_link_session is not None
+        or link._local_setup_attempt is not None
+    ):
+        raise McpHarnessError(
+            "pair_active",
+            "in-process pair is active; call link_unpair before using remote link tools",
+        )
 
 
 def _require_pair_inactive(link: LinkState) -> None:
