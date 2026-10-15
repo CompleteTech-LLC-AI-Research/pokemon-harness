@@ -166,9 +166,12 @@ from scripts.produce_battle_scenario_runtime import (
     _pyboy_module_version,  # noqa: F401  (retained facade attribute: producer._pyboy_module_version)
     measure_runtime_identity,  # noqa: F401  (retained facade attribute: producer.measure_runtime_identity)
 )
-
 from scripts.produce_battle_scenario_transaction import (
-    active_scope, bind_operation, normal_guard, operation_entry, track_publication,
+    active_scope,
+    bind_operation,
+    normal_guard,
+    operation_entry,
+    track_publication,
 )
 
 
@@ -265,11 +268,14 @@ def run(
     track_publication(ownership.get("publication"))
     if report is not None:
         prepared_at = normal_guard("report preparation")
-        plan = {**plan, "report_timing": {
-            "wall_seconds": round(prepared_at - active_scope().timing.started, 6),
-            "scope": "operation origin through report preparation",
-            "final_total_observed": False,
-        }}
+        plan = {
+            **plan,
+            "report_timing": {
+                "wall_seconds": round(prepared_at - active_scope().timing.started, 6),
+                "scope": "operation origin through report preparation",
+                "final_total_observed": False,
+            },
+        }
         report_publication = write_report(report, plan)
         track_publication(report_publication)
         normal_guard("report finalization")

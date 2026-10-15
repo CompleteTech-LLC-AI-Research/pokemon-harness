@@ -114,8 +114,9 @@ def _recovery_stream(path: Path, flags: int, mode: str, *, encoding=None):
     """
     with resource_scope() as scope:
         descriptor = os.open(path, flags, 0o600)
-        raw = scope.action(object(), path, "recovery descriptor close",
-                           lambda: os.close(descriptor))
+        raw = scope.action(
+            object(), path, "recovery descriptor close", lambda: os.close(descriptor)
+        )
         stream = os.fdopen(descriptor, mode, encoding=encoding)
         scope.disarm(raw)  # fdopen has returned successfully; ownership transferred
         wrapped = scope.action(object(), path, "recovery stream close", stream.close)
@@ -128,8 +129,9 @@ def _sync_recovery_directory(directory: Path) -> None:
     normal_guard("recovery directory sync")
     with resource_scope() as scope:
         descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        close = scope.action(object(), directory, "recovery directory close",
-                             lambda: os.close(descriptor))
+        close = scope.action(
+            object(), directory, "recovery directory close", lambda: os.close(descriptor)
+        )
         os.fsync(descriptor)
         scope.perform(close)
     normal_guard("recovery directory sync")

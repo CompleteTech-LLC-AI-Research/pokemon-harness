@@ -10,8 +10,8 @@ import pytest
 
 from scripts import produce_battle_scenario as producer
 from scripts import produce_battle_scenario_capture as capture
-from scripts import produce_battle_scenario_transaction as transaction
 from scripts import produce_battle_scenario_recovery as recovery_module
+from scripts import produce_battle_scenario_transaction as transaction
 from scripts.produce_battle_scenario_recovery import _ReportRecovery
 from tests._battle_scenario_fixtures_support import (
     _capture_kwargs,
@@ -21,7 +21,7 @@ from tests._battle_scenario_fixtures_support import (
     _staged_files,
     _writable_scenario,
 )
-
+from tests._battle_scenario_producer_cleanup_support import _recovery_handle_faults, _token
 
 PRIOR = b"exact prior report recovery bytes"
 
@@ -32,11 +32,6 @@ def _reopen(directory):
     recovery = _ReportRecovery.reopen(manifests[0])
     assert recovery.read_verified() == PRIOR
     return recovery
-
-
-def _token(path):
-    entry = path.lstat()
-    return capture._OwnedPublication(path, entry.st_ino, entry.st_dev)
 
 
 @pytest.mark.parametrize("error_type", [PermissionError, OSError, KeyboardInterrupt, SystemExit])
@@ -87,25 +82,27 @@ def test_first_cleanup_failure_does_not_skip_real_second_withdrawal(tmp_path, er
     report.write_bytes(PRIOR)
     primary = RuntimeError("original operation")
     attempted = []
-    with pytest.raises(RuntimeError) as caught:
-        with transaction.resource_scope() as scope:
-            publication = producer.write_report(report, {"new": True})
-            # Added later, therefore attempted first during reverse unwinding.
-            def fail():
-                attempted.append(1)
-                raise error_type("first withdrawal")
-            scope.action("first", tmp_path / "other", "first withdrawal", fail)
-            assert publication.recovery_metadata() is not None
-            raise primary
+    with pytest.raises(RuntimeError) as caught, transaction.resource_scope() as scope:
+        publication = producer.write_report(report, {"new": True})
+
+        # Added later, therefore attempted first during reverse unwinding.
+        def fail():
+            attempted.append(1)
+            raise error_type("first withdrawal")
+
+        scope.action("first", tmp_path / "other", "first withdrawal", fail)
+        assert publication.recovery_metadata() is not None
+        raise primary
     assert caught.value is primary and attempted == [1]
     assert report.read_bytes() == PRIOR
     assert _reopen(tmp_path).read_verified() == PRIOR
-    assert any(row.get("exception_type") == error_type.__name__
-               for row in primary.producer_cleanup)
+    assert any(row.get("exception_type") == error_type.__name__ for row in primary.producer_cleanup)
 
 
 @pytest.mark.parametrize("withdraw_failure", [False, True])
-def test_fixture_interruption_and_stage_failure_retain_primary(tmp_path, monkeypatch, withdraw_failure):
+def test_fixture_interruption_and_stage_failure_retain_primary(
+    tmp_path, monkeypatch, withdraw_failure
+):
     """C03: lower helper removes fixture despite interrupted staging cleanup."""
     real_link, real_unlink = os.link, os.unlink
     primary = KeyboardInterrupt("link returned after creation")
@@ -136,11 +133,12 @@ def test_fixture_interruption_and_stage_failure_retain_primary(tmp_path, monkeyp
     assert caught.value is primary
     assert (tmp_path / "fixture").exists() is withdraw_failure
     if withdraw_failure:
-        assert any(row.get("exception_type") == "OSError"
-                   for row in primary.producer_cleanup)
+        assert any(row.get("exception_type") == "OSError" for row in primary.producer_cleanup)
     assert len(stage_attempts) == 1 and stage_attempts[0].read_bytes() == b"bytes"
-    assert any(row["path"] == str(stage_attempts[0]) and row["disposition"] == "unresolved"
-               for row in primary.producer_cleanup)
+    assert any(
+        row["path"] == str(stage_attempts[0]) and row["disposition"] == "unresolved"
+        for row in primary.producer_cleanup
+    )
 
 
 def test_report_staging_failure_does_not_skip_outer_fixture(tmp_path, monkeypatch):
@@ -165,10 +163,9 @@ def test_report_staging_failure_does_not_skip_outer_fixture(tmp_path, monkeypatc
 
     monkeypatch.setattr(os, "replace", replace)
     monkeypatch.setattr(os, "unlink", unlink)
-    with pytest.raises(OSError) as caught:
-        with transaction.resource_scope():
-            capture._write_fixture_exclusive(fixture, b"fixture")
-            producer.write_report(report, {"new": True})
+    with pytest.raises(OSError) as caught, transaction.resource_scope():
+        capture._write_fixture_exclusive(fixture, b"fixture")
+        producer.write_report(report, {"new": True})
     assert caught.value is primary and len(attempts) == 1
     assert not fixture.exists() and report.read_bytes() == PRIOR
     _reopen(tmp_path)
@@ -196,8 +193,10 @@ def test_restore_staging_cleanup_does_not_mask_restore_failure(tmp_path, monkeyp
     assert result.disposition == "unresolved"
     assert result.exception_type == "PermissionError"
     assert "restore replace refused" in result.error
-    assert any(row.get("exception_type") == "KeyboardInterrupt"
-               and ".partial-" in row["path"] for row in result.cleanup)
+    assert any(
+        row.get("exception_type") == "KeyboardInterrupt" and ".partial-" in row["path"]
+        for row in result.cleanup
+    )
     assert report.read_bytes() == current
     _reopen(tmp_path)
 
@@ -211,11 +210,13 @@ def test_session_cleanup_interrupt_never_becomes_success(tmp_path, prior_failure
 
     class Session(_FakeSession):
         closes = 0
+
         def step(self, frames=1, **kwargs):
             if prior_failure:
                 # A declared refusal is retained rather than translated by capture.
                 raise primary
             return super().step(frames, **kwargs)
+
         def close(self):
             self.closes += 1
             raise close_failure
@@ -223,12 +224,17 @@ def test_session_cleanup_interrupt_never_becomes_success(tmp_path, prior_failure
     session = Session()
     expected = producer.CapturePreconditionFailed if prior_failure else error_type
     with pytest.raises(expected) as caught:
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: session))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path, _writable_scenario(), session_factory=lambda **_kwargs: session
+            )
+        )
     if prior_failure:
         assert caught.value is primary
-        assert any(row.get("exception_type") == error_type.__name__
-                   for row in caught.value.producer_cleanup)
+        assert any(
+            row.get("exception_type") == error_type.__name__
+            for row in caught.value.producer_cleanup
+        )
     else:
         assert caught.value is close_failure
     assert session.closes == 1 and not (tmp_path / "out.state").exists()
@@ -236,24 +242,29 @@ def test_session_cleanup_interrupt_never_becomes_success(tmp_path, prior_failure
 
 def test_broken_repr_and_add_note_do_not_skip_real_cleanup(tmp_path):
     """C07: diagnostic production is isolated before the next real action."""
+
     class Primary(RuntimeError):
         def add_note(self, _note):
             raise SystemExit("note failed")
+
     class Secondary(OSError):
         def __repr__(self):
             raise KeyboardInterrupt("repr failed")
+
         def __str__(self):
             raise KeyboardInterrupt("str failed")
+
     primary = Primary("original")
     path = tmp_path / "owned"
     path.write_bytes(b"owned")
-    with pytest.raises(Primary) as caught:
-        with transaction.resource_scope() as scope:
-            scope.publication(_token(path))
-            def fail():
-                raise Secondary()
-            scope.action("failure", tmp_path / "unresolved", "broken diagnostic", fail)
-            raise primary
+    with pytest.raises(Primary) as caught, transaction.resource_scope() as scope:
+        scope.publication(_token(path))
+
+        def fail():
+            raise Secondary()
+
+        scope.action("failure", tmp_path / "unresolved", "broken diagnostic", fail)
+        raise primary
     assert caught.value is primary and not path.exists()
     assert any(row["phase"] == "diagnostic attachment" for row in primary.producer_cleanup)
 
@@ -273,6 +284,7 @@ def test_expired_cleanup_restores_prior_without_new_success_window(tmp_path, mon
         return result
 
     real_withdraw = capture._OwnedPublication.withdraw_result
+
     def withdraw(self):
         attempted.append(self.path)
         return real_withdraw(self)
@@ -288,8 +300,11 @@ def test_expired_cleanup_restores_prior_without_new_success_window(tmp_path, mon
     recovery = _reopen(tmp_path)
     manifests = json.loads(recovery.manifest.read_text())
     assert "publication outcome unknown" in manifests["phase"]
-    assert all(row.get("disposition") != "removed" for row in caught.value.producer_cleanup
-               if row.get("path") == str(prepared["report"]))
+    assert all(
+        row.get("disposition") != "removed"
+        for row in caught.value.producer_cleanup
+        if row.get("path") == str(prepared["report"])
+    )
 
 
 def test_failure_ledger_error_is_secondary_and_canonical_prior_survives(tmp_path, monkeypatch):
@@ -305,14 +320,15 @@ def test_failure_ledger_error_is_secondary_and_canonical_prior_survives(tmp_path
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", open_file)
-    with pytest.raises(KeyboardInterrupt) as caught:
-        with transaction.resource_scope():
-            producer.write_report(report, {"new": True})
-            raise primary
+    with pytest.raises(KeyboardInterrupt) as caught, transaction.resource_scope():
+        producer.write_report(report, {"new": True})
+        raise primary
     assert caught.value is primary and report.read_bytes() == PRIOR
     _reopen(tmp_path)
-    assert any(row["phase"] == "failure ledger" and row["disposition"] == "unresolved"
-               for row in primary.producer_cleanup)
+    assert any(
+        row["phase"] == "failure ledger" and row["disposition"] == "unresolved"
+        for row in primary.producer_cleanup
+    )
 
 
 def test_nested_transfer_does_not_withdraw_twice(tmp_path, monkeypatch):
@@ -320,16 +336,17 @@ def test_nested_transfer_does_not_withdraw_twice(tmp_path, monkeypatch):
     path = tmp_path / "fixture"
     attempts = []
     real = capture._OwnedPublication.withdraw_result
+
     def withdraw(self):
         attempts.append(self.path)
         return real(self)
+
     monkeypatch.setattr(capture._OwnedPublication, "withdraw_result", withdraw)
-    with pytest.raises(OSError, match="outer"):
-        with transaction.resource_scope() as outer:
-            with transaction.resource_scope():
-                token = capture._write_fixture_exclusive(path, b"fixture")
-            outer.publication(token)  # dedup reuses the transferred action
-            raise OSError("outer")
+    with pytest.raises(OSError, match="outer"), transaction.resource_scope() as outer:
+        with transaction.resource_scope():
+            token = capture._write_fixture_exclusive(path, b"fixture")
+        outer.publication(token)  # dedup reuses the transferred action
+        raise OSError("outer")
     assert attempts.count(path) == 1 and not path.exists()
     assert _staged_files(tmp_path) == []
 
@@ -340,14 +357,14 @@ def test_positive_owned_cleanup_rejects_noop_control(tmp_path, monkeypatch, unsa
     path = tmp_path / "owned"
     path.write_bytes(b"owned")
     if unsafe:
-        monkeypatch.setattr(capture._OwnedPublication, "withdraw_result",
-                            lambda self: None)
+        monkeypatch.setattr(capture._OwnedPublication, "withdraw_result", lambda self: None)
+
     def exercise():
-        with pytest.raises(OSError):
-            with transaction.resource_scope() as scope:
-                scope.publication(_token(path))
-                raise OSError("primary")
+        with pytest.raises(OSError), transaction.resource_scope() as scope:
+            scope.publication(_token(path))
+            raise OSError("primary")
         assert not path.exists(), "no-op cleanup left owned bytes"
+
     if unsafe:
         with pytest.raises(AssertionError, match="no-op cleanup"):
             exercise()
@@ -362,15 +379,21 @@ def test_probe_oracle_rejects_false_foreign_control(tmp_path, monkeypatch, unsaf
     path.write_bytes(b"owned")
     token = _token(path)
     if unsafe:
-        monkeypatch.setattr(capture._OwnedPublication, "observe_ownership",
-                            lambda self: ("observed-foreign", None))
+        monkeypatch.setattr(
+            capture._OwnedPublication, "observe_ownership", lambda self: ("observed-foreign", None)
+        )
     else:
-        monkeypatch.setattr(capture._OwnedPublication, "observe_ownership",
-                            lambda self: ("unresolved", PermissionError("probe")))
+        monkeypatch.setattr(
+            capture._OwnedPublication,
+            "observe_ownership",
+            lambda self: ("unresolved", PermissionError("probe")),
+        )
+
     def exercise():
         result = token.withdraw_result()
         assert result.disposition == "unresolved", "probe was falsely reported foreign"
         assert path.read_bytes() == b"owned"
+
     if unsafe:
         with pytest.raises(AssertionError, match="falsely reported foreign"):
             exercise()
@@ -381,28 +404,39 @@ def test_probe_oracle_rejects_false_foreign_control(tmp_path, monkeypatch, unsaf
 def test_expiry_before_close_still_closes_session_once(tmp_path):
     """D09/C06: a normal guard must not prevent mandatory close after expiry."""
     now = [0.0]
+
     class Session(_FakeSession):
         closes = 0
+
         def save_state(self):
             now[0] = 180.0
             return super().save_state()
+
         def close(self):
             self.closes += 1
             super().close()
+
     session = Session()
     with pytest.raises(producer.CaptureBoundsExceeded):
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), clock=lambda: now[0],
-            session_factory=lambda **_kwargs: session))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                clock=lambda: now[0],
+                session_factory=lambda **_kwargs: session,
+            )
+        )
     assert session.closed and session.closes == 1
     assert not (tmp_path / "out.state").exists()
 
 
 def test_combined_expiry_diagnostic_failure_and_successful_restoration(tmp_path, monkeypatch):
     """Mandatory combined control: expired normal context must not stop recovery."""
+
     class Primary(producer.CaptureBoundsExceeded):
         def add_note(self, _text):
             raise KeyboardInterrupt("diagnostic delivery failed")
+
     report = tmp_path / "report.json"
     fixture = tmp_path / "fixture"
     report.write_bytes(PRIOR)
@@ -414,10 +448,13 @@ def test_combined_expiry_diagnostic_failure_and_successful_restoration(tmp_path,
         transaction.bind_operation(180.0)
         capture._write_fixture_exclusive(fixture, b"fixture")
         producer.write_report(report, {"new": True})
+
         def interrupt():
             raise SystemExit("first cleanup interrupted")
-        transaction.active_scope().action("first", tmp_path / "unresolved",
-                                          "first cleanup", interrupt)
+
+        transaction.active_scope().action(
+            "first", tmp_path / "unresolved", "first cleanup", interrupt
+        )
         now[0] = 181.0
         raise primary
 
@@ -435,6 +472,7 @@ def test_stage_creation_interruption_reports_uncertain_remaining_entry(tmp_path,
     real_open = os.open
     primary = KeyboardInterrupt("open interrupted after creation")
     paths = []
+
     def open_file(path, flags, *args, **kwargs):
         descriptor = real_open(path, flags, *args, **kwargs)
         if ".partial-" in Path(path).name:
@@ -442,13 +480,16 @@ def test_stage_creation_interruption_reports_uncertain_remaining_entry(tmp_path,
             paths.append(Path(path))
             raise primary
         return descriptor
+
     monkeypatch.setattr(os, "open", open_file)
     with pytest.raises(KeyboardInterrupt) as caught:
         capture._write_fixture_exclusive(tmp_path / "fixture", b"fixture")
     assert caught.value is primary and len(paths) == 1
     assert paths[0].exists() and not (tmp_path / "fixture").exists()
-    assert any(row["path"] == str(paths[0]) and row["disposition"] == "unresolved"
-               for row in primary.producer_cleanup)
+    assert any(
+        row["path"] == str(paths[0]) and row["disposition"] == "unresolved"
+        for row in primary.producer_cleanup
+    )
 
 
 def test_owned_fixture_foreign_replacement_and_real_cleanup_positive(tmp_path):
@@ -476,6 +517,7 @@ def test_paired_original_deadline_rejects_reset_window(tmp_path, monkeypatch, un
     prepared.update(out=tmp_path / "out.state", root=tmp_path)
     real_admit = transaction._OperationClock.admit
     reached = []
+
     def admit(self, phase):
         if phase == "capture final admission" and not reached:
             reached.append(phase)
@@ -484,7 +526,9 @@ def test_paired_original_deadline_rejects_reset_window(tmp_path, monkeypatch, un
                 self.started = 30.0
                 self.deadline = 210.0
         return real_admit(self, phase)
+
     monkeypatch.setattr(transaction._OperationClock, "admit", admit)
+
     def exercise():
         refused = False
         try:
@@ -492,6 +536,7 @@ def test_paired_original_deadline_rejects_reset_window(tmp_path, monkeypatch, un
         except producer.CaptureBoundsExceeded:
             refused = True
         assert refused and not prepared["out"].exists(), "reset deadline admitted late output"
+
     if unsafe:
         with pytest.raises(AssertionError, match="reset deadline"):
             exercise()
@@ -501,9 +546,12 @@ def test_paired_original_deadline_rejects_reset_window(tmp_path, monkeypatch, un
 
 
 def test_deadline_arithmetic_overflow_is_refused_before_session(tmp_path):
-    kwargs = _capture_kwargs(tmp_path, _writable_scenario(),
-                             clock=lambda: 1e308,
-                             session_factory=lambda **_kwargs: pytest.fail("no session"))
+    kwargs = _capture_kwargs(
+        tmp_path,
+        _writable_scenario(),
+        clock=lambda: 1e308,
+        session_factory=lambda **_kwargs: pytest.fail("no session"),
+    )
     kwargs["bounds"]["max_wall_seconds"] = 1e308
     with pytest.raises(producer.ScenarioRefusal, match="arithmetic"):
         producer.capture_battle_scenario(**kwargs)
@@ -522,9 +570,12 @@ def test_standalone_report_does_not_invent_wall_budget(tmp_path):
 
 def test_reentrant_operation_inherits_deadline_without_parent_registry(tmp_path):
     now = [0.0]
+
     def clock():
         return now[0]
+
     scopes = []
+
     @transaction.operation_entry("run")
     def inner(**_kwargs):
         transaction.bind_operation(1000.0)
@@ -533,6 +584,7 @@ def test_reentrant_operation_inherits_deadline_without_parent_registry(tmp_path)
         assert scope.timing.started == 30.0
         assert scope.timing.deadline == 180.0
         return {}
+
     @transaction.operation_entry("run")
     def outer(**_kwargs):
         transaction.bind_operation(180.0)
@@ -543,6 +595,7 @@ def test_reentrant_operation_inherits_deadline_without_parent_registry(tmp_path)
         assert transaction.active_scope() is parent
         assert parent.timing.started == 0.0 and parent.timing.deadline == 180.0
         return {}
+
     result = outer(clock=clock)
     assert scopes[0] is not scopes[1] and scopes[0].actions is not scopes[1].actions
     assert result["operation_timing"]["wall_seconds"] == 30.0
@@ -552,27 +605,41 @@ def test_reentrant_operation_inherits_deadline_without_parent_registry(tmp_path)
 def test_producer_revision_expiry_is_not_a_shorter_capture_duration(tmp_path, monkeypatch):
     now = [0.0]
     session = _FakeSession()
+
     def revision(_root):
         now[0] = 181.0
-        return None
+
     monkeypatch.setattr(producer, "_producer_revision", revision)
     with pytest.raises(producer.CaptureBoundsExceeded):
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), clock=lambda: now[0],
-            session_factory=lambda **_kwargs: session))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                clock=lambda: now[0],
+                session_factory=lambda **_kwargs: session,
+            )
+        )
     assert session.closed and not (tmp_path / "out.state").exists()
 
 
 def test_tighter_explicit_deadline_cannot_be_reset(tmp_path):
     now = [0.0]
     session = _FakeSession()
+
     def factory(**_kwargs):
         now[0] = 5.0
         return session
+
     with pytest.raises(producer.CaptureBoundsExceeded):
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), deadline=5.0,
-            clock=lambda: now[0], session_factory=factory))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                deadline=5.0,
+                clock=lambda: now[0],
+                session_factory=factory,
+            )
+        )
     assert session.closed and not (tmp_path / "out.state").exists()
 
 
@@ -581,19 +648,22 @@ def test_context_reset_failure_cannot_replace_an_existing_primary(tmp_path, monk
     primary = RuntimeError("original body failure")
     path = tmp_path / "owned"
     path.write_bytes(b"owned")
+
     class ResetFailure:
         def get(self):
             return real.get()
+
         def set(self, value):
             return real.set(value)
+
         def reset(self, token):
             real.reset(token)
             raise SystemExit("context reset interrupted")
+
     monkeypatch.setattr(transaction, "_ACTIVE", ResetFailure())
-    with pytest.raises(RuntimeError) as caught:
-        with transaction.resource_scope() as scope:
-            scope.publication(_token(path))
-            raise primary
+    with pytest.raises(RuntimeError) as caught, transaction.resource_scope() as scope:
+        scope.publication(_token(path))
+        raise primary
     assert caught.value is primary and not path.exists()
     assert real.get() is None
     assert any("context reset failed" in note for note in primary.__notes__)
@@ -606,16 +676,20 @@ def test_expiry_failed_restore_and_failed_ledger_remain_failure(tmp_path, monkey
     prepared["report"].write_bytes(PRIOR)
     now = [0.0]
     real_writer, real_open = producer.write_report, os.open
+
     def writer(path, payload):
         token = real_writer(path, payload)
         now[0] = 181.0
         return token
+
     def restore(*_args):
         raise PermissionError("restoration unavailable")
+
     def open_file(path, flags, *args, **kwargs):
         if Path(path).name.startswith("cleanup-"):
             raise OSError("ledger unavailable")
         return real_open(path, flags, *args, **kwargs)
+
     monkeypatch.setattr(producer, "write_report", writer)
     monkeypatch.setattr(capture, "_write_bytes_atomically", restore)
     monkeypatch.setattr(os, "open", open_file)
@@ -623,17 +697,21 @@ def test_expiry_failed_restore_and_failed_ledger_remain_failure(tmp_path, monkey
         _run_with_fake_session(prepared, clock=lambda: now[0])
     assert not prepared["out"].exists()
     assert json.loads(prepared["report"].read_text())["capture"]["producer"] == (
-        "scripts/produce_battle_scenario.py")
+        "scripts/produce_battle_scenario.py"
+    )
     _reopen(tmp_path)
     rows = caught.value.producer_cleanup
     assert any(row.get("exception_type") == "PermissionError" for row in rows)
-    assert any(row["phase"] == "failure ledger" and row["disposition"] == "unresolved"
-               for row in rows)
+    assert any(
+        row["phase"] == "failure ledger" and row["disposition"] == "unresolved" for row in rows
+    )
 
 
 def test_final_clock_and_independent_cleanup_failures_keep_all_ownership(tmp_path, monkeypatch):
     """X01: one final-clock primary with probe, action and stage failures."""
-    fixture, stage, report = (tmp_path / name for name in ("fixture", ".extra.partial-x", "report.json"))
+    fixture, stage, report = (
+        tmp_path / name for name in ("fixture", ".extra.partial-x", "report.json")
+    )
     report.write_bytes(PRIOR)
     primary = KeyboardInterrupt("final clock interrupted")
     armed, pending = [False], [None]
@@ -692,12 +770,21 @@ def test_final_clock_and_independent_cleanup_failures_keep_all_ownership(tmp_pat
     assert transaction.active_scope() is None
 
 
-@pytest.mark.parametrize("phase", [
-    "prior report copy", "prior report payload sync", "prior report manifest sync",
-    "recovery verification", "recovery directory sync", "report publication",
-])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "prior report copy",
+        "prior report payload sync",
+        "prior report manifest sync",
+        "recovery verification",
+        "recovery directory sync",
+        "report publication",
+    ],
+)
 @pytest.mark.parametrize("occurrence", [1, 2], ids=["before-work", "after-work"])
-def test_normal_recovery_guards_bracket_real_blocking_work(tmp_path, monkeypatch, phase, occurrence):
+def test_normal_recovery_guards_bracket_real_blocking_work(
+    tmp_path, monkeypatch, phase, occurrence
+):
     """D05/D06: reach both sides of real copy/readback/sync/rename work."""
     prepared = _prepared_run(tmp_path)
     prepared.update(out=tmp_path / "out.state", root=tmp_path, report=tmp_path / "report.json")
@@ -721,65 +808,6 @@ def test_normal_recovery_guards_bracket_real_blocking_work(tmp_path, monkeypatch
     assert transaction.active_scope() is None
 
 
-def _recovery_handle_faults(monkeypatch, report, *, close_roles=(), fdopen_role=None,
-                            close_type=SystemExit):
-    """Real handles, with a shim that closes once then reports an injected failure."""
-    real_open, real_fdopen, real_close = os.open, os.fdopen, os.close
-    handles, attempts = {}, []
-    wrapping_failure = OSError("fdopen failed before ownership transfer")
-
-    def role(path):
-        path = Path(path)
-        if path == report:
-            return "source"
-        if path.name == "prior-report":
-            return "backup"
-        if path.name == "manifest.json":
-            return "manifest"
-        if ".recovery-" in path.name and path.is_dir():
-            return "directory"
-        return "other"
-
-    def opening(path, flags, *args, **kwargs):
-        descriptor = real_open(path, flags, *args, **kwargs)
-        handles[descriptor] = role(path)
-        return descriptor
-
-    class Stream:
-        def __init__(self, wrapped, name):
-            self.wrapped, self.name = wrapped, name
-        def __getattr__(self, name):
-            return getattr(self.wrapped, name)
-        def close(self):
-            attempts.append((self.name, "stream"))
-            self.wrapped.close()
-            if self.name in close_roles:
-                error = close_type(f"{self.name} close failed")
-                handles.setdefault("close_failures", []).append(error)
-                raise error
-
-    def wrapping(descriptor, *args, **kwargs):
-        name = handles.get(descriptor, "other")
-        if name == fdopen_role:
-            raise wrapping_failure
-        stream = real_fdopen(descriptor, *args, **kwargs)
-        return Stream(stream, name) if name in {"source", "backup", "manifest"} else stream
-
-    def closing(descriptor):
-        name = handles.get(descriptor, "other")
-        attempts.append((name, "descriptor"))
-        real_close(descriptor)
-        if name in close_roles:
-            error = close_type(f"{name} descriptor close failed")
-            handles.setdefault("close_failures", []).append(error)
-            raise error
-
-    monkeypatch.setattr(os, "open", opening)
-    monkeypatch.setattr(os, "fdopen", wrapping)
-    monkeypatch.setattr(os, "close", closing)
-    return handles, attempts, wrapping_failure
-
-
 def _recovery_run(tmp_path):
     prepared = _prepared_run(tmp_path)
     prepared.update(out=tmp_path / "out.state", root=tmp_path, report=tmp_path / "report.json")
@@ -787,9 +815,9 @@ def _recovery_run(tmp_path):
     return prepared
 
 
-@pytest.mark.parametrize("name,phase", [
-    ("backup", "prior report copy"), ("manifest", "prior report manifest sync"),
-])
+@pytest.mark.parametrize(
+    "name,phase", [("backup", "prior report copy"), ("manifest", "prior report manifest sync")]
+)
 @pytest.mark.parametrize("close_type", [OSError, KeyboardInterrupt, SystemExit])
 def test_guard_primary_survives_recovery_stream_and_source_close(
     tmp_path, monkeypatch, name, phase, close_type
@@ -797,7 +825,8 @@ def test_guard_primary_survives_recovery_stream_and_source_close(
     """F1: actual absolute admission failure, followed by two failing closes."""
     prepared = _recovery_run(tmp_path)
     _, attempts, _ = _recovery_handle_faults(
-        monkeypatch, prepared["report"], close_roles=(name, "source"), close_type=close_type)
+        monkeypatch, prepared["report"], close_roles=(name, "source"), close_type=close_type
+    )
     now, original = [0.0], []
     real_guard = recovery_module.normal_guard
 
@@ -831,7 +860,8 @@ def test_recovery_close_without_earlier_failure_becomes_primary(tmp_path, monkey
     """F1 positive body: a first close failure prevents report replacement."""
     prepared = _recovery_run(tmp_path)
     handles, attempts, _ = _recovery_handle_faults(
-        monkeypatch, prepared["report"], close_roles=(name,), close_type=KeyboardInterrupt)
+        monkeypatch, prepared["report"], close_roles=(name,), close_type=KeyboardInterrupt
+    )
     with pytest.raises(KeyboardInterrupt, match=f"{name} close failed") as caught:
         _run_with_fake_session(prepared)
     assert caught.value is handles["close_failures"][0]
@@ -844,10 +874,13 @@ def test_recovery_close_without_earlier_failure_becomes_primary(tmp_path, monkey
 
 
 @pytest.mark.parametrize("fsync_failure", [False, True])
-def test_recovery_directory_fsync_and_close_keep_first_failure(tmp_path, monkeypatch, fsync_failure):
+def test_recovery_directory_fsync_and_close_keep_first_failure(
+    tmp_path, monkeypatch, fsync_failure
+):
     prepared = _recovery_run(tmp_path)
     handles, attempts, _ = _recovery_handle_faults(
-        monkeypatch, prepared["report"], close_roles=("directory",), close_type=SystemExit)
+        monkeypatch, prepared["report"], close_roles=("directory",), close_type=SystemExit
+    )
     real_sync = os.fsync
     primary = OSError("directory fsync failed")
 
@@ -861,8 +894,7 @@ def test_recovery_directory_fsync_and_close_keep_first_failure(tmp_path, monkeyp
         _run_with_fake_session(prepared)
     if fsync_failure:
         assert caught.value is primary
-        assert any(row.get("exception_type") == "SystemExit"
-                   for row in primary.producer_cleanup)
+        assert any(row.get("exception_type") == "SystemExit" for row in primary.producer_cleanup)
     else:
         assert caught.value is handles["close_failures"][0]
     assert attempts.count(("directory", "descriptor")) == 1
@@ -875,8 +907,12 @@ def test_recovery_directory_fsync_and_close_keep_first_failure(tmp_path, monkeyp
 def test_fdopen_failure_keeps_raw_descriptor_owned_until_once_close(tmp_path, monkeypatch, name):
     prepared = _recovery_run(tmp_path)
     _, attempts, primary = _recovery_handle_faults(
-        monkeypatch, prepared["report"], fdopen_role=name, close_roles=(name,),
-        close_type=SystemExit)
+        monkeypatch,
+        prepared["report"],
+        fdopen_role=name,
+        close_roles=(name,),
+        close_type=SystemExit,
+    )
     with pytest.raises(OSError) as caught:
         _run_with_fake_session(prepared)
     assert caught.value is primary

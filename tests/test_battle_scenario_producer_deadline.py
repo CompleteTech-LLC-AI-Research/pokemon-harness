@@ -72,11 +72,11 @@ def test_original_deadline_survives_delayed_measurement(tmp_path, monkeypatch, r
         clock.now = 179.0
 
     monkeypatch.setattr(producer.os, "link", link)
-    reached = _at_phase(monkeypatch, clock, "capture final admission",
-                        lambda value: setattr(value, "now", final))
+    reached = _at_phase(
+        monkeypatch, clock, "capture final admission", lambda value: setattr(value, "now", final)
+    )
     with pytest.raises(producer.CaptureBoundsExceeded):
-        _run_with_fake_session(prepared, clock=clock,
-                              capture=producer.capture_battle_scenario)
+        _run_with_fake_session(prepared, clock=clock, capture=producer.capture_battle_scenario)
     assert reached and session.closed
     assert not prepared["out"].exists()
     assert not prepared.get("report", tmp_path / "absent").exists()
@@ -84,15 +84,16 @@ def test_original_deadline_survives_delayed_measurement(tmp_path, monkeypatch, r
 
 @pytest.mark.parametrize("phase", ["capture final admission", "run final admission"])
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
-def test_final_clock_interrupt_rolls_back_real_publications(tmp_path, monkeypatch, phase, error_type):
+def test_final_clock_interrupt_rolls_back_real_publications(
+    tmp_path, monkeypatch, phase, error_type
+):
     """D02/D03: the clock itself raises after fixture/report publication."""
     prepared = _prepared(tmp_path)
     prior = b"prior report"
     prepared["report"].write_bytes(prior)
     clock = _Clock()
     failure = error_type("final clock")
-    reached = _at_phase(monkeypatch, clock, phase,
-                        lambda value: setattr(value, "failure", failure))
+    reached = _at_phase(monkeypatch, clock, phase, lambda value: setattr(value, "failure", failure))
     with pytest.raises(error_type) as caught:
         _run_with_fake_session(prepared, clock=clock)
     assert caught.value is failure and reached
@@ -105,8 +106,9 @@ def test_invalid_final_sample_cannot_admit_output(tmp_path, monkeypatch, value):
     """D01 variant: NaN and backward samples cannot evade comparison."""
     prepared = _prepared(tmp_path)
     clock = _Clock()
-    reached = _at_phase(monkeypatch, clock, "run final admission",
-                        lambda timer: setattr(timer, "now", value))
+    reached = _at_phase(
+        monkeypatch, clock, "run final admission", lambda timer: setattr(timer, "now", value)
+    )
     with pytest.raises(producer.ScenarioRefusal, match="nonfinite or backward"):
         _run_with_fake_session(prepared, clock=clock)
     assert reached and not prepared["out"].exists()
@@ -124,19 +126,25 @@ def test_nonfinite_origin_is_refused_before_resources(tmp_path, origin):
     assert transaction.active_scope() is None
 
 
-@pytest.mark.parametrize("phase", [
-    "prior report copy", "prior report payload sync", "prior report manifest sync",
-    "recovery verification", "recovery directory sync", "report staging close",
-    "report publication",
-])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "prior report copy",
+        "prior report payload sync",
+        "prior report manifest sync",
+        "recovery verification",
+        "recovery directory sync",
+        "report staging close",
+        "report publication",
+    ],
+)
 def test_normal_report_work_stops_at_deadline(tmp_path, monkeypatch, phase):
     """D05/D06: normal copy and sync must not create a new success window."""
     prepared = _prepared(tmp_path)
     prior = b"persisted prior"
     prepared["report"].write_bytes(prior)
     clock = _Clock()
-    reached = _at_phase(monkeypatch, clock, phase,
-                        lambda timer: setattr(timer, "now", 180.0))
+    reached = _at_phase(monkeypatch, clock, phase, lambda timer: setattr(timer, "now", 180.0))
     with pytest.raises(producer.CaptureBoundsExceeded):
         _run_with_fake_session(prepared, clock=clock)
     assert reached and prepared["report"].read_bytes() == prior
@@ -147,12 +155,16 @@ def test_normal_report_work_stops_at_deadline(tmp_path, monkeypatch, phase):
 def test_capture_slow_phases_still_use_original_deadline(tmp_path, monkeypatch, phase):
     clock = _Clock()
     session = _FakeSession()
-    reached = _at_phase(monkeypatch, clock, phase,
-                        lambda timer: setattr(timer, "now", 180.0))
+    reached = _at_phase(monkeypatch, clock, phase, lambda timer: setattr(timer, "now", 180.0))
     with pytest.raises(producer.CaptureBoundsExceeded):
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), clock=clock,
-            session_factory=lambda **_kwargs: session))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                clock=clock,
+                session_factory=lambda **_kwargs: session,
+            )
+        )
     assert reached and session.closed
     assert not (tmp_path / "out.state").exists()
 
@@ -199,9 +211,11 @@ def test_timely_positive_run_and_direct_capture(tmp_path, report):
     directory = tmp_path / "direct"
     directory.mkdir()
     session = _FakeSession()
-    record = producer.capture_battle_scenario(**_capture_kwargs(
-        directory, _writable_scenario(), clock=clock,
-        session_factory=lambda **_kwargs: session))
+    record = producer.capture_battle_scenario(
+        **_capture_kwargs(
+            directory, _writable_scenario(), clock=clock, session_factory=lambda **_kwargs: session
+        )
+    )
     assert record["wall_seconds_scope"] == "operation origin through fixture admission"
     assert session.closed and (directory / "out.state").read_bytes() == session.payload
 
@@ -213,7 +227,8 @@ def test_nested_clock_domain_mismatch_resets_context(tmp_path):
     def capture(**kwargs):
         kwargs["clock"] = _Clock()
         return producer.capture_battle_scenario(
-            **kwargs, session_factory=lambda **_kwargs: _FakeSession())
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        )
 
     with pytest.raises(producer.ScenarioRefusal, match="clock domain"):
         _run_with_fake_session(prepared, clock=clock, capture=capture)
@@ -257,26 +272,37 @@ def test_explicit_deadline_never_extends_direct_capture_window(tmp_path):
         return session
 
     with pytest.raises(producer.CaptureBoundsExceeded):
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), deadline=1000.0, clock=clock,
-            session_factory=factory))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                deadline=1000.0,
+                clock=clock,
+                session_factory=factory,
+            )
+        )
     assert session.closed and not (tmp_path / "out.state").exists()
 
 
 @pytest.mark.parametrize("limit", [float("nan"), float("inf"), 1e309])
 def test_nonfinite_explicit_deadline_refuses(tmp_path, limit):
     with pytest.raises(producer.ScenarioRefusal, match="finite"):
-        producer.capture_battle_scenario(**_capture_kwargs(
-            tmp_path, _writable_scenario(), deadline=limit,
-            session_factory=lambda **_kwargs: _FakeSession()))
+        producer.capture_battle_scenario(
+            **_capture_kwargs(
+                tmp_path,
+                _writable_scenario(),
+                deadline=limit,
+                session_factory=lambda **_kwargs: _FakeSession(),
+            )
+        )
     assert not (tmp_path / "out.state").exists()
 
 
-@pytest.mark.parametrize("inner_failure", [False, True], ids=["inner-success", "caught-inner-failure"])
+@pytest.mark.parametrize(
+    "inner_failure", [False, True], ids=["inner-success", "caught-inner-failure"]
+)
 @pytest.mark.parametrize("outer_time", [80.0, 120.0], ids=["backward-refused", "timely-positive"])
-def test_reentrant_every_observation_survives_caught_failure(
-    tmp_path, inner_failure, outer_time
-):
+def test_reentrant_every_observation_survives_caught_failure(tmp_path, inner_failure, outer_time):
     """F2: real nested runs share observations, never origins or resource lists."""
     from scripts import produce_battle_scenario_capture as capture_module
 
@@ -292,7 +318,8 @@ def test_reentrant_every_observation_survives_caught_failure(
     def inner_capture(**kwargs):
         scopes.append(transaction.active_scope())
         result = producer.capture_battle_scenario(
-            **kwargs, session_factory=lambda **_kwargs: _FakeSession())
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        )
         clock.now = 100.0
         transaction.normal_guard("inner observation before possible failure")
         if inner_failure:
@@ -305,8 +332,7 @@ def test_reentrant_every_observation_survives_caught_failure(
         capture_module._write_fixture_exclusive(extra, b"outer resource")
         clock.now = 30.0
         try:
-            inner_results.append(_run_with_fake_session(
-                inner, clock=clock, capture=inner_capture))
+            inner_results.append(_run_with_fake_session(inner, clock=clock, capture=inner_capture))
         except RuntimeError as caught:
             assert inner_failure and caught is primary
         assert transaction.active_scope() is parent
@@ -317,7 +343,8 @@ def test_reentrant_every_observation_survives_caught_failure(
         assert parent.timing.observations.last == 100.0
         clock.now = outer_time
         return producer.capture_battle_scenario(
-            **kwargs, session_factory=lambda **_kwargs: _FakeSession())
+            **kwargs, session_factory=lambda **_kwargs: _FakeSession()
+        )
 
     if outer_time < 100.0:
         with pytest.raises(producer.ScenarioRefusal, match="backward"):

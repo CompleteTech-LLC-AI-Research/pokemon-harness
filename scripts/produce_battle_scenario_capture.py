@@ -51,10 +51,17 @@ from scripts.produce_battle_scenario_recovery import (
     _secure_prior_report,
     _WithdrawalResult,
 )
-
 from scripts.produce_battle_scenario_transaction import (
-    active_scope, bind_operation, failure_cleanup, nested_evidence, normal_guard, operation_entry,
-    resource_scope, safe_note, safe_text, track_publication,
+    active_scope,
+    bind_operation,
+    failure_cleanup,
+    nested_evidence,
+    normal_guard,
+    operation_entry,
+    resource_scope,
+    safe_note,
+    safe_text,
+    track_publication,
 )
 
 
@@ -261,10 +268,12 @@ class _OwnedPublication:
         if observation != "owned":
             if observation == "unresolved" or self.displaced is not None:
                 return _WithdrawalResult(
-                    "unresolved", self.displaced,
+                    "unresolved",
+                    self.displaced,
                     f"report/output ownership unresolved at {safe_text(self.path)}; "
                     f"probe={safe_text(probe_error)}; "
-                    f"{self.recovery_description()}", observation,
+                    f"{self.recovery_description()}",
+                    observation,
                     type(probe_error).__name__ if probe_error is not None else None,
                 )
             return _WithdrawalResult("foreign-preserved", observation=observation)
@@ -273,8 +282,10 @@ class _OwnedPublication:
                 os.unlink(self.path)
             except BaseException as exc:  # noqa: BLE001 - unresolved instead of false cleanup
                 return _WithdrawalResult(
-                    "unresolved", error=f"owned output {safe_text(self.path)} could not be "
-                    f"removed: {safe_text(exc)}", observation=observation,
+                    "unresolved",
+                    error=f"owned output {safe_text(self.path)} could not be "
+                    f"removed: {safe_text(exc)}",
+                    observation=observation,
                     exception_type=type(exc).__name__,
                 )
             return _WithdrawalResult("removed", observation=observation)
@@ -283,10 +294,13 @@ class _OwnedPublication:
                 _write_bytes_atomically(self.path, self.displaced.read_verified())
         except BaseException as exc:  # noqa: BLE001 - canonical recovery is never disposed
             return _WithdrawalResult(
-                "unresolved", self.displaced,
+                "unresolved",
+                self.displaced,
                 f"replaced entry {safe_text(self.path)} could not be restored: "
-                f"{safe_text(exc)}; {self.recovery_description()}", observation,
-                type(exc).__name__, cleanup=nested_evidence(exc),
+                f"{safe_text(exc)}; {self.recovery_description()}",
+                observation,
+                type(exc).__name__,
+                cleanup=nested_evidence(exc),
             )
         return _WithdrawalResult("restored", self.displaced, observation=observation)
 
@@ -299,17 +313,23 @@ def _entry_identity(path: Path) -> tuple[int, int]:
 
 def _stage_bytes(scope: Any, staged: Path, payload: bytes) -> tuple[_OwnedPublication, Any]:
     """Register descriptor, staging inode and stream close as independent actions."""
-    uncertain = scope.action(("staging", str(staged)), staged, "staging cleanup",
-                             lambda: _WithdrawalResult("unresolved", error="staging identity unknown",
-                                                       observation="unresolved"))
+    uncertain = scope.action(
+        ("staging", str(staged)),
+        staged,
+        "staging cleanup",
+        lambda: _WithdrawalResult(
+            "unresolved", error="staging identity unknown", observation="unresolved"
+        ),
+    )
     normal_guard("staging creation")
     try:
         descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         scope.disarm(uncertain)  # definite noncreation does not own a foreign entry
         raise
-    descriptor_action = scope.action(("descriptor", descriptor), staged, "staging descriptor close",
-                                     lambda: os.close(descriptor))
+    descriptor_action = scope.action(
+        ("descriptor", descriptor), staged, "staging descriptor close", lambda: os.close(descriptor)
+    )
     entry = os.fstat(descriptor)
     token = _OwnedPublication(staged, entry.st_ino, entry.st_dev)
     uncertain.callback = token.withdraw_result
@@ -356,11 +376,17 @@ def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
         displaced = _secure_prior_report(target)
         snapshot = None
         if displaced is not None:
-            snapshot = scope.action(("recovery", id(displaced)), target,
-                                    "prior snapshot retained",
-                                    lambda: _WithdrawalResult("unresolved", displaced,
-                                        "report preparation failed; publication outcome unknown"),
-                                    displaced.metadata)
+            snapshot = scope.action(
+                ("recovery", id(displaced)),
+                target,
+                "prior snapshot retained",
+                lambda: _WithdrawalResult(
+                    "unresolved",
+                    displaced,
+                    "report preparation failed; publication outcome unknown",
+                ),
+                displaced.metadata,
+            )
         normal_guard("report recovery preparation")
         encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         normal_guard("report encoding")
@@ -601,9 +627,11 @@ def capture_battle_scenario(
     del report
     if not isinstance(bounds, dict):
         raise ScenarioRefusal("capture bounds must be a declared object")
-    bounds = validate_bounds(max_frames=bounds.get("max_frames"),
-                             max_wall_seconds=bounds.get("max_wall_seconds"),
-                             max_inputs=bounds.get("max_inputs"))
+    bounds = validate_bounds(
+        max_frames=bounds.get("max_frames"),
+        max_wall_seconds=bounds.get("max_wall_seconds"),
+        max_inputs=bounds.get("max_inputs"),
+    )
     bind_operation(bounds["max_wall_seconds"], deadline)
     scenario_id = scenario["scenario_id"]
     validate_scenario_metadata(scenario, scenario_id)
@@ -667,8 +695,12 @@ def capture_battle_scenario(
             raise CaptureNotAvailable(
                 f"{_CAPTURE_MESSAGE} The pinned runtime could not be opened: {exc}"
             ) from exc
-        session_action = active_scope().action(("session", id(session)), "owned capture session",
-                                                "session close", lambda: session.close())
+        session_action = active_scope().action(
+            ("session", id(session)),
+            "owned capture session",
+            "session close",
+            lambda: session.close(),
+        )
         normal_guard("session open")
         normal_guard("state load")
         session.load_state(Path(input_fixture).read_bytes())

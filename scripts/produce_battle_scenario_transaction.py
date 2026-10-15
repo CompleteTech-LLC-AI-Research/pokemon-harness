@@ -59,8 +59,11 @@ class _OperationClock:
 
     def _observe(self, value: float, phase: str) -> None:
         previous = self.observations.last
-        if (isinstance(value, bool) or not math.isfinite(value)
-                or (previous is not None and value < previous)):
+        if (
+            isinstance(value, bool)
+            or not math.isfinite(value)
+            or (previous is not None and value < previous)
+        ):
             raise ScenarioRefusal(f"nonfinite or backward operation clock during {phase}")
         # Shared by same-clock related operations, even when an inner failure is caught.
         self.observations.last = value
@@ -107,9 +110,13 @@ class _OperationScope:
         return action
 
     def publication(self, token: Any) -> _Action:
-        return self.action(("publication", id(token)), token.path,
-                           "publication rollback", token.withdraw_result,
-                           token.recovery_metadata)
+        return self.action(
+            ("publication", id(token)),
+            token.path,
+            "publication rollback",
+            token.withdraw_result,
+            token.recovery_metadata,
+        )
 
     def disarm(self, action: _Action) -> None:
         action.state = "disarmed"
@@ -119,8 +126,12 @@ class _OperationScope:
         if action.state != "registered":
             return action.result
         action.state = "attempted"
-        row = {"path": safe_text(action.path), "phase": action.phase,
-               "disposition": "unresolved", "attempted": True}
+        row = {
+            "path": safe_text(action.path),
+            "phase": action.phase,
+            "disposition": "unresolved",
+            "attempted": True,
+        }
         self.evidence.append(row)
         try:
             action.result = action.callback()
@@ -148,8 +159,11 @@ class _OperationScope:
         try:
             result = self.perform(action)
         except BaseException as secondary:  # noqa: BLE001 - remaining actions still run
-            label = ("session.close() also failed" if action.phase == "session close"
-                     else "producer cleanup action raised")
+            label = (
+                "session.close() also failed"
+                if action.phase == "session close"
+                else "producer cleanup action raised"
+            )
             safe_note(primary, label, secondary)
         else:
             try:
@@ -167,8 +181,13 @@ class _OperationScope:
             try:
                 self.failure_ledger(primary)
             except BaseException as diagnostic:  # noqa: BLE001 - ledger failure stays secondary
-                self.evidence.append({"phase": "failure ledger", "disposition": "unresolved",
-                                      "error": safe_text(diagnostic)})
+                self.evidence.append(
+                    {
+                        "phase": "failure ledger",
+                        "disposition": "unresolved",
+                        "error": safe_text(diagnostic),
+                    }
+                )
                 attach_evidence(primary, self.evidence)
                 safe_note(primary, "producer failure ledger could not be attempted", diagnostic)
 
@@ -180,8 +199,10 @@ class _OperationScope:
             if isinstance(recovery, dict) and isinstance(recovery.get("manifest"), str):
                 # Canonical recovery survives successful restoration too. Its
                 # location must not depend on a later best-effort ledger write.
-                safe_note(primary, "producer prior report recovery retained; manifest="
-                          + recovery["manifest"])
+                safe_note(
+                    primary,
+                    "producer prior report recovery retained; manifest=" + recovery["manifest"],
+                )
                 directories.add(Path(recovery["manifest"]).parent)
         for directory in directories:
             ledger = None
@@ -190,19 +211,31 @@ class _OperationScope:
                 ledger = directory / f"cleanup-{os.getpid()}-{time.monotonic_ns()}.json"
                 descriptor = os.open(ledger, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                    json.dump({"schema": 1, "scope": "failure cleanup attempt; not completion",
-                               "deadline": self.timing.deadline if self.timing else None,
-                               "actions": self.evidence}, stream, indent=2)
+                    json.dump(
+                        {
+                            "schema": 1,
+                            "scope": "failure cleanup attempt; not completion",
+                            "deadline": self.timing.deadline if self.timing else None,
+                            "actions": self.evidence,
+                        },
+                        stream,
+                        indent=2,
+                    )
                     stream.write("\n")
                     stream.flush()
                     os.fsync(stream.fileno())
                 # No power-loss guarantee; this is not a synced transaction journal.
                 safe_note(primary, "producer failure ledger retained", str(ledger))
             except BaseException as secondary:  # noqa: BLE001 - retain primary/snapshot
-                self.evidence.append({"phase": "failure ledger", "disposition": "unresolved",
-                                      "path": safe_text(ledger),
-                                      "exception_type": type(secondary).__name__,
-                                      "error": safe_text(secondary)})
+                self.evidence.append(
+                    {
+                        "phase": "failure ledger",
+                        "disposition": "unresolved",
+                        "path": safe_text(ledger),
+                        "exception_type": type(secondary).__name__,
+                        "error": safe_text(secondary),
+                    }
+                )
                 safe_note(primary, "producer failure ledger incomplete", secondary)
         attach_evidence(primary, self.evidence)
 
@@ -218,8 +251,13 @@ def nested_evidence(secondary: BaseException) -> tuple[dict[str, Any], ...]:
     try:
         return tuple(dict(row) for row in getattr(secondary, "producer_cleanup", ()))
     except BaseException as diagnostic:  # noqa: BLE001 - retain uncertainty, never mask cause
-        return ({"phase": "nested cleanup evidence", "disposition": "unresolved",
-                 "exception_type": type(diagnostic).__name__},)
+        return (
+            {
+                "phase": "nested cleanup evidence",
+                "disposition": "unresolved",
+                "exception_type": type(diagnostic).__name__,
+            },
+        )
 
 
 def attach_evidence(primary: BaseException, rows: list[dict[str, Any]]) -> None:
@@ -234,8 +272,10 @@ def attach_evidence(primary: BaseException, rows: list[dict[str, Any]]) -> None:
 def resource_scope():
     """A lower helper owns interruption-before-return and transfers on success."""
     parent = active_scope()
-    scope = _OperationScope(parent.timing if parent is not None else None,
-                            cleanup=parent.cleanup if parent is not None else False)
+    scope = _OperationScope(
+        parent.timing if parent is not None else None,
+        cleanup=parent.cleanup if parent is not None else False,
+    )
     try:
         token = _ACTIVE.set(scope)
         failure = None
@@ -283,9 +323,14 @@ def safe_note(primary: BaseException, label: str, detail: Any = None) -> None:
     if failure is not None:
         scope = active_scope()
         if scope is not None:
-            scope.evidence.append({"phase": "diagnostic attachment", "disposition": "unresolved",
-                                   "exception_type": failure,
-                                   "error": "producer diagnostic could not be completed"})
+            scope.evidence.append(
+                {
+                    "phase": "diagnostic attachment",
+                    "disposition": "unresolved",
+                    "exception_type": failure,
+                    "error": "producer diagnostic could not be completed",
+                }
+            )
 
 
 @contextmanager
@@ -340,6 +385,7 @@ def track_publication(token: Any) -> None:
 
 def operation_entry(kind: str):
     """Keep facade signatures/call shapes while binding synchronous nested work."""
+
     def decorate(function):
         defaults = function.__kwdefaults__ or {}
         default_clock = defaults.get("clock", time.monotonic)
@@ -348,17 +394,33 @@ def operation_entry(kind: str):
         def invoke(**kwargs):
             parent = active_scope()
             clock = kwargs.get("clock", default_clock)
-            if parent is not None and parent.timing is not None and clock is not parent.timing.clock:
+            if (
+                parent is not None
+                and parent.timing is not None
+                and clock is not parent.timing.clock
+            ):
                 raise ScenarioRefusal("nested operation clock domain differs from its owner")
             borrowed = kind == "capture" and parent is not None and parent.timing is not None
-            timing = parent.timing if borrowed else _OperationClock(
-                clock,
-                deadline=parent.timing.deadline if parent is not None and parent.timing is not None else None,
-                observations=parent.timing.observations if parent is not None and parent.timing is not None else _ObservationWatermark(),
+            timing = (
+                parent.timing
+                if borrowed
+                else _OperationClock(
+                    clock,
+                    deadline=parent.timing.deadline
+                    if parent is not None and parent.timing is not None
+                    else None,
+                    observations=parent.timing.observations
+                    if parent is not None and parent.timing is not None
+                    else _ObservationWatermark(),
+                )
             )
-            if parent is not None and parent.timing is not None and not borrowed:
-                if timing.started < parent.timing.last:
-                    raise ScenarioRefusal("backward clock entering reentrant operation")
+            if (
+                parent is not None
+                and parent.timing is not None
+                and not borrowed
+                and timing.started < parent.timing.last
+            ):
+                raise ScenarioRefusal("backward clock entering reentrant operation")
             scope = _OperationScope(timing)
             try:
                 token = _ACTIVE.set(scope)
@@ -374,19 +436,27 @@ def operation_entry(kind: str):
                 now = timing.admit(f"{kind} final admission")
                 elapsed = round(now - timing.started, 6)
                 if kind == "capture":
-                    result = {**result, "wall_seconds": elapsed,
-                              "wall_seconds_scope": "operation origin through fixture admission"}
+                    result = {
+                        **result,
+                        "wall_seconds": elapsed,
+                        "wall_seconds_scope": "operation origin through fixture admission",
+                    }
                     if borrowed:
                         parent.actions.extend(scope.actions)
                 else:
-                    result = {**result, "operation_timing": {
-                        "wall_seconds": elapsed,
-                        "scope": "operation origin through final admission",
-                        "report_finalized": kwargs.get("report") is not None,
-                    }}
+                    result = {
+                        **result,
+                        "operation_timing": {
+                            "wall_seconds": elapsed,
+                            "scope": "operation origin through final admission",
+                            "report_finalized": kwargs.get("report") is not None,
+                        },
+                    }
                 return result
             except BaseException as primary:
                 rollback_preserving(scope, primary)
                 raise
+
         return invoke
+
     return decorate

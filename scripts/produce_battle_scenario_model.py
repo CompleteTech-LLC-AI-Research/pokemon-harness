@@ -122,7 +122,7 @@ def _note(exception: BaseException, message: str) -> None:
         add_note = getattr(exception, "add_note", None)
         if add_note is not None:
             add_note(message)
-    except BaseException:  # noqa: BLE001 - diagnostics never replace the primary error
+    except BaseException:  # noqa: BLE001, S110 - best-effort notes must never replace the primary error
         pass
 
 
