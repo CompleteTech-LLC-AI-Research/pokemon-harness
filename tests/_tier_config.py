@@ -171,6 +171,7 @@ UNIT_MODULES = frozenset(
         "test_network_edge_retirement_reciprocal.py",
         "test_network_edge_retirement_wait.py",
         "test_network_frame_batching.py",
+        "test_network_recovery_status.py",
         "test_pre_linkmenu_observation.py",
         "test_network_owner_execution.py",
         "test_network_public_backpressure.py",
@@ -899,7 +900,6 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
         return frozenset()
 
     marks: set[str] = set()
-
     if filename in REAL_ROM_MODULES:
         marks.add("real_rom")
     elif filename in UNIT_MODULES:

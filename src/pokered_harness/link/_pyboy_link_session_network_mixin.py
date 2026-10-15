@@ -372,13 +372,21 @@ class _PyBoyLinkNetworkMixin:
                 if frame_barrier:
                     backend.begin_frame_turn(leader=bool(pacing_leader))
 
+                # Recovery frames share this invocation's running status. A
+                # later successful frame must not erase observed termination.
+                terminated = False
+
                 def advance_owner_frame():
+                    nonlocal terminated
                     token = backend.begin_owner_frame()
                     frame_before = getattr(pyboy, "frame_count", None)
                     result = original_tick(*args, **kwargs)
+                    if not result:
+                        terminated = True
                     if (
                         frame_before is not None
                         and pyboy.frame_count > frame_before
+                        and result
                         and not bool(getattr(pyboy, "quitting", False))
                     ):
                         backend.finish_owner_frame(token)
@@ -451,7 +459,7 @@ class _PyBoyLinkNetworkMixin:
                     except BaseException:
                         backend.abort_frame_turn(leader=bool(pacing_leader))
                         raise
-                return result
+                return False if terminated else result
 
         @wraps(original_tick)
         def owned_frame(*args, **kwargs):
