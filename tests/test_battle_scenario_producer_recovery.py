@@ -413,18 +413,19 @@ def test_backup_write_failure_refuses_report_replacement(
     report.write_bytes(PRIOR)
     real_fdopen = os.fdopen
 
-    @contextlib.contextmanager
     def fail_backup_stream(descriptor: int, mode: str, **kwargs: Any) -> Any:
-        with real_fdopen(descriptor, mode, **kwargs) as stream:
-            if mode == "wb":
+        stream = real_fdopen(descriptor, mode, **kwargs)
+        if mode == "wb":
 
-                class BrokenBackup:
-                    def write(self, _payload: bytes) -> None:
-                        raise OSError("backup write refused")
+            class BrokenBackup:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(stream, name)
 
-                yield BrokenBackup()
-            else:
-                yield stream
+                def write(self, _payload: bytes) -> None:
+                    raise OSError("backup write refused")
+
+            return BrokenBackup()
+        return stream
 
     monkeypatch.setattr(recovery_module.os, "fdopen", fail_backup_stream)
     with pytest.raises(OSError, match="backup write refused") as error:
@@ -495,21 +496,19 @@ def test_prior_read_failure_after_open_refuses_report_replacement(
     report.write_bytes(PRIOR)
     real_fdopen = os.fdopen
 
-    @contextlib.contextmanager
     def fail_source_stream(descriptor: int, mode: str, **kwargs: Any) -> Any:
-        with real_fdopen(descriptor, mode, **kwargs) as stream:
-            if mode == "rb":
+        stream = real_fdopen(descriptor, mode, **kwargs)
+        if mode == "rb":
 
-                class BrokenSource:
-                    def fileno(self) -> int:
-                        return stream.fileno()
+            class BrokenSource:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(stream, name)
 
-                    def read(self, _size: int) -> bytes:
-                        raise PermissionError("opened prior report became unreadable")
+                def read(self, _size: int) -> bytes:
+                    raise PermissionError("opened prior report became unreadable")
 
-                yield BrokenSource()
-            else:
-                yield stream
+            return BrokenSource()
+        return stream
 
     monkeypatch.setattr(recovery_module.os, "fdopen", fail_source_stream)
     with pytest.raises(PermissionError, match="became unreadable") as error:
