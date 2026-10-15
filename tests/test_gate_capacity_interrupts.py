@@ -513,7 +513,7 @@ def test_matrix_finalization_interrupt_keeps_loaded_failure_evidence(tmp_path, m
     signal_line = start + next(
         index
         for index, line in enumerate(source)
-        if line.startswith("    case_results = [case_results_by_nodeid")
+        if line.startswith("        case_results = [case_results_by_nodeid")
     )
     signalled: list[bool] = []
 

@@ -97,7 +97,7 @@ def test_batch_tier_finalization_interrupt_keeps_loaded_failure_evidence(tmp_pat
 
     monkeypatch.setattr(gate, "prepare_runtime_gate", _matrix_row_prepare({}))
     monkeypatch.setattr(gate, "run_pytest_once", run_once)
-    with _real_sigint_at_line(gate.run_tier, "    if omitted_failures:\n") as signalled:
+    with _real_sigint_at_line(gate.run_tier, "        if omitted_failures:\n") as signalled:
         result = gate.run_runtime_gates(
             runtime_mode="source",
             project_root=tmp_path,
