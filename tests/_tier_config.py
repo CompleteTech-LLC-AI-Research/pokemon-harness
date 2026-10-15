@@ -5,7 +5,6 @@ tree so developers can run them directly.  This module gives the production
 gate a stable, reviewable classification without relying on test names alone
 for the broad ROM boundary.  The small set of acceptance names is explicit so
 that a new test cannot silently move into an optional tier.
-
 Every collected test module must be listed below.  Failing collection for an
 unlisted module is intentional: silently classifying a newly added ROM test as
 ``unit`` would let the production gate report green without exercising it.
@@ -118,6 +117,7 @@ UNIT_MODULES = frozenset(
         "test_game_state.py",
         "test_gate_capacity_boundaries.py",
         "test_gate_capacity_interrupts.py",
+        "test_gate_sigint_restoration.py",
         "test_gate_capacity_main.py",
         "test_gate_capacity_policy.py",
         "test_gate_early_smoke.py",
