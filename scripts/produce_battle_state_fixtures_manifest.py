@@ -15,6 +15,7 @@ from scripts.produce_battle_state_fixtures_drive import (
     _party_summary,
 )
 from scripts.produce_battle_state_fixtures_model import (
+    _REPO,
     BATTLE_PARTY_MENU,
     CAPTURE_COMMAND_TEMPLATE,
     PRODUCER_PATH,
@@ -99,7 +100,7 @@ def _capture_provenance(
             f"Python {sys.version.split()[0]}; PyBoy {pyboy_version} "
             f"{_runtime_label()}; fork "
             f"{pyboy_revision}; producer {PRODUCER_PATH} SHA-1 "
-            f"{_sha1(Path(__file__).resolve())}"
+            f"{_sha1(_REPO / PRODUCER_PATH)}"
         ),
         "captured_at_utc": captured_at_utc,
         "verification_method": (

@@ -370,8 +370,9 @@ qualification remains incomplete. The standard-library editable-install path
 has the scoped passing evidence above. Supported inputs remain limited to the
 declared canonical fixture-backed matrix, and TCP is enforced loopback-only,
 unauthenticated, and unencrypted. Stock-ROM pairs, secure cross-host operation,
-additional platforms, and MCP-facing starter/trade/battle workflows are separate
-coverage limits, not promises made by this release scope. Required MCP
+additional platforms, MCP-facing starter journeys, and battle coverage beyond
+the declared tests remain separate coverage limits. The 24 declared MCP trade
+rows belong to the required 43-entry trade scope. Those rows and required MCP
 startup/state/action/lifecycle checks still need current-candidate evidence.
 
 Status semantics are deliberately scoped:
@@ -611,11 +612,11 @@ gitignored by design:
 rom/
 ├── red/
 │   ├── pokemon-red.gb
-│   ├── pokemon-red-color.gb       # optional color variant
+│   ├── pokemon-red-color.gb       # required by the canonical real-ROM gate
 │   └── pokemon-red.sym
 ├── blue/
 │   ├── pokemon-blue.gb
-│   ├── pokemon-blue-color.gb      # optional color variant
+│   ├── pokemon-blue-color.gb      # required by the canonical real-ROM gate
 │   └── pokemon-blue.sym
 └── yellow/
     ├── pokemon-yellow.gbc
@@ -626,16 +627,24 @@ Asset requirements are tiered. The unit/timing gate needs no ROM or save-state
 assets. A single-session test needs one pinned ROM and its matching symbol
 file. The default real-ROM gate needs all five pinned ROM files, all three
 symbol files, and the external fixture root. The tracked fixture manifest
-contains ten state entries (ordinary and battle, including four
-vanilla-derived rows), so `validate_fixture_manifest.py --fixture-root ...`
-requires all ten files. The retained prior-candidate manifest validation
-passed; six canonical fixtures have verified provenance and four
-vanilla-derived fixtures remain `PARTIAL`. The stock ROM/SYM pins and existing
+contains 31 state entries: five ordinary, five battle, three slots, and 18
+battle-boundary captures. Thus `validate_fixture_manifest.py --fixture-root
+...` requires all 31 files, including the boundary captures. Nine canonical
+ordinary/battle/slots fixtures have verified provenance, 18 boundary fixtures
+have captured provenance, and four vanilla-derived fixtures remain `PARTIAL`.
+Historical manifest validation covers the inventory recorded in that run.
+The stock ROM/SYM pins and existing
 vanilla fixture bytes validate, but vanilla ordinary capture provenance cannot
 be established: replay against the retained source failed at the 64-step
 movement bound, and the manifest's ordinary producer revision `25e231c` is
 historical. No reproducibility of those vanilla fixture bytes at the
 implementation/runtime snapshot is claimed.
+
+The default local tier also requires `yellow/battle_healing.state` and
+`blue/battle_healing.state` under the external fixture root. Their pins and
+capture recipes are recorded separately in
+[`release-evidence/battle-healing-fixtures.json`](release-evidence/battle-healing-fixtures.json);
+validating the 31-entry Cable Club manifest does not validate these two inputs.
 
 The symbol files should be generated with `DEBUG=1` from the matching
 `pret/pokered` or `pret/pokeyellow` source tree. Obtain those source trees

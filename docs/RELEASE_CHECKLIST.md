@@ -118,9 +118,10 @@ Center warp) remain scoped results, not full candidate acceptance.
 Required full candidate source/native, MCP, authenticity,
 concurrency, cleanup, install/launch, and independent review gates remain open
 until their complete current evidence passes. Enforced loopback-only operation
-is allowed. Vanilla link fixtures, additional platforms, MCP-facing
-starter/trade/battle workflows, and cross-host networking are separate
-unqualified extensions; they do not replace or weaken the required gates.
+is allowed. The 24 declared MCP trade rows belong to the required 43-entry
+trade scope. Vanilla link fixtures, additional platforms, MCP-facing starter
+journeys, battle coverage beyond the declared tests, and cross-host networking
+are separate unqualified extensions; they do not replace the required gates.
 
 ## Historical evidence boundary
 
@@ -394,8 +395,9 @@ release readiness.
 - [ ] Current remote strict trade and battle tiers pass in both required
   runtimes with bounded teardown and every ordered listener/connector pair.
 - [x] The strict acceptance declaration has an entrypoint for every canonical
-  ordered local and remote Red/Blue/Yellow pair (19 trade and 19 battle node
-  IDs).
+  ordered local and remote Red/Blue/Yellow pair and the required MCP trade
+  cases (43 trade and 19 battle node IDs). Declaration coverage alone does not
+  establish passing gameplay.
 - [x] The historical PR #17 baseline local and remote strict runtime rows pass in both
   listener/connector directions; strict trade and strict battle each passed
   19/19 with bounded teardown.
@@ -412,9 +414,6 @@ release readiness.
   each of five repetitions.
 - [ ] Serialized emulator access, concurrent calls, shutdown, and cancellation
   invariants pass on the candidate under the declared scope.
-- [ ] The opt-in capacity policy (`--capacity-policy`, issue #86) is exercised
-  on a real declared allocation; its enforcement defaults and end-to-end
-  admission/telemetry evidence remain open, so it does not gate releases yet.
 - [ ] Required native build/runtime coverage and independent release review
   are complete. Unadvertised load and platform extensions are coverage limits,
   not additional blockers; historical Windows checks do not qualify the candidate.
@@ -433,9 +432,9 @@ release readiness.
 
 - [x] `release-evidence/fixture-manifest.json` records thirty-one external state
   entries with sizes, SHA-1/SHA-256 values, expected ROM/SYM pins, source-state
-  records, runtime identity, and command templates: ten ordinary/battle rows
-  plus eighteen `captured` boundary rows driven from the admitted battle
-  fixtures by `scripts/produce_battle_state_fixtures.py`.
+  records, runtime identity, and command templates: five ordinary rows, five
+  battle rows, three slots rows, and eighteen `captured` boundary rows driven
+  from the admitted battle fixtures by `scripts/produce_battle_state_fixtures.py`.
 - [ ] Deterministic reproduction of the four vanilla-derived fixture bytes is
   established. Static validation confirms the stock ROM/SYM
   pins and existing vanilla fixture bytes, but vanilla ordinary capture
@@ -445,10 +444,11 @@ release readiness.
 - [x] `scripts/produce_cable_club_fixture.py` validates pins and has bounded
   defaults of 180 seconds and 64 movement steps.
 - [x] `scripts/prepare_battle_cable_club_fixtures.py` is tracked and produces
-  entries: the immutable derived battle fixtures, the six-member `slots`
-  fixtures whose party records are pairwise distinct, and the eighteen
-  captured boundary fixture rows; acceptance does not prepare party state in
-  emulator RAM.
+  the immutable derived battle fixtures and the six-member `slots` fixtures
+  whose party records are pairwise distinct. The separate
+  `scripts/produce_battle_state_fixtures.py` drives gameplay to capture the
+  eighteen boundary rows; acceptance does not prepare party state in emulator
+  RAM.
 - [x] Provenance is verified for nine canonical fixture entries.
 - [x] Provenance is captured for the eighteen boundary fixture entries: each
   row names the admitted battle fixture it was driven from by SHA-1 and
@@ -457,9 +457,13 @@ release readiness.
   vanilla source states are not proven to match the vanilla ROM; replay against
   the retained source failed at the 64-step bound, and the manifest's ordinary
   producer revision is historical (`25e231c`), so those rows remain `PARTIAL`.
-- [ ] The operator validates all 28 manifest entries with
+- [ ] The operator validates all 31 manifest entries with
   `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
   the external fixture root available to the release runner.
+- [ ] The same root supplies the Yellow and Blue `battle_healing.state` files
+  pinned separately in `release-evidence/battle-healing-fixtures.json`; their
+  ordinary-battle medicine tests pass in the default local tier. Cable Club
+  manifest validation does not cover these additional inputs.
 - [ ] A retained evidence bundle includes the exact source-state hashes,
   capture/generation commands, runtime identity, and original-vs-verification
   timestamp distinction.
@@ -492,7 +496,7 @@ release readiness.
   EOF, cancellation, peer timeout, duplicate messages, reconnect, and shutdown
   complete within deadlines without deadlocks or leaked workers, sockets,
   callbacks, or sessions, including concurrent calls and shutdown overlap.
-- Coverage limit: actual MCP-driven starter/trade/battle remains unproven. Unit,
+- Required MCP trade gameplay remains unproven on the current candidate. Unit,
   transport, lifecycle, and LinkMenu evidence do not prove MCP-driven starter,
   trade, or battle. Historical MCP evidence is 6/6 real integration checks in
   `13.11s` with one SDL warning, plus 104 passing dispatch tests;
@@ -502,6 +506,13 @@ release readiness.
 - [ ] Documentation distinguishes single-session, paired-link, transport,
   trade, battle, manual fixtures, and Option-B/RAM-boost diagnostics, with no
   broken links or machine-specific launch paths.
+
+## Optional capacity-policy follow-up
+
+The opt-in `--capacity-policy` benchmark (issue #86) still needs a real declared
+allocation and retained end-to-end admission/telemetry evidence. It does not
+gate releases. This optional benchmark is separate from the required native
+qualification allocation evidence listed under test gates above.
 
 ## Required release commands
 

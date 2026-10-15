@@ -155,10 +155,13 @@ records before changing any status.
 
 ## Supported-scope boundary
 
-The strict declaration contains `19` local/remote entry points per operation:
-the nine ordered Red/Blue/Yellow local pairs, nine ordered listener/connector
-TCP pairs, and the dedicated Red/Yellow assertion. Collection and declaration
-audits prove shape only.
+The strict declaration requires `43` trade and `19` battle entry points. Each
+operation includes nine ordered Red/Blue/Yellow local pairs, nine ordered
+listener/connector TCP pairs, and the dedicated Red/Yellow assertion. Trade
+also requires 24 MCP entry points: nine local orientations, nine TCP
+orientations, two multi-member slot cases, one cancellation case, and three
+EOF/disconnect cases. Collection and declaration audits prove shape only;
+historical `19/19` trade results cover the earlier declaration.
 
 The following remain open for release qualification:
 
@@ -169,6 +172,9 @@ The following remain open for release qualification:
   does not qualify the compiled runtime.
 - Current-candidate MCP startup/state/action/lifecycle verification, required
   concurrency and cleanup regressions, and independent release review.
+- Current-candidate MCP trade coverage, including the 24 required MCP rows in
+  the strict trade declaration above. Historical 19-row trade runs do not
+  exercise these additional rows.
 - Clean-install and launch evidence for the candidate being qualified. The
   standard-library editable-install path passed at `2eb21a5` on Python 3.12.13,
   including pip dependency checks and source bootstrap identity. A separate
@@ -178,7 +184,8 @@ The following remain open for release qualification:
 
 Separate coverage limits outside the declared canonical loopback scope:
 
-- MCP-driven starter/trade/battle workflows remain unproven.
+- MCP-driven starter journeys and battle coverage beyond the declared
+  acceptance tests remain unproven.
 - Vanilla ordinary fixtures and their derived rows lack complete provenance. The
   retained replay failed at the `64`-movement-step bound, and ordinary-fixture
   producer revision `25e231c` is historical; no current-head reproducibility

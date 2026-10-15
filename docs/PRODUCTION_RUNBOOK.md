@@ -175,15 +175,16 @@ this candidate.
 
 ## Capability boundary
 
-The current source-runtime trade follow-up above passes 19/19. The retained
-source strict battle result is 19/19, but full source release acceptance
-remains pending until the candidate's complete required scope is rerun and
-compiled-runtime, MCP, and platform evidence are established.
-Native gameplay, MCP starter/trade/battle, vanilla fixture provenance,
-broad-suite/platform/load coverage,
-and independent release review remain open. Six canonical fixture entries have
-verified provenance; four vanilla-derived entries remain partial. TCP is
-loopback-only, unauthenticated, and unencrypted.
+The historical source trade follow-up and retained source battle run each
+passed their 19-row declarations. The current declaration requires 43 trade
+rows, including 24 MCP rows, and 19 battle rows. Full source/native release
+acceptance remains pending until the candidate's complete required scope,
+MCP lifecycle, cleanup, and independent review pass. Starter journeys,
+additional platform/load coverage, and vanilla fixture provenance remain
+separate coverage limits. Nine canonical ordinary/battle/slots fixture entries
+have verified provenance; eighteen boundary rows have captured provenance;
+four vanilla-derived entries remain partial. TCP is loopback-only,
+unauthenticated, and unencrypted.
 
 ## 1. Start from a clean checkout
 
@@ -296,11 +297,11 @@ Create this layout:
 rom/
 ├── red/
 │   ├── pokemon-red.gb
-│   ├── pokemon-red-color.gb       # optional candidate variant
+│   ├── pokemon-red-color.gb       # required by the canonical real-ROM gate
 │   └── pokemon-red.sym
 ├── blue/
 │   ├── pokemon-blue.gb
-│   ├── pokemon-blue-color.gb      # optional candidate variant
+│   ├── pokemon-blue-color.gb      # required by the canonical real-ROM gate
 │   └── pokemon-blue.sym
 └── yellow/
     ├── pokemon-yellow.gbc
@@ -338,8 +339,9 @@ rows. The two `*-vanilla.state` pairs are recorded in the manifest but remain
 partial because their ordinary source-state provenance is not established. The
 production gate preflight checks the three canonical ordinary files and the
 three six-member `slots` files, strict acceptance tests require the three
-canonical battle files, and the manifest byte validator checks all thirteen
-listed entries. A missing required file or a manifest hash mismatch is a
+canonical battle files. The manifest byte validator checks all 31 entries:
+the thirteen files shown above and eighteen battle-boundary captures described
+below. A missing required file or a manifest hash mismatch is a
 blocked/failed release result, never a passing skip.
 
 The stock ROM/SYM pins and existing vanilla fixture bytes validate, but vanilla
@@ -354,13 +356,28 @@ For the currently controlled stateful scope, the BYO asset set is:
 - three matching symbol files: Red, Blue, and Yellow; and
 - nine canonical color-Red, color-Blue, and Yellow ordinary/battle/slots states.
 
-The thirteen-entry manifest therefore contains nine canonical states and four
-vanilla-derived states. The canonical nine have verified provenance; the four
-vanilla-derived entries remain `PARTIAL` because their ordinary source-state
-provenance is not established. Supply the two vanilla ordinary/battle pairs as
-well when validating the checked-in ten-entry manifest. They are not a
+The 31-entry manifest contains nine canonical ordinary/battle/slots states,
+four vanilla-derived states, and eighteen captured battle-boundary states.
+For each of Red, Blue, and Yellow, the boundary files are
+`cable_club-battle-faint.state`, `cable_club-pre-terminal.state`, and
+`cable_club-terminal.state`, together with the corresponding `-peer.state`
+file for each boundary. These captures are driven by
+`scripts/produce_battle_state_fixtures.py` from the admitted battle fixtures;
+they are not deterministic byte reproductions of the recorded external states.
+
+The canonical nine have verified provenance; the eighteen boundary entries
+have captured provenance. The four vanilla-derived entries remain `PARTIAL`
+because their ordinary source-state provenance is not established. Supply all
+31 files when byte-validating the manifest. The vanilla rows do not establish
 supported release scope until a vanilla-ROM-matching source state is supplied
 and reproduced.
+
+The default local tier additionally selects the ordinary-battle medicine
+tests. Supply `yellow/battle_healing.state` and `blue/battle_healing.state`
+under the same external fixture root, using the pins and capture recipes in
+[`battle-healing-fixtures.json`](../release-evidence/battle-healing-fixtures.json).
+These two files are outside the 31-entry Cable Club manifest and are checked
+by `tests/test_battle_healing_items_rom.py`.
 
 Compare every ROM used by a test or launch to the corresponding SHA-1 in
 [`VERSIONS.md`](../VERSIONS.md). For example:
@@ -547,7 +564,7 @@ does not copy ROM or fixture bytes, inherit environment variables into the
 report, or retain absolute local paths. The manifest hashes the two report
 files so a retained bundle can be checked for accidental modification. A
 failed or blocked run still writes its status and diagnostics. The default
-gate checks five pinned ROM paths, three symbol paths, the ten manifest state
+gate checks five pinned ROM paths, three symbol paths, all 31 manifest state
 entries, and all required real-ROM tiers. It also fails closed when the strict
 acceptance matrix declaration is incomplete.
 
@@ -1440,14 +1457,15 @@ python -m pytest -q \
 They require the pinned source-compatible PyBoy runtime, ROM-specific Cable
 Club fixtures, and matching symbols. The trade case compares the complete
 game-owned party-mon records before and after the exchange; the battle case
-uses a legal derived three-mon fixture and requires both sides to retain a
+uses a legal derived battle fixture and requires both sides to retain a
 read-only, settled snapshot after move exchange. The snapshot cross-checks
 active combatants, exchanged slots and moves, PP consumption, execution paths,
 and every observed damage application before either peer can pass. Neither case
 writes party or battle state during acceptance.
 These selectors and their declaration are not live evidence by themselves.
-The retained source strict battle result covers all 19 local/TCP entrypoints;
-the current working-tree source trade result covers all 19 strict entrypoints.
+The retained historical source battle and trade results cover their earlier
+19-row declarations. The current trade declaration adds 24 required MCP rows;
+those historical passes do not qualify its full 43-entry scope.
 Every required row must execute and pass without failures or skips for release
 acceptance.
 Retain the tested commit, runtime, assets, roles, deadlines, and teardown;
@@ -1518,13 +1536,13 @@ turn snapshot, and are
 parametrized over all nine ordered canonical listener/connector pairs. Both
 payloads travel through native bit-level serial traffic, and the tests reject
 the out-of-band exchange counter. A declaration or collection result does not
-execute these gameplay assertions. The current working-tree source strict trade
-gate passed 19/19; the retained source strict battle matrix passed 19/19,
-while the historical trade gate below failed 18/19 with four workers. These are
-separate from transport/lifecycle checks and from MCP-driven gameplay. A
-complete source release gate and compiled-runtime gameplay qualification remain
-open. Record both child traces and exact deadlines when investigating a
-regression.
+execute these gameplay assertions. Historical source strict trade and battle
+runs passed their 19-row declarations, while the earlier trade gate below
+failed 18/19 with four workers. Those results do not exercise the 24 MCP trade
+rows now required by the expanded 43-entry declaration. A complete current
+source release gate, MCP lifecycle checks, and compiled-runtime gameplay
+qualification remain open. Record both child traces and exact deadlines when
+investigating a regression.
 
 For opt-in subprocess-peer Python stack diagnostics, set
 `POKERED_PEER_TRACE_AFTER_SECONDS` to a positive finite number. Optionally set
@@ -1580,15 +1598,20 @@ label.
 ### Strict-matrix accounting
 
 The collection audit verifies declaration shape only; it does not execute trade
-or battle. Each operation declares nine ordered local rows, nine ordered TCP
-listener/connector rows, and one dedicated Red/Yellow assertion: 19 total.
-Listener/connector order matters, and stock-ROM rows and LinkMenu-only
-milestones are outside this strict claim.
+or battle. The required declaration contains 43 trade and 19 battle entry
+points. Both operations include nine ordered local rows, nine ordered TCP
+listener/connector rows, and one dedicated Red/Yellow assertion. Trade also
+requires 24 MCP rows: nine local orientations, nine TCP orientations, two
+multi-member sender/receiver slot cases, one cancellation case, and three
+EOF/disconnect cases. Listener/connector order matters. Stock-ROM rows and
+LinkMenu-only milestones are outside this strict claim. Actual tier execution
+counts come from the gate report and may include additional selected tests.
 
-The current working-tree source trade result is `PASS` at 19/19. The retained
-historical source results include battle `PASS` at 19/19 and trade `FAIL` at
-18/19; its failed row was Red-color listener to Blue-color connector. No clean
-full gate is established for the current candidate. Rerun affected tiers after
+The retained historical source trade follow-up passed 19/19 under the earlier
+declaration. Other historical source results include battle `PASS` at 19/19
+and trade `FAIL` at 18/19; its failed row was Red-color listener to Blue-color
+connector. Those runs do not qualify the expanded 43-entry trade declaration.
+No clean full gate is established for the current candidate. Rerun affected tiers after
 runtime changes and retain complete results; diagnostic retries and historical
 native results do not replace a passing matrix.
 
@@ -1653,7 +1676,7 @@ python scripts/prepare_battle_cable_club_fixtures.py \
 
 The two vanilla battle rows may be generated with `red_gb` and `blue_gb`, but
 they remain `PARTIAL` until their ordinary source state is proven to match the
-vanilla ROM. The exact thirteen-entry hashes, source-state records, and status
+vanilla ROM. The exact 31-entry hashes, source-state records, and status
 values are in the fixture manifest. Validate them with:
 
 ```bash
@@ -1742,17 +1765,19 @@ transport or LinkMenu milestone as a completed trade or battle.
 
 ## 8. Current sign-off blockers
 
-Release status remains `PARTIAL`. The current source strict trade follow-up
-passes 19/19, but before sign-off retain a completed full source gate for the
-candidate under review. The recorded source battle 19/19 pass is scoped
-acceptance, not a full-gate result. Also establish compiled-runtime gameplay,
+Release status remains `PARTIAL`. The historical source strict trade follow-up
+passed its earlier 19-row declaration. Before sign-off retain a completed full
+source gate for the candidate, including all 43 required trade rows and all
+19 required battle rows. The recorded source battle 19/19 pass is historical
+scoped acceptance. Also establish compiled-runtime gameplay,
 current MCP startup/state/action/lifecycle checks, required concurrency and
 cleanup regressions, and independent release review. The standard-library
 editable-install path has the scoped passing evidence recorded above; retain
 clean-install and launch evidence for the candidate being signed off.
 
-Stock-ROM fixture provenance, additional platforms, MCP-driven
-starter/trade/battle workflows, and cross-host networking remain unqualified
-extensions, not prerequisites for the declared canonical loopback scope.
+Stock-ROM fixture provenance, additional platforms, MCP-driven starter journeys,
+battle coverage beyond the declared tests, and cross-host networking remain
+unqualified extensions. The declared MCP trade rows are required within the
+canonical loopback scope and still need current-candidate passing evidence.
 Cross-host operation would require authenticated encrypted transport; the
 current TCP API must remain restricted to loopback.

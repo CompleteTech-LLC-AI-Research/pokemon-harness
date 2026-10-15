@@ -518,6 +518,37 @@ def test_boundary_admission_rejects_a_mutated_capture_input() -> None:
         manifest_merge.merge(copy.deepcopy(document), [row])
 
 
+def test_boundary_capture_provenance_passes_admission_outside_repo(tmp_path, monkeypatch) -> None:
+    """New captures must name and hash the same producer after helper extraction."""
+    from scripts import produce_battle_state_fixtures as boundary_producer
+
+    document = _load_manifest()
+    row = copy.deepcopy(
+        next(entry for entry in document["fixtures"] if entry["id"] == "red-color-battle-faint")
+    )
+    source = next(entry for entry in document["fixtures"] if entry["id"] == "red-color-battle")
+    pins = load_versions(ROOT / "VERSIONS.md")
+    monkeypatch.chdir(tmp_path)
+
+    row["provenance"] = boundary_producer._capture_provenance(
+        source_relative=source["path"],
+        source_sha1=source["sha1"],
+        source_sha256=source["sha256"],
+        version="red",
+        variant="color",
+        pyboy_version=pins.pyboy_version,
+        pyboy_revision=pins.pyboy_revision,
+        max_turns=80,
+        boundary="forced-replacement",
+        captured_at_utc="2026-10-15T00:00:00Z",
+        facts={},
+    )
+
+    assert manifest_merge.merge(document, [row]) == 0
+    admitted = next(entry for entry in document["fixtures"] if entry["id"] == row["id"])
+    assert admitted["provenance"] == row["provenance"]
+
+
 def test_catalog_declares_the_captured_input_identity_not_a_lookup() -> None:
     """The declared capture identity comes from the capture record itself.
 
