@@ -118,9 +118,12 @@ def _require(condition: bool, message: str) -> None:
 
 def _note(exception: BaseException, message: str) -> None:
     """Attach supplementary evidence to an exception when the runtime supports it."""
-    add_note = getattr(exception, "add_note", None)
-    if add_note is not None:
-        add_note(message)
+    try:
+        add_note = getattr(exception, "add_note", None)
+        if add_note is not None:
+            add_note(message)
+    except BaseException:  # noqa: BLE001, S110 - best-effort notes must never replace the primary error
+        pass
 
 
 def _check_deadline(deadline: float, clock: Callable[[], float], phase: str) -> None:
