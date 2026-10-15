@@ -18,8 +18,30 @@ runtime evidence required by the capability being advertised.
 
 ## Current audit snapshot
 
-**Release decision: `PARTIAL`, not production-ready.** On 2026-09-11, the
-resumed candidate at `3c96537` passed the isolated dual-runtime unit-only gate:
+Release qualification is assessed for one exact clean commit; this section
+records the dated campaign snapshot, not a permanent status for later commits.
+
+**Campaign validation snapshot (2026-10-15, candidate `f6d0c04d0e0d0590a13fcf9d7a5ea2649a83619f`).**
+The campaign asset audit records matching hashes for five pinned ROMs and
+three symbols (`evidence/local-completion-20261014/environment/asset-audit.json`).
+The composite receipt records 31 Cable Club manifest states and two
+battle-healing states (`evidence/local-completion-20261014/composite-fixture-admission-v4.json`).
+The operator attested that the ROM and symbol inputs were legally obtained;
+see `evidence/local-completion-20261014/operator-lawful-source-attestation-v1.json`.
+This does not establish exclusive allocation. Source release-hygiene stages
+passed on CPython 3.11.15 and 3.12.13; each recorded 8,547/8,547 unit tests
+and 2,230/2,230 timing cases with zero failures, skips, xfails, xpasses, or errors.
+The CPython 3.12.13 native/Cython report records the same counts, but its
+outer native-unit stage ended `FAILED` (exit 2) on a direct import cycle in
+`scripts/native_unit_ci.py`; details are retained in `evidence/local-completion-20261014/current-candidate-ci-v6/status.json` and
+`evidence/local-completion-20261014/current-candidate-ci-v6/native-unit.log`. The v5 source-311 verifier import-cycle failure remains
+retained; v6 reused that test bundle and records the source-312 gate passed.
+Asset-backed validation and final guest bootstrap/qualification remain pending.
+Required Tier B is five ROM variants × two runtimes (10 runs, 80 cases,
+40 per runtime); strict acceptance needs 43 trade and 19 battle rows per runtime, full required tests, immutable allocation, and final exact-commit evidence.
+
+**Historical unit-only run (2026-09-11, candidate `3c96537`).** That
+resumed candidate passed the isolated dual-runtime unit-only gate:
 source and native/Cython each completed `4508/4508` unit tests and
 `1910/1910` timing cases (five repetitions), with zero failures, skips,
 xfails, xpasses, or errors. The gate report is retained outside the checkout as
@@ -30,11 +52,10 @@ also audited the declared `9/9` local and `9/9` remote matrix rows and the
 
 The same isolated environments passed six real-ROM MCP stdio/lifecycle
 integration checks and four Red golden-path checks in each runtime. Stock Red,
-Blue, and Yellow assets were available for the run. Both color ROMs and all
-ten external link fixtures remain absent, so the validator and the full
-asset-backed source/native trade and battle gate have not run. Those missing
-inputs prevent production qualification; unit, timing, MCP lifecycle, and
-golden-path evidence do not establish Cable Club gameplay. See
+Blue, and Yellow assets were available for that run. Both color ROMs and all
+ten external link fixtures were absent at that historical snapshot, so its
+validator and asset-backed source/native gate did not run. Unit, timing, MCP
+lifecycle, and golden-path evidence do not establish Cable Club gameplay. See
 [`VERSIONS.md`](../VERSIONS.md#current-linux-isolated-runtime-evidence) for
 the exact runtime and asset record.
 
@@ -133,8 +154,8 @@ audit is
 include the targeted network fix and documentation, so strict evidence below is
 pre-fix unless explicitly labeled otherwise. The earlier merged implementation baseline was
 `6d541b7867e82fa548c456008e6acd7fb1071586` (PR #42, 2026-09-04), and the
-prior merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`. No
-production sign-off is claimed here; the release gate remains `PARTIAL`.
+prior merged head was `71ca834d673c52eb74044089e92b09e7e3ae00a0`.
+These historical results do not assign a release decision to later commits.
 
 The exact prior-candidate evidence at
 `3399407aa04f6e5e496df628442597c03e0adcc` recorded `1,094` tests collected in
@@ -322,8 +343,13 @@ release readiness.
 
 - [x] `VERSIONS.md` records SHA-1 pins for stock/color Red, stock/color Blue,
   Yellow, and the three matching symbol files.
-- [ ] The operator attests that every supplied ROM and symbol file is legally
-  obtained and matches the documented pin.
+- [x] The operator confirmed legal acquisition of the supplied ROM and
+  symbol inputs; see
+  `evidence/local-completion-20261014/operator-lawful-source-attestation-v1.json`.
+- [x] The separate asset audit confirms that all eight ROM/SYM inputs match
+  documented pins; see
+  `evidence/local-completion-20261014/environment/asset-audit.json`.
+  The legal-source attestation does not establish exclusive allocation.
 - [x] Release commands require explicit `POKERED_ROM_SHA1` and do not use
   `POKERED_SKIP_SHA1=1`.
 - [x] Static provenance review confirms the documented stock ROM/SYM pins and
@@ -453,17 +479,19 @@ release readiness.
 - [x] Provenance is captured for the eighteen boundary fixture entries: each
   row names the admitted battle fixture it was driven from by SHA-1 and
   carries its runtime identity, capture timestamp, and verification method.
-- [ ] Provenance for the four vanilla-derived entries is verified. Their
-  vanilla source states are not proven to match the vanilla ROM; replay against
-  the retained source failed at the 64-step bound, and the manifest's ordinary
-  producer revision is historical (`25e231c`), so those rows remain `PARTIAL`.
-- [ ] The operator validates all 31 manifest entries with
-  `python scripts/validate_fixture_manifest.py --fixture-root ...` and keeps
-  the external fixture root available to the release runner.
-- [ ] The same root supplies the Yellow and Blue `battle_healing.state` files
-  pinned separately in `release-evidence/battle-healing-fixtures.json`; their
-  ordinary-battle medicine tests pass in the default local tier. Cable Club
-  manifest validation does not cover these additional inputs.
+- The four vanilla-derived entries retain `PARTIAL` provenance: replay
+  against the retained source failed at the 64-step bound, and the manifest's
+  ordinary producer revision is historical (`25e231c`). This is a separate
+  provenance limit, not an added canonical acceptance row.
+- [x] The composite receipt lists all 31 manifest entries and both
+  `battle_healing.state` files; its status is
+  `ACCEPTED_INPUTS_PENDING_FULL_VALIDATION`. This is not full manifest
+  validation or release admission. Final gate execution must use and revalidate
+  the external fixture root.
+- [ ] The default local tier passes the ordinary-battle medicine tests using
+  the Yellow and Blue `battle_healing.state` inputs pinned in
+  `release-evidence/battle-healing-fixtures.json`. Cable Club manifest
+  validation does not cover these additional inputs.
 - [ ] A retained evidence bundle includes the exact source-state hashes,
   capture/generation commands, runtime identity, and original-vs-verification
   timestamp distinction.
@@ -483,8 +511,8 @@ release readiness.
 - [x] Lifecycle code has controlled pair/listen/connect/disconnect/close
   coverage, but final real-ROM teardown must still be recorded in the full
   evidence bundle.
-- [ ] Current-candidate tests verify enforced loopback binding/connection and
-  rejection of unsafe destinations. Authentication/encryption is required only
+- [ ] Tests for the exact release commit verify enforced loopback
+  binding/connection and rejection of unsafe destinations. Authentication/encryption is required only
   if cross-host support is added; enforced localhost-only is allowed.
 - [ ] MCP startup, initialize, list_tools, step, press, state resources,
   save/load, link_listen, link_connect, link_status, and link_disconnect pass
@@ -496,9 +524,9 @@ release readiness.
   EOF, cancellation, peer timeout, duplicate messages, reconnect, and shutdown
   complete within deadlines without deadlocks or leaked workers, sockets,
   callbacks, or sessions, including concurrent calls and shutdown overlap.
-- Required MCP trade gameplay remains unproven on the current candidate. Unit,
-  transport, lifecycle, and LinkMenu evidence do not prove MCP-driven starter,
-  trade, or battle. Historical MCP evidence is 6/6 real integration checks in
+- Required MCP trade gameplay must be established for the exact release
+  commit. Unit, transport, lifecycle, and LinkMenu evidence do not prove
+  MCP-driven starter, trade, or battle. Historical MCP evidence is 6/6 real integration checks in
   `13.11s` with one SDL warning, plus 104 passing dispatch tests;
   public calls reached Red's bedroom, the house exit, Pallet Town, Oak's Lab,
   and lab movement, but the bounded starter attempt ended at map `40`,

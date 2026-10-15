@@ -6,26 +6,25 @@ ROMs, symbols, save states, and sanitized evidence remain operator-managed.
 
 ## Current evidence and release decision
 
-**Release status: `PARTIAL`, not `PRODUCTION-READY`.** The current Linux
-candidate ran the isolated dual-runtime unit-only gate at code commit
-`3c96537`: source and native/Cython each passed `4,508/4,508` unit tests and
+**Historical Linux snapshot (2026-09-11, candidate `3c96537`; not a later
+release decision).** That candidate ran the isolated dual-runtime unit-only gate: source and native/Cython each passed `4,508/4,508` unit tests and
 `1,910/1,910` timing checks across five repetitions, with zero failures,
 skips, xfails, xpasses, or errors. The retained report is
 `dual-unit-final-20260911/gate-report.txt` (SHA-256
 `58e8e34efc28e4af0df6af742153a7b03eee1aeb8ca3cc94dac9e07dc11dcf2d`).
 
-| Current Linux scope | Recorded result | Evidence boundary |
+| Historical Linux scope | Recorded result | Evidence boundary |
 |---|---|---|
 | Source and native unit/timing | Each runtime: `4,508/4,508` unit and `1,910/1,910` timing | Matrix collection declared all local/remote and `19/19` strict trade/battle rows, but the unit-only gate did not execute gameplay. |
 | MCP stdio and link lifecycle | Each runtime: `6/6` real-ROM checks | Server initialization, tools/resources, save/load, local and loopback attachment, and explicit teardown using stock inputs; no Cable Club gameplay. |
 | Red golden path | Each runtime: `4/4` real-ROM checks | Stock Red ROM/symbol input only; boot/state/save/load coverage, not trade or battle. |
 | Clean source/native installation | `PASS` on separate CPython 3.11 environments | Fresh editable `.[dev]` installs, `pip check`, source/native bootstrap identity, isolated imports, clean wheel-install regression, and compiled native module origins. Native build used a private `/dev/shm` mount and the supplied development-header sysroot. |
 
-The two color ROMs and all ten external Cable Club fixtures were unavailable.
-Fixture validation and every full asset-backed local, TCP, strict-trade, and
-strict-battle tier therefore remain unexecuted. The current runtime evidence
-does not establish production gameplay qualification. The retained results
-below are historical unless explicitly identified as the current Linux run.
+The two color ROMs and all ten external Cable Club fixtures were unavailable
+in that 2026-09-11 run, so its fixture validation and asset-backed local, TCP,
+strict-trade, and strict-battle tiers were unexecuted. Those results do not
+establish gameplay qualification for later commits. The 2026-10-15 campaign
+snapshot and gate boundary are summarized in the [release checklist](RELEASE_CHECKLIST.md#current-audit-snapshot).
 
 The external unit bundle is `pokemon-qualification-dual-unit-1f19707-20260905`
 (`gate-report.json`). Native build provenance is retained in
@@ -49,7 +48,7 @@ were corrected before the dual `1f19707` pass; preserve that older failure.
 
 ### Reconciliation candidate (2026-09-09)
 
-The candidate based on `ae057bcd` remains `PARTIAL`. Retain the external
+The candidate based on `ae057bcd` was marked `PARTIAL` in this historical 2026-09-09 review. Retain the external
 bundle `poke-native-source-gate-pr65-A1qh6p` (`gate-report.json` and
 `gate-report.txt`) as a failed pre-packaging-update source gate, not as
 current-head qualification:
@@ -177,9 +176,9 @@ this candidate.
 
 The historical source trade follow-up and retained source battle run each
 passed their 19-row declarations. The current declaration requires 43 trade
-rows, including 24 MCP rows, and 19 battle rows. Full source/native release
-acceptance remains pending until the candidate's complete required scope,
-MCP lifecycle, cleanup, and independent review pass. Starter journeys,
+rows, including 24 MCP rows, and 19 battle rows. A release claim requires a complete gate for the exact commit being released:
+43 trade rows, including 24 MCP rows, and 19 battle rows per runtime, plus MCP
+lifecycle, cleanup, and independent review. Starter journeys,
 additional platform/load coverage, and vanilla fixture provenance remain
 separate coverage limits. Nine canonical ordinary/battle/slots fixture entries
 have verified provenance; eighteen boundary rows have captured provenance;
@@ -1611,9 +1610,10 @@ The retained historical source trade follow-up passed 19/19 under the earlier
 declaration. Other historical source results include battle `PASS` at 19/19
 and trade `FAIL` at 18/19; its failed row was Red-color listener to Blue-color
 connector. Those runs do not qualify the expanded 43-entry trade declaration.
-No clean full gate is established for the current candidate. Rerun affected tiers after
-runtime changes and retain complete results; diagnostic retries and historical
-native results do not replace a passing matrix.
+A release sign-off requires a clean full gate for the exact commit being
+qualified. Rerun affected tiers after runtime changes and retain complete
+results; diagnostic retries and historical native results do not replace a
+passing matrix.
 
 ## 5. Generate link fixtures safely
 
@@ -1765,8 +1765,8 @@ transport or LinkMenu milestone as a completed trade or battle.
 
 ## 8. Current sign-off blockers
 
-Release status remains `PARTIAL`. The historical source strict trade follow-up
-passed its earlier 19-row declaration. Before sign-off retain a completed full
+Assess sign-off for the exact clean commit being released. The historical
+source strict-trade follow-up passed its earlier 19-row declaration. Before sign-off retain a completed full
 source gate for the candidate, including all 43 required trade rows and all
 19 required battle rows. The recorded source battle 19/19 pass is historical
 scoped acceptance. Also establish compiled-runtime gameplay,

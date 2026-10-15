@@ -25,22 +25,38 @@ needs no ROM is under [Development test command](#development-test-command).
 
 ## Release status
 
-**Status: `PARTIAL` — the current candidate is not production-ready.**
+Release qualification is assessed for one exact clean commit; historical
+results do not assign a permanent status to later commits.
 
-On 2026-09-11, candidate `3c96537` passed the isolated dual-runtime unit-only
-gate: source and native/Cython each passed `4,508/4,508` unit tests and
-`1,910/1,910` timing cases over five repetitions, with zero failures, skips,
-xfails, xpasses, or errors. The same two runtimes each passed six real-ROM MCP
-stdio/lifecycle checks and four Red golden-path checks. Native verification ran
-inside an unprivileged Linux mount namespace with a private writable
-`/dev/shm`, because this host's shared-memory mount is read-only.
+**Campaign validation snapshot (2026-10-15, candidate `f6d0c04d0e0d0590a13fcf9d7a5ea2649a83619f`).**
+The campaign asset audit records matching hashes for five pinned ROMs and
+three symbols (`evidence/local-completion-20261014/environment/asset-audit.json`).
+The composite receipt records 31 Cable Club manifest states and two healing
+states (`evidence/local-completion-20261014/composite-fixture-admission-v4.json`).
+The operator attested that the ROM and symbol inputs were legally obtained;
+see `evidence/local-completion-20261014/operator-lawful-source-attestation-v1.json`.
+Source release-hygiene checks passed on CPython 3.11.15 and 3.12.13; each
+recorded 8,547/8,547 unit and 2,230/2,230 timing checks with zero failures,
+skips, xfails, xpasses, or errors. The CPython 3.12.13 native/Cython gate
+report records the same counts, but its outer lane ended `FAILED` (exit 2) on
+a direct internal import cycle in `scripts/native_unit_ci.py`; see the v6
+status and log at `evidence/local-completion-20261014/current-candidate-ci-v6/status.json`
+and `evidence/local-completion-20261014/current-candidate-ci-v6/native-unit.log`. Asset-backed and guest qualification remain pending; release still requires 10 Tier B runs (five ROM variants × two runtimes, 80 cases, 40 per runtime), 43 trade and 19 battle rows per runtime, full tests, immutable allocation, and terminal evidence for the exact clean commit. See the [release checklist](docs/RELEASE_CHECKLIST.md#current-audit-snapshot).
 
-This is current runtime and lifecycle evidence, not a gameplay qualification.
-The two required color ROMs and all ten Cable Club fixtures are absent from the
-candidate environment, so the fixture validator and full source/native local,
-TCP, strict-trade, and strict-battle tiers have not run. See the
+**Historical unit-only run (2026-09-11, candidate `3c96537`).** That candidate
+passed the isolated dual-runtime unit-only gate: source and native/Cython each
+passed `4,508/4,508` unit tests and `1,910/1,910` timing cases over five
+repetitions, with zero failures, skips, xfails, xpasses, or errors. Both
+runtimes also passed six real-ROM MCP stdio/lifecycle checks and four Red
+golden-path checks. Native verification used an unprivileged Linux mount
+namespace with private writable `/dev/shm` because that host's mount was
+read-only.
+
+Those results are runtime and lifecycle evidence, not gameplay qualification.
+The color ROMs and all ten Cable Club fixtures were absent in that 2026-09-11
+run; this does not describe later campaign inputs. See the
 [current Linux evidence record](VERSIONS.md#current-linux-isolated-runtime-evidence)
-and [release checklist](docs/RELEASE_CHECKLIST.md#current-audit-snapshot).
+and the [release checklist](docs/RELEASE_CHECKLIST.md#current-audit-snapshot).
 
 At `766eaa6aafecad039d5b10934ec36f8ec933645e`, the hosted
 [release-hygiene workflow](https://github.com/CompleteDotTech/pokemon/actions/runs/34028627290)
@@ -364,16 +380,16 @@ move-menu cursor/input contract. Hardware-cycle timing requires separate
 emulator or hardware evidence; disassembly does not establish it or replace
 real-ROM acceptance evidence.
 
-Release status remains `PARTIAL`: recorded source trade and remote LinkMenu
-failures prevent source qualification, and compiled-runtime gameplay
-qualification remains incomplete. The standard-library editable-install path
-has the scoped passing evidence above. Supported inputs remain limited to the
-declared canonical fixture-backed matrix, and TCP is enforced loopback-only,
+Release qualification is decided per exact clean commit. Recorded source
+trade and remote LinkMenu failures apply to their named historical candidates;
+they do not set status for later commits. The standard-library editable-install
+path has the scoped passing evidence above. Supported inputs remain limited to
+the declared canonical fixture-backed matrix, and TCP is enforced loopback-only,
 unauthenticated, and unencrypted. Stock-ROM pairs, secure cross-host operation,
 additional platforms, MCP-facing starter journeys, and battle coverage beyond
 the declared tests remain separate coverage limits. The 24 declared MCP trade
-rows belong to the required 43-entry trade scope. Those rows and required MCP
-startup/state/action/lifecycle checks still need current-candidate evidence.
+rows belong to the required 43-entry trade scope. Each release commit needs
+current evidence for those rows and for MCP startup/state/action/lifecycle.
 
 Status semantics are deliberately scoped:
 
@@ -631,7 +647,7 @@ contains 31 state entries: five ordinary, five battle, three slots, and 18
 battle-boundary captures. Thus `validate_fixture_manifest.py --fixture-root
 ...` requires all 31 files, including the boundary captures. Nine canonical
 ordinary/battle/slots fixtures have verified provenance, 18 boundary fixtures
-have captured provenance, and four vanilla-derived fixtures remain `PARTIAL`.
+have captured provenance, and four vanilla-derived fixtures retain partial provenance outside the canonical strict acceptance matrix.
 Historical manifest validation covers the inventory recorded in that run.
 The stock ROM/SYM pins and existing
 vanilla fixture bytes validate, but vanilla ordinary capture provenance cannot

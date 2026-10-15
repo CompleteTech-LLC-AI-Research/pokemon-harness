@@ -44,10 +44,10 @@ path.
 
 ## Evidence snapshot
 
-The following claims are deliberately scoped to their named run and do not
-change the `PARTIAL` release decision.
+Every result below is scoped to its named commit and run. A release decision
+requires terminal evidence for the exact clean commit being released.
 
-### Latest scoped candidate evidence (`1f19707`, 2026-09-05)
+### Historical scoped candidate evidence (`1f19707`, 2026-09-05)
 
 - Source and native each passed `1,176/1,176` unit tests and `65/65` total
   timing checks (`13` cases in each of five repetitions), with no failures,
@@ -78,7 +78,7 @@ and partial pipe capture. Optional peer diagnostics use a positive finite
 `POKERED_PEER_TRACE_AFTER_SECONDS` and, optionally, an existing
 `POKERED_PEER_TRACE_DIR`; they schedule at most two one-shot stack dumps and
 make no ROM changes. Experimental coordinator `344aa95` is on another branch
-and is not included in this candidate. Release status remains `PARTIAL`.
+and was not included in that candidate. These historical results do not set status for later commits.
 
 ### Historical source-runtime and full-gate evidence
 
@@ -163,7 +163,7 @@ orientations, two multi-member slot cases, one cancellation case, and three
 EOF/disconnect cases. Collection and declaration audits prove shape only;
 historical `19/19` trade results cover the earlier declaration.
 
-The following remain open for release qualification:
+A release sign-off requires evidence for the exact candidate commit covering:
 
 - A clean current-head full source gate, including a passing strict trade
   matrix. The recorded source battle `19/19` pass does not establish full
