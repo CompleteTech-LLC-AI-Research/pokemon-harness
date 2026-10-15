@@ -261,6 +261,60 @@ def _first_usable_move_slot(session) -> int | None:
     return None
 
 
+# Gen-I stat-stage effects return after applying their stat change; unlike
+# charging moves, they do not skip the owner's next command menu.
+_SINGLE_TURN_STAT_EFFECTS = (
+    frozenset(range(0x0A, 0x10))
+    | frozenset(range(0x12, 0x18))
+    | frozenset(range(0x32, 0x38))
+    | frozenset(range(0x3A, 0x40))
+)
+
+
+def _continuation_fallback_move_slot(session) -> int | None:
+    """Prefer a supported one-turn move only when the recorded slot is unusable.
+
+    The strict battle evidence catalog remains the authority for supported
+    damaging moves. Zero-power stat moves are considered only after that
+    selector and only when their live ROM move record has a known stat-stage
+    effect. If either check cannot establish a preferred move, retain the
+    historical first-usable fallback.
+    """
+    moves = _active_moves(session)
+    try:
+        from tests._battle_turn_evidence import _move_data, choose_supported_battle_move
+    except ImportError:
+        return _first_usable_move_slot(session)
+
+    try:
+        slot, _move = choose_supported_battle_move(session, moves)
+        return slot + 1
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        pass
+
+    for slot, entry in enumerate(moves):
+        try:
+            move, pp = entry
+        except (TypeError, ValueError):
+            continue
+        if type(move) is not int or not 1 <= move <= 165:
+            continue
+        if type(pp) is not int or not (pp & 0x3F):
+            continue
+        try:
+            data = _move_data(session, move)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            continue
+        if (
+            len(data) == 6
+            and data[0] == move
+            and data[2] == 0
+            and data[1] in _SINGLE_TURN_STAT_EFFECTS
+        ):
+            return slot + 1
+    return _first_usable_move_slot(session)
+
+
 def _slot_usable(session, cursor: int) -> bool:
     """True when ``cursor`` (one past the slot) names a move with PP left."""
     moves = _active_moves(session)
@@ -293,7 +347,7 @@ def _planned_move_cursor(session, target_slot: int | None, maximum: int) -> int 
         if cursor < 1 or not _slot_usable(session, cursor):
             cursor = None
     if cursor is None:
-        cursor = _first_usable_move_slot(session)
+        cursor = _continuation_fallback_move_slot(session)
     if cursor is None:
         return None
     if limit is not None:

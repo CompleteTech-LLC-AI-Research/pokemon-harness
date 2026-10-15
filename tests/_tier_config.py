@@ -90,6 +90,7 @@ UNIT_MODULES = frozenset(
         "test_battle_scenario_producer_screening.py",
         "test_battle_scenario_validator.py",
         "test_battle_menu_liveness.py",
+        "test_battle_continuation_fallback.py",
         "test_battle_turn_evidence.py",
         "test_battle_observer_contract.py",
         "test_tcp_battle_menu_input.py",
