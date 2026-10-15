@@ -219,7 +219,7 @@ class _NetworkBackendIOMixin:
             return self._serial_completion_context_impl()
 
     def _serial_completion_context_impl(self) -> dict[str, object] | None:
-        """Capture a bounded, JSON-safe owner diagnostic without side effects."""
+        """Copy a JSON-safe diagnostic with a retained-value byte budget."""
         if self._serial_transcript is None:
             return None
         provider = self._serial_transcript_context_provider
@@ -231,21 +231,23 @@ class _NetworkBackendIOMixin:
             return {"status": "provider_error", "error_type": type(exc).__name__}
         if not isinstance(raw, dict):
             return {"status": "invalid_result"}
+        # Only diagnostic normalization belongs in this handler. Core apply,
+        # completion IRQ and response publication retain their own failures.
         try:
             copied = json.loads(json.dumps(raw, sort_keys=True, separators=(",", ":")))
-        except (TypeError, ValueError, OverflowError):
+            value: dict[str, object] = {}
+            truncated = False
+            for key in sorted(copied):
+                candidate = dict(value)
+                candidate[key] = copied[key]
+                encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                if len(encoded) <= self._serial_transcript_context_max_bytes:
+                    value = candidate
+                else:
+                    truncated = True
+            return {"status": "ok", "truncated": truncated, "value": value}
+        except Exception:  # noqa: BLE001 - optional diagnostic data cannot abort an edge.
             return {"status": "invalid_result"}
-        value: dict[str, object] = {}
-        truncated = False
-        for key in sorted(copied):
-            candidate = dict(value)
-            candidate[key] = copied[key]
-            encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            if len(encoded) <= self._serial_transcript_context_max_bytes:
-                value = candidate
-            else:
-                truncated = True
-        return {"status": "ok", "truncated": truncated, "value": value}
 
     def _send_edge_response(self, request: _InboundEdge) -> None:
         """Send an owner-produced response without touching emulator state."""

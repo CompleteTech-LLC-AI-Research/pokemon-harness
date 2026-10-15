@@ -53,7 +53,6 @@ REAL_ROM_MODULES = frozenset(
         "test_rom_boot.py",
     }
 )
-
 # Keep the ROM-free side explicit as well.  A new ``test_*.py`` file must be
 # reviewed and added to exactly one of these sets before it can enter pytest's
 # collection path.  This is deliberately a little repetitive: the manifest is
@@ -162,6 +161,7 @@ UNIT_MODULES = frozenset(
         "test_native_hook_exceptions.py",
         "test_network_backend_dispatch.py",
         "test_network_backend_rearm.py",
+        "test_network_backend_serial_context.py",
         "test_network_backend_serial_transcript.py",
         "test_network_backend_transport.py",
         "test_network_backend_wire_idle.py",

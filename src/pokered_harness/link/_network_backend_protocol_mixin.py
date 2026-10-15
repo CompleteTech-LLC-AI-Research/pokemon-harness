@@ -599,12 +599,19 @@ class _NetworkBackendProtocolMixin:
     def set_serial_transcript_context_provider(
         self, provider: Callable[[], object] | None, *, max_bytes: int = 1024
     ) -> None:
-        """Set an optional bounded completion-context diagnostic provider.
+        """Set an optional completion-context diagnostic provider.
 
         The provider is called only when a transcript is enabled and a slave
         byte completes. Its return value is copied through a compact JSON
-        representation; errors are reported as data and cannot affect wire
-        operation.
+        representation. Provider failures and ordinary normalization exceptions
+        are reported as data, independently of core, IRQ and transport errors.
+        Normalization does not suppress process-control BaseExceptions.
+
+        ``max_bytes`` caps the compact UTF-8 JSON retained in ``value`` only;
+        the empty ``{}`` has a two-byte floor, including when max_bytes is 1.
+        Nonempty candidates must fit the requested budget. Status, truncation
+        and error fields are outside it. Full copying precedes truncation, so
+        this is not a bound on traversal, temporary allocation or callback time.
         """
         if provider is not None and not callable(provider):
             raise TypeError("provider must be callable or None")
