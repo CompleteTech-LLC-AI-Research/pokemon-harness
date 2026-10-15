@@ -22,6 +22,7 @@ from tests._runtime_packaging_support import (
     ROOT,
     _load_bootstrap,
     _load_bootstrap_with_owned_src_metadata_last,
+    _pid_is_alive,
 )
 
 
@@ -382,44 +383,6 @@ def test_bootstrap_timeout_terminates_posix_process_descendants(tmp_path) -> Non
 
     descendant_pid: int | None = None
 
-    def pid_is_alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        proc_root = Path("/proc")
-        if proc_root.is_dir():
-            try:
-                raw = (proc_root / str(pid) / "stat").read_text(encoding="ascii")
-            except FileNotFoundError:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    return False
-                except OSError:
-                    return True
-                return True
-            except (OSError, UnicodeError):
-                return True
-            closing = raw.rfind(")")
-            if closing < 0:
-                return True
-            fields = raw[closing + 1 :].split()
-            if (
-                len(fields) < 3
-                or len(fields[0]) != 1
-                or fields[0] not in "RSDZTtXxKWPI"
-                or not fields[1].isdigit()
-                or not fields[2].isdigit()
-            ):
-                return True
-            # The outer child subreaper owns this exited child until pytest exits.
-            # Do not reap it here; a zombie consumes no execution capacity.
-            return fields[0] != "Z"
-        return True
-
     try:
         with pytest.raises(subprocess.TimeoutExpired):
             module._run_bounded(
@@ -436,11 +399,11 @@ def test_bootstrap_timeout_terminates_posix_process_descendants(tmp_path) -> Non
         descendant_pid = int(pid_file.read_text(encoding="ascii"))
 
         deadline = time.monotonic() + 5.0
-        while pid_is_alive(descendant_pid) and time.monotonic() < deadline:
+        while _pid_is_alive(descendant_pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not pid_is_alive(descendant_pid), "timeout left an installer descendant alive"
+        assert not _pid_is_alive(descendant_pid), "timeout left an installer descendant alive"
     finally:
-        if descendant_pid is not None and pid_is_alive(descendant_pid):
+        if descendant_pid is not None and _pid_is_alive(descendant_pid):
             os.kill(descendant_pid, signal.SIGKILL)
 
 
