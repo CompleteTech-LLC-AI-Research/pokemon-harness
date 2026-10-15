@@ -53,7 +53,6 @@ REAL_ROM_MODULES = frozenset(
         "test_rom_boot.py",
     }
 )
-
 # Keep ROM-free modules explicit: review each new ``test_*.py`` file into exactly one
 # set before collection; this repetitive manifest guards against the wrong production tier.
 UNIT_MODULES = frozenset(
@@ -162,6 +161,7 @@ UNIT_MODULES = frozenset(
         "test_native_hook_exceptions.py",
         "test_network_backend_dispatch.py",
         "test_network_backend_rearm.py",
+        "test_network_backend_serial_context.py",
         "test_network_backend_serial_transcript.py",
         "test_network_backend_transport.py",
         "test_network_backend_wire_idle.py",
