@@ -22,6 +22,7 @@ from pokered_harness.mcp_server_model import (
     _ListenerCancelled,
 )
 from pokered_harness.mcp_server_remote_contract import _negotiate_network_clock_role, _remaining
+from pokered_harness.mcp_server_local_custody import cleanup_local, detach_local
 from pokered_harness.session import Session, locked_sessions
 
 
@@ -356,24 +357,15 @@ def _detach_local_link_session(
     local_link_session: _entry.PyBoyLinkSession,
     *,
     timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S,
+    peer: Session | None = None,
+    deadline: float | None = None,
+    secondary=None,
 ) -> None:
-    """Detach a local native link while both owned emulators are locked."""
-    peer = link.peer_session
-    # Acquire emulator owners before the provider/pair lock.  This keeps
-    # local stepping, detach, and raw provider callbacks on one order even
-    # when the primary/peer objects were supplied in reverse identity order.
-    targets = [session]
-    if peer is not None and peer is not session:
-        targets.append(peer)
-    with (
-        locked_sessions(
-            *targets,
-            allow_closed=True,
-            timeout_s=max(0.0, timeout_s),
-        ),
-        link._pair_lock,
-    ):
-        local_link_session.detach_all()
+    """Detach through the existing no-argument provider deadline seam."""
+    detach_local(
+        link, session, local_link_session, timeout_s=timeout_s,
+        peer=peer, deadline=deadline, secondary=secondary,
+    )
 
 
 def _deactivate_link_hooks(
@@ -381,10 +373,15 @@ def _deactivate_link_hooks(
     peer: Session | None = None,
     *,
     timeout_s: float = _DEFAULT_CLEANUP_TIMEOUT_S,
-) -> list[Exception]:
+    catch_base_exceptions: bool = False,
+    custody=None,
+    deadline: float | None = None,
+) -> list[BaseException]:
     """Disable and deregister link callbacks within one total deadline."""
-    deadline = time.monotonic() + max(0.0, timeout_s)
-    errors: list[Exception] = []
+    if deadline is None:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+    errors: list[BaseException] = []
+    caught = BaseException if catch_base_exceptions else Exception
     sessions: list[Session] = [session]
     if peer is not None and peer is not session:
         sessions.append(peer)
@@ -398,10 +395,16 @@ def _deactivate_link_hooks(
             allow_closed=True,
             timeout_s=_remaining(deadline),
         ):
+            if custody is not None:
+                link, attempt, token = custody
+                with link.state():
+                    valid = link._local_setup_attempt is attempt and attempt.actor is token
+                if not valid:
+                    return errors
             for target in sessions:
                 try:
                     target.deactivate_serial_hooks(timeout_s=0.0)
-                except Exception as exc:  # noqa: BLE001
+                except caught as exc:  # noqa: BLE001
                     errors.append(exc)
                 # A few legacy endpoint hooks are installed directly on
                 # PyBoy and cannot be reached through Session.serial_hook.
@@ -410,9 +413,9 @@ def _deactivate_link_hooks(
                 for symbol_name in _DIRECT_LINK_HOOKS:
                     try:
                         target.deactivate_hooks_at(symbol_name, timeout_s=0.0)
-                    except Exception as exc:  # noqa: BLE001
+                    except caught as exc:  # noqa: BLE001
                         errors.append(exc)
-    except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+    except caught as exc:  # noqa: BLE001 - cleanup is best effort
         errors.append(exc)
     return errors
 
@@ -425,6 +428,8 @@ def _disconnect_remote(link: LinkState, session: Session) -> None:
     ``LinkState`` as a pending cleanup handle, so a later ``link_disconnect``
     can retry it and reconnect cannot overlap a live worker or socket.
     """
+    if cleanup_local(link, session, disconnect=True):
+        return
     current_thread_id = threading.get_ident()
     cancel_local_setup = False
     retry_local_cleanup = False

@@ -53,7 +53,6 @@ REAL_ROM_MODULES = frozenset(
         "test_rom_boot.py",
     }
 )
-
 # Keep ROM-free modules explicit: review each new ``test_*.py`` file into exactly one
 # set before collection; this repetitive manifest guards against the wrong production tier.
 UNIT_MODULES = frozenset(
@@ -145,6 +144,7 @@ UNIT_MODULES = frozenset(
         "test_mcp_local_runtime_contract.py",
         "test_mcp_main_cleanup.py",
         "test_mcp_mode_exclusion.py",
+        "test_mcp_native_local_custody.py",
         "test_mcp_remote_runtime_contract.py",
         "test_mcp_runtime_errors.py",
         "test_link_transport.py",
