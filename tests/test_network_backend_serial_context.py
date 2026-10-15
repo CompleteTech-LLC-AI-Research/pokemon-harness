@@ -85,18 +85,24 @@ def test_normalization_stage_errors_are_compact(monkeypatch, stage, error_type):
 
 
 def _finite_nested_context():
-    """At most 2081 containers, <64 KiB JSON text; no recursion-limit change."""
+    """At most 10033 containers, <64 KiB JSON text, <=4 MiB shallow containers."""
     limit = sys.getrecursionlimit()
     assert 100 <= limit <= 2048, "outside the reviewed finite-container execution budget"
-    depth = limit + 32
-    assert depth <= 2080
+    # CPython 3.12.15's C encoder has a separate recursion guard whose largest
+    # stock limit is 10000; the Python limit alone does not bound that encoder.
+    # A single fixed construction also exceeds the admitted 3.11 Python limit.
+    depth = 10_032
+    assert depth * 6 + 16 < 64 * 1024
     nested = 0
+    container_bytes = 0
     for index in range(depth):
         nested = [nested] if index % 2 else {"x": nested}
+        container_bytes += sys.getsizeof(nested)
     supplied = {"deep": nested}
-    assert depth * 6 + 16 < 64 * 1024
-    # Establish the actual stdlib trigger instead of assuming a particular
-    # Python encoder's depth behavior. An unexpected non-trigger is a failure.
+    container_bytes += sys.getsizeof(supplied)
+    assert container_bytes <= 4 * 1024 * 1024
+    # Keep the real encoder and options used by the normalizer. A non-trigger
+    # remains a failure, not a skip or a search for another depth/encoder.
     with pytest.raises(RecursionError):
         json.dumps(supplied, sort_keys=True, separators=(",", ":"))
     return supplied
