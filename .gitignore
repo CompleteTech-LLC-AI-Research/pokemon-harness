@@ -68,3 +68,9 @@ vendor/pyboy-src/**/*.gb
 vendor/pyboy-src/**/*.gbc
 vendor/pyboy-src/**/__pycache__/
 vendor/pyboy-src/**/.benchmarks/
+
+.venv-win/
+
+.claude/worktrees/
+
+.tmp-watchdog-fix-*/

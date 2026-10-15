@@ -186,24 +186,20 @@ def _pyboy_mb_swappable() -> bool:
         return False
 
 
-_pyboy_swappable = _fixtures_ready and _pyboy_mb_swappable()
-
-
-pytestmark = pytest.mark.skipif(
-    not _pyboy_swappable,
-    reason=(
-        "PyBoy is Cython-compiled (mb / mb.serial are cdef attributes "
-        "not exposed to Python) so PyBoyLinkSession.attach can't swap "
-        "in SerialCore from outside the C extension. Install the bundled "
-        "source-compatible runtime, or use a fork that bakes SerialCore "
-        "into the motherboard, then this test will run."
-        if _fixtures_ready
-        else (
+@pytest.fixture(scope="module", autouse=True)
+def _require_real_rom_link_runtime():
+    # Importing the driver helpers for ROM-free tests must not open a ROM
+    # or create an emulator. Probe only when this module's ROM tests run.
+    if not _fixtures_ready:
+        pytest.skip(
             "Yellow ROM or Cable Club state fixture missing — regenerate "
             "with scripts/produce_cable_club_fixture.py --version yellow"
         )
-    ),
-)
+    if not _pyboy_mb_swappable():
+        pytest.skip(
+            "PyBoy does not expose mb / mb.serial; install the bundled "
+            "source-compatible runtime for local link tests"
+        )
 
 
 class _CountingBackend:
@@ -1138,15 +1134,121 @@ _BATTLE_DIAG_SYMBOLS = (
     "ExecutePlayerMove",
     "ExecuteEnemyMove",
     "PlayerCalcMoveDamage",
+    "HandlePlayerMonFainted",
+    "HandleEnemyMonFainted",
+    "EndOfBattle",
 )
 
 
 def _install_battle_diag_counters(a, b) -> dict:
     counters = {sym: [0, 0] for sym in _BATTLE_DIAG_SYMBOLS}
+    counters["settled_turn_boundaries"] = [None, None]
     for idx, sess in enumerate((a, b)):
         for sym, bucket in counters.items():
+            if sym == "settled_turn_boundaries":
+                continue
+            if sym in {
+                "MainInBattleLoop", "HandlePlayerMonFainted",
+                "HandleEnemyMonFainted", "EndOfBattle",
+            }:
+                bank, addr = sess.symbols.bank_addr(sym)
+
+                def observe_turn(
+                    _ctx, session=sess, side=idx, counts=bucket, boundary=sym,
+                ):
+                    counts[side] += 1
+                    # Fainting can terminate the turn before the opponent
+                    # acts; ending battle can skip the next loop entirely.
+                    # All these boundaries follow actual move execution.
+                    if (
+                        counters["settled_turn_boundaries"][side] is None
+                        and counters["LinkBattleExchangeData"][side] > 0
+                        and counters["ExecutePlayerMove"][side]
+                        + counters["ExecuteEnemyMove"][side] > 0
+                    ):
+                        snapshot = _battle_turn_snapshot(session)
+                        snapshot["boundary"] = boundary
+                        snapshot["cleanup_complete"] = False
+                        counters["settled_turn_boundaries"][side] = snapshot
+
+                sess._pyboy.hook_register(bank, addr, observe_turn, None)
+                continue
             _install_hook_counter(sess, sym, bucket, idx)
     return counters
+
+
+def _battle_turn_snapshot(session) -> dict:
+    """Read both active combatants before battle cleanup can reuse RAM."""
+    mem = session._pyboy.memory
+
+    def read(symbol, width=1):
+        addr = session.symbols.addr_of(symbol)
+        return int.from_bytes(bytes(mem[addr : addr + width]), "big")
+
+    def combatant(prefix):
+        return {
+            "species": read(prefix + "Species"),
+            "hp": read(prefix + "HP", 2),
+            "max_hp": read(prefix + "MaxHP", 2),
+            "status": read(prefix + "Status"),
+        }
+
+    return {
+        "in_battle": read("wIsInBattle"),
+        "result": read("wBattleResult"),
+        "player": combatant("wBattleMon"),
+        "enemy": combatant("wEnemyMon"),
+    }
+
+
+def _battle_turn_is_settled(counters) -> bool:
+    """Require matching post-turn or fully cleaned-up terminal outcomes."""
+    left, right = counters["settled_turn_boundaries"]
+    if left is None or right is None:
+        return False
+    terminal = any(
+        snapshot["boundary"] == "EndOfBattle" for snapshot in (left, right)
+    )
+    if terminal:
+        if not all(
+            snapshot["boundary"] == "EndOfBattle" and snapshot["cleanup_complete"]
+            for snapshot in (left, right)
+        ):
+            return False
+        # The ROM presents 0 as victory, 1 as loss, and 2 as draw.
+        if (left["result"], right["result"]) not in {(0, 1), (1, 0), (2, 2)}:
+            return False
+    elif left["in_battle"] != 2 or right["in_battle"] != 2:
+        return False
+    for snapshot in (left, right):
+        for key in ("player", "enemy"):
+            mon = snapshot[key]
+            if not (
+                mon["species"] > 0 and mon["max_hp"] > 0
+                and 0 <= mon["hp"] <= mon["max_hp"]
+            ):
+                return False
+        if (
+            snapshot["boundary"] == "HandlePlayerMonFainted"
+            and snapshot["player"]["hp"] != 0
+        ):
+            return False
+        if (
+            snapshot["boundary"] == "HandleEnemyMonFainted"
+            and snapshot["enemy"]["hp"] != 0
+        ):
+            return False
+    return left["player"] == right["enemy"] and left["enemy"] == right["player"]
+
+
+def _observe_battle_cleanup(a, b, counters) -> None:
+    """EndOfBattle entry precedes cleanup; require its later state reset."""
+    for side, session in enumerate((a, b)):
+        snapshot = counters["settled_turn_boundaries"][side]
+        if snapshot is not None and snapshot["boundary"] == "EndOfBattle":
+            addr = session.symbols.addr_of("wIsInBattle")
+            if session._pyboy.memory[addr] == 0:
+                snapshot["cleanup_complete"] = True
 
 
 def _drive_past_link_menu_to_colosseum(
@@ -1173,10 +1275,10 @@ def _drive_past_link_menu_to_colosseum(
     # Three DOWN presses would wrap past CANCEL back to TRADE CENTER
     # (3 items with wrap), so use a single press and verify it landed
     # by checking wCurrentMenuItem — which LinkMenu uses directly.
-    link.step_interleaved(60)
+    link.step_interleaved(60, chunk_cycles=_LINK_CHUNK_CYCLES)
     a.press("down", duration=12)
     b.press("down", duration=12)
-    link.step_interleaved(40)
+    link.step_interleaved(40, chunk_cycles=_LINK_CHUNK_CYCLES)
     # Sanity: both cursors should now be on item 1 (COLOSSEUM).
     cur_a = a._pyboy.memory[a.symbols.addr_of("wCurrentMenuItem")]
     cur_b = b._pyboy.memory[b.symbols.addr_of("wCurrentMenuItem")]
@@ -1193,7 +1295,7 @@ def _drive_past_link_menu_to_colosseum(
             break
         a.press("a", duration=4)
         b.press("a", duration=4)
-        link.step_interleaved(frames_per_attempt)
+        link.step_interleaved(frames_per_attempt, chunk_cycles=_LINK_CHUNK_CYCLES)
         extra_frames += frames_per_attempt
 
     return {
@@ -1272,10 +1374,10 @@ def _drive_complete_battle_turn(
     7. ``ExecutePlayerMove`` / ``ExecuteEnemyMove`` / ``PlayerCalcMoveDamage``
        fire as the turn resolves.
 
-    The acceptance hook is ``PlayerCalcMoveDamage`` — its firing means
-    a move was selected, transmitted to the peer, and resolved into
-    damage computation. That's "one turn complete" for the v1
-    acceptance criteria.
+    Completion requires matching HP, species, and status after move
+    exchange/execution at the next loop or a faint boundary. A terminal
+    battle additionally requires complementary results and completed
+    cleanup on both sides. Damage calculation remains diagnostic only.
     """
     cct = counters["CableClub_DoBattleOrTrade"]
     vs = counters["DisplayLinkBattleVersusTextBox"]
@@ -1284,7 +1386,7 @@ def _drive_complete_battle_turn(
     dmg = counters["PlayerCalcMoveDamage"]
 
     def tick_interleaved(frames: int) -> None:
-        link.step_interleaved(frames)
+        link.step_interleaved(frames, chunk_cycles=_LINK_CHUNK_CYCLES)
 
     def tick_per_frame(frames: int) -> None:
         link.step(frames)
@@ -1325,16 +1427,21 @@ def _drive_complete_battle_turn(
     extra_frames = 0
     attempts = battle_budget_frames // step_frames
     for _ in range(attempts):
-        if dmg[0] > 0 and dmg[1] > 0:
+        if _battle_turn_is_settled(counters):
             break
         tick_interleaved(step_frames)
         extra_frames += step_frames
+        _observe_battle_cleanup(a, b, counters)
         # A-mash to advance battle-intro dialogs, main-menu FIGHT, and
         # move-list selection (item 0 = first move). The game's battle
         # UI accepts A-mash at every "waiting for player" point and
         # falls through to defaults.
-        a.press("a", duration=4)
-        b.press("a", duration=4)
+        # Keep ticking both CPUs while the slower peer resolves its turn,
+        # but stop selecting additional moves on a side already observed
+        # at its turn, faint, or terminal boundary.
+        for idx, sess in enumerate((a, b)):
+            if counters["settled_turn_boundaries"][idx] is None:
+                sess.press("a", duration=4)
 
     return {
         "cct": cct,
@@ -1343,6 +1450,7 @@ def _drive_complete_battle_turn(
         "lbe": lbe,
         "dmg": dmg,
         "battle_phase_frames": extra_frames,
+        "turn_settled": _battle_turn_is_settled(counters),
         "counters": counters,
     }
 
@@ -1410,24 +1518,7 @@ def test_yellow_pair_starts_link_battle():
     ],
 )
 def test_pair_completes_battle_turn(version_a, version_b):
-    """Flagship battle test: two instances resolve one link-battle turn.
-
-    The hard assertion: both sides complete one full turn of the battle
-    loop — ``ExecutePlayerMove`` and ``ExecuteEnemyMove`` each fire on
-    both sides (each instance processes its own move and simulates the
-    peer's move locally), and ``LinkBattleExchangeData`` fires on both
-    sides (the move-selection nibble exchange went through the link).
-
-    ``PlayerCalcMoveDamage`` is not the right acceptance hook because
-    it only fires on damaging moves that go through the canonical
-    damage-calc path. Gen I battles have plenty of non-canonical paths
-    (status moves, OHKO moves, trapping moves like Bind/Wrap whose
-    damage is done via :asm:`DoMultiHitTrappingMove`, missing, fainting
-    before it runs, etc.). The acceptance criterion is that the link
-    protocol carries the move exchange and both sides advance through
-    the turn in lockstep — that's what Execute* + LinkBattleExchangeData
-    assert.
-    """
+    """Both peers exchange moves, execute, and reach matching next-turn state."""
     if not (_fixtures_available(version_a) and _fixtures_available(version_b)):
         pytest.skip(
             f"Cable Club fixture(s) missing for {version_a}/{version_b}"
@@ -1480,6 +1571,10 @@ def test_pair_completes_battle_turn(version_a, version_b):
             f"Side B never fired ExecutePlayerMove or ExecuteEnemyMove; "
             f"the turn didn't advance on B. counters={counters}"
         )
+        assert diag["turn_settled"], (
+            "Both peers must reach matching settled HP/species/status: "
+            f"counters={counters}"
+        )
     finally:
         a.close()
         b.close()
@@ -1503,7 +1598,7 @@ def test_red_yellow_battle_turn_is_resolved():
         warp = _drive_past_link_menu_to_colosseum(a, b, link)
         assert warp["final_map_a"] == COLOSSEUM_MAP_ID
         assert warp["final_map_b"] == COLOSSEUM_MAP_ID
-        _drive_complete_battle_turn(a, b, link, counters=counters)
+        diag = _drive_complete_battle_turn(a, b, link, counters=counters)
 
         required_hooks = (
             "DisplayLinkBattleVersusTextBox",
@@ -1511,14 +1606,23 @@ def test_red_yellow_battle_turn_is_resolved():
             "MainInBattleLoop",
             "MoveSelectionMenu",
             "LinkBattleExchangeData",
-            "ExecutePlayerMove",
-            "ExecuteEnemyMove",
-            "PlayerCalcMoveDamage",
         )
         for symbol in required_hooks:
             assert counters[symbol][0] > 0 and counters[symbol][1] > 0, (
                 f"{symbol} did not fire on both sides: counters={counters}"
             )
+        for side in (0, 1):
+            assert (
+                counters["ExecutePlayerMove"][side]
+                + counters["ExecuteEnemyMove"][side] > 0
+            ), f"No move execution on side {side}: counters={counters}"
+        # Faint-before-action may skip one Execute* path; status moves may
+        # skip PlayerCalcMoveDamage entirely. Require the actual resulting
+        # state instead of those incidental instruction paths.
+        assert diag["turn_settled"], (
+            "Both peers must reach matching settled HP/species/status: "
+            f"counters={counters}"
+        )
     finally:
         a.close()
         b.close()

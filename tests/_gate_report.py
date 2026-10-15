@@ -58,6 +58,20 @@ def pytest_collectreport(report: Any) -> None:
                 "reason": str(report.longrepr),
             }
         )
+    elif report.skipped:
+        # ``pytest.importorskip`` and module-level skipif produce a skipped
+        # CollectReport without any item-level setup/call report.  Preserve
+        # that outcome as a synthetic test record so a required production
+        # tier cannot pass while its entire module was skipped during
+        # collection.
+        nodeid = getattr(report, "nodeid", "<collection>")
+        _records()[f"{nodeid}::<collection-skip>"] = {
+            "nodeid": nodeid,
+            "outcome": "skipped",
+            "when": "collection",
+            "was_xfail": False,
+            "reason": _reason(report),
+        }
 
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:

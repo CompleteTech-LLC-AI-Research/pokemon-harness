@@ -10,6 +10,7 @@ files whose hashes match [`VERSIONS.md`](VERSIONS.md).
 Run these commands from the repository root (the path can be anywhere):
 
 ```bash
+git submodule update --init --depth 1 vendor/pyboy-src
 python -m venv .venv
 . .venv/bin/activate                 # WSL, Linux, or Git Bash
 # PowerShell: .venv\Scripts\Activate.ps1
@@ -80,3 +81,8 @@ current gate, matching asset hashes, complete strict trade and battle rows,
 bounded remote teardown, and retained evidence. The current integration
 candidate is `PARTIAL`; see [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md)
 for open conditions.
+
+## Managed delegation policy (Codex)
+
+For substantive work, use exactly three agent levels: Level 1 is the current coordinator, Level 2 is its subagents, and Level 3 is their subsubagents. Do not create or direct a Level 4 agent. Split independent work into disjoint ownership lanes, keep shared state changes coordinated by the parent, and require an independent verification pass before reporting completion. When spawning an agent, default to model `gpt-5.6-luna` with `reasoning_effort: max` and the fastest available execution path. A Level 3 agent must finish its bounded assignment and cannot spawn further agents. Preserve unrelated user changes and report any inaccessible scope instead of guessing.
+Use fast inference for every ongoing subagent call.

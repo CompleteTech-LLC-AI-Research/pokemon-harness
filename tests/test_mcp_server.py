@@ -379,7 +379,7 @@ def test_link_transport_resource_reflects_transport_state():
 # a background accept on a local port; link_connect from another "session"
 # attaches; link_status reports the transitions; link_disconnect tears down.
 #
-# We use real localhost sockets via TcpSerialLink, because the whole point
+# We use real localhost sockets via NetworkBackend, because the whole point
 # of the tool is to wire up a socket — stubbing it out would prove
 # nothing.
 
@@ -406,8 +406,7 @@ def _wait_remote_mode(link: LinkState, mode: str, timeout: float = 2.0) -> None:
 
 
 def _endpoint_sym() -> str:
-    """Symbols required by RemoteLinkEndpoint.install(). Addresses are
-    synthetic; the MCP test only needs the install() call to succeed."""
+    """Synthetic symbols retained for the remote session test shell."""
     return """
         00:22FA Serial_TryEstablishingExternallyClockedConnection
         00:216F Serial_ExchangeBytes
@@ -426,8 +425,14 @@ def _endpoint_sym() -> str:
 
 
 def _endpoint_session():
+    from types import SimpleNamespace
+    from pokered_harness.link.serial_core import SerialCore
+
     mem = DictMemory()
     pb = FakePyBoy(mem)
+    # Explicitly supply the real serial contract; fake emulator shells must
+    # not cause production MCP code to select semantic state-copying paths.
+    pb.mb = SimpleNamespace(serial=SerialCore())
     sym = load_sym_text(_endpoint_sym())
     return Session(pyboy=pb, symbols=sym, event_bus=EventBus()), pb
 

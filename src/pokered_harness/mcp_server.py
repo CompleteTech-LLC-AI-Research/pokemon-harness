@@ -41,7 +41,10 @@ from pokered_harness.link.network_backend import (
     NetworkBackend,
     NetworkBackendError,
 )
-from pokered_harness.link.pyboy_link_session import PyBoyLinkSession
+from pokered_harness.link.pyboy_link_session import (
+    PairedSessionOperationError,
+    PyBoyLinkSession,
+)
 from pokered_harness.link.serial_link import (
     SerialLink,
     SerialLinkError,
@@ -49,13 +52,23 @@ from pokered_harness.link.serial_link import (
     TcpSerialLink,
 )
 from pokered_harness.serialize import to_jsonable
+from pokered_harness.ownership import EmulatorOwnershipError, assert_no_emulator_scope
 from pokered_harness.session import (
     InvalidStateError,
     Session,
     SessionClosedError,
     SessionConfigurationError,
     VersionMismatch,
+    locked_sessions,
 )
+
+try:
+    from pyboy.core.serial import SerialBackendError as _SerialBackendError
+except ImportError:
+    # Older source forks do not expose the latched backend fault boundary.
+    _SERIAL_BACKEND_ERRORS: tuple[type[Exception], ...] = ()
+else:
+    _SERIAL_BACKEND_ERRORS = (_SerialBackendError,)
 
 
 class McpHarnessError(ValueError):
@@ -121,9 +134,8 @@ class LinkState:
        doubles that do not expose PyBoy's native serial backend.
     2. **Remote endpoint** (``remote_endpoint``/``network_session``) — a
        bit-accurate :class:`PyBoyLinkSession` backed by a localhost TCP
-       :class:`NetworkBackend`. The older semantic endpoint remains only as a
-       compatibility path for test doubles that do not expose PyBoy's serial
-       motherboard.
+       :class:`NetworkBackend`. Remote admission requires the pinned serial
+       contract; emulator test doubles must explicitly supply that contract.
 
     The two modes are mutually exclusive — calling ``link_listen`` /
     ``link_connect`` while an in-process pair is active (or vice versa)
@@ -169,6 +181,7 @@ class LinkState:
     @contextmanager
     def operation(self) -> Iterator[None]:
         """Serialize emulator/link mutations without blocking disconnect."""
+        assert_no_emulator_scope("mutating link operation")
         with self._operation_lock:
             yield
 
@@ -414,6 +427,12 @@ def _error_reply(exc: Exception) -> mcp_types.CallToolResult:
 def _error_code(exc: Exception) -> str:
     if isinstance(exc, McpHarnessError):
         return exc.code
+    if isinstance(exc, PairedSessionOperationError):
+        return "paired_session_operation"
+    if isinstance(exc, _SERIAL_BACKEND_ERRORS):
+        return "serial_backend_error"
+    if isinstance(exc, EmulatorOwnershipError):
+        return "emulator_ownership_error"
     if isinstance(exc, SessionClosedError):
         return "session_closed"
     if isinstance(exc, VersionMismatch):
@@ -521,6 +540,8 @@ def _dispatch_link_tool(
                 raise McpHarnessError(
                     "link_busy", "link teardown is still in progress"
                 )
+            _require_local_mode_available(link)
+            generation = link._generation
             if link.pair is not None and link.pair.paired:
                 raise McpHarnessError(
                     "already_paired", "already paired; call link_unpair first"
@@ -542,18 +563,22 @@ def _dispatch_link_tool(
             and _supports_bit_accurate_network(peer)
         ):
             local_link_session = PyBoyLinkSession.local()
-            try:
-                # Use a stable lock order; both sessions are owned by this
-                # MCP server and no callback is invoked while attaching.
-                with session.locked():
-                    with peer.locked():
-                        local_link_session.attach(session._pyboy)
-                        local_link_session.attach(peer._pyboy)
-            except Exception:
-                local_link_session.detach_all()
-                raise
-            with link.state():
-                link.local_link_session = local_link_session
+            # Rollback changes the same emulator backends as attachment;
+            # retain both session locks until either operation completes.
+            with locked_sessions(session, peer):
+                try:
+                    local_link_session.attach(session._pyboy)
+                    local_link_session.attach(peer._pyboy)
+                    with link.state():
+                        if link._generation != generation or link._disconnecting:
+                            raise McpHarnessError(
+                                "link_cancelled", "local pairing cancelled by disconnect"
+                            )
+                        _require_local_mode_available(link)
+                        link.local_link_session = local_link_session
+                except Exception:
+                    local_link_session.detach_all()
+                    raise
             return {
                 "paired": True,
                 "primary_version": link.primary_version,
@@ -561,16 +586,20 @@ def _dispatch_link_tool(
             }
 
         if pair is None:
-            pair = LinkPair(
-                session,
-                peer,
-                version_primary=link.primary_version,
-                version_peer=link.peer_version,
+            raise McpHarnessError(
+                "unsupported_runtime",
+                "local pairing requires the pinned bit-accurate serial runtime on both sessions",
             )
-            with link.state():
-                link.pair = pair
+        _reject_semantic_pair_on_native_runtime(pair, session, peer)
         try:
             pair.pair()
+            with link.state():
+                cancelled = link._generation != generation or link._disconnecting
+            if cancelled:
+                pair.unpair()
+                raise McpHarnessError(
+                    "link_cancelled", "local pairing cancelled by disconnect"
+                )
         except Exception:
             if created:
                 with link.state():
@@ -589,10 +618,12 @@ def _dispatch_link_tool(
             pair = link.pair
             local_link_session = link.local_link_session
         if local_link_session is not None:
-            local_link_session.detach_all()
-            with link.state():
-                if link.local_link_session is local_link_session:
-                    link.local_link_session = None
+            peer = _require_peer(link)
+            with locked_sessions(session, peer, allow_closed=True):
+                local_link_session.detach_all()
+                with link.state():
+                    if link.local_link_session is local_link_session:
+                        link.local_link_session = None
         if pair is not None and pair.paired:
             pair.unpair()
             _deactivate_link_hooks(session, pair.peer)
@@ -613,18 +644,19 @@ def _dispatch_link_tool(
             count = int(arguments["count"])
             if count <= 0:
                 raise ValueError(f"count must be positive, got {count}")
-            local_link_session.step_interleaved(
-                count, render=bool(arguments.get("render", False))
-            )
-            # PyBoyLinkSession drives the underlying emulators directly; keep
-            # Session-level bookkeeping aligned with the same frame count.
-            session.reset_tick(session.current_tick() + count)
             peer = _require_peer(link)
-            peer.reset_tick(peer.current_tick() + count)
-            return {
-                "primary_tick": session.current_tick(),
-                "peer_tick": peer.current_tick(),
-            }
+            with locked_sessions(session, peer):
+                local_link_session.step_interleaved(
+                    count, render=bool(arguments.get("render", False))
+                )
+                # Keep direct emulator work, bookkeeping, and the returned
+                # snapshot atomic relative to ordinary Session operations.
+                session.reset_tick(session.current_tick() + count)
+                peer.reset_tick(peer.current_tick() + count)
+                return {
+                    "primary_tick": session.current_tick(),
+                    "peer_tick": peer.current_tick(),
+                }
         pair = _require_pair(link)
         pair.step(int(arguments["count"]), render=bool(arguments.get("render", False)))
         return {
@@ -707,6 +739,7 @@ def _dispatch_link_tool(
         timeout_s = _validate_timeout(
             arguments.get("timeout_s", _DEFAULT_REMOTE_HELLO_TIMEOUT_S)
         )
+        _require_remote_runtime(session)
 
         listener = _bind_listener(host, port)
         cancel = threading.Event()
@@ -761,6 +794,7 @@ def _dispatch_link_tool(
             str(arguments.get("rom_version") or link.primary_version)
         )
         timeout_s = _validate_timeout(arguments.get("timeout_s", 10.0))
+        _require_remote_runtime(session)
         with link.state():
             generation = link._generation
             link._connect_cancel = threading.Event()
@@ -771,35 +805,21 @@ def _dispatch_link_tool(
         peer_version: str | None = None
         deadline = time.monotonic() + timeout_s
         try:
-            if _supports_bit_accurate_network(session):
-                transport = NetworkBackend.connect(
-                    host,
-                    port,
-                    timeout_s=timeout_s,
-                    local_rom_version=rom_version,
-                )
-                network_session = _attach_network_backend(
-                    session,
-                    transport,
-                    is_internal_clock=False,
-                    local_rom_version=rom_version,
-                )
-                peer_version = _wait_for_network_hello(
-                    transport, connect_cancel, _remaining(deadline)
-                )
-            else:
-                # Keep the semantic adapter available for lightweight test
-                # doubles and older callers that do not expose PyBoy's
-                # bit-accurate motherboard serial object.
-                transport = TcpSerialLink.connect(
-                    host, port, rom_version, timeout_s=timeout_s
-                )
-                _wait_for_remote_hello(
-                    transport, connect_cancel, _remaining(deadline)
-                )
-                peer_version = transport.peer_rom_version
-                endpoint = RemoteLinkEndpoint.as_connector(session, transport)
-                endpoint.install()
+            transport = NetworkBackend.connect(
+                host,
+                port,
+                timeout_s=timeout_s,
+                local_rom_version=rom_version,
+            )
+            network_session = _attach_network_backend(
+                session,
+                transport,
+                is_internal_clock=False,
+                local_rom_version=rom_version,
+            )
+            peer_version = _wait_for_network_hello(
+                transport, connect_cancel, _remaining(deadline)
+            )
             with link.state():
                 if (
                     connect_cancel.is_set()
@@ -868,6 +888,17 @@ def _require_remote_idle(link: LinkState) -> None:
                 f"remote link busy (mode={link.remote_mode!r}); call "
                 f"link_disconnect first",
             )
+
+
+def _require_local_mode_available(link: LinkState) -> None:
+    """Called with state locked, before changing local emulator ownership."""
+    if link.remote_mode != "idle" or any(value is not None for value in (
+        link.remote_link, link.remote_endpoint, link.network_session,
+        link._listener_socket, link._listener_thread,
+    )):
+        raise McpHarnessError(
+            "remote_busy", "remote link is active; call link_disconnect before local pairing"
+        )
 
 
 def _require_pair_inactive(link: LinkState) -> None:
@@ -985,10 +1016,48 @@ def _supports_bit_accurate_network(session: Session) -> bool:
     """Return whether a session exposes the pinned PyBoy serial contract."""
     pyboy = getattr(session, "_pyboy", None)
     serial = getattr(getattr(pyboy, "mb", None), "serial", None)
-    return serial is not None and all(
-        hasattr(serial, name)
-        for name in ("backend", "apply_external_edge", "peek_out_bit")
+    return serial is not None and hasattr(serial, "backend") and all(
+        callable(getattr(serial, name, None))
+        for name in ("apply_external_edge", "peek_out_bit")
     )
+
+
+def _is_pyboy_instance(value: object) -> bool:
+    """Recognize real PyBoy objects without relying on class-name strings."""
+    try:
+        import pyboy
+    except ImportError:
+        return False
+    pyboy_type = getattr(pyboy, "PyBoy", None)
+    return isinstance(pyboy_type, type) and isinstance(value, pyboy_type)
+
+
+def _reject_semantic_pair_on_native_runtime(
+    pair: LinkPair, session: Session, peer: Session
+) -> None:
+    """Keep semantic LinkPair fallback away from native/real PyBoy endpoints."""
+    pair_sessions = [session, peer]
+    for name in ("primary", "peer"):
+        pair_session = getattr(pair, name, None)
+        if pair_session is not None and not any(
+            pair_session is item for item in pair_sessions
+        ):
+            pair_sessions.append(pair_session)
+    if any(_supports_bit_accurate_network(item) for item in pair_sessions):
+        raise McpHarnessError(
+            "unsupported_runtime",
+            "semantic local pairing is unavailable for native serial endpoints; "
+            "use the pinned bit-accurate serial runtime",
+        )
+    if any(
+        _is_pyboy_instance(getattr(item, "_pyboy", None))
+        for item in pair_sessions
+    ):
+        raise McpHarnessError(
+            "unsupported_runtime",
+            "semantic local pairing is unavailable for real PyBoy endpoints; "
+            "use the pinned bit-accurate serial runtime",
+        )
 
 
 def _attach_network_backend(
@@ -1007,6 +1076,15 @@ def _attach_network_backend(
     with session.locked():
         network_session.attach(session._pyboy)
     return network_session
+
+
+def _require_remote_runtime(session: Session) -> None:
+    if not _supports_bit_accurate_network(session):
+        raise McpHarnessError(
+            "unsupported_runtime",
+            "remote links require the pinned PyBoy serial runtime; "
+            "semantic fallback is not supported",
+        )
 
 
 def _bind_listener(host: str, port: int) -> socket.socket:
@@ -1115,23 +1193,17 @@ def _accept_remote(
                 raise McpHarnessError("listen_failed", str(exc)) from exc
 
             conn.settimeout(None)
-            if _supports_bit_accurate_network(session):
-                transport = NetworkBackend(
-                    conn, local_rom_version=rom_version
-                )
-                network_session = _attach_network_backend(
-                    session,
-                    transport,
-                    is_internal_clock=True,
-                    local_rom_version=rom_version,
-                )
-                _wait_for_network_hello(transport, cancel, timeout_s)
-                endpoint: RemoteLinkEndpoint | None = None
-            else:
-                transport = TcpSerialLink(conn, rom_version)
-                _wait_for_remote_hello(transport, cancel, timeout_s)
-                endpoint = RemoteLinkEndpoint.as_listener(session, transport)
-                endpoint.install()
+            transport = NetworkBackend(
+                conn, local_rom_version=rom_version
+            )
+            network_session = _attach_network_backend(
+                session,
+                transport,
+                is_internal_clock=True,
+                local_rom_version=rom_version,
+            )
+            _wait_for_network_hello(transport, cancel, timeout_s)
+            endpoint: RemoteLinkEndpoint | None = None
             with link.state():
                 if (
                     cancel.is_set()
@@ -1606,10 +1678,12 @@ def main() -> None:
             )
         )
     finally:
-        if peer_session is not None:
-            peer_session.close()
-        if session is not None:
-            session.close()
+        try:
+            if peer_session is not None:
+                peer_session.close()
+        finally:
+            if session is not None:
+                session.close()
 
 
 def _env_flag(name: str) -> bool:
