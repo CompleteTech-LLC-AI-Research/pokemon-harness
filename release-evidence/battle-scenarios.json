@@ -1163,9 +1163,9 @@
       "inventory": null,
       "opponent": null,
       "runtime": {
-        "python": "3.11.2",
+        "python": "3.12.13",
         "pyboy_version": "2.7.0",
-        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "pyboy_revision": "fd765b1808ac9cb192b42ae971987158ff36ae48",
         "role": null
       },
       "required_prior_actions": [
@@ -1181,8 +1181,8 @@
         "path": "blue/cable_club-battle-faint.state",
         "repository_distributed": false,
         "size_bytes": 200548,
-        "sha1": "8d06732843bf070eafcd37531ab6c6e827aedf71",
-        "sha256": "f7da26bfddc80b8be2c2c556468e032be161596e708d20fdb6a0a4e7cc474cff",
+        "sha1": "51ea63fa831f6377272664243d50891dca257ee5",
+        "sha256": "2fbec744de8e2dc19611e6f901fca02fae95653efb5166488d9d6eb7e67d0c3d",
         "fixture_id": "blue-color-battle-faint"
       },
       "provenance": {
@@ -1191,9 +1191,9 @@
         "source_fixture_id": "blue-color-battle",
         "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
         "input_sequence": "real-play Cable Club link drive from blue-color-battle to the forced replacement boundary (no RAM writes)",
-        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
-        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
-        "captured_at_utc": "2026-09-18T05:05:27Z",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 80 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 cython runtime; fork fd765b1808ac9cb192b42ae971987158ff36ae48; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "captured_at_utc": "2026-10-15T06:35:40Z",
         "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
       },
       "evidence_class": {
@@ -1246,9 +1246,9 @@
       "inventory": null,
       "opponent": null,
       "runtime": {
-        "python": "3.11.2",
+        "python": "3.12.13",
         "pyboy_version": "2.7.0",
-        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "pyboy_revision": "fd765b1808ac9cb192b42ae971987158ff36ae48",
         "role": null
       },
       "required_prior_actions": [
@@ -1264,8 +1264,8 @@
         "path": "blue/cable_club-battle-faint-peer.state",
         "repository_distributed": false,
         "size_bytes": 200548,
-        "sha1": "cbfdd7238f1e9c5bf1e4b500e5a11d698a854b8c",
-        "sha256": "bd6605509583b7311a35f4471d30ee60cb94c7cf82350b1e5d5703e12c520e79",
+        "sha1": "6bd09ea005695e8733f1b5937245e0baf24ad52e",
+        "sha256": "249c5953c672307d11aa1a7bce3fa074b8ea1a397df680fd63b8ec6d6290ad94",
         "fixture_id": "blue-color-battle-faint-peer"
       },
       "provenance": {
@@ -1274,9 +1274,9 @@
         "source_fixture_id": "blue-color-battle",
         "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
         "input_sequence": "real-play Cable Club link drive from blue-color-battle to the forced replacement boundary (no RAM writes)",
-        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
-        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
-        "captured_at_utc": "2026-09-18T05:05:27Z",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 80 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 cython runtime; fork fd765b1808ac9cb192b42ae971987158ff36ae48; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "captured_at_utc": "2026-10-15T06:35:40Z",
         "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
       },
       "evidence_class": {
@@ -1329,9 +1329,9 @@
       "inventory": null,
       "opponent": null,
       "runtime": {
-        "python": "3.11.2",
+        "python": "3.12.13",
         "pyboy_version": "2.7.0",
-        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "pyboy_revision": "fd765b1808ac9cb192b42ae971987158ff36ae48",
         "role": null
       },
       "required_prior_actions": [
@@ -1347,8 +1347,8 @@
         "path": "blue/cable_club-pre-terminal.state",
         "repository_distributed": false,
         "size_bytes": 200548,
-        "sha1": "01ca20eabaa33e0e6cfcd87136432db9b84911f2",
-        "sha256": "fbadf039316e0d3e2c768729ce2c0f19bf8749e446e65b7942e00803c4c7929d",
+        "sha1": "8fde8919a5865e98cb5f1475970087fcf1cda5f7",
+        "sha256": "5749dc12916cedf25cba598ddf04772a7c61b0685336a7b437c2df4eafd136f6",
         "fixture_id": "blue-color-battle-pre-terminal"
       },
       "provenance": {
@@ -1357,9 +1357,9 @@
         "source_fixture_id": "blue-color-battle",
         "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
         "input_sequence": "real-play Cable Club link drive from blue-color-battle to the pre terminal boundary (no RAM writes)",
-        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
-        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
-        "captured_at_utc": "2026-09-18T05:14:09Z",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 80 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 cython runtime; fork fd765b1808ac9cb192b42ae971987158ff36ae48; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "captured_at_utc": "2026-10-15T06:39:34Z",
         "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
       },
       "evidence_class": {
@@ -1412,9 +1412,9 @@
       "inventory": null,
       "opponent": null,
       "runtime": {
-        "python": "3.11.2",
+        "python": "3.12.13",
         "pyboy_version": "2.7.0",
-        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "pyboy_revision": "fd765b1808ac9cb192b42ae971987158ff36ae48",
         "role": null
       },
       "required_prior_actions": [
@@ -1430,8 +1430,8 @@
         "path": "blue/cable_club-pre-terminal-peer.state",
         "repository_distributed": false,
         "size_bytes": 200548,
-        "sha1": "ed9c680cff2af1e64c66a78132685411d2497a38",
-        "sha256": "5f260032875cad72e422b2e020054749bc1aba8c80fafcc3d201459130293156",
+        "sha1": "4e267d7b53f83bf6d570ea8862bdaa9ef752fd19",
+        "sha256": "6f19c07d1956740e52c95ea1485860d10cb0a8a7aa7c05c6067a3bbc28530f14",
         "fixture_id": "blue-color-battle-pre-terminal-peer"
       },
       "provenance": {
@@ -1440,9 +1440,9 @@
         "source_fixture_id": "blue-color-battle",
         "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
         "input_sequence": "real-play Cable Club link drive from blue-color-battle to the pre terminal boundary (no RAM writes)",
-        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
-        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
-        "captured_at_utc": "2026-09-18T05:14:09Z",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 80 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 cython runtime; fork fd765b1808ac9cb192b42ae971987158ff36ae48; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "captured_at_utc": "2026-10-15T06:39:34Z",
         "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
       },
       "evidence_class": {
@@ -1495,9 +1495,9 @@
       "inventory": null,
       "opponent": null,
       "runtime": {
-        "python": "3.11.2",
+        "python": "3.12.13",
         "pyboy_version": "2.7.0",
-        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "pyboy_revision": "fd765b1808ac9cb192b42ae971987158ff36ae48",
         "role": null
       },
       "required_prior_actions": [
@@ -1513,8 +1513,8 @@
         "path": "blue/cable_club-terminal.state",
         "repository_distributed": false,
         "size_bytes": 200548,
-        "sha1": "4cbc31c960742c362d75ee016a52273889b734b7",
-        "sha256": "d380a19f2295982f51128f4d0e7576d870603426c59fc271395fb83f5a33040f",
+        "sha1": "b15a7230b72b08e35c17699663f9a62fb8ce9cda",
+        "sha256": "7b4a869e3cb47ade4363939a201325990d2c0f765ef7402f6e5ba26d258a8670",
         "fixture_id": "blue-color-battle-terminal-return"
       },
       "provenance": {
@@ -1523,9 +1523,9 @@
         "source_fixture_id": "blue-color-battle",
         "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
         "input_sequence": "real-play Cable Club link drive from blue-color-battle to the terminal boundary (no RAM writes)",
-        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
-        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
-        "captured_at_utc": "2026-09-18T05:16:29Z",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 80 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 cython runtime; fork fd765b1808ac9cb192b42ae971987158ff36ae48; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "captured_at_utc": "2026-10-15T06:41:01Z",
         "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
       },
       "evidence_class": {
@@ -1579,9 +1579,9 @@
       "inventory": null,
       "opponent": null,
       "runtime": {
-        "python": "3.11.2",
+        "python": "3.12.13",
         "pyboy_version": "2.7.0",
-        "pyboy_revision": "c565df66c3731fad2856169a90f6bbec99925915",
+        "pyboy_revision": "fd765b1808ac9cb192b42ae971987158ff36ae48",
         "role": null
       },
       "required_prior_actions": [
@@ -1597,8 +1597,8 @@
         "path": "blue/cable_club-terminal-peer.state",
         "repository_distributed": false,
         "size_bytes": 200548,
-        "sha1": "d2c6d3a6fe75e80b295949f3c66c3db27479c94e",
-        "sha256": "3490607ed2435b14586724da80be687e6b5e67533c9f721a8753588697dab66d",
+        "sha1": "297fa51d5a2210bbe7fc6b3c309b6dfd4d45c4f4",
+        "sha256": "304bf62d8946079fbd7a23553312aebada1c98d3a1d381223d690445e16355e7",
         "fixture_id": "blue-color-battle-terminal-return-peer"
       },
       "provenance": {
@@ -1607,9 +1607,9 @@
         "source_fixture_id": "blue-color-battle",
         "input_fixture_sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
         "input_sequence": "real-play Cable Club link drive from blue-color-battle to the terminal boundary (no RAM writes)",
-        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 240 --emit-manifest-rows <rows.json>",
-        "runtime_identity": "Python 3.11.2; PyBoy 2.7.0 cython runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
-        "captured_at_utc": "2026-09-18T05:16:29Z",
+        "capture_command_template": "python scripts/produce_battle_state_fixtures.py --version blue --rom-root <rom-root> --fixture-root <fixture-root> --max-turns 80 --emit-manifest-rows <rows.json>",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 cython runtime; fork fd765b1808ac9cb192b42ae971987158ff36ae48; producer scripts/produce_battle_state_fixtures.py SHA-1 e2e9676594415148293909087bbb02863ed0db49",
+        "captured_at_utc": "2026-10-15T06:41:01Z",
         "verification_method": "real-play Cable Club link drive from the admitted blue/cable_club-battle.state bytes (SHA-1 6aac3aabe0f6ad662dec218682c2254b3954a10a); the produced pair is reload-validated against the boundary invariants before this producer exits"
       },
       "evidence_class": {

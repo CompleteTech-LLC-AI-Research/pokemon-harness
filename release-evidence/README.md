@@ -1,9 +1,9 @@
 # External fixture evidence
 
-[`fixture-manifest.json`](fixture-manifest.json) records the 28 save-state
-files observed in the operator-managed `tests/fixtures/link` root. It records
+[`fixture-manifest.json`](fixture-manifest.json) records 31 save-state files supplied through an
+operator-managed external fixture root. It records
 file size, SHA-1, SHA-256, the expected ROM/symbol pins, and the provenance
-known at the time of the audit: six `verified` canonical rows, four `partial`
+known at admission: nine `verified` canonical rows, four `partial`
 vanilla rows, and eighteen `captured` boundary rows (a forced-replacement
 party menu, the last command boundary before the deciding knockout, and the
 terminal return, each with a peer sibling) driven from the admitted battle
@@ -12,12 +12,25 @@ fixtures.
 The 2026-09-24 integration of the battle-state branch relocated that producer's
 entry point (`scripts/produce_battle_state_fixtures.py`) into a thin facade plus
 `scripts/produce_battle_state_fixtures_{model,drive,manifest}.py` to satisfy the
-per-file size bound tracked by #122. The relocation is behavior-preserving
-(identical public attribute surface and identical collected test node IDs), so
-the eighteen `captured` boundary rows keep their recorded fixture bytes. Their
-`runtime_identity` producer SHA-1 was updated from `a59ce9e9...` to the relocated
-entry point's `e2e96765...`. No fixture was re-captured: re-capture needs the
-operator-managed ROM/SYM assets, which are not present in this environment.
+per-file size bound tracked by #122. That relocation preserved behavior
+(identical public attribute surface and identical collected test node IDs).
+At that integration, the eighteen boundary rows retained their fixture bytes
+and their `runtime_identity` producer SHA-1 changed from `a59ce9e9...` to the
+relocated entry point's `e2e96765...`. That historical run did not recapture
+fixtures because its environment lacked the operator-managed ROM/SYM inputs.
+
+The six Blue boundary rows were recaptured on 2026-10-15 from clean local
+commit `0f55211b76e5fae9e27a6c20fc817ee54bfd7853`, using the admitted Blue
+battle input and pinned ROM/SYM files. The producer now requires fresh peer
+commitment before continuing a battle turn. For an unusable planned
+continuation, existing supported-damage selection remains first; the
+fallback then prefers a ROM-validated zero-power stat-modifier move with
+an immediate-turn effect when available, before the historical first-usable
+choice. Ordinary boundary selection and per-turn frame limits are unchanged.
+The manifest records the emitted hashes, source identity, runtime,
+command, and capture time, and the battle catalog describes those bytes.
+The earlier failed capture and partial outputs remain in external evidence.
+Capture and fixture admission alone do not qualify a release.
 
 [`current-audit-2026-08-31.md`](current-audit-2026-08-31.md) records the
 current isolated-candidate gate counts, runtime identity, explicit-ROM MCP
