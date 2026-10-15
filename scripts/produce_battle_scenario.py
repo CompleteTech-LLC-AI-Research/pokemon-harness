@@ -99,10 +99,10 @@ from scripts.produce_battle_scenario_capture import (
     _entry_identity,  # noqa: F401  (retained facade attribute: producer._entry_identity)
     _InputStep,  # noqa: F401  (retained facade attribute: producer._InputStep)
     _observe_boundary,  # noqa: F401  (retained facade attribute: producer._observe_boundary)
-    _OwnedPublication,
+    _OwnedPublication,  # noqa: F401  (retained facade attribute: producer._OwnedPublication)
     _remove_staged,  # noqa: F401  (retained facade attribute: producer._remove_staged)
     _symbol_byte,  # noqa: F401  (retained facade attribute: producer._symbol_byte)
-    _withdraw_all,
+    _withdraw_all,  # noqa: F401  (retained facade attribute: producer._withdraw_all)
     _write_bytes_atomically,  # noqa: F401  (retained facade attribute: producer._write_bytes_atomically)
     _write_fixture_exclusive,  # noqa: F401  (retained facade attribute: producer._write_fixture_exclusive)
     capture_battle_scenario,
@@ -147,13 +147,13 @@ from scripts.produce_battle_scenario_model import (
     _RUNTIME_MODES,  # noqa: F401  (retained facade attribute: producer._RUNTIME_MODES)
     _SUPPORTED_BOUNDARY,  # noqa: F401  (retained facade attribute: producer._SUPPORTED_BOUNDARY)
     _UNMEASURED_RUNTIME,  # noqa: F401  (retained facade attribute: producer._UNMEASURED_RUNTIME)
-    CaptureBoundsExceeded,
+    CaptureBoundsExceeded,  # noqa: F401  (retained facade attribute: producer.CaptureBoundsExceeded)
     CaptureNotAvailable,
     CapturePreconditionFailed,  # noqa: F401  (retained facade attribute: producer.CapturePreconditionFailed)
     ScenarioBlocked,
     ScenarioRefusal,
     _check_deadline,  # noqa: F401  (retained facade attribute: producer._check_deadline)
-    _deadline_guard,
+    _deadline_guard,  # noqa: F401  (retained facade attribute: producer._deadline_guard)
     _note,  # noqa: F401  (retained facade attribute: producer._note)
     _require,  # noqa: F401  (retained facade attribute: producer._require)
 )
