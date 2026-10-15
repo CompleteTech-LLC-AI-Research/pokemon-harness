@@ -1,9 +1,9 @@
 """Bounded capture budget, atomic publication, and the capture driver.
 
-Split out of ``scripts/produce_battle_scenario.py`` for the #122 file-size
-contract with no behavior change: the code below is copied verbatim except that
-calls to facade-owned, monkeypatch-patched entry points resolve through
-``_entry`` so attribute patches on the loaded producer module stay visible.
+Originally split out of ``scripts/produce_battle_scenario.py`` for the #122
+file-size contract. Facade-owned entry points resolve through ``_entry`` so
+attribute patches on the loaded producer module stay visible. Prior-report
+recovery is retained on disk; competing-namespace races remain open in #610.
 """
 
 from __future__ import annotations
@@ -47,6 +47,11 @@ from scripts.produce_battle_scenario_model import (
     CapturePreconditionFailed,
     ScenarioRefusal,
     _note,
+)
+from scripts.produce_battle_scenario_recovery import (
+    _ReportRecovery,
+    _secure_prior_report,
+    _WithdrawalResult,
 )
 
 
@@ -179,9 +184,19 @@ def _withdraw_all(exc: BaseException, *publications: _OwnedPublication | None) -
     for publication in publications:
         if publication is None:
             continue
-        error = publication.withdraw()
-        if error is not None:
-            _note(exc, error)
+        try:
+            error = publication.withdraw()
+        except BaseException as cleanup_exc:  # noqa: BLE001 - isolate rollback interruptions
+            # A failed earlier rollback must not strand a later report's
+            # recovery. Keep the original error primary and attempt all tokens.
+            _note(exc, f"publication rollback raised {cleanup_exc!r}")
+            if publication.displaced is not None:
+                _note(exc, publication.displaced.describe())
+            for note in getattr(cleanup_exc, "__notes__", ()):
+                _note(exc, note)
+        else:
+            if error is not None:
+                _note(exc, error)
 
 
 @dataclass(frozen=True)
@@ -192,22 +207,30 @@ class _OwnedPublication:
     publish, so it outlives the removal of that entry and is never re-derived
     from a pathname a competing writer may have replaced in the meantime.
 
-    ``displaced`` holds the bytes of an entry this publication deliberately
-    replaced, so a rollback can put the earlier state back rather than destroy
-    it.
+    ``displaced`` names a retained, verified on-disk report snapshot, so recovery
+    does not depend on this process retaining its bytes in memory. It represents
+    the actual prior report only under the exclusive-writer assumption below.
+
+    Namespace mutations still require exclusive writer access: an inode check
+    followed by unlink/replace is not an atomic conditional operation (R3-01).
     """
 
     path: Path
     inode: int
     device: int
-    displaced: bytes | None = None
+    displaced: _ReportRecovery | None = None
+
+    def recovery_metadata(self) -> dict[str, Any] | None:
+        """Retained prior-report evidence for later cleanup/recovery consumers."""
+        return self.displaced.metadata() if self.displaced is not None else None
 
     def is_owned(self) -> bool:
-        """Whether ``path`` still names exactly the entry this capture published.
+        """Whether ``path`` currently matches the retained inode/device pair.
 
         ``lstat`` is deliberate: a competing writer's symlink pointing at this
         capture's own inode is a *different* directory entry owned by that
-        writer, so following the link would delete somebody else's file.
+        writer. Matching this pair is an observation, not proof of which
+        operation installed the entry or permission for an atomic mutation.
         """
         try:
             entry = os.lstat(self.path)
@@ -216,27 +239,44 @@ class _OwnedPublication:
         return (entry.st_ino, entry.st_dev) == (self.inode, self.device)
 
     def withdraw(self) -> str | None:
-        """Undo this publication; return a description of any cleanup failure.
+        """Compatibility adapter; detailed recovery remains available on token."""
+        return self.withdraw_result().as_note()
 
-        A publication that is no longer ours is left exactly as it is, so a
-        competing writer's replacement always survives this capture's rollback.
+    def withdraw_result(self) -> _WithdrawalResult:
+        """Attempt rollback under the existing exclusive namespace assumption.
+
+        An already observed foreign entry is left alone. This check does not
+        close the probe/mutation race; R3-01 remains open. Prior report recovery
+        is retained on disk even when restoration fails or ownership is lost.
         """
         if not self.is_owned():
-            return None
+            if self.displaced is not None:
+                return _WithdrawalResult(
+                    "unresolved",
+                    self.displaced,
+                    f"report ownership unresolved at {self.path}; {self.displaced.describe()}",
+                )
+            return _WithdrawalResult("foreign-preserved")
         if self.displaced is None:
             try:
                 os.unlink(self.path)
             except OSError as exc:
-                return f"owned output {self.path} could not be removed: {exc!r}"
-            return None
+                return _WithdrawalResult(
+                    "unresolved", error=f"owned output {self.path} could not be removed: {exc!r}"
+                )
+            return _WithdrawalResult("removed")
         try:
-            _write_bytes_atomically(self.path, self.displaced)
-        except OSError as exc:
-            with contextlib.suppress(OSError):
-                if self.is_owned():
-                    os.unlink(self.path)
-            return f"replaced entry {self.path} could not be restored: {exc!r}"
-        return None
+            _write_bytes_atomically(self.path, self.displaced.read_verified())
+        except BaseException as exc:  # noqa: BLE001 - retain recovery on interruption
+            # Do not remove the current report after failed restoration. Both
+            # it and the prior report's recovery remain available for diagnosis.
+            return _WithdrawalResult(
+                "unresolved",
+                self.displaced,
+                f"replaced entry {self.path} could not be restored: {exc!r}; "
+                f"{self.displaced.describe()}",
+            )
+        return _WithdrawalResult("restored", self.displaced)
 
 
 def _entry_identity(path: Path) -> tuple[int, int]:
@@ -277,20 +317,17 @@ def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
     The report is staged in a private sibling and moved into place, so a failed
     or partial write never replaces an existing report and never leaves a
     partial file behind.  The returned publication carries the inode this call
-    installed, so a caller can withdraw exactly its own report and never a
-    competing writer's replacement.
+    installed. Prior regular report bytes are secured in a private recovery
+    directory before replacement and retained across every later disposition.
+    Replacing/withdrawing still requires exclusive namespace access (R3-01).
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     staged = target.with_name(f".{target.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
-    displaced: bytes | None = None
+    displaced: _ReportRecovery | None = None
     publication: _OwnedPublication | None = None
     try:
-        if target.exists():
-            # A report target is deliberately replaceable; remembering the entry
-            # it replaced lets a later rollback restore it instead of losing it.
-            with contextlib.suppress(OSError):
-                displaced = target.read_bytes()
+        displaced = _secure_prior_report(target)
         encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
@@ -304,10 +341,10 @@ def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
         os.replace(staged, target)
         return publication
     except BaseException as exc:
-        publication_error = publication.withdraw() if publication is not None else None
+        if displaced is not None:
+            _note(exc, displaced.describe())
+        _withdraw_all(exc, publication)
         staging_error = _remove_staged(staged)
-        if publication_error is not None:
-            _note(exc, publication_error)
         if staging_error is not None:
             _note(exc, staging_error)
         raise
@@ -486,15 +523,13 @@ def _write_fixture_exclusive(
     """Publish fixture bytes without ever overwriting, or leaving a partial file.
 
     The payload is staged in a private sibling and published with ``os.link``,
-    which fails if the destination already exists.  Every step — including the
-    removal of the staging entry that finalizes the operation — runs inside the
-    rollback-protected region, and the published inode identity is retained from
-    the staging entry *before* the link.  A failure after the directory entry
-    exists (an interrupt inside ``os.link``, or one delivered once the staging
-    entry has already gone) therefore still removes this capture's own
-    publication, while a pre-existing or competing writer's entry is never
-    touched: the check is ``lstat`` on the destination, so a competing symlink
-    pointing at this capture's inode is not mistaken for the publication itself.
+    which fails if the destination already exists. A definite FileExistsError
+    grants no ownership, including when a competitor links the staging inode.
+    Publication/finalization failures attempt the existing rollback protocol.
+    Interrupted syscalls and post-probe pathname replacement remain ambiguous
+    under uncooperative writers (open R3-01); retained inode identity does not
+    supply an atomic conditional unlink. Ordinary rollback assumes exclusive
+    namespace access.
 
     ``guard`` is called immediately before the link and again once the entry
     exists, so a caller's deadline is re-checked with the publication in place
@@ -512,11 +547,15 @@ def _write_fixture_exclusive(
         if guard is not None:
             guard("fixture staging")
         # Retained before the link: once the entry exists the staging path may
-        # already be gone, so ownership must not be re-derived from that entry.
+        # already be gone. An interrupted link is still ambiguous: matching this
+        # inode cannot prove directory-entry provenance (open R3-01 remainder).
         publication = _OwnedPublication(output, *_entry_identity(staged))
         try:
             os.link(staged, output)
         except FileExistsError as exc:
+            # Under the local-filesystem contract this call did not publish.
+            # A competing link to the staging inode grants us no ownership.
+            publication = None
             raise ScenarioRefusal(f"refusing to overwrite existing output: {output}") from exc
         if guard is not None:
             guard("fixture publication")

@@ -31,8 +31,7 @@ MARKERS = (
     "timing_sensitive",
 )
 
-# These modules instantiate PyBoy, load a ROM/symbol file, or spawn a
-# real-ROM peer.  Everything outside this allowlist is ROM-free by default.
+# Modules below instantiate PyBoy, load ROM/symbol inputs, or spawn a real-ROM peer.
 REAL_ROM_MODULES = frozenset(
     {
         "test_golden_paths.py",
@@ -85,6 +84,7 @@ UNIT_MODULES = frozenset(
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_catalog.py",
         "test_battle_scenario_producer_capture.py",
+        "test_battle_scenario_producer_recovery.py",
         "test_battle_scenario_producer_run.py",
         "test_battle_scenario_producer_runtime.py",
         "test_battle_scenario_producer_screening.py",
