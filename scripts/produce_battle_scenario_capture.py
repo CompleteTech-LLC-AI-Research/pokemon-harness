@@ -226,6 +226,15 @@ class _OwnedPublication:
         """Retained prior-report evidence for later cleanup/recovery consumers."""
         return self.displaced.metadata() if self.displaced is not None else None
 
+    def recovery_description(self) -> str:
+        """Keep the human recovery contract without allowing diagnostics to raise."""
+        if self.displaced is None:
+            return "no prior report recovery"
+        try:
+            return safe_text(self.displaced.describe())
+        except BaseException:  # noqa: BLE001 - ownership remains unresolved
+            return "prior report recovery description unavailable"
+
     def observe_ownership(self) -> tuple[str, BaseException | None]:
         """Observe only; no inode probe makes subsequent mutation atomic (R3-01)."""
         try:
@@ -255,7 +264,7 @@ class _OwnedPublication:
                     "unresolved", self.displaced,
                     f"report/output ownership unresolved at {safe_text(self.path)}; "
                     f"probe={safe_text(probe_error)}; "
-                    f"{safe_text(self.recovery_metadata())}", observation,
+                    f"{self.recovery_description()}", observation,
                     type(probe_error).__name__ if probe_error is not None else None,
                 )
             return _WithdrawalResult("foreign-preserved", observation=observation)
@@ -276,7 +285,7 @@ class _OwnedPublication:
             return _WithdrawalResult(
                 "unresolved", self.displaced,
                 f"replaced entry {safe_text(self.path)} could not be restored: "
-                f"{safe_text(exc)}; {safe_text(self.recovery_metadata())}", observation,
+                f"{safe_text(exc)}; {self.recovery_description()}", observation,
                 type(exc).__name__, cleanup=nested_evidence(exc),
             )
         return _WithdrawalResult("restored", self.displaced, observation=observation)

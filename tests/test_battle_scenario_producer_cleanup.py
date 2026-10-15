@@ -888,3 +888,71 @@ def test_fdopen_failure_keeps_raw_descriptor_owned_until_once_close(tmp_path, mo
     assert len(retained) == (0 if name == "source" else 1)
     if retained:
         assert any(str(retained[0]) in note for note in primary.__notes__)
+
+
+@pytest.mark.parametrize("diagnostic_type", [OSError, KeyboardInterrupt])
+def test_recovery_description_failure_preserves_primary_and_snapshot(
+    tmp_path, monkeypatch, diagnostic_type
+):
+    report = tmp_path / "report.json"
+    report.write_bytes(PRIOR)
+    primary = KeyboardInterrupt("original replacement interruption")
+    real_replace = os.replace
+
+    def replace_then_interrupt(source, target):
+        real_replace(source, target)
+        raise primary
+
+    def refuse_restore(*_args):
+        raise OSError("restore unavailable")
+
+    def broken_description(_self):
+        raise diagnostic_type("description unavailable")
+
+    monkeypatch.setattr(capture.os, "replace", replace_then_interrupt)
+    monkeypatch.setattr(capture, "_write_bytes_atomically", refuse_restore)
+    monkeypatch.setattr(_ReportRecovery, "describe", broken_description)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        producer.write_report(report, {"new": True})
+    assert caught.value is primary
+    retained = _reopen(tmp_path)
+    assert json.loads(report.read_bytes()) == {"new": True}
+    assert any("recovery description unavailable" in note for note in primary.__notes__)
+    assert any(str(retained.manifest) in note for note in primary.__notes__)
+    assert any(row.get("disposition") == "unresolved" for row in primary.producer_cleanup)
+
+
+@pytest.mark.parametrize("ledger_type", [OSError, KeyboardInterrupt])
+def test_canonical_recovery_note_survives_failed_ledger_after_restore(
+    tmp_path, monkeypatch, ledger_type
+):
+    report = tmp_path / "report.json"
+    report.write_bytes(PRIOR)
+    primary = KeyboardInterrupt("original replacement interruption")
+    real_replace, real_open = os.replace, os.open
+    replacements, ledger_attempts = [], []
+
+    def replace_then_interrupt(source, target):
+        real_replace(source, target)
+        replacements.append(Path(target))
+        if len(replacements) == 1:
+            raise primary
+
+    def refuse_ledger(path, *args, **kwargs):
+        if Path(path).name.startswith("cleanup-"):
+            ledger_attempts.append(Path(path))
+            raise ledger_type("ledger unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(capture.os, "replace", replace_then_interrupt)
+    monkeypatch.setattr(transaction.os, "open", refuse_ledger)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        producer.write_report(report, {"new": True})
+    assert caught.value is primary
+    assert replacements == [report, report]
+    assert report.read_bytes() == PRIOR
+    retained = _reopen(tmp_path)
+    assert len(ledger_attempts) == 1
+    assert any(str(retained.manifest) in note for note in primary.__notes__)
+    assert any("failure ledger incomplete" in note for note in primary.__notes__)
+    assert any(row.get("phase") == "failure ledger" for row in primary.producer_cleanup)

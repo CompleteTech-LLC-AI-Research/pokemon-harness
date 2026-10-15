@@ -178,6 +178,10 @@ class _OperationScope:
         for row in self.evidence:
             recovery = row.get("recovery")
             if isinstance(recovery, dict) and isinstance(recovery.get("manifest"), str):
+                # Canonical recovery survives successful restoration too. Its
+                # location must not depend on a later best-effort ledger write.
+                safe_note(primary, "producer prior report recovery retained; manifest="
+                          + recovery["manifest"])
                 directories.add(Path(recovery["manifest"]).parent)
         for directory in directories:
             ledger = None
