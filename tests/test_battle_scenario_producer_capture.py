@@ -798,3 +798,60 @@ def test_producer_capture_interruption_at_publish_leaves_no_partial_file(
 
     assert not (tmp_path / "out.state").exists()
     assert _staged_files(tmp_path) == []
+
+
+@pytest.mark.parametrize("injected", [False, True])
+@pytest.mark.parametrize("kind", ["valid", "missing", "launcher", "directory", "nonexecutable"])
+def test_capture_interpreter_request_uses_the_actual_measurement_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, injected: bool, kind: str
+) -> None:
+    """Default measurement rejects missing siblings before opening a session."""
+    environment = tmp_path / "venv"
+    bindir = environment / "bin"
+    bindir.mkdir(parents=True)
+    observed = bindir / "python"
+    observed.symlink_to(sys.executable)
+    valid = kind == "valid"
+    requested = observed if valid else bindir / "python-requested"
+    if kind in {"launcher", "nonexecutable"}:
+        requested.write_text("#!/bin/sh\nexit 99\n")
+        requested.chmod(0o755 if kind == "launcher" else 0o644)
+    elif kind == "directory":
+        requested.mkdir()
+    monkeypatch.setattr(producer.sys, "executable", str(observed))
+    monkeypatch.setattr(producer.sys, "prefix", str(environment))
+    monkeypatch.setattr(producer, "_pyboy_cython_flag", lambda: False)
+    monkeypatch.setattr(producer, "_pyboy_module_version", lambda: "observed-version")
+    monkeypatch.setattr(producer, "_pyboy_module_revision", lambda: "observed-revision")
+    opened = []
+
+    def factory(**_kwargs: object) -> _FakeSession:
+        opened.append(True)
+        return _FakeSession()
+
+    monkeypatch.setattr(producer, "_default_session_factory", factory)
+    kwargs = _capture_kwargs(tmp_path, _writable_scenario(), python=requested, repo_root=ROOT)
+    if injected:
+        kwargs["session_factory"] = factory
+    if not valid and (not injected or kind in {"missing", "directory"}):
+        with pytest.raises(producer.ScenarioRefusal, match="requested interpreter"):
+            producer.capture_battle_scenario(**kwargs)
+        assert opened == []
+        assert not (tmp_path / "out.state").exists()
+        assert _staged_files(tmp_path) == []
+        return
+
+    record = producer.capture_battle_scenario(**kwargs)
+    assert opened == [True]
+    assert record["runtime_request"] == {"runtime": "source", "python": str(requested)}
+    if injected:
+        assert record["runtime_measurement"] == "not_measured"
+        assert record["runtime_identity"] is None
+        assert record["runtime"] == "unmeasured"
+        assert record["python"] is None
+    else:
+        assert record["runtime_measurement"] == "measured"
+        assert record["runtime_identity"]["requested_python"] == str(requested)
+        assert record["runtime_identity"]["executable_path"] == str(observed)
+        assert record["runtime_identity"]["environment"] == str(environment)
+        assert record["runtime_identity"]["measured"] is True

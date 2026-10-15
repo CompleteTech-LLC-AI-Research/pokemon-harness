@@ -8,6 +8,7 @@ calls to facade-owned, monkeypatch-patched entry points resolve through
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -92,14 +93,51 @@ def _pyboy_module_revision() -> str | None:
 
 
 def _interpreter_environment(path: Path) -> str:
-    """Return the environment root a ``<environment>/bin/python`` path belongs to.
+    """Normalize directories without resolving the executable out of its venv.
 
-    ``.venv-source/bin/python`` and ``.venv-native/bin/python`` can both be
-    symlinks to the same ``/usr/bin/python3.11``, so the resolved binary cannot
-    tell two environments apart.  The directory above ``bin`` is what identifies
-    the environment, exactly as ``sys.prefix`` does for the running process.
+    POSIX ``bin/python``, Windows ``Scripts/python.exe``, and base-install
+    ``python.exe`` paths are supported. Relative paths are relative to cwd;
+    directory symlinks and platform case normalization identify the same root.
+    A bare name is a relative path, not a PATH search or launcher protocol.
     """
-    return str(path.parent.parent)
+    directory = path.absolute().parent.resolve()
+    if directory.name.lower() in {"bin", "scripts"}:
+        directory = directory.parent
+    return os.path.normcase(str(directory))
+
+
+def _validate_interpreter_request(python: str | Path, executable: str) -> None:
+    """Observe filesystem identity only; never execute a supplied launcher.
+
+    Same-environment aliases (symlinks or hard links) must name the running
+    interpreter file. A copied binary or a wrapper is not an observed alias.
+    This is a point-in-time check, not a promise about later path replacement;
+    capture continues in this process and never launches the requested path.
+    """
+    requested = Path(python)
+    try:
+        environment = os.path.normcase(str(Path(sys.prefix).resolve()))
+        requested_environment = _interpreter_environment(requested)
+        if requested_environment != environment:
+            raise ScenarioRefusal(
+                f"requested interpreter {python} belongs to the environment "
+                f"{requested_environment!r}, which is not the executing interpreter "
+                f"environment {environment!r} ({executable}); refusing to record an interpreter "
+                "this process does not run in, even when both binaries resolve to the same file"
+            )
+        if not requested.is_file() or not os.access(requested, os.X_OK):
+            raise ScenarioRefusal(
+                f"requested interpreter {python} must be an existing executable file"
+            )
+        if not requested.samefile(executable):
+            raise ScenarioRefusal(
+                f"requested interpreter {python} is not the executing interpreter "
+                f"file ({executable}); wrappers and copied binaries are not measured aliases"
+            )
+    except ScenarioRefusal:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ScenarioRefusal(f"requested interpreter {python} cannot be verified: {exc}") from exc
 
 
 def measure_runtime_identity(
@@ -135,14 +173,7 @@ def measure_runtime_identity(
     executable = str(sys.executable)
     environment = str(sys.prefix)
     if python is not None:
-        requested_environment = _interpreter_environment(Path(python))
-        if requested_environment != environment:
-            raise ScenarioRefusal(
-                f"requested interpreter {python} belongs to the environment "
-                f"{requested_environment!r}, which is not the executing interpreter "
-                f"environment {environment!r} ({executable}); refusing to record an interpreter "
-                "this process does not run in, even when both binaries resolve to the same file"
-            )
+        _validate_interpreter_request(python, executable)
     from pokered_harness.config import load_versions
 
     pins = load_versions(Path(repo_root) / "VERSIONS.md")
