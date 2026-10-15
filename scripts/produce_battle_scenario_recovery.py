@@ -96,6 +96,9 @@ class _WithdrawalResult:
     disposition: Literal["removed", "restored", "foreign-preserved", "unresolved"]
     recovery: _ReportRecovery | None = None
     error: str | None = None
+    observation: str | None = None
+    exception_type: str | None = None
+    cleanup: tuple[dict[str, Any], ...] = ()
 
     def as_note(self) -> str | None:
         return self.error

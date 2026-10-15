@@ -8,7 +8,6 @@ recovery is retained on disk; competing-namespace races remain open in #610.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import math
@@ -46,7 +45,6 @@ from scripts.produce_battle_scenario_model import (
     CaptureNotAvailable,
     CapturePreconditionFailed,
     ScenarioRefusal,
-    _note,
 )
 from scripts.produce_battle_scenario_recovery import (
     _ReportRecovery,
@@ -55,8 +53,8 @@ from scripts.produce_battle_scenario_recovery import (
 )
 
 from scripts.produce_battle_scenario_transaction import (
-    active_scope, bind_operation, failure_cleanup, normal_guard, operation_entry,
-    track_publication,
+    active_scope, bind_operation, failure_cleanup, nested_evidence, normal_guard, operation_entry,
+    resource_scope, safe_note, safe_text, track_publication,
 )
 
 
@@ -184,27 +182,23 @@ class _CaptureBudget:
 
 
 def _withdraw_all(exc: BaseException, *publications: _OwnedPublication | None) -> None:
-    """Undo every owned publication, attaching cleanup failures to ``exc``.
-
-    The primary error always stays primary: a cleanup that cannot complete is
-    reported as a note instead of replacing the failure a caller must act on.
-    """
-    for publication in publications:
-        if publication is None:
-            continue
-        try:
-            error = publication.withdraw()
-        except BaseException as cleanup_exc:  # noqa: BLE001 - isolate rollback interruptions
-            # A failed earlier rollback must not strand a later report's
-            # recovery. Keep the original error primary and attempt all tokens.
-            _note(exc, f"publication rollback raised {cleanup_exc!r}")
-            if publication.displaced is not None:
-                _note(exc, publication.displaced.describe())
-            for note in getattr(cleanup_exc, "__notes__", ()):
-                _note(exc, note)
-        else:
-            if error is not None:
-                _note(exc, error)
+    """Legacy string-adapter call shape; real operation scopes use detailed results."""
+    with failure_cleanup():
+        for publication in publications:
+            if publication is None:
+                continue
+            try:
+                error = publication.withdraw()
+            except BaseException as cleanup_exc:  # noqa: BLE001 - independent legacy consumers
+                safe_note(exc, "publication rollback raised", cleanup_exc)
+                try:
+                    if publication.displaced is not None:
+                        safe_note(exc, publication.displaced.describe())
+                except BaseException:  # noqa: BLE001 - formatting cannot stop later cleanup
+                    safe_note(exc, "publication recovery description unavailable")
+            else:
+                if error is not None:
+                    safe_note(exc, "publication rollback unresolved", error)
 
 
 @dataclass(frozen=True)
@@ -232,59 +226,60 @@ class _OwnedPublication:
         """Retained prior-report evidence for later cleanup/recovery consumers."""
         return self.displaced.metadata() if self.displaced is not None else None
 
-    def is_owned(self) -> bool:
-        """Whether ``path`` currently matches the retained inode/device pair.
-
-        ``lstat`` is deliberate: a competing writer's symlink pointing at this
-        capture's own inode is a *different* directory entry owned by that
-        writer. Matching this pair is an observation, not proof of which
-        operation installed the entry or permission for an atomic mutation.
-        """
+    def observe_ownership(self) -> tuple[str, BaseException | None]:
+        """Observe only; no inode probe makes subsequent mutation atomic (R3-01)."""
         try:
             entry = os.lstat(self.path)
-        except OSError:
-            return False
-        return (entry.st_ino, entry.st_dev) == (self.inode, self.device)
+        except FileNotFoundError:
+            return "absent", None
+        except BaseException as exc:  # noqa: BLE001 - an interrupted probe is uncertainty
+            return "unresolved", exc
+        if (entry.st_ino, entry.st_dev) == (self.inode, self.device):
+            return "owned", None
+        return "observed-foreign", None
+
+    def is_owned(self) -> bool:
+        """Compatibility observation only; destructive cleanup uses detailed state."""
+        return self.observe_ownership()[0] == "owned"
 
     def withdraw(self) -> str | None:
         """Compatibility adapter; detailed recovery remains available on token."""
         return self.withdraw_result().as_note()
 
     def withdraw_result(self) -> _WithdrawalResult:
-        """Attempt rollback under the existing exclusive namespace assumption.
-
-        An already observed foreign entry is left alone. This check does not
-        close the probe/mutation race; R3-01 remains open. Prior report recovery
-        is retained on disk even when restoration fails or ownership is lost.
-        """
-        if not self.is_owned():
-            if self.displaced is not None:
+        """One rollback attempt under the existing exclusive-writer assumption."""
+        observation, probe_error = self.observe_ownership()
+        if observation != "owned":
+            if observation == "unresolved" or self.displaced is not None:
                 return _WithdrawalResult(
-                    "unresolved",
-                    self.displaced,
-                    f"report ownership unresolved at {self.path}; {self.displaced.describe()}",
+                    "unresolved", self.displaced,
+                    f"report/output ownership unresolved at {safe_text(self.path)}; "
+                    f"probe={safe_text(probe_error)}; "
+                    f"{safe_text(self.recovery_metadata())}", observation,
+                    type(probe_error).__name__ if probe_error is not None else None,
                 )
-            return _WithdrawalResult("foreign-preserved")
+            return _WithdrawalResult("foreign-preserved", observation=observation)
         if self.displaced is None:
             try:
                 os.unlink(self.path)
-            except OSError as exc:
+            except BaseException as exc:  # noqa: BLE001 - unresolved instead of false cleanup
                 return _WithdrawalResult(
-                    "unresolved", error=f"owned output {self.path} could not be removed: {exc!r}"
+                    "unresolved", error=f"owned output {safe_text(self.path)} could not be "
+                    f"removed: {safe_text(exc)}", observation=observation,
+                    exception_type=type(exc).__name__,
                 )
-            return _WithdrawalResult("removed")
+            return _WithdrawalResult("removed", observation=observation)
         try:
-            _write_bytes_atomically(self.path, self.displaced.read_verified())
-        except BaseException as exc:  # noqa: BLE001 - retain recovery on interruption
-            # Do not remove the current report after failed restoration. Both
-            # it and the prior report's recovery remain available for diagnosis.
+            with failure_cleanup():
+                _write_bytes_atomically(self.path, self.displaced.read_verified())
+        except BaseException as exc:  # noqa: BLE001 - canonical recovery is never disposed
             return _WithdrawalResult(
-                "unresolved",
-                self.displaced,
-                f"replaced entry {self.path} could not be restored: {exc!r}; "
-                f"{self.displaced.describe()}",
+                "unresolved", self.displaced,
+                f"replaced entry {safe_text(self.path)} could not be restored: "
+                f"{safe_text(exc)}; {safe_text(self.recovery_metadata())}", observation,
+                type(exc).__name__, cleanup=nested_evidence(exc),
             )
-        return _WithdrawalResult("restored", self.displaced)
+        return _WithdrawalResult("restored", self.displaced, observation=observation)
 
 
 def _entry_identity(path: Path) -> tuple[int, int]:
@@ -293,21 +288,42 @@ def _entry_identity(path: Path) -> tuple[int, int]:
     return entry.st_ino, entry.st_dev
 
 
-def _write_bytes_atomically(path: Path, payload: bytes) -> None:
-    """Replace ``path`` with ``payload`` through an fsynced private sibling."""
-    staged = path.with_name(f".{path.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+def _stage_bytes(scope: Any, staged: Path, payload: bytes) -> tuple[_OwnedPublication, Any]:
+    """Register descriptor, staging inode and stream close as independent actions."""
+    uncertain = scope.action(("staging", str(staged)), staged, "staging cleanup",
+                             lambda: _WithdrawalResult("unresolved", error="staging identity unknown",
+                                                       observation="unresolved"))
+    normal_guard("staging creation")
     try:
         descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            normal_guard("payload staging")
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-            normal_guard("payload staging")
+    except FileExistsError:
+        scope.disarm(uncertain)  # definite noncreation does not own a foreign entry
+        raise
+    descriptor_action = scope.action(("descriptor", descriptor), staged, "staging descriptor close",
+                                     lambda: os.close(descriptor))
+    entry = os.fstat(descriptor)
+    token = _OwnedPublication(staged, entry.st_ino, entry.st_dev)
+    uncertain.callback = token.withdraw_result
+    stream = os.fdopen(descriptor, "wb")
+    scope.disarm(descriptor_action)  # ownership transfers to the stream
+    close = scope.action(("stream", id(stream)), staged, "staging stream close", stream.close)
+    normal_guard("payload staging")
+    stream.write(payload)
+    stream.flush()
+    os.fsync(stream.fileno())
+    normal_guard("payload staging")
+    scope.perform(close)
+    normal_guard("payload staging close")
+    return token, uncertain
+
+
+def _write_bytes_atomically(path: Path, payload: bytes) -> None:
+    """Restore via independent staging; never mutate the canonical prior copy."""
+    with resource_scope() as scope:
+        staged = path.with_name(f".{path.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+        _, stage = _stage_bytes(scope, staged, payload)
         os.replace(staged, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(staged)
+        scope.disarm(stage)
 
 
 def _remove_staged(path: Path) -> str | None:
@@ -316,56 +332,40 @@ def _remove_staged(path: Path) -> str | None:
         os.unlink(path)
     except FileNotFoundError:
         return None
-    except OSError as exc:
-        return f"staged file {path} could not be removed: {exc!r}"
+    except BaseException as exc:  # noqa: BLE001 - compatibility cleanup reports uncertainty
+        return f"staged file {safe_text(path)} could not be removed: {safe_text(exc)}"
     return None
 
 
 def write_report(path: str | Path, payload: Any) -> _OwnedPublication:
-    """Write a private capture/replay report atomically.
-
-    The report is staged in a private sibling and moved into place, so a failed
-    or partial write never replaces an existing report and never leaves a
-    partial file behind.  The returned publication carries the inode this call
-    installed. Prior regular report bytes are secured in a private recovery
-    directory before replacement and retained across every later disposition.
-    Replacing/withdrawing still requires exclusive namespace access (R3-01).
-    """
-    normal_guard("report preparation")
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staged = target.with_name(f".{target.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
-    displaced: _ReportRecovery | None = None
-    publication: _OwnedPublication | None = None
-    try:
+    """Preserve the two-argument facade; retained recovery is not transaction commit."""
+    with resource_scope() as scope:
+        normal_guard("report preparation")
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staged = target.with_name(f".{target.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
         displaced = _secure_prior_report(target)
+        snapshot = None
+        if displaced is not None:
+            snapshot = scope.action(("recovery", id(displaced)), target,
+                                    "prior snapshot retained",
+                                    lambda: _WithdrawalResult("unresolved", displaced,
+                                        "report preparation failed; publication outcome unknown"),
+                                    displaced.metadata)
         normal_guard("report recovery preparation")
         encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         normal_guard("report encoding")
-        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            normal_guard("report staging")
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
+        staged_token, stage = _stage_bytes(scope, staged, encoded)
         normal_guard("report staging close")
-        # Retain the identity before the rename: an interrupt delivered inside
-        # ``os.replace`` (after the entry exists, before it returns) must still
-        # be recognisable as this capture's own publication.
-        publication = _OwnedPublication(target, *_entry_identity(staged), displaced)
+        publication = _OwnedPublication(target, staged_token.inode, staged_token.device, displaced)
+        scope.publication(publication)  # lower helper owns interruption before return
+        if snapshot is not None:
+            scope.disarm(snapshot)  # the publication action now carries recovery evidence
         normal_guard("report publication")
         os.replace(staged, target)
+        scope.disarm(stage)
         normal_guard("report publication")
         return publication
-    except BaseException as exc:
-        if displaced is not None:
-            _note(exc, displaced.describe())
-        with failure_cleanup():
-            _withdraw_all(exc, publication)
-        staging_error = _remove_staged(staged)
-        if staging_error is not None:
-            _note(exc, staging_error)
-        raise
 
 
 def refuse_report_alias(report: str | Path, *protected: str | Path | None) -> None:
@@ -538,58 +538,29 @@ def _drive_to_link_reception(session: Any, budget: _CaptureBudget) -> None:
 def _write_fixture_exclusive(
     output: Path, payload: bytes, *, guard: Callable[[str], None] | None = None
 ) -> _OwnedPublication:
-    """Publish fixture bytes without ever overwriting, or leaving a partial file.
-
-    The payload is staged in a private sibling and published with ``os.link``,
-    which fails if the destination already exists. A definite FileExistsError
-    grants no ownership, including when a competitor links the staging inode.
-    Publication/finalization failures attempt the existing rollback protocol.
-    Interrupted syscalls and post-probe pathname replacement remain ambiguous
-    under uncooperative writers (open R3-01); retained inode identity does not
-    supply an atomic conditional unlink. Ordinary rollback assumes exclusive
-    namespace access.
-
-    ``guard`` is called immediately before the link and again once the entry
-    exists, so a caller's deadline is re-checked with the publication in place
-    and a late expiry rolls it back instead of admitting it.
-    """
-    output.parent.mkdir(parents=True, exist_ok=True)
-    staged = output.with_name(f".{output.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
-    publication: _OwnedPublication | None = None
-    try:
-        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            normal_guard("payload staging")
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-            normal_guard("payload staging")
+    """Exclusive publication; ambiguous-link and post-probe ABA remain #610 OPEN."""
+    with resource_scope() as scope:
+        normal_guard("fixture directory preparation")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        normal_guard("fixture directory preparation")
+        staged = output.with_name(f".{output.name}.partial-{os.getpid()}-{time.monotonic_ns()}")
+        staged_token, stage = _stage_bytes(scope, staged, payload)
         if guard is not None:
             guard("fixture staging")
-        # Retained before the link: once the entry exists the staging path may
-        # already be gone. An interrupted link is still ambiguous: matching this
-        # inode cannot prove directory-entry provenance (open R3-01 remainder).
-        publication = _OwnedPublication(output, *_entry_identity(staged))
+        publication = _OwnedPublication(output, staged_token.inode, staged_token.device)
+        published = scope.publication(publication)
         try:
             os.link(staged, output)
         except FileExistsError as exc:
-            # Under the local-filesystem contract this call did not publish.
-            # A competing link to the staging inode grants us no ownership.
-            publication = None
+            scope.disarm(published)  # definite local EEXIST grants no ownership
             raise ScenarioRefusal(f"refusing to overwrite existing output: {output}") from exc
         if guard is not None:
             guard("fixture publication")
-        # Finalization: with the staging entry gone the operation has committed.
+        # Normal finalization is distinct from its single failure-cleanup action.
         os.unlink(staged)
+        scope.disarm(stage)
+        normal_guard("fixture staging close")
         return publication
-    except BaseException as exc:
-        publication_error = publication.withdraw() if publication is not None else None
-        staging_error = _remove_staged(staged)
-        if publication_error is not None:
-            _note(exc, publication_error)
-        if staging_error is not None:
-            _note(exc, staging_error)
-        raise
 
 
 @operation_entry("capture")
@@ -619,6 +590,11 @@ def capture_battle_scenario(
     history, the runtime identity, or the output hashes.
     """
     del report
+    if not isinstance(bounds, dict):
+        raise ScenarioRefusal("capture bounds must be a declared object")
+    bounds = validate_bounds(max_frames=bounds.get("max_frames"),
+                             max_wall_seconds=bounds.get("max_wall_seconds"),
+                             max_inputs=bounds.get("max_inputs"))
     bind_operation(bounds["max_wall_seconds"], deadline)
     scenario_id = scenario["scenario_id"]
     validate_scenario_metadata(scenario, scenario_id)
@@ -664,8 +640,10 @@ def capture_battle_scenario(
     budget = _CaptureBudget(bounds, clock=clock, deadline=deadline)
     session: Any | None = None
     failure: BaseException | None = None
+    session_action = None
     try:
         try:
+            normal_guard("session open")
             session = factory(
                 rom=rom,
                 sym=sym,
@@ -680,7 +658,12 @@ def capture_battle_scenario(
             raise CaptureNotAvailable(
                 f"{_CAPTURE_MESSAGE} The pinned runtime could not be opened: {exc}"
             ) from exc
+        session_action = active_scope().action(("session", id(session)), "owned capture session",
+                                                "session close", lambda: session.close())
+        normal_guard("session open")
+        normal_guard("state load")
         session.load_state(Path(input_fixture).read_bytes())
+        normal_guard("state load")
         _drive_to_link_reception(session, budget)
         observed = _observe_boundary(session)
         budget.check_wall("boundary observation")
@@ -701,18 +684,25 @@ def capture_battle_scenario(
         failure = exc
         raise
     finally:
-        if session is not None:
-            try:
-                session.close()
-            except Exception as close_exc:
-                if failure is None:
-                    # An otherwise successful capture whose teardown failed has
-                    # not established bounded cleanup, so it must not publish.
+        if session_action is not None:
+            owner = active_scope()
+            if failure is not None:
+                with failure_cleanup():
+                    owner.attempt(session_action, failure)
+            else:
+                try:
+                    normal_guard("session close")
+                except BaseException as expiry:
+                    with failure_cleanup():
+                        owner.attempt(session_action, expiry)
+                    raise
+                try:
+                    owner.perform(session_action)
+                except Exception as close_exc:
                     raise ScenarioRefusal(
-                        f"capture teardown failed for {scenario_id!r} and the owned session was "
-                        f"not closed; no bytes were written: {close_exc}"
+                        f"capture teardown failed; no bytes were written: {safe_text(close_exc)}"
                     ) from close_exc
-                _note(failure, f"session.close() also failed: {close_exc!r}")
+                normal_guard("session close")
 
     effective_bounds = budget.bounds
     runtime_identity = plan.get("runtime_identity") if isinstance(plan, dict) else None
