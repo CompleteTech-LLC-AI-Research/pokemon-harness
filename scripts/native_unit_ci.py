@@ -225,7 +225,7 @@ def _read_json_object(path: Path, description: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read {description}: {type(exc).__name__}: {exc}") from exc
     if not isinstance(value, dict):
-        raise ValueError(f"{description} root is not an object")
+        raise TypeError(f"{description} root is not an object")
     return value
 
 
@@ -305,7 +305,7 @@ def _require_gate_success(report: dict[str, Any]) -> dict[str, Any]:
             "errors",
         )
         if not isinstance(counts, dict):
-            raise ValueError(f"production gate tier {name!r} has no counts object")
+            raise TypeError(f"production gate tier {name!r} has no counts object")
         normalized: dict[str, int] = {}
         for field in required_count_fields:
             value = counts.get(field)
