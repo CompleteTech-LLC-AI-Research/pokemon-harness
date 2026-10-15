@@ -365,12 +365,12 @@ def finalize(root: Path, output: Path) -> None:
         # Import only for finalization, after the environment and checkout are ready.
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
-        from scripts import production_gate_evidence
+        from scripts import production_gate
 
         gate_dir = evidence / "gate"
-        production_gate_evidence.verify_evidence_bundle(gate_dir)
+        production_gate.verify_evidence_bundle(gate_dir)
         report = _read_json_object(gate_dir / "gate-report.json", "production gate report")
-        if report.get("schema_version") != production_gate_evidence.EVIDENCE_SCHEMA_VERSION:
+        if report.get("schema_version") != production_gate.EVIDENCE_SCHEMA_VERSION:
             raise ValueError("production gate report schema version is unsupported")
         receipt["gate"] = _require_gate_success(report)
         receipt["harness_head"] = head

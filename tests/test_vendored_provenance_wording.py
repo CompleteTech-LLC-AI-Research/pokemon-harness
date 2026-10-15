@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -274,7 +275,7 @@ def native_ci_modules(native_ci, tmp_path, monkeypatch):
 def _write_native_terminal_inputs(native_ci, root, output, *, variant="valid"):
     if str(PROJECT_ROOT) not in native_ci.sys.path:
         native_ci.sys.path.insert(0, str(PROJECT_ROOT))
-    evidence_module = native_ci.importlib.import_module("scripts.production_gate_evidence")
+    gate_module = native_ci.importlib.import_module("scripts.production_gate")
     evidence = output / "evidence"
     (evidence / "gate").mkdir(parents=True)
     head = native_ci._git(root, "rev-parse", "HEAD")
@@ -324,7 +325,7 @@ def _write_native_terminal_inputs(native_ci, root, output, *, variant="valid"):
             }
         )
     report = {
-        "schema_version": evidence_module.EVIDENCE_SCHEMA_VERSION,
+        "schema_version": gate_module.EVIDENCE_SCHEMA_VERSION,
         "generated_at": "2026-10-14T00:00:00Z",
         "project_root": "<project-root>",
         "rom_root": "<rom-root>",
@@ -362,9 +363,9 @@ def _write_native_terminal_inputs(native_ci, root, output, *, variant="valid"):
         "capacity": {},
         "safety": {},
     }
-    evidence_module.write_evidence_bundle(evidence / "gate", report)
+    gate_module.write_evidence_bundle(evidence / "gate", report)
     if variant == "corrupt_bundle":
-        report_path = evidence / "gate" / evidence_module.EVIDENCE_REPORT_FILENAME
+        report_path = evidence / "gate" / gate_module.EVIDENCE_REPORT_FILENAME
         report_path.write_text(report_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
 
@@ -406,6 +407,40 @@ def test_native_ci_terminal_receipt_requires_complete_passing_gate(
         receipt = json.loads((evidence / "native-terminal.json").read_text(encoding="utf-8"))
         assert receipt["status"] == "FAIL"
         assert receipt["problems"]
+
+
+def test_native_ci_terminal_check_imports_gate_facade_in_fresh_process(
+    native_ci, native_ci_repo, tmp_path, monkeypatch
+):
+    """The terminal CLI must load the canonical gate facade in a clean process."""
+    monkeypatch.setattr(native_ci, "host_facts", lambda: ({}, []))
+    output = tmp_path / "native-output"
+    native_ci.prepare(native_ci_repo, output)
+    _write_native_terminal_inputs(native_ci, native_ci_repo, output)
+
+    fresh_process = """
+import sys
+from pathlib import Path
+from scripts import native_unit_ci
+
+assert "scripts.production_gate" not in sys.modules
+assert "scripts.production_gate_evidence" not in sys.modules
+native_unit_ci.ROOT = Path(sys.argv[1])
+raise SystemExit(native_unit_ci.main(["terminal-check", sys.argv[2]]))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", fresh_process, str(native_ci_repo), str(output)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    receipt_path = output / "evidence" / "native-terminal.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "PASS"
+    assert receipt["gate"]["timing_repetitions"] == 5
 
 
 def test_native_ci_accepts_matching_native_pinball_identity(native_ci, native_ci_modules):
