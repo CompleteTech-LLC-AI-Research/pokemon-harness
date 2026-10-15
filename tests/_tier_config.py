@@ -882,6 +882,7 @@ TIMING_SENSITIVE_TESTS = frozenset(
     }
 )
 
+
 def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
     """Return all production-gate markers for one collected test.
 
@@ -899,7 +900,6 @@ def classify_test(path: str | Path, test_name: str) -> frozenset[str]:
         return frozenset()
 
     marks: set[str] = set()
-
     if filename in REAL_ROM_MODULES:
         marks.add("real_rom")
     elif filename in UNIT_MODULES:
