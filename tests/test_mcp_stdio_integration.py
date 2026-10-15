@@ -286,7 +286,17 @@ async def test_stdio_save_state_roundtrip_is_deterministic():
         assert _payload(load_result) == {"ok": True}
         restored = await session.read_resource("pokered://game-state")
         restored_body = json.loads(restored.contents[0].text)  # type: ignore[union-attr]
+        expected_epoch = expected_body.pop("epoch")
+        restored_epoch = restored_body.pop("epoch")
         assert restored_body == expected_body
+        assert expected_epoch["session_id"] == restored_epoch["session_id"]
+        assert expected_epoch["tick"] == 260
+        assert restored_epoch["tick"] == 560
+        assert restored_epoch["tick"] > expected_epoch["tick"]
+        assert expected_epoch["load_generation"] == 1
+        assert restored_epoch["load_generation"] == expected_epoch["load_generation"] + 1
+        assert expected_epoch["reset_generation"] == 0
+        assert restored_epoch["reset_generation"] == expected_epoch["reset_generation"]
         saved_again = await session.call_tool("save_state", {})
         assert saved_again.isError is not True
         saved_again_blob = base64.b64decode(
