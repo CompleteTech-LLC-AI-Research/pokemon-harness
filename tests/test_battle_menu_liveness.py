@@ -211,6 +211,197 @@ def test_committed_move_tracks_the_roms_own_move_selection_entry():
     assert producer._committed_move(counters, 1, baseline) is False
     counters = _counters_with_selection([20, 20], [8, 10])
     assert producer._committed_move(counters, 1, baseline) is True
+    assert producer._committed_move(counters, 0, baseline, required_delta=2) is False
+    counters = _counters_with_selection([20, 20], [9, 10])
+    assert producer._committed_move(counters, 0, baseline, required_delta=2) is True
+
+
+def _settlement_counters(main, select_enemy):
+    return {
+        "MainInBattleLoop": list(main),
+        "MainInBattleLoop.selectEnemyMove": list(select_enemy),
+        "DisplayBattleMenu": [55, 66],
+        "MoveSelectionMenu": [0, 0],
+        "LinkBattleExchangeData": [0, 0],
+        "ExecutePlayerMove": [0, 0],
+        "ExecuteEnemyMove": [0, 0],
+        "HandlePlayerMonFainted": [0, 0],
+        "HandleEnemyMonFainted": [0, 0],
+        "EndOfBattle": [0, 0],
+    }
+
+
+class _SettlementSession:
+    def __init__(self, index, counters):
+        self.index = index
+        self.counters = counters
+        self.link = None
+        self.presses = []
+
+    def press(self, button, *, duration):
+        self.presses.append(
+            {
+                "button": button,
+                "duration": duration,
+                "steps": len(self.link.steps),
+                "main": tuple(self.counters["MainInBattleLoop"]),
+                "select": tuple(self.counters["MainInBattleLoop.selectEnemyMove"]),
+                "display": tuple(self.counters["DisplayBattleMenu"]),
+            }
+        )
+
+
+class _SettlementLink:
+    def __init__(self, transition):
+        self.transition = transition
+        self.steps = []
+
+    def step_interleaved(self, frames, *, chunk_cycles):
+        self.steps.append((frames, chunk_cycles))
+        self.transition(len(self.steps))
+
+
+def _install_settlement_scheduler(monkeypatch, counters, ready, transition):
+    from scripts import produce_battle_state_fixtures_drive as drive
+
+    sessions = [_SettlementSession(index, counters) for index in range(2)]
+    link = _SettlementLink(transition)
+    for session in sessions:
+        session.link = link
+    monkeypatch.setattr(drive, "_battle_menu_input_ready", lambda session: ready[session.index])
+    monkeypatch.setattr(
+        drive,
+        "_menu_awaiting_a",
+        lambda session: "command" if ready[session.index] else None,
+    )
+    monkeypatch.setattr(drive, "_byte", lambda session, name: 0)
+    monkeypatch.setattr(drive, "_battle_ended", lambda session: False)
+    monkeypatch.setattr(drive, "_faint_deltas", lambda counters, index, before: (0, 0))
+    return drive, sessions, link
+
+
+@pytest.mark.parametrize(
+    (
+        "baseline_kind",
+        "entry_main",
+        "entry_select",
+        "old_main",
+        "old_select",
+        "require_counter",
+    ),
+    (
+        ("first-turn", [101, 200], [301, 401], [100, 200], [300, 400], True),
+        ("live-command", [701, 901], [1101, 1201], [701, 901], [1100, 1200], True),
+        ("replacement", [4000, 6000], [7000, 9000], None, None, False),
+    ),
+)
+def test_settlement_does_not_reuse_a_selection_from_an_older_caller_baseline(
+    monkeypatch,
+    baseline_kind,
+    entry_main,
+    entry_select,
+    old_main,
+    old_select,
+    require_counter,
+):
+    """Pre-turn, live-command and replacement baselines share a fresh gate.
+
+    The first two caller baselines already have a peer selection increment.
+    When side 0 enters a later loop but side 1 has not selected that
+    continuation, that old increment must not authorize another A press.
+    Replacement settlement has no caller baseline and retains the same rule.
+    """
+    from scripts import produce_battle_state_fixtures_drive as drive
+
+    counters = _settlement_counters(entry_main, entry_select)
+    if baseline_kind == "replacement":
+        baseline = None
+    else:
+        baseline = drive._baseline(_settlement_counters(old_main, old_select))
+    ready = [False, False]
+
+    def transition(step):
+        if step == 1:
+            counters["MainInBattleLoop"][0] += 1
+            ready[0] = True
+        elif step == 2:
+            counters["MainInBattleLoop"][1] += 1
+            ready[:] = [True, True]
+
+    drive, sessions, link = _install_settlement_scheduler(monkeypatch, counters, ready, transition)
+    result = drive._settle_turn(
+        sessions[0],
+        sessions[1],
+        link,
+        counters,
+        step_frames=20,
+        frame_budget=80,
+        chunk_cycles=256,
+        require_counter=require_counter,
+        baseline=baseline,
+        keep_alive=True,
+    )
+
+    assert result == {"status": "boundary", "spent": 40}
+    assert [session.presses for session in sessions] == [[], []]
+    assert link.steps == [(20, 256), (20, 256)]
+
+
+def test_charging_skip_commits_the_second_continuation_without_a_menu_counter(monkeypatch):
+    """A skipped-menu peer can authorize the matching later continuation.
+
+    Side 0 reaches its second loop after side 1 has committed only the first
+    skipped-menu turn.  The pump waits for side 1's second selection hook,
+    which advances through the charging skip even though DisplayBattleMenu
+    does not change, then answers exactly one live command menu.
+    """
+    from scripts import produce_battle_state_fixtures_drive as drive
+
+    counters = _settlement_counters([1000, 2000], [3000, 4000])
+    baseline = drive._baseline(counters)
+    ready = [False, False]
+
+    def transition(step):
+        if step == 1:
+            counters["MainInBattleLoop"][0] += 1
+            counters["MainInBattleLoop"][1] += 1
+            counters["MainInBattleLoop.selectEnemyMove"][1] += 1
+        elif step == 2:
+            counters["MainInBattleLoop"][0] += 1
+            ready[0] = True
+        elif step == 3:
+            counters["MainInBattleLoop"][1] += 1
+            counters["MainInBattleLoop.selectEnemyMove"][1] += 1
+        elif step == 4:
+            counters["MainInBattleLoop"][0] += 1
+            counters["MainInBattleLoop"][1] += 1
+            ready[:] = [True, True]
+
+    drive, sessions, link = _install_settlement_scheduler(monkeypatch, counters, ready, transition)
+    result = drive._settle_turn(
+        sessions[0],
+        sessions[1],
+        link,
+        counters,
+        step_frames=20,
+        frame_budget=120,
+        chunk_cycles=256,
+        baseline=baseline,
+        keep_alive=True,
+    )
+
+    assert result == {"status": "boundary", "spent": 80}
+    assert len(sessions[0].presses) == 1
+    assert sessions[0].presses[0] == {
+        "button": "a",
+        "duration": 4,
+        "steps": 3,
+        "main": (1002, 2002),
+        "select": (3000, 4002),
+        "display": (55, 66),
+    }
+    assert sessions[1].presses == []
+    assert link.steps == [(20, 256)] * 4
 
 
 def _bank1_battle_session(*, bank, party_count=6):

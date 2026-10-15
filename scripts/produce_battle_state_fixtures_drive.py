@@ -348,16 +348,23 @@ def _faint_deltas(counters: dict, index: int, before: dict) -> tuple[int, int]:
     return player, enemy
 
 
-def _committed_move(counters: dict, index: int, baseline: dict) -> bool:
-    """True once ``index``'s ROM has moved past its own command menu this turn.
+def _committed_move(
+    counters: dict,
+    index: int,
+    baseline: dict,
+    *,
+    required_delta: int = 1,
+) -> bool:
+    """True once ``index`` has committed enough turns past ``baseline``.
 
     ``MainInBattleLoop.selectEnemyMove`` (``engine/battle/core.asm:347``) is
     reached once per turn, after the side has answered its command menu -- or
     straight after the skip for a charging, thrashing, recharging or trapped
     side, because that skip jumps to the same label.  An increment is therefore
-    the ROM's own witness that this side has committed to the turn's move and
-    can no longer be sent backwards to a command menu, which is exactly the
-    fact a peer needs before it is safe to answer its own command menu.
+    the ROM's own witness that this side has committed to a turn's move and can
+    no longer be sent backwards to a command menu.  ``required_delta`` lets the
+    caller match that witness to a later continuation when the other side has
+    already entered more than one turn loop.
 
     ``MainInBattleLoop`` itself is *not* enough: it is entered at the top of the
     function, ~20 frames before ``DisplayBattleMenu`` makes a side's command
@@ -368,10 +375,11 @@ def _committed_move(counters: dict, index: int, baseline: dict) -> bool:
     the turn-loop gate opened at t=180 and pressed the other side 20 frames too
     early, wedging the pair (``SVBK == 2``, unreadable party, junk HP).
     """
-    return (
+    selected_delta = (
         _counters(counters, "MainInBattleLoop.selectEnemyMove", index)
-        > baseline["select_enemy"][index]
+        - baseline["select_enemy"][index]
     )
+    return selected_delta >= max(1, int(required_delta))
 
 
 def _baseline(counters: dict) -> dict:
@@ -475,16 +483,11 @@ def _pump_menu_input(
     only ever a steering *target*; it never opens the move branch.
 
     The command menu is answered only while ``command_fresh`` is true, which
-    the caller sets once *both* sides have re-entered their own turn loop this
-    turn.  A command menu can open for one side before the *peer* restarts its
-    turn, and answering it at that point sends that side into its move menu
-    while the peer is still finishing the previous turn's loss text; the peer
-    then walks away from the menu the next exchange needs.  Observed on the
-    blue faint pair: answering b's command menu at t=100 -- after b's own turn
-    had restarted but ~100 frames before a restarted at t=200 -- left b parked
-    in ``(1, 5, 195)`` and settled as a timeout, while the same pair driven
-    with no input at all reached a real both-command boundary at t=200 with
-    both sides healthy.
+    the caller sets after the peer has committed the matching continuation.
+    A command menu can open for one side before the peer commits that turn,
+    and answering it early can leave the peer walking away from the menu the
+    next exchange needs.  The caller compares progress since settlement entry
+    so an earlier turn's selection cannot authorize a later command press.
 
     Returns ``(deadline, began_turn, slot)``.  ``began_turn`` is true when the
     press opened a turn's move selection (A on FIGHT); ``slot`` names the move
@@ -545,8 +548,11 @@ def _settle_turn(
     """Advance until the turn ends in a boundary, faint, or terminal state.
 
     ``baseline`` may be the counter snapshot taken when the turn started (the
-    command menu); when omitted, baselines are read at entry, so only a
-    *future* counter increment counts.
+    command menu) and remains the reference for turn, faint and boundary
+    accounting. A separate snapshot is always read at settlement entry for
+    matching command selections to the requesting side's continuation count.
+    When ``baseline`` is omitted, the entry snapshot also supplies the ordinary
+    accounting baseline.
 
     The ROM resolves the turn, but the only input injected here is the single
     press each side's *own* live menu is already waiting for.  That is
@@ -566,8 +572,9 @@ def _settle_turn(
     boundary it snapshotted, and the recorded plan is never invented for a
     turn no boundary exists for.
     """
+    settlement_progress = _baseline(counters)
     if baseline is None:
-        baseline = _baseline(counters)
+        baseline = settlement_progress
     # ``plan`` only supplies move cursors for the adaptive pump; resolution
     # itself is still driven by the ROM once both moves are confirmed.
     slots: list[int | None] = [None, None]
@@ -621,25 +628,34 @@ def _settle_turn(
         # both at a command menu is a boundary and is left untouched for the
         # caller to snapshot.
         if (keep_alive or not require_counter) and not both_command:
-            # A side's command menu is answered only once its *peer* has
-            # committed to this turn's move.  The turn-loop entry alone is not
-            # enough: a side re-enters ``MainInBattleLoop`` ~20 frames before
-            # its own command menu is live, so a gate on that let a side whose
-            # peer was still walking to its menu be pressed a frame early and
-            # wedged (blue turn 9's in-turn replacement).  Requiring the peer's
-            # ``MainInBattleLoop.selectEnemyMove`` increment -- reached after
-            # the peer answers, or skips, its own command menu -- proves the
-            # peer can no longer be sent backwards to a command menu, which is
-            # the only state in which answering this side is safe.
+            # A side's command menu is answered only after its peer has
+            # committed the matching continuation.  The old caller baseline
+            # is still used for turn/faint/boundary accounting, but its select
+            # increments accumulate across bridged turns and cannot establish
+            # that the peer committed this one.  Compare each side's selection
+            # count with settlement-entry progress, and require as many peer
+            # selections as this side has entered turn loops.  The selection
+            # hook also advances when a charging, thrashing, recharging or
+            # trapped side skips its command menu.
             for index, session in enumerate((a, b)):
                 peer = 1 - index
+                required_delta = max(
+                    1,
+                    _counters(counters, "MainInBattleLoop", index)
+                    - settlement_progress["main"][index],
+                )
                 deadline, began, slot = _pump_menu_input(
                     session,
                     next_press=next_press[index],
                     spent=spent,
                     target_slot=slots[index],
                     started=started[index],
-                    command_fresh=_committed_move(counters, peer, baseline),
+                    command_fresh=_committed_move(
+                        counters,
+                        peer,
+                        settlement_progress,
+                        required_delta=required_delta,
+                    ),
                 )
                 next_press[index] = deadline
                 if began:
