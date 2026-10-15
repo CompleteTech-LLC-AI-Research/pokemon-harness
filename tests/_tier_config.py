@@ -55,10 +55,8 @@ REAL_ROM_MODULES = frozenset(
     }
 )
 
-# Keep the ROM-free side explicit as well.  A new ``test_*.py`` file must be
-# reviewed and added to exactly one of these sets before it can enter pytest's
-# collection path.  This is deliberately a little repetitive: the manifest is
-# a guard against a test silently falling into the wrong production tier.
+# Keep ROM-free modules explicit: review each new ``test_*.py`` file into exactly one
+# set before collection; this repetitive manifest guards against the wrong production tier.
 UNIT_MODULES = frozenset(
     {
         "test_normal_red_profile_support.py",
@@ -84,6 +82,8 @@ UNIT_MODULES = frozenset(
         "test_battle_medicine_oracle.py",
         "test_battle_scenario_catalog.py",
         "test_battle_scenario_producer_capture.py",
+        "test_battle_scenario_producer_cleanup.py",
+        "test_battle_scenario_producer_deadline.py",
         "test_battle_scenario_producer_recovery.py",
         "test_battle_scenario_producer_run.py",
         "test_battle_scenario_producer_runtime.py",
