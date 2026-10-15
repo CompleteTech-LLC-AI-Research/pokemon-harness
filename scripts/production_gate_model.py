@@ -473,7 +473,7 @@ class PreparedRuntimeGate:
 def build_execution_plan(
     modes: Sequence[str], selected: Sequence[str], *, early_smoke: bool, fail_fast: bool
 ) -> dict[str, Any]:
-    """Declare ordered work before dispatch, including the smoke's evidence role."""
+    """Declare work; full qualification includes the additional early smoke."""
 
     modes = tuple(modes)
     selected = tuple(selected)
@@ -489,7 +489,7 @@ def build_execution_plan(
         "smoke-only"
         if selected == ("smoke",)
         else "full"
-        if set(selected) == set(DEFAULT_TIERS)
+        if early_smoke and set(selected) == set(DEFAULT_TIERS)
         else "selected-tiers"
     )
     steps = (
