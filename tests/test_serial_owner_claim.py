@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 from pyboy.core.serial import Serial, SerialBackendError
@@ -198,3 +199,164 @@ def test_network_callback_failure_isolated_after_one_native_application() -> Non
         sender.join(timeout=1.0)
         master.stop(timeout_s=1.0)
         slave.stop(timeout_s=1.0)
+
+
+def test_network_dispatch_preserves_existing_native_callback(monkeypatch) -> None:
+    core = Serial(False)
+    core.set_SB(0xA5)
+    core.set_SC(0x80)
+    callback_threads: list[int] = []
+
+    def callback() -> None:
+        callback_threads.append(threading.get_ident())
+
+    core.owner_dispatch_callback = callback
+    gate = SerialOperationGate()
+    master, backend = NetworkBackend.pair()
+    master.start_receiver(local_core=None)
+    backend.start_receiver(
+        local_core=core,
+        irq_callback=callback,
+        serial_gate=gate,
+        dispatch_to_owner=True,
+    )
+
+    def send_and_service() -> int:
+        result: list[object] = []
+
+        def send() -> None:
+            try:
+                result.append(master.on_edge(1, 1))
+            except BaseException as exc:  # noqa: BLE001 - assert outside thread
+                result.append(exc)
+
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while backend._edge_queue.empty():
+            assert time.monotonic() < deadline, "owner request was not queued"
+            time.sleep(0.001)
+        assert backend.service_pending_edges(max_edges=1) == 1
+        sender.join(timeout=1.0)
+        assert not sender.is_alive()
+        assert len(result) == 1 and type(result[0]) is int
+        return result[0]
+
+    gate_held = threading.Event()
+    release_gate = threading.Event()
+    sender_results: list[object] = []
+    owner_results: list[int] = []
+    owner_errors: list[BaseException] = []
+
+    def hold_gate() -> None:
+        with gate:
+            gate_held.set()
+            assert release_gate.wait(timeout=2.0)
+
+    def send_final_edge() -> None:
+        try:
+            sender_results.append(master.on_edge(1, 1))
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            sender_results.append(exc)
+
+    def service_final_edge() -> None:
+        try:
+            owner_results.append(backend.service_pending_edges(max_edges=1))
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            owner_errors.append(exc)
+
+    holder = threading.Thread(target=hold_gate, daemon=True)
+    sender = threading.Thread(target=send_final_edge, daemon=True)
+    service = threading.Thread(target=service_final_edge, daemon=True)
+    try:
+        assert backend._local_core is core
+        assert backend._irq_callback is callback
+        assert core.owner_dispatch_callback is callback
+        for _ in range(7):
+            send_and_service()
+            assert callback_threads == []
+
+        holder.start()
+        assert gate_held.wait(timeout=1.0)
+        sender.start()
+        deadline = time.monotonic() + 1.0
+        while backend._edge_queue.empty():
+            assert time.monotonic() < deadline, "final owner request was not queued"
+            time.sleep(0.001)
+        service.start()
+        time.sleep(0.01)
+        assert callback_threads == []
+        assert core.owner_dispatch_callback is callback
+
+        release_gate.set()
+        service.join(timeout=1.0)
+        sender.join(timeout=1.0)
+        holder.join(timeout=1.0)
+        assert not service.is_alive() and not sender.is_alive() and not holder.is_alive()
+        assert owner_errors == []
+        assert owner_results == [1]
+        assert len(sender_results) == 1 and type(sender_results[0]) is int
+        assert callback_threads == [service.ident]
+    finally:
+        release_gate.set()
+        if holder.ident is not None:
+            holder.join(timeout=1.0)
+        if service.ident is not None:
+            service.join(timeout=1.0)
+        master.stop(timeout_s=1.0)
+        backend.stop(timeout_s=1.0)
+    assert core.owner_dispatch_callback is callback
+
+
+@pytest.mark.parametrize(
+    "shape",
+    (
+        pytest.param("setter-only-without-gate", id="setter-only-without-gate"),
+        pytest.param("attached-core-without-claim", id="attached-core-without-claim"),
+    ),
+)
+def test_network_dispatch_core_shape_admission_uses_shared_gate_not_claim_api(
+    shape, monkeypatch
+) -> None:
+    backend, peer = NetworkBackend.pair()
+
+    class AttachedCore:
+        transfer_enabled = 1
+        internal_clock = 0
+        SB = 0
+        SC = 0x80
+
+        def peek_out_bit(self) -> int:
+            return 0
+
+        def apply_external_edge(self, _bit: int) -> bool:
+            return False
+
+    try:
+        if shape == "setter-only-without-gate":
+
+            class SetterOnly:
+                def __init__(self) -> None:
+                    self.setter_calls = 0
+
+                def set_owner_pump(self, _callback) -> None:
+                    self.setter_calls += 1
+
+            core = SetterOnly()
+            with pytest.raises(ValueError, match="serial_gate"):
+                backend.start_receiver(core, dispatch_to_owner=True)
+            assert core.setter_calls == 0
+            assert backend._local_core is None
+            assert backend._reader is None and backend._edge_worker is None
+        else:
+            core = AttachedCore()
+            gate = SerialOperationGate()
+            backend.start_receiver(core, serial_gate=gate, dispatch_to_owner=True)
+            assert not hasattr(core, "claim_owner_pump")
+            assert backend._serial_gate is gate
+            assert backend._local_core is core
+            assert backend._dispatch_to_owner is True
+            assert backend.stop(timeout_s=1.0) is True
+    finally:
+        backend.stop(timeout_s=1.0)
+        peer.stop(timeout_s=1.0)

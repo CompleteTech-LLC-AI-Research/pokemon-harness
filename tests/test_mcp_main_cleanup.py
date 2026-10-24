@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pokered_harness import config, mcp_server
+from pokered_harness import config, mcp_server, mcp_server_serve
 from pokered_harness.mcp_server import McpHarnessError
 
 
@@ -125,17 +125,35 @@ def _closes(calls):
     return [call for call in calls if call.startswith("close:")]
 
 
-def _assert_cleanup_result(raised, operation_error, *error_names):
+def _capture_cleanup_results(monkeypatch):
+    results = []
+    original = mcp_server_serve._close_sessions_independently
+
+    def capture(*args, **kwargs):
+        errors = original(*args, **kwargs)
+        results.append(errors)
+        return errors
+
+    monkeypatch.setattr(mcp_server_serve, "_close_sessions_independently", capture)
+    return results
+
+
+def _assert_cleanup_result(raised, operation_error, observed, expected):
+    assert len(observed) == 1
+    actual = observed[0]
+    assert [role for role, _error in actual] == [role for role, _error in expected]
+    assert len(actual) == len(expected)
+    for (_, actual_error), (_, expected_error) in zip(actual, expected):
+        assert actual_error is expected_error
+
+    details = "; ".join(f"{role} {type(error).__name__}: {error}" for role, error in expected)
     if operation_error is None:
         assert isinstance(raised.value, McpHarnessError)
         assert raised.value.code == "server_cleanup_failed"
-        for name in error_names:
-            assert name in str(raised.value)
+        assert str(raised.value) == details
     else:
         assert raised.value is operation_error
-        assert any(
-            "MCP session cleanup failed" in note for note in getattr(raised.value, "__notes__", ())
-        )
+        assert getattr(raised.value, "__notes__", []) == [f"MCP session cleanup failed: {details}"]
 
 
 def test_configure_main_isolates_inherited_symbol_pin_overrides(monkeypatch, tmp_path):
@@ -185,6 +203,7 @@ def test_main_operation_failure_closes_only_constructed_sessions(
 def test_peer_close_failure_still_closes_primary_and_preserves_operation_context(
     monkeypatch, tmp_path, fail_at
 ):
+    cleanup_results = _capture_cleanup_results(monkeypatch)
     operation_error = OperationFailure(fail_at) if fail_at is not None else None
     peer_error = PeerCloseFailure("peer stop failed")
     calls = _configure_main(
@@ -197,13 +216,14 @@ def test_peer_close_failure_still_closes_primary_and_preserves_operation_context
     with pytest.raises(Exception) as raised:
         mcp_server.main()
     assert _closes(calls) == ["close:peer", "close:primary"]
-    _assert_cleanup_result(raised, operation_error, "peer PeerCloseFailure")
+    _assert_cleanup_result(raised, operation_error, cleanup_results, [("peer", peer_error)])
 
 
 @pytest.mark.parametrize("fail_at", [None, "hooks:peer", "serve"])
 def test_both_close_failures_preserve_peer_and_operation_exception_context(
     monkeypatch, tmp_path, fail_at
 ):
+    cleanup_results = _capture_cleanup_results(monkeypatch)
     operation_error = OperationFailure(fail_at) if fail_at is not None else None
     peer_error = PeerCloseFailure("peer stop failed")
     primary_error = PrimaryCloseFailure("primary stop failed")
@@ -221,12 +241,13 @@ def test_both_close_failures_preserve_peer_and_operation_exception_context(
     _assert_cleanup_result(
         raised,
         operation_error,
-        "peer PeerCloseFailure",
-        "primary PrimaryCloseFailure",
+        cleanup_results,
+        [("peer", peer_error), ("primary", primary_error)],
     )
 
 
 def test_primary_close_failure_preserves_serve_failure_without_peer(monkeypatch, tmp_path):
+    cleanup_results = _capture_cleanup_results(monkeypatch)
     operation_error = OperationFailure("serve failed")
     primary_error = PrimaryCloseFailure("primary stop failed")
     calls = _configure_main(
@@ -240,4 +261,4 @@ def test_primary_close_failure_preserves_serve_failure_without_peer(monkeypatch,
     with pytest.raises(Exception) as raised:
         mcp_server.main()
     assert _closes(calls) == ["close:primary"]
-    _assert_cleanup_result(raised, operation_error, "primary PrimaryCloseFailure")
+    _assert_cleanup_result(raised, operation_error, cleanup_results, [("primary", primary_error)])

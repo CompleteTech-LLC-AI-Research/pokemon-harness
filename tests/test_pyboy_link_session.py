@@ -808,6 +808,21 @@ def test_step_exchanges_a_full_byte_end_to_end():
     assert core_b.transfer_enabled == 0
 
 
+def test_network_step_advances_single_attached_pyboy():
+    backend, peer = NetworkBackend.pair()
+    pyboy = _FakePyBoy(serial=SerialCore())
+    link = PyBoyLinkSession(network_backend=backend)
+
+    try:
+        link.attach(pyboy)
+        link.step(frames=3)
+
+        assert pyboy._cycles == 3 * CYCLES_PER_BYTE_DMG
+    finally:
+        link.detach_all()
+        peer.stop()
+
+
 def test_interleaved_chunk_uses_cpu_cycles_for_variable_length_instructions():
     """A chunk ends on emulated time, not an instruction-count estimate."""
 

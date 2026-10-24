@@ -91,6 +91,8 @@ UNIT_MODULES = frozenset(
         "test_battle_scenario_validator.py",
         "test_battle_menu_liveness.py",
         "test_battle_turn_evidence.py",
+        "test_battle_observer_contract.py",
+        "test_tcp_battle_menu_input.py",
         "test_config.py",
         "test_coordinator_detach_callback.py",
         "test_diagnose_pair_trade.py",
@@ -313,6 +315,10 @@ KNOWN_TEST_MODULES = REAL_ROM_MODULES | UNIT_MODULES | OPT_IN_MODULES
 # belong here; unlisted future functions retain the module's real-ROM tier.
 ROM_FREE_TESTS = frozenset(
     {
+        (
+            "test_production_gate_matrix_manifest.py",
+            "test_tier_classifier_marks_bootstrap_descendant_timeout_as_timing_sensitive",
+        ),
         (
             "test_mcp_timed_rom.py",
             "test_rom_client_load_state_timeout_redacts_data",
@@ -573,6 +579,7 @@ TIER_REQUIRED_TESTS = {
 # lane, whose exact name is owned by that lane.
 TIMING_SENSITIVE_TESTS = frozenset(
     {
+        ("test_runtime_packaging_bootstrap.py", "test_timeout_stops_build_descendants"),
         (
             "test_probe_owner_phases.py",
             "test_spawn_serializes_and_reports_exact_owner_phase_schema",

@@ -21,10 +21,11 @@ class _BlockingCore:
     SB = 0
     SC = 0x80
 
-    def __init__(self) -> None:
+    def __init__(self, *, completes: bool = False) -> None:
         self.started = threading.Event()
         self.release = threading.Event()
         self.calls = 0
+        self.completes = completes
 
     def peek_out_bit(self) -> int:
         return 0
@@ -33,7 +34,7 @@ class _BlockingCore:
         self.calls += 1
         self.started.set()
         self.release.wait(timeout=2.0)
-        return False
+        return self.completes
 
 
 class _CompletingCore:
@@ -119,11 +120,17 @@ def test_detach_local_core_timeout_preserves_attachment_and_can_retry() -> None:
 
 def test_owner_dispatch_detach_waits_for_gate_admitted_core_operation() -> None:
     master, slave = NetworkBackend.pair()
-    core = _BlockingCore()
+    core = _BlockingCore(completes=True)
     slave_gate = SerialOperationGate()
+    callback_threads: list[threading.Thread] = []
+
+    def callback() -> None:
+        callback_threads.append(threading.current_thread())
+
     master.start_receiver(local_core=None)
     slave.start_receiver(
         local_core=core,
+        irq_callback=callback,
         serial_gate=slave_gate,
         dispatch_to_owner=True,
     )
@@ -156,6 +163,7 @@ def test_owner_dispatch_detach_waits_for_gate_admitted_core_operation() -> None:
 
         assert slave.detach_local_core(timeout_s=0.05) is False
         assert slave._local_core is core
+        assert slave._irq_callback is callback
         assert slave._local_core_detached is False
 
         core.release.set()
@@ -166,8 +174,12 @@ def test_owner_dispatch_detach_waits_for_gate_admitted_core_operation() -> None:
         assert service_errors == []
         assert service_results == [1]
         assert edge_errors == []
+        assert callback_threads == [service]
+        assert slave._local_core is core
+        assert slave._irq_callback is callback
         assert slave.detach_local_core(timeout_s=0.5) is True
         assert slave._local_core is None
+        assert slave._irq_callback is None
     finally:
         core.release.set()
         service.join(timeout=1.0)
@@ -179,10 +191,16 @@ def test_owner_dispatch_detach_waits_for_gate_admitted_core_operation() -> None:
 def test_stop_deadline_does_not_wait_unbounded_for_owner_dispatch() -> None:
     """Terminal socket cancellation remains bounded behind native owner work."""
     master, slave = NetworkBackend.pair()
-    core = _BlockingCore()
+    core = _BlockingCore(completes=True)
+    callback_threads: list[threading.Thread] = []
+
+    def callback() -> None:
+        callback_threads.append(threading.current_thread())
+
     master.start_receiver(local_core=None)
     slave.start_receiver(
         local_core=core,
+        irq_callback=callback,
         serial_gate=SerialOperationGate(),
         dispatch_to_owner=True,
     )
@@ -217,6 +235,8 @@ def test_stop_deadline_does_not_wait_unbounded_for_owner_dispatch() -> None:
         assert slave.stop(timeout_s=0.05) is False
         assert time.monotonic() - started < 0.5
         assert slave.connected is False
+        assert slave._local_core is core
+        assert slave._irq_callback is callback
 
         core.release.set()
         service.join(timeout=1.0)
@@ -226,7 +246,13 @@ def test_stop_deadline_does_not_wait_unbounded_for_owner_dispatch() -> None:
         assert service_errors == []
         assert sender_errors and isinstance(sender_errors[0], NetworkBackendError)
         assert service_results == [0]
+        assert callback_threads == [service]
         assert slave.stop(timeout_s=0.5) is True
+        assert slave._local_core is core
+        assert slave._irq_callback is callback
+        assert slave.detach_local_core(timeout_s=0.5) is True
+        assert slave._local_core is None
+        assert slave._irq_callback is None
     finally:
         core.release.set()
         service.join(timeout=1.0)

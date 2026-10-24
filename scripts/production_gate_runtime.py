@@ -741,6 +741,7 @@ def _load_gate_report(
                 if record["was_xfail"] and record["outcome"] in {"skipped", "passed"}
                 else record["outcome"],
                 "reason": record["reason"],
+                "when": record["when"],
             }
             for record in records
             if record["outcome"] != "passed" or record["was_xfail"]

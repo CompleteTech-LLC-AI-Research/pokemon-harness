@@ -6,6 +6,7 @@ import select
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,24 +59,43 @@ def _backpressured_tcp():
         raise
 
 
-@pytest.mark.parametrize("contention", ["write", "edge"])
+@pytest.mark.parametrize("contention", ["write", "edge", "tcp"])
 def test_edge_deadline_covers_admission_and_write_lock(monkeypatch, contention):
     monkeypatch.setattr(module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.12)
-    backend, peer = NetworkBackend.pair()
-    lock = backend._write_lock if contention == "write" else backend._edge_call_lock
-    lock.acquire()
+    peer_socket = None
+    peer = None
+    if contention == "tcp":
+        sender, peer_socket = _backpressured_tcp()
+        backend = NetworkBackend(sender)
+        lock = None
+    else:
+        backend, peer = NetworkBackend.pair()
+        lock = backend._write_lock if contention == "write" else backend._edge_call_lock
+        lock.acquire()
     started = time.monotonic()
+    before = backend.debug_snapshot()
     done, errors, thread = _call_edge(backend)
     try:
         assert done.wait(0.45)
         assert time.monotonic() - started < 0.45
         assert errors
-        if contention == "write":
+        if contention == "edge":
+            after = backend.debug_snapshot()
+            assert backend.connected
+            assert after["edge_req_sent"] == before["edge_req_sent"]
+            assert after["pending_edge_requests"] == before["pending_edge_requests"]
+            assert backend._edge_inflight is False
+            assert backend._edge_inflight_id is None
+        else:
             assert not backend.connected
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()
         backend.stop(timeout_s=1.0)
-        peer.stop(timeout_s=1.0)
+        if peer is not None:
+            peer.stop(timeout_s=1.0)
+        if peer_socket is not None:
+            peer_socket.close()
         thread.join(timeout=1.0)
         assert not thread.is_alive()
 
@@ -100,11 +120,35 @@ def test_edge_admission_and_response_share_one_total_budget(monkeypatch):
         thread.join(timeout=1.0)
 
 
-@pytest.mark.parametrize("operation", ["hello", "sync", "exchange"])
+def test_write_lock_admission_and_response_share_one_total_budget(monkeypatch):
+    monkeypatch.setattr(module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.30)
+    backend, peer = NetworkBackend.pair()
+    backend._write_lock.acquire()
+    started = time.monotonic()
+    done, errors, thread = _call_edge(backend)
+    try:
+        time.sleep(0.20)
+        backend._write_lock.release()
+        assert done.wait(0.22)
+        assert time.monotonic() - started < 0.43
+        assert errors and not backend.connected
+    finally:
+        if backend._write_lock.locked():
+            backend._write_lock.release()
+        backend.stop(timeout_s=1.0)
+        peer.stop(timeout_s=1.0)
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("operation", ["hello", "sync", "exchange", "response"])
 def test_control_writes_fail_closed_under_tcp_backpressure(monkeypatch, operation):
     monkeypatch.setattr(module, "_DEFAULT_SEND_TIMEOUT_SECONDS", 0.10)
+    if operation == "response":
+        monkeypatch.setattr(module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.10)
     sender, peer_socket = _backpressured_tcp()
     backend: NetworkBackend | None = None
+    response_send_errors: list[NetworkBackendError] = []
     started = time.monotonic()
     try:
         if operation == "hello":
@@ -112,13 +156,49 @@ def test_control_writes_fail_closed_under_tcp_backpressure(monkeypatch, operatio
                 NetworkBackend(sender, local_rom_version="red")
         else:
             backend = NetworkBackend(sender)
-            with pytest.raises(NetworkBackendError, match="timed out|deadline|closed"):
-                if operation == "sync":
-                    backend.announce_sync(3)
-                else:
-                    backend.exchange_block(2, b"hello", timeout=0.2)
+            if operation == "response":
+                backend._local_core = SimpleNamespace(
+                    transfer_enabled=1,
+                    internal_clock=0,
+                    peek_out_bit=lambda: 0,
+                    apply_external_edge=lambda _bit: False,
+                )
+                original_send_frame = backend._send_frame
+
+                def send_response_after_refill(frame, *, timeout, operation):
+                    if operation == "EDGE_RESP":
+                        sender.setblocking(False)
+                        try:
+                            while True:
+                                sender.send(b"x" * 65536)
+                        except BlockingIOError:
+                            pass
+                    try:
+                        return original_send_frame(frame, timeout=timeout, operation=operation)
+                    except NetworkBackendError as exc:
+                        if operation == "EDGE_RESP":
+                            response_send_errors.append(exc)
+                        raise
+
+                backend._send_frame = send_response_after_refill
+            if operation == "response":
+                # The inbound response handler closes the backend after a
+                # send failure instead of propagating the worker exception.
+                backend._handle_edge_req(0)
+                assert len(response_send_errors) == 1
+                assert "timed out" in str(response_send_errors[0])
+                assert not backend.connected
+                assert backend.debug_snapshot()["closed"] is True
+            else:
+                with pytest.raises(NetworkBackendError, match="timed out|deadline|closed"):
+                    if operation == "sync":
+                        backend.announce_sync(3)
+                    elif operation == "exchange":
+                        backend.exchange_block(2, b"hello", timeout=0.2)
         assert time.monotonic() - started < 0.6
         assert sender.fileno() == -1
+        if operation == "response":
+            assert backend.debug_snapshot()["edge_resp_sent"] == 0
     finally:
         if backend is not None:
             backend.stop(timeout_s=1.0)
@@ -252,5 +332,32 @@ def test_stop_cancels_waiting_edge_without_using_full_edge_timeout(monkeypatch):
         backend._write_lock.release()
         backend.stop(timeout_s=1.0)
         peer.stop(timeout_s=1.0)
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+
+
+def test_stop_cancels_tcp_backpressured_edge_send(monkeypatch):
+    monkeypatch.setattr(module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 5.0)
+    sender, peer_socket = _backpressured_tcp()
+    backend = NetworkBackend(sender)
+    send_entered = threading.Event()
+    original_send_frame = backend._send_frame
+
+    def observe_send(*args, **kwargs):
+        send_entered.set()
+        return original_send_frame(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "_send_frame", observe_send)
+    done, errors, thread = _call_edge(backend)
+    try:
+        assert send_entered.wait(timeout=1.0)
+        started = time.monotonic()
+        assert backend.stop(timeout_s=0.3) is True
+        assert done.wait(0.4)
+        assert time.monotonic() - started < 0.4
+        assert errors and not backend.connected
+    finally:
+        backend.stop(timeout_s=1.0)
+        peer_socket.close()
         thread.join(timeout=1.0)
         assert not thread.is_alive()

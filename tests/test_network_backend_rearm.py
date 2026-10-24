@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from pokered_harness.link import network_backend as network_module
-from pokered_harness.link.network_backend import NetworkBackend
+from pokered_harness.link.network_backend import NetworkBackend, NetworkBackendError
 
 
 def _free_port() -> int:
@@ -167,6 +167,12 @@ def _post_byte_rearm(monkeypatch):
                         assert worker is None or not worker.is_alive()
 
 
+@pytest.fixture
+def _short_edge_response_deadline(monkeypatch):
+    """Let the master deadline expire before the slave's post-byte grace."""
+    monkeypatch.setattr(network_module, "_EDGE_RESPONSE_TIMEOUT_SECONDS", 0.08)
+
+
 class _DisarmingSlaveCore:
     """Become unarmed between the worker's readiness checks."""
 
@@ -221,6 +227,33 @@ def test_post_byte_rearm_grace_accepts_late_real_byte_without_keepalive(_post_by
     assert snap["keepalive_after_post_byte_waits"] == 0
     assert snap["keepalive_bits_sent"] == 0
     assert schedule.core._byte_index == 2
+
+
+def test_post_byte_missing_rearm_fails_without_fabricating_payload(
+    _short_edge_response_deadline, _post_byte_rearm
+):
+    """An impatient master gets no synthetic keepalive during post-byte grace."""
+    schedule = _post_byte_rearm
+    assert schedule.finished.wait(timeout=1.0)
+    assert len(schedule.errors) == 1
+    assert isinstance(schedule.errors[0], NetworkBackendError)
+    assert schedule.replies == []
+    assert not schedule.master.connected
+
+    expired = schedule.backend.debug_snapshot()
+    assert expired["slave_post_byte_rearm_waits"] == 1
+    assert expired["keepalive_bits_sent"] == 0
+    assert expired["edge_resp_sent"] == 1
+
+    # Let the worker leave the actual re-arm poll after the peer has closed.
+    schedule.now = schedule.backend._post_byte_rearm_until + 0.001
+    schedule.release.set()
+    worker = schedule.backend._edge_worker
+    assert worker is not None
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert schedule.backend.debug_snapshot()["edge_resp_sent"] == 1
+    assert schedule.core._byte_index == 1
 
 
 def test_listen_and_connect_over_loopback_exchange_byte():

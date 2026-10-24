@@ -271,11 +271,18 @@ def test_invalid_outgoing_slot_never_becomes_proof(probe, slot):
         ("records", ["00"]),
         ("ot_names", ["00"]),
         ("nicknames", ["00"]),
+        pytest.param("species", [153, 176, 178, 255], id="species-record-mismatch"),
+        pytest.param("records", None, id="missing-records"),
     ],
 )
 def test_malformed_party_evidence_fails_closed(probe, field, value):
     evidence = owners()
-    evidence[0]["copied_party"][field] = value
+    if field == "records" and value is None:
+        del evidence[0]["copied_party"][field]
+    else:
+        evidence[0]["copied_party"][field] = value
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        probe._validate_party(evidence[0]["copied_party"])
     assert adjudicate(probe, evidence)["complete"] is False
 
 

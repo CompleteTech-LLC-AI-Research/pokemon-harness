@@ -460,13 +460,48 @@ def test_incoming_edge_and_completion_irq_run_on_owner_thread() -> None:
     core.set_SB(0x3C)
     core.set_SC(0x80)
     irq_threads: list[int] = []
-    master, slave = _start_owner_pair(core, irq=lambda: irq_threads.append(threading.get_ident()))
+    events: list[tuple] = []
+
+    class InstrumentedSerial:
+        """Record the production edge boundary while delegating to real Serial."""
+
+        def __init__(self, serial):
+            self.serial = serial
+
+        def __getattr__(self, name):
+            return getattr(self.serial, name)
+
+        def peek_out_bit(self) -> int:
+            bit = self.serial.peek_out_bit()
+            events.append(("sample", threading.get_ident(), bit))
+            return bit
+
+        def apply_external_edge(self, incoming_bit: int) -> bool:
+            complete = self.serial.apply_external_edge(incoming_bit)
+            events.append(("apply", threading.get_ident(), incoming_bit, complete))
+            return complete
+
+    def irq() -> None:
+        owner = threading.get_ident()
+        irq_threads.append(owner)
+        events.append(("irq", owner))
+
+    instrumented = InstrumentedSerial(core)
+    master, slave = _start_owner_pair(instrumented, irq=irq)
     owner_thread = threading.get_ident()
     try:
         expected = [0, 0, 1, 1, 1, 1, 0, 0]
         for _ in range(8):
             result = _send_and_service(master, slave)
             assert result == [expected[_]]
+        assert len(events) == 17
+        assert [event[0] for event in events] == ["sample", "apply"] * 8 + ["irq"]
+        assert {event[1] for event in events} == {owner_thread}
+        assert [event[2] for event in events if event[0] == "sample"] == expected
+        apply_events = [event for event in events if event[0] == "apply"]
+        assert [event[2] for event in apply_events] == [1] * 8
+        assert [event[3] for event in apply_events] == [False] * 7 + [True]
+        assert events[-1] == ("irq", owner_thread)
         assert core.SB == 0xFF
         assert core._bits_remaining == 0
         assert irq_threads == [owner_thread]
@@ -493,6 +528,106 @@ def test_without_owner_service_no_native_mutation_and_bounded_expiry(monkeypatch
     finally:
         master.stop(timeout_s=1.0)
         slave.stop(timeout_s=1.0)
+
+
+def test_public_stop_cancels_pending_edge_while_real_serial_gate_is_held() -> None:
+    """Public stop wakes a sender without applying or replaying its queued edge."""
+    core = Serial(False)
+    core.set_SB(0x3C)
+    core.set_SC(0x80)
+    gate = SerialOperationGate()
+    irq_calls: list[int] = []
+    master, owner = NetworkBackend.pair()
+    master.start_receiver(local_core=None)
+    owner.start_receiver(
+        local_core=core,
+        irq_callback=lambda: irq_calls.append(threading.get_ident()),
+        serial_gate=gate,
+        dispatch_to_owner=True,
+    )
+
+    gate_held = threading.Event()
+    release_gate = threading.Event()
+    service_started = threading.Event()
+    holder_errors: list[BaseException] = []
+    owner_errors: list[BaseException] = []
+    owner_results: list[int] = []
+    sender_results: list[object] = []
+
+    def hold_gate() -> None:
+        try:
+            with gate:
+                gate_held.set()
+                if not release_gate.wait(timeout=2.0):
+                    raise TimeoutError("test did not release shared serial gate")
+        except BaseException as exc:  # noqa: BLE001 - asserted after bounded joins
+            holder_errors.append(exc)
+
+    def send_edge() -> None:
+        try:
+            sender_results.append(master.on_edge(1, 1))
+        except BaseException as exc:  # noqa: BLE001 - expected after public stop
+            sender_results.append(exc)
+
+    def service_edge() -> None:
+        service_started.set()
+        try:
+            owner_results.append(owner.service_pending_edges(max_edges=1))
+        except BaseException as exc:  # noqa: BLE001 - reported independently
+            owner_errors.append(exc)
+
+    holder = threading.Thread(target=hold_gate, name="test-held-serial-gate", daemon=True)
+    sender = threading.Thread(target=send_edge, name="test-pending-edge-sender", daemon=True)
+    service = threading.Thread(target=service_edge, name="test-owner-dispatch", daemon=True)
+    try:
+        holder.start()
+        assert gate_held.wait(timeout=1.0)
+        sender.start()
+        _wait_for_owner_queue(owner, deadline=time.monotonic() + 1.0)
+        service.start()
+        assert service_started.wait(timeout=1.0)
+        time.sleep(0.01)
+
+        assert core._bits_remaining == 8
+        assert core._shift_register == 0x3C
+        assert irq_calls == []
+        assert owner.debug_snapshot()["owner_edge_applied"] == 0
+        stop_result = owner.stop(timeout_s=0.05)
+        assert type(stop_result) is bool
+        sender.join(timeout=1.0)
+        assert not sender.is_alive(), "public stop left the edge sender blocked"
+        assert len(sender_results) == 1
+        assert isinstance(sender_results[0], NetworkBackendError)
+        assert core._bits_remaining == 8
+        assert core._shift_register == 0x3C
+        assert irq_calls == []
+        assert owner.debug_snapshot()["owner_edge_applied"] == 0
+        assert owner._pre_close_snapshot["pending_edge_requests"] == 1
+
+        release_gate.set()
+        holder.join(timeout=1.0)
+        service.join(timeout=1.0)
+        assert not holder.is_alive()
+        assert not service.is_alive()
+        assert holder_errors == []
+        assert owner_errors == []
+        assert owner_results == [0]
+        if stop_result is False:
+            assert owner.stop(timeout_s=0.5) is True
+        assert owner.connected is False
+        assert owner.service_pending_edges(max_edges=1) == 0
+        assert core._bits_remaining == 8
+        assert core._shift_register == 0x3C
+        assert irq_calls == []
+        assert owner.debug_snapshot()["owner_edge_applied"] == 0
+    finally:
+        release_gate.set()
+        if holder.ident is not None:
+            holder.join(timeout=1.0)
+        if service.ident is not None:
+            service.join(timeout=1.0)
+        master.stop(timeout_s=1.0)
+        owner.stop(timeout_s=1.0)
 
 
 def test_owner_dispatch_can_move_between_owner_threads() -> None:

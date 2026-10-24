@@ -1529,11 +1529,22 @@ regression.
 For opt-in subprocess-peer Python stack diagnostics, set
 `POKERED_PEER_TRACE_AFTER_SECONDS` to a positive finite number. Optionally set
 `POKERED_PEER_TRACE_DIR` to an existing external directory to retain private,
-unique per-process logs; otherwise output goes to stderr and may be truncated
-by parent capture. At most two one-shot dump schedules are attempted per peer,
-including cleanup. This does not terminate the peer, inspect emulator state,
-or guarantee native C stack frames. Keep these diagnostic artifacts outside
-version control; stack capture is not gameplay evidence.
+unique per-process logs; otherwise output uses safe stderr and may be truncated
+by parent capture. At most two one-shot Python stack captures are attempted per
+peer, including cleanup. Each capture snapshots Python frames without locals
+or source text and caps its formatted output at 512 KiB. An absent or invalid,
+non-finite, or non-positive delay disables capture; invalid delay configuration
+may produce one bounded best-effort warning but does not create a dump artifact
+or start capture work. With a valid delay, an invalid or unavailable artifact
+directory produces one bounded best-effort warning and falls back to a safe
+stderr duplicate. If stderr cannot be safely duplicated, capture is disabled.
+Warnings are best effort and never write synchronously on the peer path. A
+capture may wait for the GIL and is not guaranteed during
+an indefinitely GIL-held native call. Diagnostics do not terminate the peer,
+inspect emulator/ROM state, or include native C frames. A blocked output sink
+does not block the peer caller; close waits at most 250 ms and a reaper may
+retain the descriptor until the write finishes or the process exits. Keep these
+artifacts outside version control; stack capture is not gameplay evidence.
 
 The ROM-free concurrency/lifecycle probe is:
 

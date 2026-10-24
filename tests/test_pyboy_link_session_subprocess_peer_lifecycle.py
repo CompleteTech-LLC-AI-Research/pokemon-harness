@@ -15,12 +15,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests import _pyboy_link_session_subprocess_support as _subprocess_support
+from tests import _tcp_trade_peer_trace_test_support as _watchdog_test_support
 from tests._pyboy_link_session_subprocess_support import (
     _MAX_FAILURE_SENTINEL_ERROR,
     _SUPERVISOR_RESULT_SOURCE,
@@ -50,11 +52,14 @@ from tests._tcp_trade_peer import _hold_at_sync_boundary
         "arm-error",
         "cancel-error",
         "close-error",
+        "blocked-sink",
+        "gil-held-delay",
     ],
 )
 def test_peer_trace_watchdog(watchdog_case, monkeypatch):
     """Opt-in peer stack diagnostics remain bounded and preserve peer outcomes."""
     from tests import _tcp_trade_peer as peer
+    from tests import _tcp_trade_peer_trace as trace_module
 
     delay_env = "POKERED_PEER_TRACE_AFTER_SECONDS"
     dir_env = "POKERED_PEER_TRACE_DIR"
@@ -64,7 +69,8 @@ def test_peer_trace_watchdog(watchdog_case, monkeypatch):
         def unexpected(*args, **kwargs):
             pytest.fail("disabled watchdog must not open files or arm diagnostics")
 
-        monkeypatch.setattr(peer.faulthandler, "dump_traceback_later", unexpected)
+        monkeypatch.setattr(trace_module, "_trace_warning", lambda _message="": None)
+        monkeypatch.setattr(trace_module, "_new_thread", unexpected)
         monkeypatch.setattr(peer.tempfile, "mkstemp", unexpected)
         for value in (None, "", "garbage", "0", "-1", "nan", "inf", "-inf"):
             if value is None:
@@ -75,6 +81,7 @@ def test_peer_trace_watchdog(watchdog_case, monkeypatch):
         return
 
     if watchdog_case == "destinations":
+        monkeypatch.setattr(peer.sys, "stderr", peer.sys.__stderr__)
         monkeypatch.setenv(delay_env, "0.05")
         trace = peer._PeerTraceWatchdog.from_env()
         assert trace.destination is peer.sys.stderr
@@ -117,6 +124,7 @@ def test_peer_trace_watchdog(watchdog_case, monkeypatch):
             assert trace.destination is peer.sys.stderr
             assert not trace.owned
             trace.close()
+
         return
 
     if watchdog_case == "wrapper":
@@ -165,7 +173,7 @@ def test_peer_trace_watchdog(watchdog_case, monkeypatch):
         return
 
     if watchdog_case == "real-output":
-        # Real faulthandler runs only in this disposable Python child. No ROM
+        # Real stack capture runs only in this disposable Python child. No ROM
         # imports/loads, emulator, TCP connection, or repository artifacts.
         assert not _watchdog_dumps_ready("Timeout (first)\n", 1)
         assert not _watchdog_dumps_ready(
@@ -176,6 +184,52 @@ def test_peer_trace_watchdog(watchdog_case, monkeypatch):
             'Timeout (first)\nFile "<string>", line 1\nTimeout (second)\nFile "<string>", line 2\n',
             2,
         )
+
+        class FakeCode:
+            __slots__ = ("co_filename", "co_name")
+
+            def __init__(self):
+                self.co_filename = "<snapshot>"
+                self.co_name = "frame_without_local_values"
+
+        class FakeFrame:
+            __slots__ = ("__weakref__", "f_back", "f_code", "f_lineno")
+
+            def __init__(self):
+                self.f_code = FakeCode()
+                self.f_lineno = 42
+                self.f_back = None
+
+        frame = FakeFrame()
+        frame_ref = weakref.ref(frame)
+        frames = {7: frame}
+        del frame
+        snapshot = trace_module._snapshot_stack(frames)
+        assert b'File "<snapshot>", line 42' in snapshot
+        assert b"local_secret" not in snapshot
+        assert frames == {}
+        assert frame_ref() is None
+
+        class BrokenFrame:
+            __slots__ = ("__weakref__",)
+
+            @property
+            def f_code(self):
+                raise RuntimeError("frame formatting interrupted")
+
+        first = FakeFrame()
+        broken = BrokenFrame()
+        first.f_back = broken
+        first_ref = weakref.ref(first)
+        broken_ref = weakref.ref(broken)
+        partial_frames = {9: first}
+        del first, broken
+        partial_snapshot = trace_module._snapshot_stack(partial_frames)
+        assert b'File "<snapshot>", line 42' in partial_snapshot
+        assert partial_frames == {}
+        assert first_ref() is None
+        assert broken_ref() is None
+
         script = """
 import json, os, sys, time
 from pathlib import Path
@@ -198,7 +252,7 @@ try:
         data = ""
         while time.monotonic() < cutoff:
             data = path.read_text(errors='replace')
-            # faulthandler writes each dump incrementally.  The timeout
+            # A stack dump can be visible before the worker has completed its
             # header can be visible before the frame lines that make the
             # dump useful (and that the assertions below require).
             if _watchdog_dumps_ready(data, count):
@@ -245,29 +299,44 @@ print(json.dumps({'pid': os.getpid(), 'name': path.name, 'dumps': 2,
             assert len(list(Path(directory).iterdir())) == 2
         return
 
+    if watchdog_case == "blocked-sink":
+        return _watchdog_test_support.run_blocked_sink_case()
+
+    if watchdog_case == "gil-held-delay":
+        return _watchdog_test_support.run_gil_held_delay_case()
+
     events = []
     clock = [100.0]
     monkeypatch.setattr(peer.time, "monotonic", lambda: clock[0])
 
     destination = 987654
     closed = []
-    arms = []
+    threads = []
 
-    def arm(delay, **kwargs):
-        events.append("arm")
-        arms.append((delay, kwargs))
-        assert not closed
-        if watchdog_case == "arm-error":
-            raise OSError("diagnostic arm failed")
+    class FakeThread:
+        ident = None
 
-    def cancel():
-        events.append("cancel")
-        assert not closed
-        if watchdog_case == "cancel-error":
-            raise OSError("diagnostic cancellation failed")
+        def __init__(self):
+            self.alive = False
 
-    monkeypatch.setattr(peer.faulthandler, "dump_traceback_later", arm)
-    monkeypatch.setattr(peer.faulthandler, "cancel_dump_traceback_later", cancel)
+        def start(self):
+            events.append("arm")
+            if watchdog_case == "arm-error":
+                raise OSError("diagnostic worker start failed")
+
+        def join(self, timeout=None):
+            events.append("join")
+
+        def is_alive(self):
+            return self.alive
+
+    def make_thread(_target, *, name):
+        thread = FakeThread()
+        threads.append((name, thread))
+        return thread
+
+    monkeypatch.setattr(trace_module, "_new_thread", make_thread)
+    monkeypatch.setattr(trace_module, "_trace_warning", lambda _message="": None)
     original_close = os.close
 
     def close(fd):
@@ -280,18 +349,32 @@ print(json.dumps({'pid': os.getpid(), 'name': path.name, 'dumps': 2,
 
     monkeypatch.setattr(peer.os, "close", close)
     trace = peer._PeerTraceWatchdog(10.0, destination, owned=True)
+
+    def cancel():
+        events.append("cancel")
+        assert not closed
+        if watchdog_case == "cancel-error":
+            raise OSError("diagnostic cancellation failed")
+        trace._closing = True
+        trace._generation += 1
+        for record in trace._records:
+            record.cancel.set()
+            record.wake.set()
+
+    monkeypatch.setattr(trace, "_signal_cancellation", cancel)
     failure = RuntimeError("original peer failure")
 
     def run_peer(*, trace):
         # Cleanup before initial due must not replace/postpone its timer.
         clock[0] = 105.0
         trace.cleanup(130.0)
-        assert len(arms) == 1
+        assert trace.attempts == 1
         clock[0] = 111.0
         trace.cleanup(113.0)
         trace.cleanup(140.0)
-        assert len(arms) == 2
-        assert arms[1][0] == 2.0
+        assert trace.attempts == 2
+        assert [record.due for record in trace._records] == [110.0, 113.0]
+        assert all(record.descriptor == destination for record in trace._records)
         events.append("emit_result")
         assert not closed
         raise failure
@@ -301,11 +384,9 @@ print(json.dumps({'pid': os.getpid(), 'name': path.name, 'dumps': 2,
     with pytest.raises(RuntimeError) as raised:
         peer.main()
     assert raised.value is failure
-    assert arms[0][0] == 10.0
-    for _delay, kwargs in arms:
-        assert kwargs["file"] == destination
-        assert kwargs.get("repeat", False) is False
-        assert kwargs.get("exit", False) is False
+    assert trace.initial_due == 110.0
+    assert len(trace._records) == 2
+    assert len(threads) == 2
     assert events.index("emit_result") < events.index("cancel")
     if watchdog_case == "cancel-error":
         assert not closed
@@ -314,6 +395,8 @@ print(json.dumps({'pid': os.getpid(), 'name': path.name, 'dumps': 2,
         assert events.index("cancel") < events.index("close")
         trace.close()
         assert closed == [destination]
+    if watchdog_case == "arm-error":
+        return _watchdog_test_support.run_ambiguous_start_case()
 
 
 def test_setup_handshake_failure_returns_bounded_non_success_sentinels():

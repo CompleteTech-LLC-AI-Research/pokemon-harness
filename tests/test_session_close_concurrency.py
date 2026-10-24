@@ -429,3 +429,12 @@ def test_invalid_timeout_does_not_change_lifecycle(timeout):
     assert not session.closed
     assert not pyboy.stopped
     session.step()
+
+
+def test_large_finite_timeout_is_clamped_before_lock_acquire():
+    session, pyboy, _ = _session()
+    assert not session.closed
+    assert not pyboy.stopped
+    session.close(timeout_s=1e300)
+    assert session.closed
+    assert pyboy.stopped

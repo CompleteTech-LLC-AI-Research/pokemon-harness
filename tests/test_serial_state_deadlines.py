@@ -139,3 +139,112 @@ def test_canceled_internal_selection_roundtrips_without_restarting(cgb_mode):
     assert restored._cycles_to_interrupt == MAX_CYCLES
     assert restored.tick(original.clock + 4096) is False
     assert restored._cycles_to_interrupt == MAX_CYCLES
+
+
+@pytest.mark.parametrize(
+    "cgb_mode",
+    [pytest.param(False, id="dmg"), pytest.param(True, id="cgb")],
+)
+def test_internal_master_same_role_rewrite_preserves_inflight_deadline_and_snapshot(cgb_mode):
+    serial = SerialCore(cgb_mode)
+    assert serial.tick(100) is False
+    serial.set_SB(0x96)
+    serial.set_SC(0x81)
+    assert serial.clock_target == 612
+    assert serial._cycles_to_interrupt == 512
+    assert serial._bits_remaining == 8
+
+    assert serial.tick(611) is False
+    assert serial._bits_remaining == 8
+    assert serial._cycles_to_interrupt == 1
+    assert serial.tick(612) is False
+    assert serial._bits_remaining == 7
+    in_flight_shift = serial._shift_register
+    assert serial.clock_target == 1124
+
+    assert serial.tick(700) is False
+    serial.set_SB(0x3C)
+    serial.set_SC(0x81)
+    assert serial.SB == 0x3C
+    assert serial._shift_register == in_flight_shift
+    assert serial._bits_remaining == 7
+    assert serial.clock_target == 1124
+    assert serial._cycles_to_interrupt == 424
+
+    for edge, deadline in enumerate((1124, 1636, 2148, 2660, 3172, 3684, 4196), start=1):
+        assert serial.tick(deadline - 1) is False
+        assert serial._bits_remaining == 8 - edge
+        assert serial._cycles_to_interrupt == 1
+        assert serial.tick(deadline) is (edge == 7)
+        assert serial._bits_remaining == 7 - edge
+        if edge < 7:
+            assert serial.clock_target == deadline + 512
+            assert serial._cycles_to_interrupt == 512
+    assert serial.SB == 0xFF
+    assert serial.transfer_enabled == 0
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert serial.tick(4197) is False
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+
+
+@pytest.mark.parametrize(
+    ("cgb_mode", "base"),
+    [
+        pytest.param(False, 0, id="dmg-zero"),
+        pytest.param(True, 0, id="cgb-zero"),
+        pytest.param(False, 1 << 40, id="dmg-large"),
+        pytest.param(True, 1 << 40, id="cgb-large"),
+    ],
+)
+def test_internal_master_cancel_before_first_edge_rearms_at_exact_deadlines(cgb_mode, base):
+    serial = SerialCore(cgb_mode)
+    assert serial.tick(base) is False
+    serial.set_SB(0x42)
+    serial.set_SC(0x81)
+    assert serial.clock_target == base + 512
+    assert serial.tick(base + 511) is False
+    assert serial._bits_remaining == 8
+
+    serial.set_SC(0x01)
+    assert serial.internal_clock == 1
+    assert serial.transfer_enabled == 0
+    assert serial._bits_remaining == 0
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert serial.tick(base + 512) is False
+    assert serial._bits_remaining == 0
+    assert serial.tick(base + 4096) is False
+    assert serial._bits_remaining == 0
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+
+    serial.set_SB(0x55)
+    serial.set_SC(0x81)
+    assert serial._shift_register == 0x55
+    assert serial._bits_remaining == 8
+    assert serial.clock_target == base + 4608
+    assert serial._cycles_to_interrupt == 512
+
+    deadlines = (
+        base + 4608,
+        base + 5120,
+        base + 5632,
+        base + 6144,
+        base + 6656,
+        base + 7168,
+        base + 7680,
+        base + 8192,
+    )
+    for edge, deadline in enumerate(deadlines, start=1):
+        assert serial.tick(deadline - 1) is False
+        assert serial._bits_remaining == 9 - edge
+        assert serial._cycles_to_interrupt == 1
+        assert serial.tick(deadline) is (edge == 8)
+        assert serial._bits_remaining == 8 - edge
+        if edge < 8:
+            assert serial.clock_target == deadline + 512
+            assert serial._cycles_to_interrupt == 512
+
+    assert serial.SB == 0xFF
+    assert serial.transfer_enabled == 0
+    assert serial._cycles_to_interrupt == MAX_CYCLES
+    assert serial.tick(base + 8193) is False
+    assert serial._cycles_to_interrupt == MAX_CYCLES

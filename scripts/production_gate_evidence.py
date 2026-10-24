@@ -293,7 +293,7 @@ def _safe_tier(
             key: _safe_diagnostic(
                 getattr(detail, key), roots, replacements=replacements, limit=sys.maxsize
             )
-            for key in ("nodeid", "outcome", "reason")
+            for key in ("nodeid", "outcome", "reason", "when")
         }
         remaining_chars, omitted = _retain_failure_detail(
             safe_details, record, iteration=detail.iteration, remaining_chars=remaining_chars
