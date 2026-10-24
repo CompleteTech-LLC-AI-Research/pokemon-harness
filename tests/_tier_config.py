@@ -54,8 +54,7 @@ REAL_ROM_MODULES = frozenset(
     }
 )
 
-# Keep ROM-free modules explicit: review each new ``test_*.py`` file into exactly one
-# set before collection; this repetitive manifest guards against the wrong production tier.
+# Review every ROM-free test module into exactly one explicit production tier.
 UNIT_MODULES = frozenset(
     {
         "test_normal_red_profile_support.py",
@@ -96,6 +95,7 @@ UNIT_MODULES = frozenset(
         "test_coordinator_detach_callback.py",
         "test_diagnose_pair_trade.py",
         "test_diagnostic_script_safety.py",
+        "test_live_battle_demo_pair.py",
         "test_emulator_ownership.py",
         "test_pair_checkpoints.py",
         "test_party_record_audit.py",
