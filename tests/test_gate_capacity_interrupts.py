@@ -8,10 +8,14 @@ import json
 import os
 import signal
 import sys
+import threading
+import types
+from pathlib import Path
 
 import pytest
 
 from scripts import gate_capacity
+from scripts import production_gate_capacity as capacity_module
 from tests._gate_capacity_support import (
     FakeMatrixPopen,
     _runtime_result,
@@ -567,3 +571,231 @@ def test_matrix_finalization_interrupt_keeps_loaded_failure_evidence(tmp_path, m
     assert gate.runtime_gate_passes(result) is False
     # Exactly one admission identity for the single planned row.
     assert len(session.telemetry.pair_states) == 1, session.telemetry.pair_states
+
+
+_ROW = "tests/test_matrix.py::test_pair[aaa-fail]"
+
+
+@contextlib.contextmanager
+def _process_sigint_handler(handler):
+    original = signal.signal(signal.SIGINT, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+
+def _native_none_signal(monkeypatch):
+    """Show the capacity module a SIGINT handler Python did not install (None).
+
+    Only the module's ``signal`` name is replaced; the process handler is never
+    set to None.  The fake rejects a None handler exactly like CPython does.
+    """
+
+    calls: list = []
+
+    def fake_signal(signum, handler):
+        calls.append((signum, handler))
+        if handler is None:
+            raise TypeError(
+                "signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object"
+            )
+
+    stub = types.SimpleNamespace(
+        SIGINT=signal.SIGINT, signal=fake_signal, getsignal=lambda _signum: None
+    )
+    monkeypatch.setattr(capacity_module, "signal", stub)
+    return calls
+
+
+def _failing_report(reason):
+    return gate.GateReport(
+        gate.Counts(total=1, failed=1),
+        nodeids=(_ROW,),
+        failed_records=({"nodeid": _ROW, "outcome": "failed", "reason": reason},),
+    )
+
+
+def test_guard_declines_a_native_none_handler_and_leaves_signal_alone(monkeypatch):
+    """Regression: restore(None) raised TypeError and masked the outgoing outcome."""
+
+    calls = _native_none_signal(monkeypatch)
+    before = signal.getsignal(signal.SIGINT)
+    guard = capacity_module._defer_sigint_while_finalizing()
+    assert calls == [], calls
+    assert signal.getsignal(signal.SIGINT) is before
+    assert guard.declined_reason, "the unsupported native-handler case must be explicit"
+    assert guard.restore() is False
+    assert guard.restore() is False
+    assert calls == [], calls
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+@pytest.mark.parametrize(
+    "scenario", ["normal", "publish_failure", "assembly_failure", "between_repetition"]
+)
+def test_batch_native_none_handler_keeps_the_original_outcome(tmp_path, monkeypatch, scenario):
+    calls = _native_none_signal(monkeypatch)
+    injected = RuntimeError("INJECTED-" + scenario)
+    published: list = []
+    iterations: list[int] = []
+
+    def run_once(**kwargs):
+        iterations.append(len(iterations) + 1)
+        if scenario == "between_repetition" and len(iterations) > 1:
+            os.kill(os.getpid(), signal.SIGINT)
+        return 1, _failing_report("NATIVE-NONE-FAILURE"), "RETAIN-NATIVE-NONE-OUTPUT", ["pytest"]
+
+    def publish(tier):
+        published.append(tier)
+        if scenario == "publish_failure":
+            raise injected
+
+    def broken_tier_result(*args, **kwargs):
+        raise injected
+
+    def call():
+        return gate.run_tier(
+            name="timing" if scenario == "between_repetition" else "unit",
+            project_root=tmp_path,
+            python_executable=Path("python"),
+            environment={},
+            required_problems=[],
+            repeat=5,
+            timeout_override=5,
+            report_directory=tmp_path,
+            publish=publish,
+        )
+
+    monkeypatch.setattr(gate, "run_pytest_once", run_once)
+    if scenario == "assembly_failure":
+        monkeypatch.setitem(
+            inspect.unwrap(gate.run_tier).__globals__, "TierResult", broken_tier_result
+        )
+    with _process_sigint_handler(signal.default_int_handler):
+        if scenario == "normal":
+            tier = call()
+            assert len(published) == 1 and published[0] is tier, published
+        elif scenario == "between_repetition":
+            with pytest.raises(gate.TierInterruptedDuringCleanup) as cancelled:
+                call()
+            tier = cancelled.value.tier
+            assert len(published) == 1 and published[0] is tier, published
+            assert iterations == [1, 2], iterations
+        else:
+            with pytest.raises(RuntimeError) as failed:
+                call()
+            assert failed.value is injected
+            assert len(published) == (1 if scenario == "publish_failure" else 0), published
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert calls == [], calls
+    if scenario in {"normal", "between_repetition"}:
+        assert tier.counts.failed == 1 and tier.returncodes == [1], (tier.counts, tier.returncodes)
+        assert "RETAIN-NATIVE-NONE-OUTPUT" in tier.output_tail, tier.output_tail
+        assert tier.status == ("INTERRUPTED" if scenario == "between_repetition" else "FAIL")
+
+
+@pytest.mark.parametrize("scenario", ["normal", "publish_failure", "assembly_failure"])
+def test_matrix_native_none_handler_keeps_the_original_outcome(tmp_path, monkeypatch, scenario):
+    calls = _native_none_signal(monkeypatch)
+    injected = RuntimeError("INJECTED-" + scenario)
+    published: list = []
+
+    def publish(tier):
+        published.append(tier)
+        if scenario == "publish_failure":
+            raise injected
+
+    def broken_tier_result(*args, **kwargs):
+        raise injected
+
+    def call():
+        return gate.run_matrix_tier(
+            name="trade",
+            project_root=tmp_path,
+            python_executable=Path("python"),
+            environment={},
+            required_problems=[],
+            timeout_override=5,
+            report_directory=tmp_path,
+            required_nodeids=(_ROW,),
+            matrix_workers=1,
+            publish=publish,
+        )
+
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeMatrixPopen)
+    if scenario == "assembly_failure":
+        monkeypatch.setitem(
+            inspect.unwrap(gate.run_matrix_tier).__globals__, "TierResult", broken_tier_result
+        )
+    with _process_sigint_handler(signal.default_int_handler):
+        if scenario == "normal":
+            tier = call()
+            assert len(published) == 1 and published[0] is tier, published
+        else:
+            with pytest.raises(RuntimeError) as failed:
+                call()
+            assert failed.value is injected
+            assert len(published) == (1 if scenario == "publish_failure" else 0), published
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert calls == [], calls
+    if scenario == "normal":
+        assert tier.status == "FAIL" and tier.counts.failed == 1, (tier.status, tier.counts)
+        assert "MATRIX-OUTPUT" in tier.output_tail, tier.output_tail
+
+
+@pytest.mark.parametrize("previous", [signal.SIG_IGN, signal.SIG_DFL], ids=["ign", "dfl"])
+def test_guard_restores_sig_ign_and_sig_dfl_exactly(previous):
+    with _process_sigint_handler(previous):
+        guard = capacity_module._defer_sigint_while_finalizing()
+        assert signal.getsignal(signal.SIGINT) == guard._handler
+        assert guard.restore() is False
+        assert signal.getsignal(signal.SIGINT) is previous
+
+
+def test_guard_restore_is_idempotent_and_never_clobbers_a_later_handler(monkeypatch):
+    def sentinel(_signum, _frame):
+        return None
+
+    def later(_signum, _frame):
+        return None
+
+    state = {"handler": sentinel}
+    calls: list = []
+
+    def fake_signal(signum, handler):
+        calls.append(handler)
+        previous, state["handler"] = state["handler"], handler
+        return previous
+
+    stub = types.SimpleNamespace(
+        SIGINT=signal.SIGINT, signal=fake_signal, getsignal=lambda _signum: state["handler"]
+    )
+    monkeypatch.setattr(capacity_module, "signal", stub)
+    guard = capacity_module._defer_sigint_while_finalizing()
+    assert state["handler"] == guard._handler
+    guard._handler(signal.SIGINT, None)
+    assert guard.restore() is True
+    assert state["handler"] is sentinel
+    state["handler"] = later
+    assert guard.restore() is True
+    assert state["handler"] is later
+    assert len(calls) == 2, calls
+
+
+def test_guard_is_a_noop_off_the_main_thread():
+    before = signal.getsignal(signal.SIGINT)
+    outcome: dict = {}
+
+    def work():
+        try:
+            guard = capacity_module._defer_sigint_while_finalizing()
+            outcome["restore"] = guard.restore()
+        except BaseException as exc:  # noqa: BLE001 - recorded and asserted below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    thread.join()
+    assert outcome == {"restore": False}, outcome
+    assert signal.getsignal(signal.SIGINT) is before
