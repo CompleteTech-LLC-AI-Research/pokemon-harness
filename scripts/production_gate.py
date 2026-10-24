@@ -87,6 +87,12 @@ DEFAULT_TIMEOUT_SECONDS: dict[str, float] = {
 
 _SHA1_RE = re.compile(r"^\|\s*SHA-?1\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|")
 _PATH_RE = re.compile(r"^\|\s*Path\s*\|\s*`([^`]+)`\s*\|")
+_FIXTURE_SHA1_RE = re.compile(
+    r"^\|\s*`([^`]+\.state)`\s*\|\s*`([0-9A-Fa-f]{40})`\s*\|"
+)
+
+MAX_OUTPUT_TAIL = 8000
+_DIAGNOSTIC_OUTCOMES = frozenset({"failed", "error"})
 
 
 @dataclass(frozen=True)
@@ -230,6 +236,32 @@ def parse_expected_symbol_sha1(versions_file: Path) -> dict[Path, str]:
     return expected
 
 
+def parse_expected_fixture_sha1(versions_file: Path) -> dict[Path, str]:
+    """Extract documented SHA-1 pins for operator-managed fixture files.
+
+    Fixture rows are kept in the provenance table as paths relative to the
+    fixture root (for example, ``red/cable_club.state``).  Accept the full
+    ``tests/fixtures/link/`` prefix as well so the parser also handles an
+    explicit manifest-style contract without storing machine-local paths.
+    """
+
+    expected: dict[Path, str] = {}
+    for line in versions_file.read_text(encoding="utf-8").splitlines() if versions_file.is_file() else ():
+        match = _FIXTURE_SHA1_RE.match(line)
+        if match is None:
+            continue
+        relative = Path(match.group(1))
+        parts = relative.parts
+        if parts[:3] == ("tests", "fixtures", "link"):
+            relative = Path(*parts[3:])
+        elif parts[:2] == ("fixtures", "link"):
+            relative = Path(*parts[2:])
+        elif parts[:1] == ("link",):
+            relative = Path(*parts[1:])
+        expected[relative] = match.group(2).lower()
+    return expected
+
+
 def sha1_of_file(path: Path) -> str:
     digest = hashlib.sha1()
     with path.open("rb") as stream:
@@ -243,6 +275,7 @@ def inspect_assets(
     fixture_root: Path,
     expected_sha1: dict[Path, str],
     expected_symbol_sha1: dict[Path, str] | None = None,
+    expected_fixture_sha1: dict[Path, str] | None = None,
 ) -> list[AssetRecord]:
     records: list[AssetRecord] = []
 
@@ -255,7 +288,12 @@ def inspect_assets(
             )
             continue
         actual = sha1_of_file(path)
-        status = "ok" if expected is None or actual == expected else "sha1-mismatch"
+        if expected is None:
+            status = "missing-pin"
+        elif actual != expected:
+            status = "sha1-mismatch"
+        else:
+            status = "ok"
         records.append(
             AssetRecord(
                 label,
@@ -298,13 +336,29 @@ def inspect_assets(
 
     for label, relative in REQUIRED_FIXTURES:
         path = fixture_root / relative
+        expected = (
+            expected_fixture_sha1.get(relative)
+            if expected_fixture_sha1 is not None
+            else None
+        )
+        actual = sha1_of_file(path) if path.is_file() else None
+        if not path.is_file():
+            status = "missing"
+        elif expected_fixture_sha1 is not None and expected is None:
+            status = "missing-pin"
+        elif expected is not None and actual != expected:
+            status = "sha1-mismatch"
+        else:
+            status = "ok"
         records.append(
             AssetRecord(
                 label,
                 "fixture",
                 str(path),
-                "ok" if path.is_file() else "missing",
+                status,
                 size=path.stat().st_size if path.is_file() else None,
+                expected_sha1=expected,
+                actual_sha1=actual,
             )
         )
     return records
@@ -467,14 +521,85 @@ def _reason_counter(payload: dict[str, Any]) -> dict[str, int]:
     return dict(sorted(reasons.items()))
 
 
-def load_gate_report(path: Path) -> tuple[Counts, dict[str, int], str]:
-    """Load the stable JSON emitted by ``tests._gate_report``."""
-
+def _read_gate_report(path: Path) -> tuple[dict[str, Any] | None, str]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return Counts(errors=1), {}, f"could not read pytest report: {type(exc).__name__}: {exc}"
+        return None, f"could not read pytest report: {type(exc).__name__}: {exc}"
+    if not isinstance(payload, dict):
+        return None, "could not read pytest report: top-level payload is not an object"
+    return payload, ""
+
+
+def load_gate_report(path: Path) -> tuple[Counts, dict[str, int], str]:
+    """Load the stable JSON emitted by ``tests._gate_report``."""
+
+    payload, error = _read_gate_report(path)
+    if error or payload is None:
+        return Counts(errors=1), {}, error
     return Counts.from_report(payload), _reason_counter(payload), ""
+
+
+def _bounded_report_text(value: Any, limit: int = 2400) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    marker = "\n...[report reason truncated]...\n"
+    remaining = max(0, limit - len(marker))
+    head = remaining // 2
+    return text[:head] + marker + text[-(remaining - head):]
+
+
+def _structured_failure_diagnostics(payload: dict[str, Any]) -> str:
+    """Render bounded failure records before pytest's potentially huge summary.
+
+    The JSON report retains the phase (setup/call/teardown) and collection
+    errors even when ``pytest -rA`` emits thousands of passing-test lines.
+    Keep those records in the gate's bounded output so the first failed timing
+    iteration remains actionable after later repeats pass.
+    """
+
+    records: list[str] = []
+    for record in payload.get("tests", []):
+        if not isinstance(record, dict):
+            continue
+        outcome = str(record.get("outcome") or "")
+        if outcome not in _DIAGNOSTIC_OUTCOMES and not record.get("was_xfail"):
+            continue
+        nodeid = _bounded_report_text(record.get("nodeid") or "<unknown>", 500)
+        when = _bounded_report_text(record.get("when") or "unknown", 80)
+        reason = _bounded_report_text(record.get("reason") or "(no reason reported)")
+        records.append(
+            f"test nodeid={nodeid!r} when={when!r} outcome={outcome!r}\n"
+            f"reason:\n{reason}"
+        )
+    for record in payload.get("collection_errors", []):
+        if not isinstance(record, dict):
+            continue
+        nodeid = _bounded_report_text(record.get("nodeid") or "<collection>", 500)
+        reason = _bounded_report_text(record.get("reason") or "(no reason reported)")
+        records.append(f"collection nodeid={nodeid!r}\nreason:\n{reason}")
+    if not records:
+        return ""
+    rendered = "structured pytest diagnostics:\n" + "\n\n".join(records)
+    return _bounded_report_text(rendered, MAX_OUTPUT_TAIL - 128)
+
+
+def _bounded_output_with_diagnostics(
+    output: str,
+    diagnostics: str,
+    report_error: str = "",
+) -> str:
+    """Bound raw pytest output while reserving space for structured failures."""
+
+    suffix_parts = [part for part in (diagnostics, report_error) if part]
+    suffix = "\n".join(suffix_parts)
+    if suffix:
+        suffix = "\n" + suffix
+    available = max(0, MAX_OUTPUT_TAIL - len(suffix))
+    raw_tail = (output or "")[-available:] if available else ""
+    rendered = raw_tail + suffix
+    return rendered[-MAX_OUTPUT_TAIL:]
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
@@ -542,13 +667,18 @@ def run_pytest_once(
     else:
         returncode = int(process.returncode or 0)
 
-    counts, reasons, report_error = load_gate_report(report_path)
-    if report_error:
-        output = f"{output}\n{report_error}"
+    payload, report_error = _read_gate_report(report_path)
+    if payload is None:
+        counts, reasons = Counts(errors=1), {}
+    else:
+        counts, reasons = Counts.from_report(payload), _reason_counter(payload)
+    diagnostics = _structured_failure_diagnostics(payload) if payload is not None else ""
     # Keep the command and enough output to diagnose a failed gate without
     # flooding the orchestrator with every emulator trace.
     del started
-    return returncode, counts, reasons, output[-8000:], command
+    return returncode, counts, reasons, _bounded_output_with_diagnostics(
+        output, diagnostics, report_error
+    ), command
 
 
 def synthetic_optional_skip(
@@ -600,6 +730,7 @@ def run_tier(
     aggregate_reasons: Counter[str] = Counter()
     returncodes: list[int] = []
     output_tail = ""
+    failure_output: str | None = None
     command: list[str] | None = None
     started = time.monotonic()
     for iteration in range(1, repeat + 1):
@@ -621,8 +752,21 @@ def run_tier(
         aggregate.errors += counts.errors
         aggregate_reasons.update(reasons)
         returncodes.append(returncode)
-        if output.strip():
-            output_tail = output
+        iteration_failed = (
+            returncode not in (0, 5)
+            or counts.failed + counts.errors + counts.xfailed + counts.xpassed > 0
+            or (required and counts.skipped > 0)
+        )
+        if iteration_failed and failure_output is None:
+            # Preserve the first failure's diagnostics even if every later
+            # repeat passes. Aggregate counts/returncodes still describe
+            # all iterations; keep the retained diagnostic tail bounded.
+            header = f"pytest iteration {iteration}/{repeat}, returncode={returncode}\n"
+            failure_output = header + (output or "pytest produced no output")[-(8000 - len(header)):]
+        if failure_output is not None:
+            output_tail = failure_output
+        elif output.strip():
+            output_tail = output[-8000:]
 
     duration = time.monotonic() - started
     unexpected = aggregate.failed + aggregate.errors + aggregate.xfailed + aggregate.xpassed
@@ -809,8 +953,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     fixture_root = find_fixture_root(project_root, args.fixture_root)
     expected_sha1 = parse_expected_sha1(project_root / "VERSIONS.md")
     expected_symbol_sha1 = parse_expected_symbol_sha1(project_root / "VERSIONS.md")
+    expected_fixture_sha1 = parse_expected_fixture_sha1(project_root / "VERSIONS.md")
     assets = inspect_assets(
-        rom_root, fixture_root, expected_sha1, expected_symbol_sha1
+        rom_root,
+        fixture_root,
+        expected_sha1,
+        expected_symbol_sha1,
+        expected_fixture_sha1,
     )
     environment = build_test_environment(
         project_root, rom_root, fixture_root, expected_sha1, args.runtime_mode

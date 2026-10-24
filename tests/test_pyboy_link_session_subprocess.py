@@ -163,7 +163,14 @@ def _collect_result(proc, timeout: float, *, label: str = "") -> dict:
                 print(f"  {line}")
     for line in stdout.splitlines():
         if line.startswith("__TCP_TRADE_RESULT__ "):
-            return json.loads(line[len("__TCP_TRADE_RESULT__ "):])
+            result = json.loads(line[len("__TCP_TRADE_RESULT__ "):])
+            if proc.returncode != 0:
+                pytest.fail(
+                    f"{label or 'peer'} exited with rc={proc.returncode}; "
+                    f"result={result}\n"
+                    f"stderr tail:\n{stderr[-2000:]}"
+                )
+            return result
     pytest.fail(
         f"peer subprocess exited without emitting __TCP_TRADE_RESULT__; "
         f"rc={proc.returncode}, "
@@ -329,8 +336,8 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp():
     """Diagnostic Red/Blue remote battle flow with native serial traffic.
 
     The peer processes load legal, ROM-matched battle fixtures and drive the
-    Cable Club battle path. The peer uses a controlled LinkMenu setup to
-    select Colosseum, so this row is not untouched-gameplay acceptance; all
+    Cable Club battle path with ordinary DOWN/A menu input. Production link
+    setup still seeds the serial role in RAM, so this is diagnostic evidence; all
     exchange traffic after setup must pass through NetworkBackend's native
     bit-level serial transport.
     """
@@ -395,3 +402,7 @@ def test_subprocess_pair_resolves_battle_turn_over_tcp():
         + result_b.get("ExecuteEnemyMove", 0)
         > 0
     ), f"connector battle turn did not advance; {result_b}"
+    from scripts.tcp_link_matrix import _verify_battle_turns
+
+    errors = _verify_battle_turns([result_a, result_b])
+    assert not errors, f"remote battle did not settle consistently: {errors}"

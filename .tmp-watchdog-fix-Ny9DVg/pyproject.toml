@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokered-harness"
+version = "0.1.0"
+description = "Memory-first automation harness for Pokémon Red via PyBoy, exposed over MCP."
+requires-python = ">=3.11"
+readme = "README.md"
+license = "LGPL-3.0-only"
+license-files = ["vendor/pyboy-src/LICENSE.md"]
+dependencies = [
+    # These are the versions used by the certified gate. Bump them as a
+    # tested set; open-ended requirements can silently change the emulator
+    # or MCP contract on a clean install.
+    "mcp==1.29.1",
+    "cython==3.0.12",
+    "numpy==2.4.6; python_version < '3.12'",
+    "numpy==2.5.2; python_version >= '3.12'",
+    "pydantic==2.13.5",
+    "pysdl2==0.9.17",
+    "pysdl2-dll==2.32.10",
+]
+
+[project.scripts]
+pokered-harness = "pokered_harness.mcp_server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.5",
+]
+
+[tool.setuptools]
+# Package data is an explicit allowlist.  Manifest-driven package data would
+# let stale ignored egg-info/SOURCES.txt entries leak files into the wheel.
+include-package-data = false
+
+# Package the pinned PyBoy fork into the same distribution as the harness.
+# This keeps editable installs and wheels on the identical runtime without a
+# local-path dependency (which is not valid in wheel metadata).
+packages = [
+    "pokered_harness",
+    "pokered_harness.events",
+    "pokered_harness.link",
+    "pokered_harness.state",
+    "pokered_harness.symbols",
+    "pyboy",
+    "pyboy.api",
+    "pyboy.core",
+    "pyboy.core.cartridge",
+    "pyboy.link",
+    "pyboy.logging",
+    "pyboy.plugins",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+pyboy = "vendor/pyboy-src/pyboy"
+
+[tool.setuptools.package-data]
+"pyboy.core" = ["bootrom_cgb.bin", "bootrom_dmg.bin"]
+"pyboy.plugins" = ["font.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+markers = [
+    "unit: ROM-free deterministic tests",
+    "real_rom: requires a BYO ROM and symbol file",
+    "local_link: real-ROM in-process link tests",
+    "remote_link: real-ROM TCP or subprocess link tests",
+    "mcp_stdio: real-ROM MCP stdio integration tests",
+    "acceptance: real-ROM trade or battle acceptance",
+    "trade: real-ROM trade coverage",
+    "battle: real-ROM battle coverage",
+    "battle_acceptance: strict real-ROM battle-turn acceptance",
+    "battle_diagnostic: remote battle diagnostic with controlled menu setup",
+    "timing_sensitive: repeatable scheduling-sensitive regression",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# PyBoy is a pinned third-party source fork. Keep product lint scoped to
+# src/, tests/, and scripts/; audit the vendored runtime separately with
+# explicit Ruff/compile/import checks rather than mass-rewriting upstream code.
+extend-exclude = ["vendor/pyboy-src"]

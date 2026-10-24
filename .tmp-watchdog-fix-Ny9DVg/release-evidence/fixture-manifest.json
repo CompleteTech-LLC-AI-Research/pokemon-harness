@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "manifest_id": "pokered-harness.external-link-fixtures",
+  "manifest_version": 1,
+  "generated_on": "2026-08-30",
+  "fixture_root": "tests/fixtures/link",
+  "asset_policy": {
+    "repository_distributed": false,
+    "repository_tracking": "untracked; *.state is ignored",
+    "observed_location": "operator-managed external fixture root using the fixture_root layout",
+    "validation_command": "python scripts/validate_fixture_manifest.py --fixture-root <fixture-root>",
+    "validation_policy": "fail closed on missing, size, SHA-1, or SHA-256 mismatch",
+    "provenance_policy": "verified means the exact bytes were reproduced from the recorded source and pinned ROM/runtime; original operator timestamps are explicitly distinguished from verification timestamps"
+  },
+  "fixtures": [
+    {
+      "id": "red-color-ordinary",
+      "path": "red/cable_club.state",
+      "version": "red",
+      "variant": "color",
+      "kind": "ordinary",
+      "size_bytes": 200546,
+      "sha1": "546d7edaf7c3a987f86ae86a97066c7d619eefbb",
+      "sha256": "ea0993b8652db11c85b24002170b93377b1a92b55c95f178f00a08a7c0e11719",
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/produce_cable_club_fixture.py",
+        "source_state": "external walkthrough_red/milestones/cerulean_pc.state; SHA-1 cbccc00b91ef442890142bbd5fc41563882d0655; SHA-256 791f6dcb2f8a2ffaf7403fa042d495db2830dd5553730641e040aee4eb6d73f5",
+        "capture_command_template": "python scripts/produce_cable_club_fixture.py --version red --variant color --source <matching-cerulean-pc.state> --rom rom/red/pokemon-red-color.gb --sym rom/red/pokemon-red.sym --out tests/fixtures/link/red/cable_club.state",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 25e231c25912b10322ba1d5c624c4ef0e54be8a6",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte reproduction; original capture timestamp not retained)",
+        "verification_method": "reproduced with the recorded source state and matching color-Red ROM; output SHA-1 equals the external fixture",
+        "evidence_note": "Final fixture bytes are verified by deterministic reproduction; the source state remains an operator-managed external input."
+      }
+    },
+    {
+      "id": "red-vanilla-ordinary",
+      "path": "red/cable_club-vanilla.state",
+      "version": "red",
+      "variant": "vanilla",
+      "kind": "ordinary",
+      "size_bytes": 192217,
+      "sha1": "affd77c20bf4600b8057ea33683ed58a2ac86157",
+      "sha256": "4749d88ebdf6b7840f68efaf89bba07ab2b522e9b23269f142f8ec882f6a4347",
+      "expected_rom": {
+        "path": "rom/red/pokemon-red.gb",
+        "sha1": "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "partial",
+        "producer": "scripts/produce_cable_club_fixture.py",
+        "source_state": "external walkthrough_red/milestones/cerulean_pc.state; SHA-1 cbccc00b91ef442890142bbd5fc41563882d0655; SHA-256 791f6dcb2f8a2ffaf7403fa042d495db2830dd5553730641e040aee4eb6d73f5; retained source is not proven to be vanilla-ROM captured",
+        "capture_command_template": "python scripts/produce_cable_club_fixture.py --version red --variant vanilla --source <matching-vanilla-cerulean-pc.state> --rom rom/red/pokemon-red.gb --sym rom/red/pokemon-red.sym --out tests/fixtures/link/red/cable_club-vanilla.state",
+        "runtime_identity": null,
+        "captured_at_utc": null,
+        "verification_method": null,
+        "evidence_note": "A bounded attempt with the retained source and vanilla Red ROM exceeded the movement budget; a vanilla-ROM-matching source state is still required."
+      }
+    },
+    {
+      "id": "red-color-battle",
+      "path": "red/cable_club-battle.state",
+      "version": "red",
+      "variant": "color",
+      "kind": "battle",
+      "size_bytes": 200546,
+      "sha1": "4343278b018187ed4bf7c4eda3b202097456f048",
+      "sha256": "4f165f3ddd9b03710d94bf6702fabfc35b9408b03a8973c6407d474d8801f461",
+      "expected_rom": {
+        "path": "rom/red/pokemon-red-color.gb",
+        "sha1": "e1deed63080bc24cad5fba18ecb3184f905d16d4"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external red/cable_club.state; SHA-1 546d7edaf7c3a987f86ae86a97066c7d619eefbb; SHA-256 ea0993b8652db11c85b24002170b93377b1a92b55c95f178f00a08a7c0e11719",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants red_color",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 0f4d54d8e1eef2362759cbd2f91a43f16c05000c",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte reproduction; original capture timestamp not retained)",
+        "verification_method": "reproduced from the verified color-Red ordinary fixture with the tracked battle generator; output SHA-1 equals the external fixture",
+        "evidence_note": "Battle acceptance loads this immutable state and performs no party mutation at runtime."
+      }
+    },
+    {
+      "id": "red-vanilla-battle",
+      "path": "red/cable_club-battle-vanilla.state",
+      "version": "red",
+      "variant": "vanilla",
+      "kind": "battle",
+      "size_bytes": 192217,
+      "sha1": "63d00b469b07e3969bcd82be1047031265be0b3a",
+      "sha256": "4f100b5bd9bc6b226e93c200d38d036b6f9221449600850e74b0a14061c8704a",
+      "expected_rom": {
+        "path": "rom/red/pokemon-red.gb",
+        "sha1": "ea9bcae617fdf159b045185467ae58b2e4a48b9a"
+      },
+      "expected_symbols": {
+        "path": "rom/red/pokemon-red.sym",
+        "sha1": "03783c86a42588bd77f73bd7814cf8d70e590118"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "partial",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external red/cable_club-vanilla.state; SHA-1 affd77c20bf4600b8057ea33683ed58a2ac86157; SHA-256 4749d88ebdf6b7840f68efaf89bba07ab2b522e9b23269f142f8ec882f6a4347; ordinary source provenance is partial",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants red_gb",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 0f4d54d8e1eef2362759cbd2f91a43f16c05000c",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte derivation; original capture timestamp not retained)",
+        "verification_method": "reproduced from the retained vanilla-Red ordinary fixture with the tracked battle generator; output SHA-1 equals the external fixture, but ordinary source provenance remains partial",
+        "evidence_note": "Battle acceptance loads this immutable state and performs no party mutation at runtime; vanilla-ROM source provenance remains open."
+      }
+    },
+    {
+      "id": "blue-color-ordinary",
+      "path": "blue/cable_club.state",
+      "version": "blue",
+      "variant": "color",
+      "kind": "ordinary",
+      "size_bytes": 200546,
+      "sha1": "0809d2f8e514c7fb714a73a7b13f120b26a40c38",
+      "sha256": "bc19c13a556f4fbabc6c08fd88e31e712ad7dcb9cf2213b15a6cd6cf3bddbba7",
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/produce_cable_club_fixture.py",
+        "source_state": "external walkthrough_blue/milestones/cerulean_pc.state; SHA-1 2863e715a7fa471633efaadc5027dc54fe6cde21; SHA-256 e505459004c392d524344812e3ebb60bc8a62a8e4e8f41d61bc8a323b78ae5a2",
+        "capture_command_template": "python scripts/produce_cable_club_fixture.py --version blue --variant color --source <matching-cerulean-pc.state> --rom rom/blue/pokemon-blue-color.gb --sym rom/blue/pokemon-blue.sym --out tests/fixtures/link/blue/cable_club.state",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 25e231c25912b10322ba1d5c624c4ef0e54be8a6",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte reproduction; original capture timestamp not retained)",
+        "verification_method": "reproduced with the recorded source state and matching color-Blue ROM; output SHA-1 equals the external fixture",
+        "evidence_note": "Final fixture bytes are verified by deterministic reproduction; the source state remains an operator-managed external input."
+      }
+    },
+    {
+      "id": "blue-vanilla-ordinary",
+      "path": "blue/cable_club-vanilla.state",
+      "version": "blue",
+      "variant": "vanilla",
+      "kind": "ordinary",
+      "size_bytes": 192217,
+      "sha1": "cff5349b55f8fdf47a5af63d674977103aeb44d6",
+      "sha256": "e1ecd93dfe31e9a5568fd01f9b2b98be33ff5225cbcf6e6df8e338410c0cce93",
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue.gb",
+        "sha1": "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "partial",
+        "producer": "scripts/produce_cable_club_fixture.py",
+        "source_state": "external walkthrough_blue/milestones/cerulean_pc.state; SHA-1 2863e715a7fa471633efaadc5027dc54fe6cde21; SHA-256 e505459004c392d524344812e3ebb60bc8a62a8e4e8f41d61bc8a323b78ae5a2; retained source is not proven to be vanilla-ROM captured",
+        "capture_command_template": "python scripts/produce_cable_club_fixture.py --version blue --variant vanilla --source <matching-vanilla-cerulean-pc.state> --rom rom/blue/pokemon-blue.gb --sym rom/blue/pokemon-blue.sym --out tests/fixtures/link/blue/cable_club-vanilla.state",
+        "runtime_identity": null,
+        "captured_at_utc": null,
+        "verification_method": null,
+        "evidence_note": "A bounded attempt with the retained source and vanilla Blue ROM exceeded the movement budget; a vanilla-ROM-matching source state is still required."
+      }
+    },
+    {
+      "id": "blue-color-battle",
+      "path": "blue/cable_club-battle.state",
+      "version": "blue",
+      "variant": "color",
+      "kind": "battle",
+      "size_bytes": 200546,
+      "sha1": "6aac3aabe0f6ad662dec218682c2254b3954a10a",
+      "sha256": "2a49a3d27ab73f86460083bb8fb5b6b63c9546816c69656fe50448e88d9c6e0e",
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue-color.gb",
+        "sha1": "5f4b05725a860e04077045462176d3e2771c5022"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external blue/cable_club.state; SHA-1 0809d2f8e514c7fb714a73a7b13f120b26a40c38; SHA-256 bc19c13a556f4fbabc6c08fd88e31e712ad7dcb9cf2213b15a6cd6cf3bddbba7",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants blue_color",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 0f4d54d8e1eef2362759cbd2f91a43f16c05000c",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte reproduction; original capture timestamp not retained)",
+        "verification_method": "reproduced from the verified color-Blue ordinary fixture with the tracked battle generator; output SHA-1 equals the external fixture",
+        "evidence_note": "Battle acceptance loads this immutable state and performs no party mutation at runtime."
+      }
+    },
+    {
+      "id": "blue-vanilla-battle",
+      "path": "blue/cable_club-battle-vanilla.state",
+      "version": "blue",
+      "variant": "vanilla",
+      "kind": "battle",
+      "size_bytes": 192217,
+      "sha1": "442c1497c0398f7e54ceade9739ddd1b5b9456fc",
+      "sha256": "1a6439a936f017582f9b088046624d8cf208590644d8394d5b7ee4a4b19b843a",
+      "expected_rom": {
+        "path": "rom/blue/pokemon-blue.gb",
+        "sha1": "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2"
+      },
+      "expected_symbols": {
+        "path": "rom/blue/pokemon-blue.sym",
+        "sha1": "c779a0628cfc97cc9ac9db2520a1e23a2d8b7ed6"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "partial",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external blue/cable_club-vanilla.state; SHA-1 cff5349b55f8fdf47a5af63d674977103aeb44d6; SHA-256 e1ecd93dfe31e9a5568fd01f9b2b98be33ff5225cbcf6e6df8e338410c0cce93; ordinary source provenance is partial",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants blue_gb",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 0f4d54d8e1eef2362759cbd2f91a43f16c05000c",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte derivation; original capture timestamp not retained)",
+        "verification_method": "reproduced from the retained vanilla-Blue ordinary fixture with the tracked battle generator; output SHA-1 equals the external fixture, but ordinary source provenance remains partial",
+        "evidence_note": "Battle acceptance loads this immutable state and performs no party mutation at runtime; vanilla-ROM source provenance remains open."
+      }
+    },
+    {
+      "id": "yellow-cgb-ordinary",
+      "path": "yellow/cable_club.state",
+      "version": "yellow",
+      "variant": "cgb",
+      "kind": "ordinary",
+      "size_bytes": 200546,
+      "sha1": "37df4dbdb512cd3febdc2d536281683476291d3b",
+      "sha256": "73d1a134606d4646b0c0146c07369b6fe1da891a7d87bc893a550e623be04bea",
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/produce_cable_club_fixture.py",
+        "source_state": "external walkthrough_yellow/milestones/cerulean_pc.state; SHA-1 28bf579888d7e17a30831117ec0e1a3534b01034; SHA-256 e3f5bfef1fd229907a12ec8fb2006f05d47a07ca5bfa49fd106ff204318d4b8a",
+        "capture_command_template": "python scripts/produce_cable_club_fixture.py --version yellow --variant cgb --source <matching-cerulean-pc.state> --rom rom/yellow/pokemon-yellow.gbc --sym rom/yellow/pokemon-yellow.sym --out tests/fixtures/link/yellow/cable_club.state",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 25e231c25912b10322ba1d5c624c4ef0e54be8a6",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte reproduction; original capture timestamp not retained)",
+        "verification_method": "reproduced with the recorded source state and matching Yellow ROM; output SHA-1 equals the external fixture",
+        "evidence_note": "Final fixture bytes are verified by deterministic reproduction; the source state remains an operator-managed external input."
+      }
+    },
+    {
+      "id": "yellow-cgb-battle",
+      "path": "yellow/cable_club-battle.state",
+      "version": "yellow",
+      "variant": "cgb",
+      "kind": "battle",
+      "size_bytes": 200546,
+      "sha1": "78c7d0b32006b11baa9ac9c71efc73b0a8d807b9",
+      "sha256": "96574cba6b3dbd370adad0a7f5df0d2520dea30af4bffdfbfb9fe1b70e4d3ecc",
+      "expected_rom": {
+        "path": "rom/yellow/pokemon-yellow.gbc",
+        "sha1": "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1"
+      },
+      "expected_symbols": {
+        "path": "rom/yellow/pokemon-yellow.sym",
+        "sha1": "7c4205723943e7722230dcf014e5e8a2012474aa"
+      },
+      "repository_distributed": false,
+      "provenance": {
+        "status": "verified",
+        "producer": "scripts/prepare_battle_cable_club_fixtures.py",
+        "source_state": "external yellow/cable_club.state; SHA-1 37df4dbdb512cd3febdc2d536281683476291d3b; SHA-256 73d1a134606d4646b0c0146c07369b6fe1da891a7d87bc893a550e623be04bea",
+        "capture_command_template": "python scripts/prepare_battle_cable_club_fixtures.py --repo-root <checkout> --rom-root <rom-root> --fixture-root <fixture-root> --output-root <output-root> --variants yellow",
+        "runtime_identity": "Python 3.12.13; PyBoy 2.7.0 source runtime; fork c565df66c3731fad2856169a90f6bbec99925915; producer revision 0f4d54d8e1eef2362759cbd2f91a43f16c05000c",
+        "captured_at_utc": "2026-08-31T16:48:18Z (byte-for-byte reproduction; original capture timestamp not retained)",
+        "verification_method": "reproduced from the verified Yellow ordinary fixture with the tracked battle generator; output SHA-1 equals the external fixture",
+        "evidence_note": "Battle acceptance loads this immutable state and performs no party mutation at runtime."
+      }
+    }
+  ]
+}

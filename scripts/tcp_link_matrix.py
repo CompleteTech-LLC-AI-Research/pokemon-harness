@@ -8,9 +8,11 @@ Mode B path more closely than an in-process link demo.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,6 +23,43 @@ from typing import Any
 
 RESULT_MARKER = "__TCP_TRADE_RESULT__ "
 VERSIONS = ("red_gb", "red_color", "blue_gb", "blue_color", "yellow")
+_VERSION_ASSETS = {
+    "red_gb": (
+        "red",
+        "pokemon-red.gb",
+        "pokemon-red.sym",
+        "cable_club-vanilla.state",
+        "cable_club-battle-vanilla.state",
+    ),
+    "red_color": (
+        "red",
+        "pokemon-red-color.gb",
+        "pokemon-red.sym",
+        "cable_club.state",
+        "cable_club-battle.state",
+    ),
+    "blue_gb": (
+        "blue",
+        "pokemon-blue.gb",
+        "pokemon-blue.sym",
+        "cable_club-vanilla.state",
+        "cable_club-battle-vanilla.state",
+    ),
+    "blue_color": (
+        "blue",
+        "pokemon-blue-color.gb",
+        "pokemon-blue.sym",
+        "cable_club.state",
+        "cable_club-battle.state",
+    ),
+    "yellow": (
+        "yellow",
+        "pokemon-yellow.gbc",
+        "pokemon-yellow.sym",
+        "cable_club.state",
+        "cable_club-battle.state",
+    ),
+}
 TRADE_PHASES = (
     "00_loaded",
     "01_link_menu",
@@ -37,7 +76,7 @@ BATTLE_PHASES = (
     "02_battle_menu",
     "03_colosseum",
     "04_battle_launch",
-    "05_battle_damage",
+    "05_battle_settled",
     "06_battle_synced",
 )
 
@@ -54,6 +93,95 @@ class PeerRun:
     result: dict[str, Any] | None
 
 
+def _sha256_or_missing(path: Path) -> str:
+    """Hash one evidence input, retaining an explicit missing marker."""
+    if not path.is_file():
+        return "<missing>"
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _matrix_fingerprint(
+    *,
+    repo_root: Path,
+    modes: list[str],
+    versions: list[str],
+    deadline_seconds: float,
+    python: str,
+) -> str:
+    """Return a content fingerprint for resumable proof evidence.
+
+    A successful row is only reusable when the executable, driver, transport,
+    ROM/symbol bytes, fixtures, and deadline contract are unchanged.  This is
+    deliberately content-based so an ignored BYO asset root can move without
+    making otherwise identical evidence unverifiable.
+    """
+    configured_rom_root = os.environ.get("POKERED_ROM_ROOT")
+    rom_root = Path(configured_rom_root or repo_root / "rom").expanduser()
+    if not rom_root.is_absolute():
+        rom_root = repo_root / rom_root
+    configured_fixture_root = os.environ.get("POKERED_FIXTURE_ROOT")
+    fixture_root = Path(
+        configured_fixture_root or repo_root / "tests" / "fixtures" / "link"
+    ).expanduser()
+    if not fixture_root.is_absolute():
+        fixture_root = repo_root / fixture_root
+    requested_python = Path(python).expanduser()
+    resolved_python = requested_python
+    if not resolved_python.is_absolute():
+        resolved_python = Path(shutil.which(python) or python)
+    python_fingerprint = {
+        "requested": str(requested_python),
+        "resolved": str(resolved_python),
+        "sha256": _sha256_or_missing(resolved_python),
+    }
+    parts: dict[str, Any] = {
+        "modes": sorted(modes),
+        "versions": sorted(versions),
+        "deadline_seconds": float(deadline_seconds),
+        "python": python_fingerprint,
+        "python_version": sys.version,
+        "source": {},
+        "assets": {},
+    }
+    source_paths = [
+        repo_root / relative
+        for relative in (
+            "VERSIONS.md",
+            ".gitmodules",
+            "pyproject.toml",
+            "scripts/tcp_link_matrix.py",
+            "tests/_tcp_trade_peer.py",
+            "vendor/pyboy-src/POKERED_HARNESS_PYBOY_REVISION",
+        )
+    ]
+    for directory in (
+        repo_root / "src" / "pokered_harness",
+        repo_root / "vendor" / "pyboy-src" / "pyboy",
+    ):
+        source_paths.extend(directory.rglob("*.py"))
+    parts["source"] = {
+        str(path.relative_to(repo_root)): _sha256_or_missing(path)
+        for path in sorted(set(source_paths))
+    }
+    for version in versions:
+        game, rom_name, sym_name, trade_state, battle_state = _VERSION_ASSETS[version]
+        for kind, relative in (
+            ("rom", Path(game) / rom_name),
+            ("symbol", Path(game) / sym_name),
+            ("trade_fixture", Path(game) / trade_state),
+            ("battle_fixture", Path(game) / battle_state),
+        ):
+            root = fixture_root if kind.endswith("fixture") else rom_root
+            key = f"{version}:{kind}"
+            parts["assets"][key] = _sha256_or_missing(root / relative)
+    encoded = json.dumps(parts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _free_port() -> int:
     sock = socket.socket()
     try:
@@ -66,7 +194,12 @@ def _free_port() -> int:
 def _parse_result(stdout: str) -> dict[str, Any] | None:
     for line in reversed(stdout.splitlines()):
         if line.startswith(RESULT_MARKER):
-            return json.loads(line[len(RESULT_MARKER) :])
+            try:
+                payload = json.loads(line[len(RESULT_MARKER) :])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                return payload
     return None
 
 
@@ -118,6 +251,7 @@ def _run_pair(
     connect_version: str,
     deadline_seconds: float,
     python: str,
+    fingerprint: str,
 ) -> dict[str, Any]:
     pair_name = f"{listen_version}_to_{connect_version}"
     label = f"{mode}_{pair_name}"
@@ -134,6 +268,10 @@ def _run_pair(
     if env.get("PYTHONPATH"):
         py_path_parts.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(py_path_parts)
+    # This matrix is the bundled source-runtime proof path. Native
+    # qualification is a separate production-gate invocation and must not be
+    # silently selected by a stray site-installed extension.
+    env["PYBOY_NO_CYTHON"] = "1"
 
     listener_cmd = _peer_command(
         python=python,
@@ -163,6 +301,10 @@ def _run_pair(
     listener_stderr_path = run_dir / "listener.stderr"
     connector_stdout_path = run_dir / "connector.stdout"
     connector_stderr_path = run_dir / "connector.stderr"
+    listener: subprocess.Popen[str] | None = None
+    connector: subprocess.Popen[str] | None = None
+    spawn_error: str | None = None
+    timed_out = False
 
     with (
         listener_stdout_path.open("w", encoding="utf-8") as listener_stdout_file,
@@ -170,38 +312,62 @@ def _run_pair(
         connector_stdout_path.open("w", encoding="utf-8") as connector_stdout_file,
         connector_stderr_path.open("w", encoding="utf-8") as connector_stderr_file,
     ):
-        listener = subprocess.Popen(
-            listener_cmd,
-            cwd=repo_root,
-            env=env,
-            text=True,
-            stdout=listener_stdout_file,
-            stderr=listener_stderr_file,
-        )
-        time.sleep(1.0)
-        connector = subprocess.Popen(
-            connector_cmd,
-            cwd=repo_root,
-            env=env,
-            text=True,
-            stdout=connector_stdout_file,
-            stderr=connector_stderr_file,
-        )
+        try:
+            listener = subprocess.Popen(
+                listener_cmd,
+                cwd=repo_root,
+                env=env,
+                text=True,
+                stdout=listener_stdout_file,
+                stderr=listener_stderr_file,
+            )
+            time.sleep(1.0)
+            connector = subprocess.Popen(
+                connector_cmd,
+                cwd=repo_root,
+                env=env,
+                text=True,
+                stdout=connector_stdout_file,
+                stderr=connector_stderr_file,
+            )
 
-        timeout = deadline_seconds + 45.0
-        timed_out = False
-        deadline_at = time.time() + timeout
-        for proc in (listener, connector):
-            remaining = max(1.0, deadline_at - time.time())
-            try:
-                proc.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                proc.kill()
-        for proc in (listener, connector):
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
+            timeout = deadline_seconds + 45.0
+            deadline_at = time.time() + timeout
+            for proc in (listener, connector):
+                remaining = max(1.0, deadline_at - time.time())
+                try:
+                    proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+            for proc in (listener, connector):
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                proc.wait()
+        except OSError as exc:
+            # A failed connector/listener launch must not leave the already
+            # started peer orphaned. Keep the failed row inspectable in the
+            # manifest instead of aborting the whole matrix process.
+            spawn_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            for proc in (connector, listener):
+                if proc is None:
+                    continue
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                try:
+                    proc.wait()
+                except OSError:
+                    pass
 
     listener_stdout = listener_stdout_path.read_text(encoding="utf-8")
     listener_stderr = listener_stderr_path.read_text(encoding="utf-8")
@@ -212,7 +378,7 @@ def _run_pair(
         PeerRun(
             role="listen",
             version=listen_version,
-            returncode=listener.returncode,
+            returncode=listener.returncode if listener is not None else None,
             stdout=listener_stdout,
             stderr=listener_stderr,
             result=_parse_result(listener_stdout),
@@ -220,7 +386,7 @@ def _run_pair(
         PeerRun(
             role="connect",
             version=connect_version,
-            returncode=connector.returncode,
+            returncode=connector.returncode if connector is not None else None,
             stdout=connector_stdout,
             stderr=connector_stderr,
             result=_parse_result(connector_stdout),
@@ -234,6 +400,9 @@ def _run_pair(
         peers=peers,
         timed_out=timed_out,
     )
+    if spawn_error is not None:
+        verification["ok"] = False
+        verification["errors"].insert(0, f"subprocess spawn failed: {spawn_error}")
     _write_contact_sheets(
         run_dir=run_dir,
         label=label,
@@ -247,6 +416,7 @@ def _run_pair(
         "pair": pair_name,
         "listen_version": listen_version,
         "connect_version": connect_version,
+        "fingerprint": fingerprint,
         "port": port,
         "elapsed_seconds": elapsed_seconds,
         "timed_out": timed_out,
@@ -320,19 +490,14 @@ def _verify_run(
 
     results = [peer.result or {} for peer in peers]
     if mode == "trade":
+        errors.extend(_verify_party_swap(results))
         for peer, result in zip(peers, results, strict=True):
             if result.get("_AddEnemyMonToPlayerParty", 0) <= 0:
                 errors.append(f"{peer.role} did not add enemy mon")
             if result.get("TradeCenter_Trade", 0) <= 0:
                 errors.append(f"{peer.role} did not enter TradeCenter_Trade")
     else:
-        for peer, result in zip(peers, results, strict=True):
-            if result.get("PlayerCalcMoveDamage", 0) <= 0:
-                errors.append(f"{peer.role} did not calculate battle damage")
-            if result.get("LinkBattleExchangeData", 0) <= 0:
-                errors.append(f"{peer.role} did not exchange battle data")
-            if result.get("DisplayLinkBattleVersusTextBox", 0) <= 0:
-                errors.append(f"{peer.role} did not display battle versus text")
+        errors.extend(_verify_battle_turns(results))
 
     return {
         "ok": not errors,
@@ -341,6 +506,154 @@ def _verify_run(
         "shot_count": len(list(run_dir.glob("*.png"))),
         "palette_profiles": palette_profiles,
     }
+
+
+def _verify_battle_turns(results: list[dict[str, Any]]) -> list[str]:
+    """Fail closed unless both peers recorded the same settled turn state.
+
+    The peer records its first loop/faint/end boundary after move exchange
+    and execution. A damage-function entry, a sync marker, or final aggregate
+    hook counts cannot substitute for the state captured at that boundary.
+    """
+    if len(results) != 2:
+        return ["battle requires exactly two peer results"]
+
+    boundaries = {
+        "MainInBattleLoop", "HandlePlayerMonFainted",
+        "HandleEnemyMonFainted", "EndOfBattle",
+    }
+    snapshots = []
+
+    def integer(value, minimum=0, maximum=None):
+        return (
+            type(value) is int and value >= minimum
+            and (maximum is None or value <= maximum)
+        )
+
+    for side, result in enumerate(results):
+        prefix = f"battle peer {side}"
+        if not isinstance(result, dict):
+            return [f"{prefix} result is missing"]
+        snapshot = result.get("battle_turn")
+        if not isinstance(snapshot, dict):
+            return [f"{prefix} settled snapshot is missing"]
+        boundary = snapshot.get("boundary")
+        if type(snapshot.get("schema")) is not int or snapshot["schema"] != 1:
+            return [f"{prefix} snapshot schema is unsupported"]
+        if not isinstance(boundary, str) or boundary not in boundaries:
+            return [f"{prefix} snapshot boundary is invalid"]
+
+        for field, hook in (
+            ("exchange_count", "LinkBattleExchangeData"),
+            ("player_execute_count", "ExecutePlayerMove"),
+            ("enemy_execute_count", "ExecuteEnemyMove"),
+            ("boundary_count", boundary),
+            ("loop_count", "MainInBattleLoop"),
+        ):
+            captured = snapshot.get(field)
+            total = result.get(hook)
+            if not integer(captured) or not integer(total) or captured > total:
+                return [f"{prefix} snapshot counts do not match observed hooks"]
+        if (
+            snapshot["exchange_count"] <= 0 or snapshot["boundary_count"] <= 0
+            or snapshot["player_execute_count"] + snapshot["enemy_execute_count"] <= 0
+            or snapshot["loop_count"] < (2 if boundary == "MainInBattleLoop" else 1)
+            or not integer(snapshot.get("execution_exchange_count"), minimum=1)
+            or snapshot["execution_exchange_count"] != snapshot["exchange_count"]
+        ):
+            return [f"{prefix} snapshot precedes move exchange/execution"]
+        if not integer(result.get("DisplayLinkBattleVersusTextBox"), minimum=1):
+            return [f"{prefix} did not display battle versus text"]
+        if not integer(snapshot.get("result"), maximum=255):
+            return [f"{prefix} battle result is invalid"]
+
+        if boundary == "EndOfBattle":
+            if (
+                type(snapshot.get("in_battle")) is not int
+                or snapshot["in_battle"] not in (2, 255)
+                or snapshot.get("cleanup_complete") is not True
+                or type(snapshot.get("post_cleanup_in_battle")) is not int
+                or snapshot["post_cleanup_in_battle"] != 0
+            ):
+                return [f"{prefix} terminal battle cleanup is incomplete"]
+        elif type(snapshot.get("in_battle")) is not int or snapshot["in_battle"] != 2:
+            return [f"{prefix} turn boundary was not in a trainer/link battle"]
+
+        for role in ("player", "enemy"):
+            mon = snapshot.get(role)
+            if (
+                not isinstance(mon, dict)
+                or not integer(mon.get("species"), minimum=1, maximum=255)
+                or not integer(mon.get("max_hp"), minimum=1, maximum=65535)
+                or not integer(mon.get("hp"), maximum=65535)
+                or mon["hp"] > mon["max_hp"]
+                or not integer(mon.get("status"), maximum=255)
+            ):
+                return [f"{prefix} {role} combatant snapshot is invalid"]
+        if (
+            boundary == "HandlePlayerMonFainted" and snapshot["player"]["hp"] != 0
+        ) or (
+            boundary == "HandleEnemyMonFainted" and snapshot["enemy"]["hp"] != 0
+        ):
+            return [f"{prefix} faint boundary has nonzero HP"]
+        snapshots.append(snapshot)
+
+    left, right = snapshots
+    if left["exchange_count"] != right["exchange_count"]:
+        return ["battle snapshots describe different move exchanges"]
+    if any(snapshot["boundary"] == "EndOfBattle" for snapshot in snapshots):
+        if not all(snapshot["boundary"] == "EndOfBattle" for snapshot in snapshots):
+            return ["battle peers disagree about terminal outcome"]
+        # EndOfBattle presents 0 as victory, 1 as loss, and 2 as draw.
+        if (left["result"], right["result"]) not in {(0, 1), (1, 0), (2, 2)}:
+            return ["battle terminal results are not complementary"]
+
+    fields = ("species", "hp", "max_hp", "status")
+    for local, remote in ((left["player"], right["enemy"]), (left["enemy"], right["player"])):
+        if any(local[field] != remote[field] for field in fields):
+            return ["battle peers disagree on settled combatant state"]
+    return []
+
+
+def _verify_party_swap(results: list[dict[str, Any]]) -> list[str]:
+    """Verify the lead-record swap performed by this driver's menu policy.
+
+    Function-entry hooks and screenshots cannot prove the copy completed.
+    Identical lead records also cannot distinguish a swap from no operation.
+    """
+    if len(results) != 2:
+        return ["trade requires exactly two peer results"]
+    before = [result.get("party_before") for result in results]
+    after = [result.get("party_after") for result in results]
+    for party in (*before, *after):
+        if not isinstance(party, dict):
+            return ["trade party snapshot is missing"]
+        count = party.get("count")
+        records = party.get("mon_records")
+        species = party.get("species")
+        if (
+            type(count) is not int or not 1 <= count <= 6
+            or not isinstance(records, list) or len(records) != count
+            or not isinstance(species, list) or len(species) != count + 1
+            or species[-1] != 0xFF
+        ):
+            return ["trade party snapshot has invalid count, records, or species"]
+        try:
+            decoded = [bytes.fromhex(record) for record in records]
+        except (TypeError, ValueError):
+            return ["trade party record is not hex-encoded bytes"]
+        if any(len(record) != 44 for record in decoded):
+            return ["trade party record must contain 44 bytes"]
+        if [record[0] for record in decoded] != species[:-1]:
+            return ["trade party records disagree with species list"]
+    if before[0]["mon_records"][0] == before[1]["mon_records"][0]:
+        return ["trade lead records are indistinguishable; swap is unproven"]
+    errors = []
+    for side in range(2):
+        expected = [before[1 - side]["mon_records"][0], *before[side]["mon_records"][1:]]
+        if after[side]["mon_records"] != expected:
+            errors.append(f"peer {side} did not receive the other lead while preserving its party")
+    return errors
 
 
 def _verify_palette(
@@ -443,7 +756,9 @@ def _write_contact_sheets(
             sheet.save(proof_dir / f"{phase}.png")
 
 
-def _write_manifest(outdir: Path, entries: list[dict[str, Any]]) -> None:
+def _write_manifest(
+    outdir: Path, entries: list[dict[str, Any]], *, fingerprint: str
+) -> None:
     ok = all(entry["verification"]["ok"] for entry in entries)
     manifest = {
         "ok": ok,
@@ -451,6 +766,7 @@ def _write_manifest(outdir: Path, entries: list[dict[str, Any]]) -> None:
         "entry_count": len(entries),
         "passed": sum(1 for entry in entries if entry["verification"]["ok"]),
         "failed": sum(1 for entry in entries if not entry["verification"]["ok"]),
+        "fingerprint": fingerprint,
         "entries": entries,
     }
     (outdir / "manifest.json").write_text(
@@ -496,27 +812,81 @@ def main() -> int:
     args = ap.parse_args()
 
     repo_root = args.repo_root.resolve()
-    outdir = (repo_root / args.outdir).resolve() if not args.outdir.is_absolute() else args.outdir
+    outdir = (
+        (repo_root / args.outdir).resolve()
+        if not args.outdir.is_absolute()
+        else args.outdir
+    )
     outdir.mkdir(parents=True, exist_ok=True)
+    fingerprint = _matrix_fingerprint(
+        repo_root=repo_root,
+        modes=list(args.modes),
+        versions=list(args.versions),
+        deadline_seconds=args.deadline_seconds,
+        python=args.python,
+    )
 
     entries: list[dict[str, Any]] = []
     completed: set[tuple[str, str, str]] = set()
     manifest_path = outdir / "manifest.json"
-    if args.resume_ok and manifest_path.exists():
-        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for entry in previous.get("entries", []):
-            key = (
-                entry.get("mode"),
-                entry.get("listen_version"),
-                entry.get("connect_version"),
-            )
-            if entry.get("verification", {}).get("ok") and all(key):
-                entries.append(entry)
-                completed.add(key)
-
     include_any = set(args.include_any_version or [])
     listen_filter = set(args.listen_versions or [])
     connect_filter = set(args.connect_versions or [])
+
+    def selected(key: tuple[str, str, str]) -> bool:
+        mode, listen_version, connect_version = key
+        if mode not in args.modes:
+            return False
+        if listen_version not in args.versions or connect_version not in args.versions:
+            return False
+        if listen_filter and listen_version not in listen_filter:
+            return False
+        if connect_filter and connect_version not in connect_filter:
+            return False
+        return (
+            not include_any
+            or listen_version in include_any
+            or connect_version in include_any
+        )
+
+    if args.resume_ok and manifest_path.exists():
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            previous = None
+            print(
+                f"[matrix] ignoring unreadable manifest: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+        if isinstance(previous, dict) and previous.get("fingerprint") == fingerprint:
+            prior_entries = previous.get("entries", [])
+            if not isinstance(prior_entries, list):
+                prior_entries = []
+            for entry in prior_entries:
+                if not isinstance(entry, dict):
+                    continue
+                key = (
+                    entry.get("mode"),
+                    entry.get("listen_version"),
+                    entry.get("connect_version"),
+                )
+                verification = entry.get("verification")
+                if (
+                    entry.get("fingerprint") == fingerprint
+                    and isinstance(verification, dict)
+                    and verification.get("ok")
+                    and all(key)
+                    and selected(key)
+                ):
+                    entries.append(entry)
+                    completed.add(key)
+        elif previous is not None:
+            print(
+                "[matrix] existing manifest fingerprint differs; rerunning "
+                "successful rows",
+                flush=True,
+            )
+
     for mode in args.modes:
         for listen_version, connect_version in itertools.product(args.versions, repeat=2):
             if listen_filter and listen_version not in listen_filter:
@@ -544,9 +914,10 @@ def main() -> int:
                 connect_version=connect_version,
                 deadline_seconds=args.deadline_seconds,
                 python=args.python,
+                fingerprint=fingerprint,
             )
             entries.append(entry)
-            _write_manifest(outdir, entries)
+            _write_manifest(outdir, entries, fingerprint=fingerprint)
             status = "ok" if entry["verification"]["ok"] else "FAIL"
             print(
                 f"[matrix] {status} {name} "
@@ -564,7 +935,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    _write_manifest(outdir, entries)
+    _write_manifest(outdir, entries, fingerprint=fingerprint)
     return 0 if all(entry["verification"]["ok"] for entry in entries) else 1
 
 

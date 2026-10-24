@@ -1,0 +1,93 @@
+[project]
+name = "pyboy"
+version = "2.7.0"
+authors = [
+    {name = "Mads Ynddal", email = "mads@ynddal.dk"}
+]
+keywords = ["gameboy", "game boy", "emulator", "cython", "pypy"]
+description = "Game Boy emulator written in Python"
+# The upstream README is intentionally not vendored.  Keep the standalone
+# PyBoy build metadata valid when this source snapshot is bootstrapped from a
+# clean checkout.
+readme = {text = "Pinned PyBoy source fork bundled by pokered-harness.", content-type = "text/plain"}
+license = "LGPL-3.0-only"
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Cython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: System :: Emulators",
+]
+requires-python = ">=3.9"
+
+dependencies = [
+    "numpy",
+    "pysdl2",
+    "pysdl2-dll",
+]
+
+[project.optional-dependencies]
+all = [
+    "pyopengl",
+    "glfw",
+    "PyOpenAL",
+    "markdown",
+    "pdoc3",
+    "gym",
+]
+
+[project.urls]
+Homepage = "https://github.com/Baekalfen/PyBoy"
+Documentation = "https://docs.pyboy.dk/index.html"
+Repository = "https://github.com/Baekalfen/PyBoy.git"
+
+[project.scripts]
+pyboy = "pyboy.__main__:main"
+
+[build-system]
+requires = [
+    "setuptools>=61.0.0",
+    "wheel",
+    # Keep the optional Cython build on the same compiler version as the
+    # harness bootstrap and its tested serial ABI.
+    "cython==3.0.12; platform_python_implementation == 'CPython'",
+    "numpy",
+]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+zip-safe = false
+packages = ["pyboy", "pyboy.api", "pyboy.core", "pyboy.core.cartridge", "pyboy.link", "pyboy.logging", "pyboy.plugins"]
+
+[tool.setuptools.package-data]
+"*" = [
+    "**/*.pxi",
+    "**/*.pyx",
+    "**/*.pxd",
+    "**/bootrom*.bin",
+    "**/font.txt"
+]
+
+[tool.pytest.ini_options]
+addopts = "--benchmark-disable"
+testpaths = [
+    "tests",
+    "pyboy",
+]
+filterwarnings = [
+    "error",
+    "ignore:Using SDL2 binaries from pysdl2-dll.*",
+    "ignore:pysdl2-dll is installed as source-only.*"
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = false
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+ignore = ["E741", "E731", "E712", "F821"]

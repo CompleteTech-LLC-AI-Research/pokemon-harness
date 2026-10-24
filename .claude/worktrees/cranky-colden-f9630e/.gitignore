@@ -1,0 +1,32 @@
+# ROM and build-derived game artifacts — never commit (BYO-ROM, see README)
+*.gb
+*.gbc
+*.sym
+*.map
+*.sav
+*.state
+rom/
+roms/
+pokered/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.venv/
+venv/
+
+# Walkthrough artifacts (derived from ROM — never commit)
+walkthrough_output/
+walkthrough_*/
+
+# Tooling
+.idea/
+.vscode/
+*.swp
+.DS_Store

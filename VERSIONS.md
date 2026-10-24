@@ -6,26 +6,128 @@ certification. The repository does not distribute ROMs, symbol files, save
 states, or other ROM-derived artifacts.
 
 Status: `PARTIAL` for the current integration candidate. The candidate is based
-on `d8060be232dbbb75798fa1ff93e49c2f84747b9f` (2026-09-03) with additional
+on `7c207bd` on `sync/20260907-poke-harness` (2026-09-07) with additional
 runtime, packaging, lifecycle, and test changes that are not yet a release
 commit. A hash or dependency pin records an input; it does not certify the
 candidate.
 
-The latest bounded candidate unit gate ran with the bundled source PyBoy
-runtime and passed 360/360 unit tests and 35/35 timing tests in each of five
-repetitions. Current asset preflight matched all five pinned ROMs, three symbol
-files, and six required ordinary/battle Cable Club fixtures. This is still scoped evidence,
-not release sign-off: the strict trade gate timed out in its remote
-Red-color↔Blue-color row at the 600-second bound, and no current battle result
-is recorded. A clean current trade or battle result still must be recorded
-before either capability can be advertised.
+The [release checklist](docs/RELEASE_CHECKLIST.md) is the authority for the
+latest integrated source/native validation and remaining blockers. Dated
+results describe historical snapshots. Later MCP
+lifecycle and scheduler integration do not change the runtime/asset pins or
+qualify a full trade or battle matrix.
 
-A separate bounded remote diagnostic completed one Blue-color↔Blue-color trade
-row (`1/1`) with balanced `6,528` serial edges per direction and no unknown
-opcodes. Both peers used the same fixture; retain this as a diagnostic only,
-not strict party-swap acceptance or full-matrix evidence.
+The 2026-09-08 working snapshot includes the 512-T-cycle normal serial period,
+latched backend faults, physical-time scheduling across CPU-speed transitions,
+the common raw/managed owner boundary, and native owner-pump receive. Bootstrap
+verifies behavior rather than trusting the legacy revision marker. That marker
+remains the fork base revision. The runtime foundation is now published in fork
+commit `b443ecd539f35aa0edbf8abdc9cfb7e7d26b3f21`; the harness-side dependency
+pointer and associated packaging/test checkpoint remain pending publication.
 
-No current candidate strict trade or battle matrix result is recorded in this
+The latest admission integration rejects stale or claimless attached cores
+before emulator-backend writes or legacy promotion and removes the
+`PyBoyLinkSession` role-status seeding path. The native constructor's role
+keyword is inert. The default native MCP path therefore no longer writes
+`hSerialConnectionStatus` to select a clock role. Legacy `SerialBridge` and
+`RemoteLinkEndpoint` compatibility paths still contain semantic/RAM shortcuts
+outside that default path and require a reachability audit; no all-public-API
+RAM-free claim is made.
+
+Five local MCP guard tests use injected pairs and reject real/native-capable
+endpoints before semantic pairing mutates state. This is local admission
+evidence only; it is not a new socket guard or a real-ROM gameplay matrix.
+
+The pre-owner-post diagnostics source/native gates each passed 925 unit tests and
+685 timing executions (137 cases repeated five times), with no failures,
+errors, skips, xfails, or xpasses. All 14 asset hashes match. Source used
+CPython 3.12.3 (32.286/142.790 seconds for unit/timing); native used CPython
+3.12.13 (26.218/98.208 seconds). Retained reports are
+`shared-diagnostics-source-gate.json` and `shared-diagnostics-native-gate.json`.
+These runs follow a test-only descendant-readiness fix and improved bounded
+gate failure diagnostics. An intervening source run failed the descendant
+timeout test (919/920 unit, 670/670 timing); its retained report is
+`shared-docs-source-gate.json`. The original traceback was not retained, so
+the startup race found during review is not a proven cause of that failure.
+No serial owner-post candidate changes are included in these passing gates.
+
+The preceding source boot gate passed 920 unit tests and 670 timing executions
+(134 cases repeated five times) under CPython 3.12.3 (129.961/479.402 seconds),
+with zero failures, errors, skips, xfails, or xpasses and all 14 asset hashes
+matched. The current native boot gate passes the same 920/670 scope under
+CPython 3.12.13 (67.452/229.558 seconds); the prior source/native stdio 919/670
+results remain retained as baselines. Both fresh separate Linux environments used the
+exact 43-version dependency constraints, `pip check`, bootstrap, and no caller
+`PYTHONPATH`; the gate's internal paths selected the shared harness. The native
+gates reused the existing claim-fork wheel rather than making a new native
+build. These are source/native gate evidence, not a clean committed-clone,
+full trade/battle, intro-completion, or broad gameplay qualification. The
+retained full-gate records are `shared-rom-boot-source-gate.json`,
+`shared-rom-boot-native-gate.json`, `shared-stdio-source-gate.json`, and
+`shared-stdio-native-gate.json`.
+
+The integrated stdio helper passed four single-session cases in each runtime
+with an actual child return code of zero under a 120-second deadline. The shared
+stdio suite passed 6/6 in source (35.35 seconds) and native (28.83 seconds);
+both Red/Blue remote directions used two child servers that exited zero and
+reclaimed their ports. The retained records are
+`isolated-stdio-teardown-source.xml`, `isolated-stdio-teardown-native.xml`,
+`shared-stdio-teardown-source.xml`, `shared-stdio-teardown-native.xml`, and
+`stdio-summary.json`. This is MCP lifecycle evidence, not a full trade,
+battle, or intro-completion qualification.
+
+The integrated five-variant ROM boot scope passed 31/31 in source (116.64
+seconds) and native (13.85 seconds), covering `red-stock`, `red-color`,
+`blue-stock`, `blue-color`, and `yellow` boot/advance/replay cases plus 26 gate
+checks. Each XML property records actual ROM and symbol hashes matching the
+pinned values; `replay_sha256` equals `expected_replay_sha256` and is distinct
+from `checkpoint_sha256`; and `teardown_status=closed`. This
+qualifies only boot/advance/replay/save-load/close for the five inputs; it does
+not claim intro completion, trade, battle, or broad gameplay. The owner pre/post
+callback API and its cross-runtime regressions are now integrated.
+The integrated source gate now passes 936 unit tests and 685 timing executions
+(137 cases repeated five times), with zero failures, errors, skips, xfails, or
+xpasses and all 14 supplied asset hashes matching. The five source ROM
+boot/state/replay checks also pass. The retained gate summary is
+`shared-owner-post-source-gate-summary.json` (a transcription of completed
+stdout, not the full gate JSON); boot evidence is
+`shared-owner-post-source-boot.xml` in the operator evidence directory.
+The isolated installed-native gate also passes 936 unit tests and 685 timing
+executions with zero failures, errors, skips, xfails, or xpasses; all 14 asset
+hashes match. All five native ROM boot/state/replay checks pass, including
+verified replay hashes and closed sessions. Native evidence is retained as
+`shared-owner-post-native-gate.json` and
+`shared-owner-post-native-boot.xml`. These results qualify the scoped Linux
+source/native runtime checks, not a clean committed release or gameplay. This
+API foundation does not implement authentic clock negotiation. The source and
+native records are `shared-rom-boot-source.xml` and
+`shared-rom-boot-native.xml`. The full source/native gate reports are
+`shared-rom-boot-source-gate.json` and `shared-rom-boot-native-gate.json`.
+
+The prior receiver/owner snapshot passed 906 unit and 660 timing executions
+(132 cases repeated five times), with 150 focused checks per runtime. Those
+results are historical comparison, not the latest admission result. Earlier
+post-network stdio results predate the current receiver/admission changes; the
+current six-case records are named above. The clock-phase/save-v18 experiment
+remains isolated: its 290-test source result is not native-qualified. The
+checklist retains historical failures and role-seeded gameplay diagnostics.
+
+The historical pre-clock-repair native local battle matrix (128 T-cycles per
+bit) completed 4 passed, 5 failed, and 0 skipped:
+Red/Yellow and Blue/Yellow passed both orders; the three same-version pairs
+and both Red/Blue orders failed. Exact native Red/Yellow party-record trade
+passed separately. Complete release matrices remain unqualified.
+
+A historical role-seeded source Red-color→Blue-color remote battle row passed
+the stronger settled snapshot verifier in 455.93 seconds: matching turn/state,
+6,032 balanced edges, and clean peer teardown. It is a diagnostic only and does
+not qualify the current no-role-RAM path or either matrix.
+
+Dated installation, gate, MCP, and gameplay results—including failed and
+timed-out runs—are retained in the checklist's [historical evidence](docs/RELEASE_CHECKLIST.md#historical-evidence-retained-for-comparison).
+These historical snapshots do not identify the bytes of the integrated runtime.
+
+No complete passing candidate strict trade or battle matrix is recorded in this
 file. Dated results further below are historical or scoped follow-ups; they
 must not be presented as acceptance for this candidate. Remote TCP remains
 loopback-only, unauthenticated, and unencrypted, so cross-host use is not
@@ -35,6 +137,13 @@ The repository does retain the source/runtime contract needed for a clean
 reproduction: Python `>=3.11`, `mcp==1.29.1`, and bundled PyBoy `2.7.0` at the
 fork revision recorded below. The selected environment must pass dependency,
 bootstrap, and package-owner checks before it is used as MCP or gate runtime.
+The selected vendored checkout is runtime-foundation commit
+`b443ecd539f35aa0edbf8abdc9cfb7e7d26b3f21`, published in the configured fork.
+Its parent is packaging-sync commit `de80f1024c9513f3b78e7cceffee5262d9f86ec1`;
+the legacy fork-base marker below is unchanged. The harness's committed gitlink
+still points to that legacy base until the coordinated dependency checkpoint
+publishes the new pointer and `.gitmodules`. A published fork alone does not
+establish a reproducible harness release.
 
 ## Historical and scoped evidence
 
@@ -49,9 +158,9 @@ real-ROM 47/47, remote transport/MCP 15/15, strict trade 19/19, strict battle
 passed the ROM-free 555/555 unit and 40/40 × 5 timing slice, focused
 transport/MCP 167/167, bounded concurrency probe 8/8 × 5, and real-ROM remote
 transport 15/15. These results are historical slices, not a full rerun of the
-current merged implementation. Earlier post-PR #23 native failures at the
-Cython `PyBoy.tick` ownership seam are superseded by PR #26/#27 and are not
-current acceptance evidence.
+implementation. Earlier post-PR #23 native failures and the PR #26/#27
+follow-ups describe those historical revisions; they do not establish that
+the current checkout has safe native ownership or error propagation.
 
 PR #22 adds bounded MCP stdio unpair cleanup and fresh remote lifecycle
 generation tracking. Its release-hygiene workflow passed; the full strict
@@ -79,11 +188,13 @@ runtime.
 
 The project distribution bundles the pinned PyBoy source runtime. It exposes
 the Python-accessible `mb.serial` backend used by the bit-accurate link
-coordinator and remote TCP transport. The optional Cython/native build passes
-its compiled serial-contract probe and the focused 110/110 serial-link suite,
-but the historical native strict-trade result is 18/19 and mixed exact-row
-follow-ups leave its reliability unproven; the full current native battle
-matrix is unqualified. A pre-existing standalone PyBoy wheel must not be
+coordinator and remote TCP transport. The current native boot gate passes the
+920-unit/670-timing runtime scope and verifies the compiled serial contract;
+the retained source/native stdio baseline gates each recorded 919/670. The
+historical native strict-trade result is 18/19 and mixed exact-row follow-ups
+leave its gameplay reliability unproven, while the full current native battle
+matrix is unqualified. A
+pre-existing standalone PyBoy wheel must not be
 allowed to shadow this package; verify the runtime identity and selected mode
 before release. See the
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
@@ -229,7 +340,7 @@ matrix uses the color Red, color Blue, and Yellow ordinary/battle rows below:
 | Local strict trade matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club.state` for each side | Recorded source gate: 9/9 local rows. The native strict-trade matrix has a historical 18/19 result; mixed exact-row follow-ups leave reliability unproven |
 | Local strict battle matrix | color Red, color Blue, or Yellow in every ordered pair | matching `cable_club-battle.state` for each side | Historical source baseline passed 9/9 local rows; current full source rerun is not recorded, and native full battle coverage remains unqualified |
 | Remote strict trade matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching ordinary fixture for each side | Recorded source gate: 9/9 remote rows. Native follow-ups for the historical 18/19 matrix both passed and failed, including party mismatch and phase stalls |
-| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; latest native direct lane exercised 3/9 under a bounded 155-second pair deadline (one pass, two fail, six unrun), with no test-only bypasses; the full 19-entrypoint battle set remains unqualified |
+| Remote strict battle matrix | canonical color Red, color Blue, or Yellow listener/connector in every ordered pair | matching battle fixture for each side | Historical source baseline passed 9/9 remote rows; a historical native direct lane exercised 3/9 under a bounded 155-second pair deadline (one pass, two fail, six unrun), reporting no test-only bypasses. The current complete matrix and settled-outcome verification remain unqualified |
 
 The tracked
 [`scripts/prepare_battle_cable_club_fixtures.py`](scripts/prepare_battle_cable_club_fixtures.py)

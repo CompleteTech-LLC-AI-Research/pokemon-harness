@@ -239,8 +239,8 @@ Small unit tests that drive `SB`/`SC` directly and assert exact hardware
 semantics. No ROM required; synthesize instruction sequences via a
 minimal test harness.
 
-- Master writes `SB=0xAA`, `SC=0x81`; after 8 × 1024 cycles (8192 Hz
-  at 8MHz), assert `SC & 0x80 == 0`, `IF & 0x08 != 0`, received
+- Master writes `SB=0xAA`, `SC=0x81`; after 8 × 512 T-cycles (8192 Hz
+  at 4.194304 MHz), assert `SC & 0x80 == 0`, `IF & 0x08 != 0`, received
   `SB == 0xFF` (null backend).
 - Two local-backed cores: master writes `0xAA`, slave writes `0x55`;
   after edge cycle, assert master `SB == 0x55`, slave `SB == 0xAA`.
