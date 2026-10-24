@@ -1,6 +1,8 @@
 """Bounded evidence reads with cooperative checkpoints and a digest of the same bytes."""
 
 import hashlib
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,12 +18,24 @@ def read_evidence_bytes(
     *,
     checkpoint: Callable[[], None] = noop_checkpoint,
     max_bytes: int = MAX_JSON_EVIDENCE_BYTES,
+    regular_nofollow: bool = False,
 ) -> tuple[bytes, str]:
     """Read/hash the same bounded bytes; no partial result is returned after expiry."""
 
     checkpoint()
     digest, pieces, size = hashlib.sha256(), [], 0
-    with path.open("rb") as handle:
+    if regular_nofollow:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("evidence is not a regular file")
+            handle = os.fdopen(descriptor, "rb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+    else:
+        handle = path.open("rb")
+    with handle:
         while True:
             checkpoint()
             chunk = handle.read(CHUNK_BYTES)

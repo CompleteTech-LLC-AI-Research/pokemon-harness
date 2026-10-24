@@ -272,6 +272,8 @@ class RootProbeOwner:
             raise ProbeProtocolError("; ".join(problems))
         peer.record.sequence = body["sequence"]
         peer.final = body
+        if not body["timely_cleanup"]:
+            self.custody.refuse("supervisor physical cleanup completed after its original bound")
         if now >= self.budget.cleanup_bound() or (
             body.get("success") and now >= self.budget.deadline
         ):
@@ -396,7 +398,7 @@ class RootProbeOwner:
         ):
             return False
         finals = {peer.record.role: peer.final for peer in self.peers if peer.record is not None}
-        return bool(
+        reconciled = bool(
             all(role in self.custody.roles for role in ROLES)
             and all(
                 finals.get(role) is not None and finals[role]["success"]
@@ -405,6 +407,12 @@ class RootProbeOwner:
             and self.reconcile()
             and not self.custody.failures
         )
+        if not reconciled:
+            return False
+        if self.budget.now() >= min(self.budget.deadline, self.budget.cleanup_bound()):
+            self.custody.refuse("operation expired during physical reconciliation")
+            return False
+        return True
 
     def release_confirmed_resources(self) -> bool:
         """Retire only the physically reconciled scope, retaining partial failures.

@@ -195,8 +195,13 @@ class NestedCleanup:
         if self.thread is not None and self.thread.is_alive():
             problems.append("owned handshake thread did not stop within 2 seconds")
         else:
-            for name in ("child", "nested"):
+            # Settle the intermediate parent before discharging the child's wait:
+            # ECHILD while that parent lives can become an outer wait on its death.
+            for name in ("nested", "child"):
                 if name not in self.fds:
+                    continue
+                if name == "child" and "nested" in self.fds:
+                    problems.append("child: intermediate parent wait remains unresolved")
                     continue
                 fd = self.fds[name]
                 try:
@@ -211,10 +216,20 @@ class NestedCleanup:
                         assert reaped is not None, "owned fixture reaping is still pending"
                         reaping = "outer waitid completed"
                     except ChildProcessError:
-                        # Exit is already proven by this held pidfd. ECHILD proves
-                        # there is no wait obligation for this test-process owner;
-                        # an external parent may still own the exited zombie.
-                        reaping = "ECHILD; no outer wait obligation"
+                        # A still-present exited instance may be another parent's
+                        # zombie, transferable later. Only actual removal/reuse
+                        # of this exact exited instance discharges that future wait.
+                        instance = self.metadata[name]
+                        try:
+                            raw = Path(f"/proc/{instance['pid']}/stat").read_bytes()
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            stamp = int(raw.rsplit(b")", 1)[1].split()[19])
+                            assert stamp != instance["start"], (
+                                "exited instance still owes a parent wait"
+                            )
+                        reaping = "ECHILD; exact exited instance already removed/reaped"
                     assert self._held_fd(name) == fd, "descriptor changed before release"
                     os.close(fd)
                     del self.fds[name]

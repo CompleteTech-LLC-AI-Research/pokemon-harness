@@ -14,7 +14,7 @@ import runpy
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -608,6 +608,8 @@ def _load_gate_report(
     *,
     expected_returncode: int | None = None,
     allow_partial: bool = False,
+    reader: Callable[[Path], Any] | None = None,
+    checkpoint: Callable[[], None] | None = None,
 ) -> GateReport:
     """Read and validate a report produced by the gate pytest plugin.
 
@@ -618,8 +620,10 @@ def _load_gate_report(
     a complete report.
     """
 
+    if checkpoint is not None:
+        checkpoint()
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8")) if reader is None else reader(path)
     except (OSError, json.JSONDecodeError) as exc:
         return GateReport(
             Counts(errors=1),
@@ -644,6 +648,8 @@ def _load_gate_report(
         if not isinstance(collection_skips, list):
             raise TypeError("pytest report collection_skips is not a list")
         for collection_entry in (*collection_errors, *collection_skips):
+            if checkpoint is not None:
+                checkpoint()
             if not isinstance(collection_entry, dict):
                 raise TypeError("pytest report collection entry is not an object")
             if not isinstance(collection_entry.get("nodeid"), str):
@@ -683,6 +689,8 @@ def _load_gate_report(
         derived = Counts(total=len(records), errors=len(collection_errors))
         seen_nodeids: set[str] = set()
         for record in records:
+            if checkpoint is not None:
+                checkpoint()
             if not isinstance(record, dict):
                 raise TypeError("pytest report contains a non-object test record")
             nodeid = record.get("nodeid")
@@ -730,6 +738,8 @@ def _load_gate_report(
     except (TypeError, ValueError) as exc:
         return GateReport(Counts(errors=1), error=f"invalid pytest report: {exc}")
 
+    if checkpoint is not None:
+        checkpoint()
     return GateReport(
         counts=counts,
         skip_reasons=_reason_counter(payload),

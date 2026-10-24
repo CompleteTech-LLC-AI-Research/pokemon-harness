@@ -7,9 +7,13 @@ admission, output polling and cleanup must use these same bounds when implemente
 from __future__ import annotations
 
 import math
+import subprocess
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Protocol
 
 PRE_DISPATCH_SECONDS = 1800.0
 PRE_DISPATCH_CLEANUP_SECONDS = 60.0
@@ -23,6 +27,17 @@ def noop_checkpoint() -> None:
     """A utility callback without an active sibling supervisor."""
 
 
+class ProbeRunner(Protocol):
+    def __call__(
+        self,
+        command: Sequence[str],
+        *,
+        environment: Mapping[str, str],
+        cwd: Path,
+        budget: MeasurementBudget,
+    ) -> subprocess.CompletedProcess[bytes]: ...
+
+
 @dataclass(frozen=True)
 class MeasurementBudget:
     deadline: float
@@ -31,6 +46,17 @@ class MeasurementBudget:
     service: Callable[[], None] = noop_checkpoint
     cleanup_limit: Callable[[], float | None] = lambda: None
     _cleanup_seen: list[float] = field(default_factory=list, repr=False, compare=False)
+    probe_runner: ProbeRunner | None = field(default=None, repr=False, compare=False)
+    temporary_owner: Callable[[tempfile.TemporaryDirectory[str]], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def retain_temporary(self, directory: tempfile.TemporaryDirectory[str]) -> None:
+        self.checkpoint()
+        if self.temporary_owner is None:
+            raise IdentityDeadline("probe temporary inputs require a continuing root owner")
+        self.temporary_owner(directory)
+        self.checkpoint()
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.deadline) or not math.isfinite(self.cleanup_deadline):
@@ -69,6 +95,32 @@ class MeasurementBudget:
     def cleanup_checkpoint(self) -> None:
         if not self.cleanup_open():
             raise IdentityDeadline("failure diagnostics exceeded the frozen cleanup deadline")
+
+    def run_probe(
+        self,
+        command: Sequence[str],
+        *,
+        environment: Mapping[str, str],
+        cwd: Path,
+        max_seconds: float | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """No unsupervised fallback when the continuing owner is unavailable."""
+
+        self.checkpoint()
+        if self.probe_runner is None:
+            raise IdentityDeadline("identity probe requires a continuing root broker")
+        operation = self
+        if max_seconds is not None:
+            if not math.isfinite(max_seconds) or max_seconds <= 0:
+                raise ValueError("probe operation cap must be positive and finite")
+            operation = self.tighten(
+                deadline=min(self.deadline, self.now() + max_seconds),
+                cleanup_deadline=self.cleanup_bound(),
+            )
+        result = self.probe_runner(command, environment=environment, cwd=cwd, budget=operation)
+        operation.checkpoint()
+        self.checkpoint()
+        return result
 
     def tighten(self, *, deadline: float, cleanup_deadline: float) -> MeasurementBudget:
         if not math.isfinite(deadline) or not math.isfinite(cleanup_deadline):

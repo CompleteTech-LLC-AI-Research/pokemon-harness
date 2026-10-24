@@ -120,6 +120,11 @@ def canonical(body):
     return json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
 
 
+def valid_mac(tag):
+    return (isinstance(tag, str) and len(tag) == 64
+            and all(value in '0123456789abcdef' for value in tag))
+
+
 def send_bytes(channel, raw, *, fd=None):
     if len(raw) > MAX_FRAME:
         raise RuntimeError('control frame bound exceeded')
@@ -168,7 +173,7 @@ def send_authenticated(channel, phase, extra, *, role_override=None, instance_ov
 def receive_authenticated(channel, expected_role, pid, stamp, phase):
     body = receive_bytes(channel)
     tag = body.pop('mac', None)
-    if not isinstance(tag, str) or not hmac.compare_digest(
+    if not valid_mac(tag) or not hmac.compare_digest(
             tag, hmac.new(key, canonical(body), hashlib.sha256).hexdigest()):
         raise RuntimeError('control frame authentication failed')
     expected = dict(scope=config['scope'], nonce=config['nonce'], role=expected_role,
@@ -241,7 +246,7 @@ def service_control():
         try:
             body = decode(raw)
             tag = body.pop('mac', None)
-            if not isinstance(tag, str) or not hmac.compare_digest(
+            if not valid_mac(tag) or not hmac.compare_digest(
                     tag, hmac.new(key, canonical(body), hashlib.sha256).hexdigest()):
                 raise RuntimeError('stop frame authentication failed')
             if (body.get('scope') != config['scope'] or body.get('nonce') != config['nonce']
@@ -253,7 +258,7 @@ def service_control():
             if type(bound) not in (int, float) or not math.isfinite(bound):
                 raise RuntimeError('stop cleanup bound is unknown')
             cleanup_deadline = min(cleanup_deadline, bound)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError, TypeError, RecursionError, UnicodeError):
             request_stop('malformed control frame')
 """
 
@@ -306,13 +311,15 @@ if role == 'payload':
 sweep()
 physical_empty = exhausted() and not held
 now = time.monotonic()
-proof = bool(physical_empty and subreaper_on() and not custody_errors and now < cleanup_deadline)
-success = bool(proof and not operation_errors and direct is not None
+proof = bool(physical_empty and subreaper_on() and not custody_errors)
+timely_cleanup = bool(proof and now < cleanup_deadline)
+success = bool(timely_cleanup and not operation_errors and direct is not None
                and direct.returncode == 0 and now < job_deadline)
 body = {'parent_pid': parent_pid, 'parent_start': parent_start,
         'subreaper_start': True, 'subreaper_end': subreaper_on(),
         'physical_empty': physical_empty, 'echild': physical_empty,
-        'proof': proof, 'success': success, 'forks': forks, 'adopted': adopted,
+        'proof': proof, 'timely_cleanup': timely_cleanup, 'success': success,
+        'forks': forks, 'adopted': adopted,
         'reaped': reaped, 'killed': killed, 'remaining': list(held),
         'custody_errors': custody_errors, 'operation_errors': operation_errors,
         'child_status': direct.returncode if direct is not None else None,

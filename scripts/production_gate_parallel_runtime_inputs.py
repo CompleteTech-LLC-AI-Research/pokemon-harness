@@ -35,6 +35,11 @@ from scripts.production_gate_parallel_isolation import (
     freeze_tree,
     write_denied_problems,
 )
+from scripts.production_gate_parallel_measurement_budget import (
+    MeasurementBudget,
+    pre_dispatch_budget,
+)
+from scripts.production_gate_parallel_probe_bootstrap import CONTROL_ENVIRONMENT
 
 PROBE = r"""
 import json, os, site, sys, sysconfig
@@ -69,20 +74,26 @@ PROBE_TIMEOUT_SECONDS = 120
 WRITABLE_REPORT_LIMIT = 8
 
 
-def probe_runtime(interpreter: str, pythonpath: str) -> dict[str, Any]:
+def probe_runtime(
+    interpreter: str,
+    pythonpath: str,
+    *,
+    budget: MeasurementBudget | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    budget = budget or pre_dispatch_budget()
     environment = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": pythonpath,
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    environment.update({name: "1" for name in CONTROL_ENVIRONMENT if name.endswith("THREADS")})
     try:
-        result = subprocess.run(
+        result = budget.run_probe(
             [interpreter, "-c", PROBE],
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=False,
-            env=environment,
+            environment=environment,
+            cwd=(cwd or Path.cwd()).resolve(),
+            max_seconds=PROBE_TIMEOUT_SECONDS,
         )
         info = json.loads(result.stdout.strip().splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
@@ -212,6 +223,7 @@ def build_private_runtimes(
     project_root: Path,
     checkout: Path,
     destination: Path,
+    budget: MeasurementBudget | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve, classify and copy-and-freeze whatever the executing UID could modify.
 
@@ -221,12 +233,15 @@ def build_private_runtimes(
     in the snapshot, or in a tree this UID cannot write.
     """
 
+    budget = budget or pre_dispatch_budget()
+    budget.checkpoint()
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     pythonpath = os.pathsep.join(str(checkout / part) for part in ("src", "vendor/pyboy-src", "."))
     copies: dict[str, Path] = {}
     results: dict[str, dict[str, Any]] = {}
     for mode, interpreter in sorted(interpreters.items()):
-        info = probe_runtime(interpreter, pythonpath)
+        budget.checkpoint()
+        info = probe_runtime(interpreter, pythonpath, budget=budget, cwd=checkout)
         prefix, base = Path(info["prefix"]), Path(info["base_prefix"])
         problems: list[str] = []
         protected: list[str] = []
@@ -281,7 +296,7 @@ def build_private_runtimes(
         frozen = [root for root in (private_prefix, private_base) if root is not None]
         if run_interpreter != interpreter:
             # What the job will really run, not what was originally resolved.
-            final = probe_runtime(run_interpreter, pythonpath)
+            final = probe_runtime(run_interpreter, pythonpath, budget=budget, cwd=checkout)
             info = {**info, "path": final["path"]}
             if private_base is not None:
                 for label in ("real_executable", "stdlib"):
@@ -332,6 +347,7 @@ def build_private_runtimes(
                 "evidence": "static resolution only; no runtime execution evidence",
             },
         }
+    budget.checkpoint()
     return results
 
 

@@ -123,6 +123,7 @@ def test_authenticated_final_requires_complete_exact_instance_accounting():
         subreaper_start=True,
         subreaper_end=True,
         proof=True,
+        timely_cleanup=True,
         success=True,
         custody_errors=[],
         operation_errors=[],

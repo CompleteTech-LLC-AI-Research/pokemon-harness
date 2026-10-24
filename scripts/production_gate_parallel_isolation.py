@@ -14,10 +14,14 @@ from __future__ import annotations
 import itertools
 import os
 import shutil
-import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from scripts.production_gate_parallel_measurement_budget import (
+    MeasurementBudget,
+    pre_dispatch_budget,
+)
 
 PYTEST_CACHE_ENV = "POKERED_GATE_PYTEST_CACHE_DIR"
 PORT_BASE_ENV = "POKERED_PARALLEL_PORT_BASE"
@@ -160,7 +164,7 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _init_repository(checkout: Path) -> None:
+def _init_repository(checkout: Path, *, measurement: MeasurementBudget) -> None:
     """Give the snapshot a real, independent git repository (index and one commit).
 
     Required unit tests run ``git ls-files`` against the checkout root; a snapshot outside any
@@ -186,17 +190,16 @@ def _init_repository(checkout: Path) -> None:
             "immutable snapshot",
         ),
     ):
-        done = subprocess.run(
+        done = measurement.run_probe(
             ["git", "-C", str(checkout), *argv],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-            env=_git_environment(),
+            environment=_git_environment(),
+            cwd=checkout.resolve(),
+            max_seconds=120,
         )
         if done.returncode != 0:
             raise IsolationError(
-                f"snapshot repository setup failed at git {argv[0]}: {done.stderr.strip()[:200]}"
+                f"snapshot repository setup failed at git {argv[0]}: "
+                f"{done.stderr.decode('utf-8', 'replace').strip()[:200]}"
             )
 
 
@@ -270,24 +273,28 @@ def build_snapshot(
     destination: Path,
     *,
     max_bytes: int = SNAPSHOT_MAX_BYTES,
+    measurement: MeasurementBudget | None = None,
 ) -> dict[str, Any]:
     """Create the private immutable snapshot and prove it denies writes, or raise."""
 
+    measurement = measurement or pre_dispatch_budget()
+    measurement.checkpoint()
     if destination.exists():
         raise IsolationError("snapshot destination already exists")
     destination.mkdir(mode=0o700, parents=True)
     checkout = destination / "checkout"
-    listing = subprocess.run(
+    listing = measurement.run_probe(
         ["git", "-C", str(project_root), "ls-files", "-z", "--cached"],
-        capture_output=True,
-        check=False,
-        timeout=60,
+        environment=_git_environment(),
+        cwd=project_root.resolve(),
+        max_seconds=60,
     )
     if listing.returncode != 0:
         raise IsolationError("git could not list the tracked files")
     budget = [max_bytes]
     files = 0
     for raw in listing.stdout.split(b"\0"):
+        measurement.checkpoint()
         if not raw:
             continue
         relative = raw.decode("utf-8", "surrogateescape")
@@ -308,7 +315,7 @@ def build_snapshot(
         if budget[0] < 0:
             raise IsolationError("the private snapshot exceeds its byte ceiling")
     if checkout.is_dir():
-        _init_repository(checkout)
+        _init_repository(checkout, measurement=measurement)
     assets = destination / "assets"
     files += _copy_tree(rom_root, assets / "rom", budget)
     files += _copy_tree(fixture_root, assets / "fixtures", budget)

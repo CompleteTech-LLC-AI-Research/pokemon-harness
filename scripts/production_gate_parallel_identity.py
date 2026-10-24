@@ -110,15 +110,19 @@ def measure_commit(
 
     def git(*argv: str) -> subprocess.CompletedProcess[str]:
         checkpoint()
-        result = subprocess.run(
+        result = budget.run_probe(
             ["git", "-C", str(project_root), *argv],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
+            environment=dict(os.environ),
+            cwd=project_root.resolve(),
+            max_seconds=60,
         )
         checkpoint()
-        return result
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            result.stdout.decode("utf-8"),
+            result.stderr.decode("utf-8"),
+        )
 
     try:
         head, status = (
@@ -168,13 +172,11 @@ def measure_build_identity(
     environment["PYTHONPATH"] = os.pathsep.join(entries)
     try:
         checkpoint()
-        probe = subprocess.run(
+        probe = budget.run_probe(
             [interpreter, "-c", BUILD_PROBE],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            env=environment,
+            environment=environment,
+            cwd=project_root.resolve(),
+            max_seconds=PROBE_TIMEOUT_SECONDS,
         )
         checkpoint()
         measured = json.loads(probe.stdout)
