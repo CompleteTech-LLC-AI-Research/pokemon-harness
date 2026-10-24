@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts import production_gate_parallel_job_retirement as retirement
 from scripts import production_gate_parallel_processes as proc
 from scripts import production_gate_parallel_safety as safety
 from scripts.production_gate_parallel_capacity import PairBudget
@@ -51,6 +52,7 @@ def finish_failure_case(point):
         running.append(
             SimpleNamespace(
                 job_id=name,
+                deadline=clock.monotonic() + 1.0,
                 cleanup_deadline=None,
                 stop_requested=False,
                 process=SimpleNamespace(
@@ -89,6 +91,7 @@ def finish_failure_case(point):
         "sleeper": clock.sleep,
         "read_guardian_receipt": reader,
         "safety": safety,
+        "retirement": retirement,
         "outcome_record": lambda plan, job, state, **fields: dict(state=state, **fields),
         "plan": None,
         "outcomes": {},

@@ -14,10 +14,16 @@ from __future__ import annotations
 import itertools
 import os
 import shutil
-import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from scripts.production_gate_parallel_identity import noop_checkpoint
+from scripts.production_gate_parallel_io import copy_file_bytes, tree_entries
+from scripts.production_gate_parallel_measurement_budget import (
+    MeasurementBudget,
+    pre_dispatch_budget,
+)
 
 PYTEST_CACHE_ENV = "POKERED_GATE_PYTEST_CACHE_DIR"
 PORT_BASE_ENV = "POKERED_PARALLEL_PORT_BASE"
@@ -130,25 +136,36 @@ def diff_snapshots(
     return problems
 
 
-def _copy_file(source: Path, target: Path) -> int:
+def _copy_file(
+    source: Path, target: Path, *, checkpoint: Callable[[], None] = noop_checkpoint
+) -> int:
+    checkpoint()
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target)
+    copy_file_bytes(source, target, checkpoint=checkpoint)
     shutil.copymode(source, target)
-    return source.stat().st_size
+    size = source.stat().st_size
+    checkpoint()
+    return size
 
 
-def _copy_tree(source: Path, target: Path, budget: list[int]) -> int:
+def _copy_tree(
+    source: Path,
+    target: Path,
+    budget: list[int],
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> int:
     count = 0
-    for dirpath, dirnames, filenames in os.walk(source):
-        dirnames[:] = sorted(name for name in dirnames if name != ".git")
-        for name in sorted(filenames):
-            origin = Path(dirpath) / name
-            if not origin.is_file():
-                continue
-            budget[0] -= _copy_file(origin, target / origin.relative_to(source))
-            count += 1
-            if budget[0] < 0:
-                raise IsolationError("the private snapshot exceeds its byte ceiling")
+    checkpoint()
+    for origin in tree_entries(source, checkpoint=checkpoint, exclude_dirs=frozenset({".git"})):
+        checkpoint()
+        if not origin.is_file():
+            continue
+        budget[0] -= _copy_file(origin, target / origin.relative_to(source), checkpoint=checkpoint)
+        count += 1
+        if budget[0] < 0:
+            raise IsolationError("the private snapshot exceeds its byte ceiling")
+    checkpoint()
     return count
 
 
@@ -160,7 +177,7 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _init_repository(checkout: Path) -> None:
+def _init_repository(checkout: Path, *, measurement: MeasurementBudget) -> None:
     """Give the snapshot a real, independent git repository (index and one commit).
 
     Required unit tests run ``git ls-files`` against the checkout root; a snapshot outside any
@@ -186,33 +203,30 @@ def _init_repository(checkout: Path) -> None:
             "immutable snapshot",
         ),
     ):
-        done = subprocess.run(
+        done = measurement.run_probe(
             ["git", "-C", str(checkout), *argv],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-            env=_git_environment(),
+            environment=_git_environment(),
+            cwd=checkout.resolve(),
+            max_seconds=120,
         )
         if done.returncode != 0:
             raise IsolationError(
-                f"snapshot repository setup failed at git {argv[0]}: {done.stderr.strip()[:200]}"
+                f"snapshot repository setup failed at git {argv[0]}: "
+                f"{done.stderr.decode('utf-8', 'replace').strip()[:200]}"
             )
 
 
-def freeze_tree(root: Path) -> None:
-    """Remove every write permission bit from the snapshot's own copies (files, then dirs)."""
+def freeze_tree(root: Path, *, checkpoint: Callable[[], None] = noop_checkpoint) -> None:
+    """Remove write bits, children before directories; keep partial trees on refusal."""
 
-    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
-        for name in filenames:
-            path = Path(dirpath) / name
-            if not path.is_symlink():
-                os.chmod(path, path.stat().st_mode & ~WRITE_BITS & 0o7777)
-        for name in dirnames:
-            path = Path(dirpath) / name
-            if not path.is_symlink():
-                os.chmod(path, path.stat().st_mode & ~WRITE_BITS & 0o7777)
+    checkpoint()
+    for path in tree_entries(root, checkpoint=checkpoint):
+        checkpoint()
+        if not path.is_symlink():
+            os.chmod(path, path.stat().st_mode & ~WRITE_BITS & 0o7777)
+        checkpoint()
     os.chmod(root, root.stat().st_mode & ~WRITE_BITS & 0o7777)
+    checkpoint()
 
 
 def thaw_and_remove(root: Path) -> None:
@@ -229,13 +243,20 @@ def thaw_and_remove(root: Path) -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
-def write_denied_problems(root: Path) -> list[str]:
+def write_denied_problems(
+    root: Path, *, checkpoint: Callable[[], None] = noop_checkpoint
+) -> list[str]:
     """Probe for real: a write or create inside the snapshot must be refused by the OS."""
 
     problems: list[str] = []
-    probe_file = next(
-        (p for p in sorted(root.rglob("*")) if p.is_file() and not p.is_symlink()), None
-    )
+    checkpoint()
+    probe_file = None
+    # Same lexicographic first eligible file as sorted(rglob), without whole-tree sorting.
+    for path in tree_entries(root, checkpoint=checkpoint):
+        checkpoint()
+        if path.is_file() and not path.is_symlink() and (probe_file is None or path < probe_file):
+            probe_file = path
+    checkpoint()
     if probe_file is None:
         return ["the snapshot contains no file to probe"]
     try:
@@ -250,6 +271,7 @@ def write_denied_problems(root: Path) -> list[str]:
             "isolation capability not established: a snapshot file opened for writing "
             "(permission bits do not bind this process, for example it runs as root)"
         )
+    checkpoint()
     probe_dir = root / ".write-probe"
     try:
         probe_dir.mkdir()
@@ -260,6 +282,7 @@ def write_denied_problems(root: Path) -> list[str]:
     else:
         probe_dir.rmdir()
         problems.append("isolation capability not established: a directory could be created")
+    checkpoint()
     return problems
 
 
@@ -270,24 +293,28 @@ def build_snapshot(
     destination: Path,
     *,
     max_bytes: int = SNAPSHOT_MAX_BYTES,
+    measurement: MeasurementBudget | None = None,
 ) -> dict[str, Any]:
     """Create the private immutable snapshot and prove it denies writes, or raise."""
 
+    measurement = measurement or pre_dispatch_budget()
+    measurement.checkpoint()
     if destination.exists():
         raise IsolationError("snapshot destination already exists")
     destination.mkdir(mode=0o700, parents=True)
     checkout = destination / "checkout"
-    listing = subprocess.run(
+    listing = measurement.run_probe(
         ["git", "-C", str(project_root), "ls-files", "-z", "--cached"],
-        capture_output=True,
-        check=False,
-        timeout=60,
+        environment=_git_environment(),
+        cwd=project_root.resolve(),
+        max_seconds=60,
     )
     if listing.returncode != 0:
         raise IsolationError("git could not list the tracked files")
     budget = [max_bytes]
     files = 0
     for raw in listing.stdout.split(b"\0"):
+        measurement.checkpoint()
         if not raw:
             continue
         relative = raw.decode("utf-8", "surrogateescape")
@@ -299,24 +326,29 @@ def build_snapshot(
             (checkout / relative).parent.mkdir(parents=True, exist_ok=True)
             os.symlink(link, checkout / relative)
         elif source.is_dir():
-            files += _copy_tree(source, checkout / relative, budget)
+            files += _copy_tree(
+                source, checkout / relative, budget, checkpoint=measurement.checkpoint
+            )
         elif source.is_file():
-            budget[0] -= _copy_file(source, checkout / relative)
+            budget[0] -= _copy_file(source, checkout / relative, checkpoint=measurement.checkpoint)
             files += 1
         else:
             raise IsolationError(f"tracked path is missing from the working tree: {relative}")
         if budget[0] < 0:
             raise IsolationError("the private snapshot exceeds its byte ceiling")
     if checkout.is_dir():
-        _init_repository(checkout)
+        _init_repository(checkout, measurement=measurement)
     assets = destination / "assets"
-    files += _copy_tree(rom_root, assets / "rom", budget)
-    files += _copy_tree(fixture_root, assets / "fixtures", budget)
-    freeze_tree(destination)
-    problems = write_denied_problems(destination)
+    files += _copy_tree(rom_root, assets / "rom", budget, checkpoint=measurement.checkpoint)
+    files += _copy_tree(
+        fixture_root, assets / "fixtures", budget, checkpoint=measurement.checkpoint
+    )
+    freeze_tree(destination, checkpoint=measurement.checkpoint)
+    problems = write_denied_problems(destination, checkpoint=measurement.checkpoint)
     if problems:
-        thaw_and_remove(destination)
+        # Refusal retains the partial/frozen tree for the continuing resource owner.
         raise IsolationError("; ".join(problems))
+    measurement.checkpoint()
     return {
         "root": str(destination),
         "checkout": str(checkout),
@@ -329,7 +361,7 @@ def build_snapshot(
 
 
 def create_job_tree(
-    run_root: Path, run_id: str, job_id: str, directories: Sequence[str]
+    run_root: Path, run_id: str, job_id: str, directories: Sequence[str], *, launch: Any = None
 ) -> dict[str, Path]:
     """Create the owned private trees for one job; refuse symlinks and existing trees."""
 
@@ -338,10 +370,30 @@ def create_job_tree(
     base = run_root / run_id / job_id
     if not base.resolve().is_relative_to(run_root.resolve()):
         raise OSError("job tree escapes the run root")
-    base.mkdir(mode=0o700, parents=True, exist_ok=False)
-    tree = {"root": base}
+    if launch is None:
+        base.mkdir(mode=0o700, parents=True, exist_ok=False)
+        tree = {"root": base}
+    else:
+        tree = launch.tree
+        tree["root"] = base
+        parent = base.parent
+        if parent.is_symlink():
+            raise OSError("run parent must not be a symlink")
+        if not parent.exists():
+            launch.path_states[parent] = "intent"
+            parent.mkdir(mode=0o700, exist_ok=False)
+            launch.directory_created(parent)
+        elif not parent.is_dir():
+            raise OSError("run parent must be a directory")
+        launch.path_states[base] = "intent"
+        base.mkdir(mode=0o700, exist_ok=False)
+        launch.directory_created(base)
     for name in directories:
         path = base / name
+        if launch is not None:
+            launch.path_states[path] = "intent"
         path.mkdir(mode=0o700, exist_ok=False)
+        if launch is not None:
+            launch.directory_created(path)
         tree[name] = path
     return tree

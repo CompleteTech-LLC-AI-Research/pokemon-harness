@@ -14,6 +14,7 @@ import os
 import time
 from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
+from typing import Any
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 KILL_WAIT_SECONDS = 5.0
@@ -64,7 +65,10 @@ class JobCgroup:
         root: Path = CGROUP_ROOT,
         own: str | None = None,
         required: tuple[str, ...] = REQUIRED_FILES,
+        launch: Any = None,
     ) -> JobCgroup:
+        if launch is not None:
+            return cls._create_owned(name, launch, root=root, own=own, required=required)
         own = own if own is not None else own_cgroup_path()
         if own is None:
             return cls(None, "no cgroup v2 hierarchy for this process", root=root)
@@ -83,6 +87,34 @@ class JobCgroup:
             os.rmdir(path)
             return cls(None, f"the kernel exposes no {missing[0]}", root=root)
         return cls(path, root=root)
+
+    @classmethod
+    def _create_owned(
+        cls,
+        name: str,
+        launch: Any,
+        *,
+        root: Path,
+        own: str | None,
+        required: tuple[str, ...],
+    ) -> JobCgroup:
+        own = own if own is not None else own_cgroup_path()
+        if own is None:
+            return cls(None, "no cgroup v2 hierarchy for this process", root=root)
+        parent = root / own.lstrip("/")
+        if not (os.access(parent, os.W_OK | os.X_OK) and (parent / "cgroup.procs").exists()):
+            return cls(
+                None, "this process's cgroup is not delegated to the executing user", root=root
+            )
+        launch.cgroup_path = parent / name
+        launch.cgroup_state = "intent"
+        launch.cgroup = cls(launch.cgroup_path, root=root)
+        launch.cgroup_path.mkdir(mode=0o700)
+        launch.cgroup_state = "created"
+        missing = [item for item in required if not (launch.cgroup_path / item).exists()]
+        if missing:
+            raise OSError(f"the kernel exposes no {missing[0]}")
+        return launch.cgroup
 
     def contains(self, pid: int) -> bool:
         """Kernel membership of ``pid`` (read from its own /proc entry)."""

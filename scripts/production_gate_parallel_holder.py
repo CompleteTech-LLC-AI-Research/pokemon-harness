@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.production_gate_parallel_holder_schema import terminal_schema_problems
+from scripts.production_gate_parallel_job_lifecycle import allocate_process
 from scripts.production_gate_parallel_processes import (
     GUARDIAN_SOURCE,
     GuardianStatus,
@@ -405,57 +406,41 @@ def launch_holder(
     grace_seconds: float,
     worker_argv: list[str],
     *,
+    launch: Any,
     cgroup: str = "",
     max_seconds: float = HOLDER_MAX_SECONDS,
     **popen_kwargs: Any,
 ) -> tuple[subprocess.Popen[Any], bytes]:
-    """Start H (which starts the real guardian); same shape as ``launch_guardian`` but the returned
-    process is the HOLDER, so its pid/start are the holder's and the guardian is authenticated separately."""
-
+    """Start original H with all normal-return allocations in the caller's slot."""
     owner_pid = os.getpid()
     owner = read_stat(owner_pid)
     if owner is None:
         raise OSError("the original orchestrator instance could not be established")
-    secret = os.urandom(32)
-    secret_read, secret_write = os.pipe()
-    status_read, status_write = os.pipe()
     holder_path = Path(receipt_path).with_name("holder.json")
-    try:
-        os.write(secret_write, secret.hex().encode())
-        os.close(secret_write)
-        secret_write = -1
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                HOLDER_SOURCE,
-                str(holder_path),
-                str(receipt_path),
-                str(grace_seconds),
-                str(secret_read),
-                str(status_write),
-                GUARDIAN_SOURCE,
-                str(max_seconds),
-                str(owner_pid),
-                str(owner[0]),
-                f"--cgroup={cgroup}",
-                *worker_argv,
-            ],
-            pass_fds=(secret_read, status_write),
-            **popen_kwargs,
-        )
-    except BaseException:
-        os.close(status_read)
-        raise
-    finally:
-        os.close(secret_read)
-        os.close(status_write)
-        if secret_write >= 0:
-            os.close(secret_write)
-    process.guardian_status = GuardianStatus(
-        status_read, holder=HolderRef(holder_path, secret, process.pid)
-    )  # type: ignore[attr-defined]
-    return process, secret
+    return allocate_process(
+        launch,
+        command=lambda slot: [
+            sys.executable,
+            "-c",
+            HOLDER_SOURCE,
+            str(holder_path),
+            str(receipt_path),
+            str(grace_seconds),
+            str(slot.pipes["secret_read"]),
+            str(slot.pipes["status_write"]),
+            GUARDIAN_SOURCE,
+            str(max_seconds),
+            str(owner_pid),
+            str(owner[0]),
+            f"--cgroup={cgroup}",
+            *worker_argv,
+        ],
+        holder_factory=lambda slot: HolderRef(holder_path, slot.secret, slot.process.pid),
+        popen=subprocess.Popen,
+        os_module=os,
+        status_type=GuardianStatus,
+        popen_kwargs=popen_kwargs,
+    )
 
 
 __all__ = ("HOLDER_SOURCE", "HolderRef", "instance_absent", "launch_holder")

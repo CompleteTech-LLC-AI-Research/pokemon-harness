@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
-import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -43,10 +43,11 @@ from scripts.production_gate_parallel_isolation import (
     thaw_and_remove,
 )
 from scripts.production_gate_parallel_measurement_budget import (
+    IdentityDeadline,
     MeasurementBudget,
-    pre_dispatch_budget,
 )
 from scripts.production_gate_parallel_plan import PlanError, build_parallel_plan, cli_deadlines
+from scripts.production_gate_parallel_probe_session import ProbeSession
 from scripts.production_gate_parallel_processes import interrupt_on_signals
 from scripts.production_gate_parallel_report import render_report_text, write_report
 from scripts.production_gate_parallel_runtime_inputs import build_private_runtimes, runtime_digest
@@ -63,6 +64,7 @@ def freeze_selection(
     rom_root: Path,
     fixture_root: Path,
     tiers: Sequence[str],
+    budget: MeasurementBudget,
 ) -> tuple[dict[str, list[str]], list[str]]:
     """Collect the COMPLETE selection per tier in each runtime, from the snapshot, before dispatch.
 
@@ -92,7 +94,11 @@ def freeze_selection(
         )
         environment["POKERED_IMPORT_ORIGIN_EQUIVALENT_ROOTS"] = str(project_root)
         collections = run_collection_preflight(
-            project_root=snap_root, python_executable=Path(interpreter), environment=environment
+            project_root=snap_root,
+            python_executable=Path(interpreter),
+            environment=environment,
+            probe_budget=budget,
+            raw_output_directory=Path(snapshot["root"]).parent / "collection" / mode,
         )
         failed = [item for item in collections if item.status != "PASS"]
         if failed:
@@ -110,10 +116,16 @@ def freeze_selection(
     return (next(iter(per_mode.values()), {}), problems)
 
 
-def settle_runtime(report: dict[str, Any], snapshot_root: str, runtime_root: Path) -> bool:
+def settle_runtime(
+    report: dict[str, Any],
+    snapshot_root: str,
+    runtime_root: Path,
+    *,
+    probe_session: ProbeSession | None = None,
+) -> bool:
     """Remove the private snapshot and runtime copies only on explicit, complete cleanup proof."""
 
-    if should_retain_runtime(report):
+    if should_retain_runtime(report) or (probe_session is not None and probe_session.pending()):
         report["snapshot_retained"] = snapshot_root  # never remove what cleanup has not cleared
         return False
     thaw_and_remove(Path(snapshot_root))
@@ -121,8 +133,49 @@ def settle_runtime(report: dict[str, Any], snapshot_root: str, runtime_root: Pat
     return True
 
 
-def run_parallel_cli(
+def run_parallel_cli(**kwargs: Any) -> int:
+    """Keep the root's actual custody alive through refusal and checked restoration."""
+
+    session = ProbeSession()
+    failure: BaseException | None = None
+    with session.cancellation_signals():
+        try:
+            session.__enter__()
+            return _run_parallel_cli_owned(probe_session=session, **kwargs)
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            cleanup_failure: BaseException | None = None
+            while not session.closed:
+                try:
+                    if cleanup_failure is not None:
+                        time.sleep(0.01)
+                    if session.children_quiescent():
+                        session.close()  # own pending disposition must not make a circle
+                    else:
+                        session.continue_custody()
+                        time.sleep(0.01)  # no new cleanup or success allowance
+                except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - cleanup refusal cannot transfer custody or replace an earlier failure
+                    # A refusal is not a transfer of custody. Keep the same root,
+                    # pins and original bounds, including after an earlier error.
+                    session.interrupt.set()
+                    if cleanup_failure is None:
+                        cleanup_failure = error
+                    continue
+            if cleanup_failure is not None:
+                if failure is None:
+                    raise cleanup_failure
+                failure.add_note(
+                    "root cleanup initially refused; subsequently retired: " + str(cleanup_failure)
+                )
+            if failure is None and session.interrupt.is_set():
+                raise IdentityDeadline("CLI cancelled; root custody has retired")
+
+
+def _run_parallel_cli_owned(
     *,
+    probe_session: ProbeSession,
     args: Any,
     parser: Any,
     project_root: Path,
@@ -160,7 +213,7 @@ def run_parallel_cli(
             "--parallel-allow-unqualified runs on retention evidence only and is never an acceptance"
         )
         return 2
-    preflight_budget = pre_dispatch_budget()
+    preflight_budget = probe_session.budget
     problems = list(configuration_problems)
     policy_text, policy_sha256, policy_problems = capture_policy(
         capacity_policy_path, capacity_policy_sha256
@@ -189,6 +242,7 @@ def run_parallel_cli(
                 Path(str(rom_root)),
                 Path(str(fixture_root)),
                 run_root / run_id / "snapshot",
+                measurement=preflight_budget,
             )
         except (IsolationError, OSError) as exc:
             problems.append(f"private immutable snapshot refused: {exc}")
@@ -200,6 +254,7 @@ def run_parallel_cli(
                 project_root=project_root,
                 checkout=Path(snapshot["checkout"]),
                 destination=runtime_root,
+                budget=preflight_budget,
             )
         except (IsolationError, OSError) as exc:
             problems.append(f"private immutable runtime refused: {exc}")
@@ -230,7 +285,7 @@ def run_parallel_cli(
                 fixture_root=snap_fixture,
                 git_root=project_root,
                 checkpoint=checkpoint,
-                budget=budget if budget is not None else preflight_budget,
+                budget=probe_session.attach(budget if budget is not None else preflight_budget),
             )
 
         measured = {mode: measure(f"{mode}-job") for mode in ("source", "cython")}
@@ -253,6 +308,7 @@ def run_parallel_cli(
                 rom_root=Path(str(rom_root)),
                 fixture_root=Path(str(fixture_root)),
                 tiers=tuple(selected),
+                budget=preflight_budget,
             )
             problems.extend(selection_problems)
         if not problems:
@@ -293,9 +349,12 @@ def run_parallel_cli(
             except PlanError as exc:
                 problems.append(f"plan refused: {exc}")
     if problems or plan is None:
-        if snapshot:
-            thaw_and_remove(Path(snapshot["root"]))
-        thaw_and_remove(runtime_root)
+        if not probe_session.pending():
+            if snapshot:
+                thaw_and_remove(Path(snapshot["root"]))
+            thaw_and_remove(runtime_root)
+        else:
+            problems.append("probe custody UNPROVEN; snapshot/runtime inputs retained")
         print("parallel runtime gate refused:\n" + "\n".join(f"  {item}" for item in problems))
         return 2
     gate_arguments = [
@@ -322,7 +381,7 @@ def run_parallel_cli(
         session=capacity_session,
         probe=capacity_loss_probe(sum(job["pairs"] for job in plan.as_dict()["jobs"][:2])),
     )
-    interrupt = threading.Event()
+    interrupt = probe_session.interrupt
     with contextlib.ExitStack() as stack:
         stack.enter_context(interrupt_on_signals(interrupt))
         if capacity_session is not None:
@@ -338,12 +397,16 @@ def run_parallel_cli(
             interrupt=interrupt,
             serial=bool(getattr(args, "parallel_serial", False)),
             measure=measure,
+            root_context=probe_session.root_context,
             capacity_policy_text=policy_text,
             require_kernel_ownership=not getattr(args, "parallel_allow_unqualified", False),
         )
     report["runtime_inputs"] = {mode: info["manifest"] for mode, info in private.items()}
     report["runtime_immutability"] = "NOT_COMPLETE: see acceptance_limits of each runtime manifest"
-    settle_runtime(report, snapshot["root"], runtime_root)
+    report["identity_probe_receipts"] = (
+        list(probe_session.broker.receipts) if probe_session.broker is not None else []
+    )
+    settle_runtime(report, snapshot["root"], runtime_root, probe_session=probe_session)
     compare_to = getattr(args, "parallel_compare_to", None)
     if compare_to is not None:
         try:

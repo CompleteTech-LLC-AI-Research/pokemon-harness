@@ -58,8 +58,13 @@ def protected_base(monkeypatch):
     real = inputs.writable_entries
     base = os.path.realpath(sys.base_prefix)
 
-    def fake(root, limit=inputs.WRITABLE_REPORT_LIMIT):
-        return [] if os.path.realpath(str(root)).startswith(base) else real(root, limit)
+    def fake(root, limit=inputs.WRITABLE_REPORT_LIMIT, *, checkpoint=lambda: None):
+        checkpoint()
+        return (
+            []
+            if os.path.realpath(str(root)).startswith(base)
+            else real(root, limit, checkpoint=checkpoint)
+        )
 
     monkeypatch.setattr(inputs, "writable_entries", fake)
 

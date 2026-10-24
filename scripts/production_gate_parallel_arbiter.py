@@ -33,6 +33,8 @@ from scripts.gate_capacity_arbiter import (
     seal,
     unseal,
 )
+from scripts.production_gate_parallel_handler_custody import ConnectionCustody, stop_hub
+from scripts.production_gate_parallel_job_lifecycle import dispose_listener, start_listener
 
 LEASE_SECONDS = 15.0  # heartbeats arrive every 2 s; an estimate, not a qualification
 VIOLATION_LIMIT = 3
@@ -63,6 +65,7 @@ class ArbiterHub:
         on_loss: Callable[[str], None] | None = None,
         lease_seconds: float = LEASE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        handler_limit: int | None = None,
     ) -> None:
         self.name, self.total = uuid.uuid4().hex, total_pairs
         self.on_loss, self.lease_seconds, self._clock = on_loss, lease_seconds, clock
@@ -74,27 +77,32 @@ class ArbiterHub:
         self._stopping = threading.Event()
         self._server: socket.socket | None = None
         self._thread: threading.Thread | None = None
+        self._startup_state = "new"
+        self._server_state = "none"
+        self._thread_state = "none"
+        self._thread_dispose_attempted = False
+        self._connections = ConnectionCustody(
+            max(4, 2 * total_pairs + 2) if handler_limit is None else handler_limit, self.lose
+        )
 
     def start(self) -> ArbiterHub:
-        server = _SOCKET(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        server.bind("\0" + self.name)
-        server.listen(16)
-        server.settimeout(0.2)
-        self._server = server
-        self._thread = threading.Thread(target=self._accept, name="arbiter-hub", daemon=True)
-        self._thread.start()
-        return self
+        return start_listener(self, _SOCKET, threading.Thread, self._accept, "arbiter-hub")
+
+    @property
+    def startup_disposed(self) -> bool:
+        return (
+            self._server_state in ("none", "closed")
+            and self._thread_state in ("none", "quiescent")
+            and self._connections.disposed()
+        )
 
     def stop(self) -> None:
-        self._stopping.set()
-        if self._server is not None:
-            self._server.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        stop_hub(self, dispose_listener)
 
     def register(self, job_id: str, pairs: int, policy: str = "") -> dict[str, str]:
         """Add a job before its worker exists and return the environment that reaches its gate."""
 
+        self._connections.housekeep()
         key = os.urandom(32)
         with self._lock:
             self._jobs[job_id] = _Job(job_id, key, pairs, policy, self._clock())
@@ -155,6 +163,7 @@ class ArbiterHub:
             self.on_loss(self.closed_reason)
 
     def check_leases(self) -> None:
+        self._connections.housekeep()  # finite nonblocking owner leaf, no protocol/socket effects
         if self._thread is not None and not self._thread.is_alive() and not self._stopping.is_set():
             self.lose("the parent arbiter stopped serving")
         now = self._clock()
@@ -169,17 +178,26 @@ class ArbiterHub:
 
     def _accept(self) -> None:
         assert self._server is not None
-        while not self._stopping.is_set():
-            try:
-                descriptor, _ = self._server._accept()  # avoids socket.socket()
-            except TimeoutError:
-                continue
-            except OSError:
-                return
-            conn = _SOCKET(
-                self._server.family, self._server.type, self._server.proto, fileno=descriptor
-            )
-            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+        try:
+            while not self._stopping.is_set():
+                record = self._connections.reserve()
+                if record is None:
+                    return
+                try:
+                    record.raw_result = self._server._accept()
+                except (TimeoutError, BlockingIOError):
+                    self._connections.unreadable(record)
+                    continue
+                except BaseException as error:
+                    self._connections.fail(record, "the Hub accept result is unproven", accept=True)
+                    if isinstance(error, OSError):
+                        return
+                    raise
+                self._connections.accepted(record)
+                self._connections.wrap(record, _SOCKET, self._server)
+                self._connections.dispatch(record, threading.Thread, self._serve)
+        finally:
+            self._connections.complete_accept()
 
     @staticmethod
     def _peer(conn: socket.socket) -> tuple[int, int]:

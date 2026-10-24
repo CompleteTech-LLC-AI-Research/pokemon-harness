@@ -176,9 +176,14 @@ def test_a_negative_acknowledgment_keeps_the_socket_with_the_owner(owner):
         assert len(descriptors) == 1
         os.close(descriptors[0])
         conn.send(b'{"op":"nack"}')
-    assert _wait_state(owner, port, "leased")
+    assert _wait_state(owner, port, "unacknowledged")
     assert _rival_bind(port, reuse_port=False) == errno.EADDRINUSE
-    assert handoff.take_listener("127.0.0.1", port) is not None
+    assert owner._book.leases and not owner.startup_disposed
+    with pytest.raises((handoff.HandoffError, OSError)):
+        handoff.take_listener("127.0.0.1", port)
+    assert len(owner._book.leases) == 1
+    assert next(iter(owner._book.leases.values())).unknown
+    assert _rival_bind(port, reuse_port=False) == errno.EADDRINUSE
 
 
 def test_a_handed_over_socket_is_refused_unless_it_is_a_listening_loopback_socket_on_the_port():

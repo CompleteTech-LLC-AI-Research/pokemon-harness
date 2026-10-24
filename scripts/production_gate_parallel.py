@@ -16,16 +16,15 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from scripts import production_gate_parallel_job_retirement as retirement
 from scripts import production_gate_parallel_safety as safety
 from scripts.production_gate_parallel_arbiter import ArbiterHub
 from scripts.production_gate_parallel_artifacts import (
@@ -42,7 +41,6 @@ from scripts.production_gate_parallel_capacity import (
     affinity_pairs,
     capacity_loss_probe,
     child_capacity_loss,
-    policy_file_problem,
     require_parallel_capacity,
     write_pinned_policy,
 )
@@ -63,12 +61,19 @@ from scripts.production_gate_parallel_isolation import (
     port_range_problems,
     snapshot_tree,
 )
+from scripts.production_gate_parallel_job_lifecycle import (
+    JobLaunchLedger,
+    WorkerArgvFactory,
+    _Running,
+    default_worker_argv,  # noqa: F401 - preserve the existing public factory facade
+    start_allocation,
+    write_plan_allocations,
+)
 from scripts.production_gate_parallel_ownership import (
     holder_loss,
     latch_holder_loss,
     receipt_loss,
     record_cgroup_receipt,
-    signal_guardians,
 )
 from scripts.production_gate_parallel_phases import (
     barrier_decision,
@@ -87,6 +92,8 @@ from scripts.production_gate_parallel_processes import (
     read_guardian_receipt,
 )
 from scripts.production_gate_parallel_reporting import completed_report, write_running_progress
+from scripts.production_gate_parallel_root_run import run_owned
+from scripts.production_gate_parallel_service import OwnerService
 from scripts.production_gate_parallel_stopping import DeadlineWatch, prepare_stops, stop_process
 
 __all__ = [
@@ -116,10 +123,12 @@ def _wall_now() -> datetime:
     return datetime.now(UTC)
 
 
-def prepare_job_tree(run_root: Path, run_id: str, job_id: str) -> dict[str, Path]:
+def prepare_job_tree(
+    run_root: Path, run_id: str, job_id: str, *, launch: Any = None
+) -> dict[str, Path]:
     """Create private writers through the isolation module, retaining the public entrypoint."""
 
-    return create_job_tree(run_root, run_id, job_id, TREE_DIRECTORIES)
+    return create_job_tree(run_root, run_id, job_id, TREE_DIRECTORIES, launch=launch)
 
 
 def job_environment(
@@ -198,69 +207,11 @@ def _manifest(directory: Path) -> dict[str, tuple[int, int]]:
     return entries
 
 
-@dataclass
-class _Running:
-    job_id: str
-    phase: str
-    process: subprocess.Popen[Any]
-    started: float
-    deadline: float
-    tree: dict[str, Path]
-    token: str
-    owned: OwnedTree
-    launched_wall: datetime
-    receipt: Path
-    secret: bytes
-    handles: list[Any] = field(default_factory=list)
-    cleanup_deadline: float | None = None
-    stop_requested: bool = False
-
-
-WorkerArgvFactory = Callable[[ParallelPlan, str, Mapping[str, Path], Path], Sequence[str]]
-
-
-def default_worker_argv(
-    gate_arguments: Sequence[str],
-    interpreters: Mapping[str, str] | None = None,
-    *,
-    git_root: Path | None = None,
-    rom_root: Path | None = None,
-    fixture_root: Path | None = None,
-    capacity_policy: bool = False,
-) -> WorkerArgvFactory:
-    """Return the factory that launches the real per-runtime worker module."""
-
-    def factory(
-        plan: ParallelPlan, job_id: str, tree: Mapping[str, Path], project_root: Path
-    ) -> list[str]:
-        mode = plan.job(job_id)["mode"]
-        interpreter = (interpreters or {}).get(mode, sys.executable)
-        argv = [
-            interpreter,
-            "-m",
-            "scripts.production_gate_parallel_worker",
-            f"--plan={tree['root'].parent / 'plan.json'}",
-            f"--job-id={job_id}",
-            f"--job-root={tree['root']}",
-            f"--project-root={project_root}",
-            f"--python={interpreter}",
-        ]
-        for flag, value in (
-            ("--git-root", git_root),
-            ("--rom-root", rom_root),
-            ("--fixture-root", fixture_root),
-        ):
-            if value is not None:
-                argv.append(f"{flag}={value}")
-        if capacity_policy:
-            argv.append(f"--capacity-policy={tree['root'] / 'capacity-policy.json'}")
-        argv.extend(f"--gate-arg={item}" for item in gate_arguments)
-        return argv
-
-    return factory
-
-
-def _write_plan_file(run_root: Path, plan: ParallelPlan) -> Path:
+def _write_plan_file(
+    run_root: Path, plan: ParallelPlan, *, ledger: JobLaunchLedger | None = None
+) -> Path:
+    if ledger is not None:
+        return write_plan_allocations(ledger, run_root, plan, os, load_plan, PlanError)
     directory = run_root / plan.run_id
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = directory / "plan.json"
@@ -273,11 +224,21 @@ def _write_plan_file(run_root: Path, plan: ParallelPlan) -> Path:
 
 
 def _close_handles(running: _Running) -> None:
+    slot = getattr(running, "launch", None)
     for handle in running.handles:
+        if slot is not None:
+            if slot.handle_states.get(id(handle), "open") != "open":
+                continue
+            slot.handle_states[id(handle)] = "closing"
         try:
             handle.close()
         except OSError:
-            pass
+            if slot is not None:
+                slot.handle_states[id(handle)] = "unknown"
+                slot.errors.append("output handle close unproven")
+        else:
+            if slot is not None:
+                slot.handle_states[id(handle)] = "closed"
 
 
 def run_parallel_plan(
@@ -299,41 +260,29 @@ def run_parallel_plan(
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     wall_clock: Callable[[], datetime] = _wall_now,
+    root_context: Any = None,
     adopt_orphans: bool = True,
     use_cgroup: bool = True,
     require_kernel_ownership: bool = False,
 ) -> dict[str, Any]:
-    """Dispatch every planned job (phase by phase) and return the retained aggregate report."""
-
-    with OrchestratorAdoption(enabled=adopt_orphans) as adoption:
-        return _run_plan(
-            plan,
-            adoption=adoption,
-            use_cgroup=use_cgroup,
-            require_kernel_ownership=require_kernel_ownership,
-            run_root=run_root,
-            project_root=project_root,
-            budget=budget,
-            worker_argv_factory=worker_argv_factory,
-            base_env=base_env,
-            capacity=capacity,
-            capacity_probe=capacity_probe,
-            interrupt=interrupt,
-            serial=serial,
-            measure=measure,
-            capacity_policy_text=capacity_policy_text,
-            poll_seconds=poll_seconds,
-            grace_seconds=grace_seconds,
-            clock=clock,
-            sleeper=sleeper,
-            wall_clock=wall_clock,
-        )
+    """Dispatch under one retained adoption owner, standalone or explicitly borrowed."""
+    return run_owned(
+        plan, adoption_type=OrchestratorAdoption, ledger_type=JobLaunchLedger,
+        runner=_run_plan, root_context=root_context, adopt_orphans=adopt_orphans,
+        run_root=run_root, project_root=project_root, budget=budget,
+        worker_argv_factory=worker_argv_factory, base_env=base_env, capacity=capacity,
+        capacity_probe=capacity_probe, interrupt=interrupt, serial=serial, measure=measure,
+        capacity_policy_text=capacity_policy_text, poll_seconds=poll_seconds,
+        grace_seconds=grace_seconds, clock=clock, sleeper=sleeper, wall_clock=wall_clock,
+        use_cgroup=use_cgroup, require_kernel_ownership=require_kernel_ownership,
+    )
 
 
 def _run_plan(
     plan: ParallelPlan,
     *,
     adoption: OrchestratorAdoption,
+    ledger: JobLaunchLedger | None = None,
     use_cgroup: bool,
     require_kernel_ownership: bool,
     run_root: Path,
@@ -353,12 +302,22 @@ def _run_plan(
     sleeper: Callable[[float], None],
     wall_clock: Callable[[], datetime],
 ) -> dict[str, Any]:
+    if ledger is None:
+        ledger = JobLaunchLedger(budget)
+        ledger.adoption = adoption
+    ledger.retain()
+    if ledger.setup_attempted or ledger.adoption is not adoption:
+        raise RuntimeError("run allocation setup cannot be retried or change adoption owner")
+    ledger.setup_attempted = True
+    ledger.clock = clock
     body = plan.as_dict()
-    live = capacity or LiveCapacity(budget, probe=capacity_probe)
+    ledger.live = capacity or LiveCapacity(budget, probe=capacity_probe)
+    live = ledger.live
     started = clock()
     outcomes: dict[str, dict[str, Any]] = {}
     running: list[_Running] = []
     cleanup: dict[str, dict[str, Any]] = {}
+    ledger.cleanup = cleanup
     launched_jobs: set[str] = set()
     out_manifests: dict[str, dict[str, tuple[int, int]]] = {}
     trees: dict[str, dict[str, Path]] = {}
@@ -367,11 +326,18 @@ def _run_plan(
     phase_of = {job["job_id"]: job["phase"] for job in body["jobs"]}
     ranges = assign_port_ranges(list(phase_of))
     problems.extend(port_range_problems(ranges))
-    handoffs = HandoffRegistry()
+    ledger.handoffs = HandoffRegistry(job_ids=(j["job_id"] for j in body["jobs"]))
+    handoffs = ledger.handoffs
 
-    hub = ArbiterHub(
-        budget.total_pairs, on_loss=lambda _reason: signal_guardians(running, problems)
+    ledger.loss_notice = retirement.HubLossNotice()
+    # Background loss only notifies; guardian delivery waits for an owner checkpoint.
+    ledger.hub = ArbiterHub(
+        budget.total_pairs,
+        on_loss=ledger.loss_notice.notify,
+        handler_limit=max(4, 2 * budget.total_pairs + 2 * len(body["jobs"])),
     )
+    hub = ledger.hub
+    handoffs.bind_loss(hub.lose)
     deadlines = DeadlineWatch(
         running,
         hub,
@@ -386,13 +352,17 @@ def _run_plan(
     ownership = kernel_ownership(require_kernel_ownership)
 
     def close_handoff(job_id: str) -> dict[str, Any] | None:
-        ledger = handoffs.close(job_id)
-        if ledger and ledger["unacknowledged"]:
+        slot = ledger.slots.get(job_id)
+        if slot is not None and slot.spawn_attempted and not slot.setup_complete:
+            return None
+        ledger.tighten_startup(job_id)
+        record = handoffs.close(job_id)
+        if record and record["unacknowledged"]:
             problems.append(
                 f"{job_id}: a leased listener was transferred but never acknowledged "
-                f"{ledger['unacknowledged'][:5]}"
+                f"{record['unacknowledged'][:5]}"
             )
-        return ledger
+        return record
 
     cancel_reason = ""
     progress_path = run_root / body["run_id"] / "progress.json"
@@ -438,11 +408,26 @@ def _run_plan(
 
         return safety.recover_evidence(read_terminal_artifact, collect_partial_evidence, item.tree)
 
+    def owned_finish(item: _Running, status: int, worker_pid: Any) -> Any:
+        def measure_owned() -> Any:
+            return _finish_job(
+                plan, item, status, clock, wall_clock, measure, worker_pid,
+                checkpoint=lambda: owner_pulse(skip=item),
+                cancel_reason=lambda: owner_service.cancel_reason,
+            )
+        if ledger.root_context is not None:
+            return ledger.root_context.during_finish(item, measure_owned)
+        return measure_owned()
+
     def finish(item: _Running, status: int, *, allow_cancel: bool) -> None:
+        if not retirement.enter_finish(item, status, running, outcomes):
+            return
         _close_handles(item)
         view = item.process.guardian_status  # type: ignore[attr-defined]
-        item.cleanup_deadline = (
-            item.cleanup_deadline or clock() + body["deadlines"]["cleanup_seconds"]
+        item.cleanup_deadline = min(
+            item.cleanup_deadline if item.cleanup_deadline is not None else float("inf"),
+            item.deadline + body["deadlines"]["cleanup_seconds"],
+            clock() + body["deadlines"]["cleanup_seconds"],
         )
         early_loss = holder_loss(view, {"pid": item.process.pid, "start": item.owned.root_start})
         if early_loss and allow_cancel:
@@ -463,7 +448,8 @@ def _run_plan(
             reader=read_guardian_receipt,
         )
         record_cgroup_receipt(item.owned, guardian, guardian_problems)
-        receipt = item.owned.terminate(
+        receipt = retirement.sweep_owned(
+            item,
             grace_seconds=grace_seconds,
             clock=clock,
             sleeper=sleeper,
@@ -482,16 +468,7 @@ def _run_plan(
         outcome = total_outcome(
             plan,
             item.job_id,
-            lambda: _finish_job(
-                plan,
-                item,
-                status,
-                clock,
-                wall_clock,
-                measure,
-                worker_pid,
-                checkpoint=deadlines.pulse,
-            ),
+            lambda: owned_finish(item, status, worker_pid),
             exit_status=status,
             launched_utc=item.launched_wall.isoformat(),
             finished_utc=wall_clock().isoformat(),
@@ -509,7 +486,7 @@ def _run_plan(
             outcome["reason"] = f"could not start: {guardian['start_error']}"
         if not proven:
             receipt["proof"] = False
-        view.close()
+        retirement.close_legacy_status(item)
         lost, malformed = safety.child_capacity_loss_total(
             child_capacity_loss, outcome.get("capacity")
         )
@@ -541,9 +518,10 @@ def _run_plan(
             outcome["state"] = "failed"
             outcome["artifact_problems"].append(f"the child reported a loss: {lost}")
             latch_holder_loss(budget, hub, item.job_id, lost)
+        retirement.finish_custody(item, receipt, proven, outcome, running, owner_service)
         outcomes[item.job_id] = outcome
         out_manifests[item.job_id] = _manifest(item.tree["out"])
-        running.remove(item)
+        retirement.remove_active(item, running)
         progress()
         if allow_cancel and running and lost:
             cancel(f"capacity loss reported by {item.job_id}: {lost}")
@@ -556,8 +534,10 @@ def _run_plan(
             cancel(f"fail_fast: {item.job_id} {outcome['state']}")
 
     def harvest(*, allow_cancel: bool = True) -> None:
-        for item in running[:]:
-            status = item.process.poll()
+        for item in retirement.active_snapshot(running, outcomes):
+            if item not in running or not retirement.active_item(item):
+                continue
+            status = retirement.poll_item(item)
             if status is not None and item in running and not item.stop_requested:
                 try:
                     finish(item, status, allow_cancel=allow_cancel)
@@ -571,8 +551,13 @@ def _run_plan(
                         outcomes,
                         cleanup,
                         running,
-                        deadline=item.cleanup_deadline
-                        or clock() + body["deadlines"]["cleanup_seconds"],
+                        deadline=min(
+                            item.cleanup_deadline
+                            if item.cleanup_deadline is not None
+                            else float("inf"),
+                            item.deadline + body["deadlines"]["cleanup_seconds"],
+                            clock() + body["deadlines"]["cleanup_seconds"],
+                        ),
                         clock=clock,
                         sleeper=sleeper,
                     )
@@ -580,39 +565,23 @@ def _run_plan(
                         cancel(f"containment lost before finish failed: {hub.closed_reason}")
 
     def stop(item: _Running) -> None:
-        """Ask the guardian to contain its subtree first, then prove it from outside."""
-
-        view = item.process.guardian_status  # type: ignore[attr-defined]
-        hub.expect_drop(item.job_id)  # the owner ends this connection; that alone is not a loss
-        deadline = item.cleanup_deadline or clock() + body["deadlines"]["cleanup_seconds"]
-        item.cleanup_deadline = deadline
-        stop_process(
-            item, view, deadline, grace_seconds=grace_seconds, clock=clock, sleeper=sleeper
-        )
-        guardian, _problems = view.read_receipts(
-            item.receipt,
-            item.secret,
-            item.process.pid,
-            item.owned.root_start,
+        retirement.stop_job(
+            item,
+            running=running,
+            hub=hub,
+            cleanup=cleanup,
+            ports_seen=ports_seen,
+            close_handoff=close_handoff,
+            cleanup_proven=cleanup_proven,
+            stop_process=stop_process,
             reader=read_guardian_receipt,
-        )
-        record_cgroup_receipt(item.owned, guardian, _problems)
-        receipt = item.owned.terminate(
-            grace_seconds=grace_seconds,
+            record_cgroup_receipt=record_cgroup_receipt,
             clock=clock,
             sleeper=sleeper,
-            deadline=item.cleanup_deadline,
+            grace_seconds=grace_seconds,
+            cleanup_seconds=body["deadlines"]["cleanup_seconds"],
+            owner_service=owner_service,
         )
-        if not cleanup_proven(receipt, guardian, view):
-            receipt["proof"] = False
-        view.close()
-        cleanup[item.job_id] = {
-            "process_tree": receipt,
-            "guardian": guardian or {},
-            "listener_handoff": close_handoff(item.job_id),
-            "arbiter": hub.unregister(item.job_id, cleanup_proven=receipt["proof"] is True),
-        }
-        ports_seen[item.job_id] = set(item.owned.ports)
 
     def cancel(reason: str) -> None:
         nonlocal cancel_reason
@@ -627,10 +596,10 @@ def _run_plan(
         harvest(
             allow_cancel=False
         )  # completed jobs were never signalled; failures remain their own rows
-        for item in list(running):
+        for item in retirement.active_snapshot(running, outcomes):
             stop_error = safety.stop_safely(item, stop, cleanup, clock=clock, sleeper=sleeper)
             recovered, partial = recover(item)
-            status = item.process.poll()
+            status = retirement.final_poll(item)
             _close_handles(item)
             settle(
                 item.job_id,
@@ -641,133 +610,126 @@ def _run_plan(
                 partial=partial,
                 item=item,
             )
-            running.remove(item)
+            retirement.remove_active(item, running)
+
+    def setup_checkpoint() -> None:
+        owner_pulse()
+        if owner_service.cancel_reason:
+            raise CapacityError(owner_service.cancel_reason)
 
     def start(job: Mapping[str, Any]) -> None:
+        nonlocal cancel_reason
         job_id = job["job_id"]
-        handles: list[Any] = []
-        job_cgroup = JobCgroup(None, "not created")
+        slot = ledger.prepare(job_id, phase_of[job_id])
         try:
-            tree = prepare_job_tree(run_root, body["run_id"], job_id)
-            trees[job_id] = tree
-            token = f"{body['run_id']}:{job_id}:{uuid.uuid4().hex}"
-            receipt_path = tree["root"] / "guardian.json"
-            if capacity_policy_text is not None:
-                write_pinned_policy(
-                    tree["root"] / "capacity-policy.json",
-                    capacity_policy_text,
-                    job["pairs"],
-                    job.get("policy_sha256"),
-                )
-            worker_argv = list(worker_argv_factory(plan, job_id, tree, project_root))
-            handles.append(open(tree["root"] / "child.stdout", "wb"))  # noqa: SIM115
-            handles.append(open(tree["root"] / "child.stderr", "wb"))  # noqa: SIM115
-            launched_monotonic = clock()
-            launched = wall_clock()
-            handoff = handoffs.open(job_id, *ranges[job_id])
-            arbiter_env = hub.register(job_id, job["pairs"], job.get("policy_sha256", ""))
-            job_cgroup = (
-                JobCgroup.create(f"pokered-{body['run_id'][:12]}-{job_id}")
-                if use_cgroup
-                else JobCgroup(None, "disabled by the caller")
-            )
-            if require_kernel_ownership and not job_cgroup.available:
-                raise OwnershipError(f"kernel ownership is required: {job_cgroup.reason}")
-            process, secret = (launch_holder if adoption.enabled else launch_guardian)(
-                receipt_path,
-                grace_seconds,
-                worker_argv,
-                cgroup=("!" if require_kernel_ownership else "")
-                + (str(job_cgroup.path) if job_cgroup.available else ""),
-                cwd=project_root,
-                env=job_environment(
-                    tree,
-                    base_env,
-                    project_root=project_root,
-                    token=token,
-                    port_range=ranges[job_id],
-                    deadline_epoch=launched.timestamp() + float(job["deadline_seconds"]),
-                    job_deadline_monotonic=launched_monotonic + float(job["deadline_seconds"]),
-                    cleanup_deadline_monotonic=launched_monotonic
-                    + float(job["deadline_seconds"])
-                    + float(body["deadlines"]["cleanup_seconds"]),
-                    handoff=handoff,
-                    arbiter_env=arbiter_env,
-                ),
+            start_allocation(
+                slot,
+                job,
+                ledger=ledger,
+                body=body,
+                plan=plan,
+                run_root=run_root,
+                project_root=project_root,
+                base_env=base_env,
+                ranges=ranges,
+                adoption=adoption,
+                handoffs=handoffs,
+                hub=hub,
+                use_cgroup=use_cgroup,
+                require_kernel_ownership=require_kernel_ownership,
+                grace_seconds=grace_seconds,
+                capacity_policy_text=capacity_policy_text,
+                clock=clock,
+                wall_clock=wall_clock,
+                running=running,
+                checkpoint=setup_checkpoint,
+                prepare_tree=prepare_job_tree,
+                policy_writer=write_pinned_policy,
+                worker_factory=worker_argv_factory,
+                cgroup_type=JobCgroup,
+                ownership_error=OwnershipError,
+                launcher=launch_holder if adoption.enabled else launch_guardian,
+                environment=job_environment,
+                tree_type=OwnedTree,
+                running_type=_Running,
+                token_factory=lambda: f"{body['run_id']}:{job_id}:{uuid.uuid4().hex}",
                 stdin=subprocess.DEVNULL,
-                stdout=handles[0],
-                stderr=handles[1],
-                start_new_session=True,
             )
-        except (OSError, CapacityError, OwnershipError) as exc:
-            close_handoff(job_id)
-            hub.unregister(job_id)
-            job_cgroup.remove()
-            for handle in handles:
-                handle.close()
-            detail = str(exc) if isinstance(exc, OwnershipError) else type(exc).__name__
-            settle(job_id, "failed", f"could not start: {detail}")
-            if isinstance(exc, OwnershipError):
-                hub.lose(f"{job_id}: {detail}")
-            if body["fail_fast"] and may_cancel_siblings(phase_of[job_id], True):
-                cancel(f"fail_fast: {job_id} could not start")
-            return
-        running.append(
-            _Running(
-                job_id,
-                phase_of[job_id],
-                process,
-                launched_monotonic,
-                launched_monotonic + float(job["deadline_seconds"]),
-                tree,
-                token,
-                OwnedTree(
-                    process.pid,
-                    token,
-                    clock=clock,
-                    adoption=adoption,
-                    status=process.guardian_status,  # type: ignore[attr-defined]
-                    known_children=lambda: (
-                        {i.process.pid for i in running}
-                        | {pid for i in running for pid in i.owned.tracked}
-                    ),
-                    cgroup=job_cgroup,
-                ),
-                launched,
-                receipt_path,
-                secret,
-                handles,
-            )
-        )
-        launched_jobs.add(job_id)
-        progress()
+            launched_jobs.add(job_id)
+            progress()
+            setup_checkpoint()
+        except BaseException as exc:
+            slot.fail(exc)
+            if slot.spawn_attempted:
+                # Unknown/no returned process is never discovered by a numeric PID.
+                cancel_reason = cancel_reason or f"job setup unproven: {job_id}: {slot.failure}"
+                ledger.failure = ledger.failure or cancel_reason
+            else:
+                if not slot.dispose_no_spawn(handoffs, hub):
+                    cancel_reason = cancel_reason or f"local setup disposition unproven: {job_id}"
+                    ledger.failure = ledger.failure or cancel_reason
+            if isinstance(exc, (OSError, CapacityError, OwnershipError)):
+                detail = str(exc) if isinstance(exc, OwnershipError) else type(exc).__name__
+                settle(job_id, "failed", f"could not start: {detail}")
+                if isinstance(exc, OwnershipError):
+                    hub.lose(f"{job_id}: {detail}")
+                if body["fail_fast"] and may_cancel_siblings(phase_of[job_id], True):
+                    cancel(f"fail_fast: {job_id} could not start")
+            else:
+                cancel_reason = cancel_reason or f"job setup failed: {job_id}: {slot.failure}"
+                raise
+        finally:
+            if slot.tree:
+                trees[job_id] = slot.tree
+
+    owner_service = OwnerService(
+        running,
+        hub,
+        budget,
+        live,
+        deadlines,
+        plan,
+        interrupt,
+        cleanup_seconds=body["deadlines"]["cleanup_seconds"],
+        clock=clock,
+        loss_notice=ledger.loss_notice,
+        handoffs=handoffs,
+    )
+    if ledger.root_context is not None:
+        ledger.root_context.attach_service(ledger, owner_service)
+    owner_pulse = (
+        ledger.root_context.service if ledger.root_context is not None else owner_service.pulse
+    )
+    deadlines.owner_loss_delivery = lambda: owner_service.consume_hub_loss(deadlines_current=True)
+
+    def consume_service_cancel() -> bool:
+        nonlocal cancel_reason
+        owner_service.consume_hub_loss()
+        if not owner_service.cancel_reason:
+            return False
+        cancel_reason = cancel_reason or owner_service.cancel_reason
+        note = f"owner service cancelled: {owner_service.cancel_reason}"
+        if note not in problems:
+            problems.append(note)  # aggregate FAIL even if every row was already finalized
+        return True
 
     def poll() -> None:
         while running:
-            hub.check_leases()
-            for item in tuple(running):  # a policy that is no longer the plan-pinned one is a loss
-                pin = plan.job(item.job_id).get("policy_sha256")
-                if pin and policy_file_problem(item.tree["root"] / "capacity-policy.json", pin):
-                    hub.lose(f"{item.job_id}: the child capacity policy changed during the run")
-            if hub.closed_reason:
-                budget.mark_lost(hub.closed_reason)
-                cancel(f"live arbiter closed admission: {hub.closed_reason}")
+            owner_service.preflight()
+            if consume_service_cancel():
+                cancel(cancel_reason)
                 break
             harvest()
+            if consume_service_cancel():
+                cancel(cancel_reason)
+                break
             if not running:
                 break
-            if interrupt is not None and interrupt.is_set():
-                cancel("external interrupt")
+            owner_service.pulse(preflight=False)
+            if consume_service_cancel():
+                cancel(cancel_reason)
                 break
-            reason = live.check()
-            if reason:
-                budget.mark_lost(reason)
-                hub.lose(f"capacity loss: {reason}")
-                cancel(f"capacity loss: {reason}")
-                break
-            for item in list(running):
-                item.owned.observe()
-                deadlines.pulse()
+            for item in retirement.active_snapshot(running, outcomes):
                 if deadlines.fail_fast_reason:
                     cancel(deadlines.fail_fast_reason)
                     break
@@ -776,7 +738,7 @@ def _run_plan(
                         item, stop, cleanup, clock=clock, sleeper=sleeper
                     )
                     recovered, partial = recover(item)
-                    status = item.process.poll()
+                    status = retirement.final_poll(item)
                     _close_handles(item)
                     settle(
                         item.job_id,
@@ -787,7 +749,7 @@ def _run_plan(
                         partial=partial,
                         item=item,
                     )
-                    running.remove(item)
+                    retirement.remove_active(item, running)
                     if may_cancel_siblings(item.phase, body["fail_fast"]) and running:
                         cancel(f"fail_fast: {item.job_id} timed out")
             if running:
@@ -795,15 +757,22 @@ def _run_plan(
 
     def admit(batch: Sequence[Mapping[str, Any]]) -> bool:
         nonlocal cancel_reason
+        if consume_service_cancel() or ledger.errors:
+            cancel_reason = cancel_reason or "job allocation disposition failed"
+            for job in batch:
+                settle(job["job_id"], "not_started", f"not started: {cancel_reason}")
+            return False
         if hub.closed_reason:
             budget.mark_lost(hub.closed_reason)  # a closed arbiter closes dispatch as well
         try:
             require_parallel_capacity(plan, budget)
             for job in batch:
+                ledger.prepare(job["job_id"], phase_of[job["job_id"]])
                 live.admit(job["job_id"], job["pairs"])
         except CapacityError as exc:
             for job in batch:
-                live.release(job["job_id"])
+                ledger.dispose_unstarted()
+                ledger.release_capacity(job["job_id"], True)
                 settle(job["job_id"], "not_started", f"refused before dispatch: {exc}")
             cancel_reason = cancel_reason or f"capacity refused: {exc}"
             problems.append(f"capacity refused before dispatch: {exc}")
@@ -811,7 +780,7 @@ def _run_plan(
         return True
 
     try:
-        _write_plan_file(run_root, plan)
+        _write_plan_file(run_root, plan, ledger=ledger)
         if ownership["admitted"]:
             hub.start()
         else:
@@ -848,13 +817,18 @@ def _run_plan(
                     job_id = job["job_id"]
                     if job_id not in outcomes:
                         settle(
-                            job_id, "not_started", f"not started: {cancel_reason or 'no dispatch'}"
+                            job_id,
+                            "failed" if job_id in ledger.attempted else "not_started",
+                            f"setup unproven: {cancel_reason}"
+                            if job_id in ledger.attempted
+                            else f"not started: {cancel_reason or 'no dispatch'}",
                         )
-                    proof = safety.cleanup_proven_for(launched_jobs, cleanup, job_id)
+                    proof = safety.cleanup_proven_for(launched_jobs, cleanup, job_id, ledger=ledger)
                     if proof:
-                        live.release(job_id)
+                        ledger.release_capacity(job_id, proof)
                     else:
                         problems.append(f"{job_id}: cleanup unproven; reservation retained")
+                        cancel_reason = cancel_reason or f"{job_id}: cleanup remains unproven"
                     if job_id in trees and proof and outcomes[job_id]["state"] == "passed":
                         shutil.rmtree(trees[job_id]["tmp"], ignore_errors=True)
             previous = [outcomes[job["job_id"]] for job in jobs if job["job_id"] in outcomes]
@@ -864,26 +838,49 @@ def _run_plan(
     except KeyboardInterrupt:
         cancel("external interrupt")
     finally:
+        ledger.guard(consume_service_cancel, "consume cancellation")
         if running:
-            cancel(cancel_reason or "orchestrator exit")
-        handoffs.close_all()
-        hub.stop()
+            ledger.guard(lambda: cancel(cancel_reason or "orchestrator exit"), "cancel siblings")
+        ledger.guard(lambda: owner_service.pulse(), "service siblings on exit")
+        ledger.guard(consume_service_cancel, "consume exit cancellation")
+        ledger.guard(ledger.dispose_unstarted, "dispose unstarted")
+        ledger.guard(
+            lambda: retirement.restore_pending_outcomes(ledger, outcomes), "pending outcomes"
+        )
         for job_id in phase_of:
             if job_id not in outcomes:
-                settle(job_id, "not_started", f"not started: {cancel_reason or 'no dispatch'}")
-            if safety.cleanup_proven_for(launched_jobs, cleanup, job_id):
-                live.release(job_id)
+                ledger.guard(
+                    lambda job_id=job_id: settle(
+                        job_id,
+                        "failed" if job_id in ledger.attempted else "not_started",
+                        f"setup unproven: {cancel_reason}"
+                        if job_id in ledger.attempted
+                        else f"not started: {cancel_reason or 'no dispatch'}",
+                    ),
+                    "missing outcome",
+                )
+            if safety.cleanup_proven_for(launched_jobs, cleanup, job_id, ledger=ledger):
+                ledger.release_capacity(job_id, True)
         for job_id, tree in trees.items():
-            proven = cleanup.get(job_id, {}).get("process_tree", {}).get("proof") is True
-            if proven and outcomes[job_id]["state"] == "passed":
-                shutil.rmtree(tree["tmp"], ignore_errors=True)
-            cleanup.setdefault(job_id, {}).update(
-                {
-                    "tmp_removed": not tree["tmp"].exists(),
-                    "cache_retained": tree["cache"].exists(),
-                    "child_exit_status": outcomes[job_id].get("child_exit_status"),
-                }
-            )
+            try:
+                if not all(key in tree for key in ("tmp", "cache", "out")):
+                    cleanup.setdefault(job_id, {}).update(
+                        process_tree={"proof": False}, partial_tree=True
+                    )
+                    continue
+                proven = safety.cleanup_proven_for(launched_jobs, cleanup, job_id, ledger=ledger)
+                if proven and outcomes[job_id]["state"] == "passed":
+                    shutil.rmtree(tree["tmp"], ignore_errors=True)
+                cleanup.setdefault(job_id, {}).update(
+                    {
+                        "tmp_removed": not tree["tmp"].exists(),
+                        "cache_retained": tree["cache"].exists(),
+                        "child_exit_status": outcomes[job_id].get("child_exit_status"),
+                    }
+                )
+            except BaseException as error:  # noqa: BLE001 - preserve the original caller failure
+                ledger.errors.append(f"cleanup metadata: {job_id}: {type(error).__name__}")
+
     for job_id, tree in trees.items():
         if job_id in out_manifests and _manifest(tree["out"]) != out_manifests[job_id]:
             problems.append(
@@ -902,9 +899,12 @@ def _run_plan(
     problems.extend(distinct_tree_problems(trees))
     if project_root.is_dir():
         problems.extend(diff_snapshots(shared_before, snapshot_tree(project_root, excluded)))
-    complete = safety.note_unproven_cleanup(launched_jobs, cleanup, problems)
+    complete = safety.note_unproven_cleanup(launched_jobs, cleanup, problems, ledger=ledger)
+    if not ledger.finalize(cleanup):
+        complete = False
+        problems.append("job allocation/startup custody or restoration remains unproven")
     ordered = [outcomes[job["job_id"]] for job in body["jobs"]]
-    return completed_report(
+    report = completed_report(
         plan,
         ordered,
         started,
@@ -919,6 +919,14 @@ def _run_plan(
         serial=serial,
         load=(load_before, os.getloadavg() if hasattr(os, "getloadavg") else ()),
     )
+    report["allocation_publication"] = {
+        "attempted": sorted(ledger.attempted),
+        "returned": sorted(s.job_id for s in ledger.slots.values() if s.process is not None),
+        "pending": ledger.retained,
+        "errors": list(ledger.errors),
+    }
+    retirement.seal_report(report, hub)
+    return report
 
 
 def terminal_artifact_path(tree: Mapping[str, Path]) -> Path:

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.production_gate_parallel_job_lifecycle import JobLaunch
 from scripts.production_gate_parallel_processes import (
     JOB_TOKEN_ENV,
     GuardianStatus,
@@ -177,8 +178,13 @@ def run_guardian(tmp_path, mode):
 
     receipt = tmp_path / "guardian.json"
     mark = tmp_path / "grandchild.pid"
+    launch = JobLaunch("standalone-control")
     process, secret = launch_guardian(
-        receipt, 1.0, [sys.executable, "-c", WORKER, str(mark), mode], start_new_session=True
+        receipt,
+        1.0,
+        [sys.executable, "-c", WORKER, str(mark), mode],
+        start_new_session=True,
+        launch=launch,
     )
     return process, secret, receipt, mark
 
@@ -219,7 +225,8 @@ def test_a_stop_signal_makes_the_guardian_contain_the_whole_detached_subtree(tmp
 
 def test_a_stop_signal_before_the_worker_starts_leaves_a_proven_never_started_receipt(tmp_path):
     receipt = tmp_path / "guardian.json"
-    process, secret = launch_guardian(receipt, 1.0, [sys.executable, "-c", "pass"])
+    launch = JobLaunch("standalone-control")
+    process, secret = launch_guardian(receipt, 1.0, [sys.executable, "-c", "pass"], launch=launch)
     try:
         wait_for(receipt)  # readiness receipt: handlers are installed from here on
         process.send_signal(signal.SIGTERM)
@@ -238,7 +245,8 @@ def test_a_stop_signal_before_the_worker_starts_leaves_a_proven_never_started_re
 
 def test_a_worker_that_cannot_start_is_reported_by_the_guardian_not_lost(tmp_path):
     receipt = tmp_path / "guardian.json"
-    process, secret = launch_guardian(receipt, 1.0, ["/nonexistent/python"])
+    launch = JobLaunch("standalone-control")
+    process, secret = launch_guardian(receipt, 1.0, ["/nonexistent/python"], launch=launch)
     assert process.wait(timeout=30) == 127
     body, problems = read_guardian_receipt(receipt, secret, process.pid)
     assert body["start_error"] == "FileNotFoundError"
@@ -313,7 +321,8 @@ def test_the_status_pipe_is_an_independent_launch_record_not_a_file(tmp_path):
 
 def test_a_real_guardian_reports_ready_and_spawn_intent_over_its_status_pipe(tmp_path):
     receipt = tmp_path / "guardian.json"
-    process, secret = launch_guardian(receipt, 1.0, [sys.executable, "-c", "pass"])
+    launch = JobLaunch("standalone-control")
+    process, secret = launch_guardian(receipt, 1.0, [sys.executable, "-c", "pass"], launch=launch)
     try:
         process.wait(timeout=30)
         view = process.guardian_status
@@ -444,12 +453,14 @@ MARK_WORKER = "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('spawne
 
 def run_marking_guardian(tmp_path, cgroup):
     receipt, mark = tmp_path / "guardian.json", tmp_path / "spawned.txt"
+    launch = JobLaunch("standalone-control")
     process, secret = launch_guardian(
         receipt,
         1.0,
         [sys.executable, "-c", MARK_WORKER, str(mark)],
         cgroup=cgroup,
         start_new_session=True,
+        launch=launch,
     )
     process.wait(timeout=30)
     return process, secret, receipt, mark

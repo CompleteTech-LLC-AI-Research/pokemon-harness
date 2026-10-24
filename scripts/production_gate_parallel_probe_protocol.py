@@ -50,7 +50,7 @@ def decode_probe_frame(raw: bytes, context: ProbeContext) -> dict[str, Any]:
         raise ProbeProtocolError("missing or oversized probe frame")
     try:
         body = loads_strict(raw.decode("utf-8"))
-    except (UnicodeError, ValueError) as error:
+    except (UnicodeError, ValueError, RecursionError) as error:
         raise ProbeProtocolError("probe frame is not strict JSON") from error
     if not isinstance(body, dict):
         raise ProbeProtocolError("probe frame is not an object")
@@ -61,7 +61,12 @@ def decode_probe_frame(raw: bytes, context: ProbeContext) -> dict[str, Any]:
         ).hexdigest()
     except (TypeError, ValueError) as error:
         raise ProbeProtocolError("probe frame contains noncanonical values") from error
-    if not isinstance(tag, str) or not hmac.compare_digest(tag, expected_mac):
+    if (
+        not isinstance(tag, str)
+        or len(tag) != 64
+        or any(value not in "0123456789abcdef" for value in tag)
+        or not hmac.compare_digest(tag, expected_mac)
+    ):
         raise ProbeProtocolError("probe frame authentication failed")
     for name in ("scope", "nonce", "source_sha256", "program_sha256"):
         if body.get(name) != getattr(context, name):
@@ -156,13 +161,17 @@ def terminal_problems(
     all_children = groups["forks"] | groups["adopted"]
     if groups["reaped"] != all_children or not groups["killed"].issubset(all_children):
         return ["supervisor signal/reaping accounting does not reconcile"]
-    if type(body.get("success")) is not bool or not isinstance(body.get("operation_errors"), list):
+    if (
+        type(body.get("success")) is not bool
+        or type(body.get("timely_cleanup")) is not bool
+        or not isinstance(body.get("operation_errors"), list)
+    ):
         return ["supervisor operation disposition is missing"]
     status = body.get("child_status")
     if (child_instance is None and status is not None) or (
         child_instance is not None and type(status) is not int
     ):
         return ["supervisor child status contradicts fork accounting"]
-    if body["success"] and (status != 0 or body["operation_errors"]):
+    if body["success"] and (status != 0 or body["operation_errors"] or not body["timely_cleanup"]):
         return ["supervisor success contradicts its original failure evidence"]
     return []

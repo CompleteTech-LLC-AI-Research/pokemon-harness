@@ -10,10 +10,17 @@ import time
 from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
+from scripts import production_gate_parallel_job_retirement as retirement
 
-def cleanup_proven_for(launched: Collection[str], cleanup: Mapping[str, Any], job_id: str) -> bool:
+
+def cleanup_proven_for(
+    launched: Collection[str], cleanup: Mapping[str, Any], job_id: str, *, ledger: Any = None
+) -> bool:
     """A job that never launched owes no cleanup; a launched one needs an explicit proved record."""
 
+    if ledger is not None:
+        original = cleanup_proven_for(set(launched) | ledger.attempted, cleanup, job_id)
+        return ledger.proof(job_id, original)
     if job_id not in launched:
         return True
     record = cleanup.get(job_id)
@@ -22,20 +29,27 @@ def cleanup_proven_for(launched: Collection[str], cleanup: Mapping[str, Any], jo
 
 
 def cleanup_completeness(
-    launched: Collection[str], cleanup: Mapping[str, Any]
+    launched: Collection[str], cleanup: Mapping[str, Any], *, ledger: Any = None
 ) -> tuple[bool, list[str]]:
     """(complete, unproven job ids): complete only when EVERY launched job has a proved record."""
 
-    unproven = sorted(j for j in launched if not cleanup_proven_for(launched, cleanup, j))
+    relevant = set(launched) | (set(ledger.slots) if ledger is not None else set())
+    unproven = sorted(
+        j for j in relevant if not cleanup_proven_for(launched, cleanup, j, ledger=ledger)
+    )
     return not unproven, unproven
 
 
 def note_unproven_cleanup(
-    launched: Collection[str], cleanup: Mapping[str, Any], problems: list[str]
+    launched: Collection[str],
+    cleanup: Mapping[str, Any],
+    problems: list[str],
+    *,
+    ledger: Any = None,
 ) -> bool:
     """One diagnostic per launched job without proved cleanup; True only when every job is proved."""
 
-    complete, unproven = cleanup_completeness(launched, cleanup)
+    complete, unproven = cleanup_completeness(launched, cleanup, ledger=ledger)
     for job_id in unproven:
         note = f"{job_id}: cleanup unproven; reservation retained"
         if note not in problems:
@@ -46,6 +60,8 @@ def note_unproven_cleanup(
 def close_failed_status(item: Any, record: dict[str, Any]) -> str:
     """Release the status pipe after fallback's last read; retain a failed close."""
 
+    if retirement.retain_failed_status(item, record):
+        return ""
     try:
         view = getattr(getattr(item, "process", None), "guardian_status", None)
         if view is not None:
@@ -81,6 +97,10 @@ def fail_finish(
     job_id = item.job_id
     reason = f"finish failed closed: {type(exc).__name__}: {str(exc)[:160]}"
     published = outcomes.get(job_id)
+    if not isinstance(published, dict):
+        retained = retirement.retained_outcome(item)
+        if isinstance(retained, dict):
+            published = outcomes[job_id] = retained
     try:
         if isinstance(published, dict):
             # Whatever was already published (even a pass), an error in finish makes it a failure;
@@ -121,9 +141,14 @@ def fail_finish(
         close_failed_status(item, record)
         return
     record = cleanup.setdefault(job_id, {})
+    if retirement.fallback_record(item, record):
+        record["finish_error"] = reason
+        return
     try:  # one more bounded, pidfd-only attempt; the guardian proof was never evaluated, so never proved
         receipt = dict(
-            item.owned.terminate(grace_seconds=1.0, deadline=deadline, clock=clock, sleeper=sleeper)
+            retirement.sweep_owned(
+                item, grace_seconds=1.0, deadline=deadline, clock=clock, sleeper=sleeper
+            )
         )
         receipt.update(proof=False, reason="the guardian proof was not evaluated: " + reason)
     except Exception as again:  # noqa: BLE001
@@ -148,6 +173,10 @@ def stop_safely(
     and that job's reservation remains retained.
     """
 
+    if not retirement.active_item(item) and retirement.fallback_record(
+        item, cleanup.setdefault(item.job_id, {})
+    ):
+        return "managed custody remains unproven" if item.launch.custody_state != "disposed" else ""
     try:
         stop(item)
         return ""
@@ -155,9 +184,12 @@ def stop_safely(
         reason = f"stop failed closed: {type(exc).__name__}: {str(exc)[:160]}"
     record = cleanup.setdefault(item.job_id, {})
     record["stop_error"] = reason
+    if retirement.fallback_record(item, record):
+        return reason
     try:
         receipt = dict(
-            item.owned.terminate(
+            retirement.sweep_owned(
+                item,
                 grace_seconds=1.0,
                 deadline=item.cleanup_deadline if item.cleanup_deadline is not None else clock(),
                 clock=clock,

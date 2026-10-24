@@ -17,9 +17,13 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterable, Sequence
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from scripts.production_gate_parallel_measurement_budget import MeasurementBudget
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -146,6 +150,7 @@ def run_import_origin_preflight(
     environment: dict[str, str],
     timeout_seconds: float,
     raw_output_directory: Path | None = None,
+    probe_budget: MeasurementBudget | None = None,
 ) -> CollectionResult:
     """Verify the selected interpreter imports this checkout's own source.
 
@@ -165,6 +170,17 @@ def run_import_origin_preflight(
     started = time.monotonic()
     child_environment = dict(environment)
     child_environment["PYTHONWARNINGS"] = "ignore"
+    if probe_budget is not None:
+        from scripts.production_gate_parallel_collection import run_origin_probe
+
+        return run_origin_probe(
+            command=command,
+            project_root=project_root,
+            environment=child_environment,
+            timeout_seconds=timeout_seconds,
+            budget=probe_budget,
+            raw_output_directory=raw_output_directory,
+        )
     try:
         process = subprocess.Popen(
             command,
@@ -250,6 +266,7 @@ def run_collection_preflight(
     environment: dict[str, str],
     timeout_seconds: float = COLLECTION_TIMEOUT_SECONDS,
     raw_output_directory: Path | None = None,
+    probe_budget: MeasurementBudget | None = None,
 ) -> list[CollectionResult]:
     """Run both supported pytest collection entry points.
 
@@ -265,6 +282,7 @@ def run_collection_preflight(
         environment=environment,
         timeout_seconds=timeout_seconds,
         raw_output_directory=raw_output_directory,
+        **({"probe_budget": probe_budget} if probe_budget is not None else {}),
     )
 
     commands: list[tuple[str, list[str]]] = [
@@ -310,7 +328,19 @@ def run_collection_preflight(
             )
         )
 
-    with tempfile.TemporaryDirectory(prefix="pokered-collection-") as directory:
+    if probe_budget is None:
+        directory_context = tempfile.TemporaryDirectory(prefix="pokered-collection-")
+    else:
+        # Root retains the report path until physical cleanup, including when
+        # the measured pytest remains alive after a bounded collection refusal.
+        from scripts.production_gate_parallel_measurement_budget import IdentityDeadline
+
+        if probe_budget.temporary_owner is None:
+            raise IdentityDeadline("collection temporary inputs require a continuing root owner")
+        retained_directory = tempfile.TemporaryDirectory(prefix="pokered-collection-")
+        probe_budget.retain_temporary(retained_directory)
+        directory_context = nullcontext(retained_directory.name)
+    with directory_context as directory:
         results: list[CollectionResult] = [origin_result]
         for index, (name, command) in enumerate(commands):
             # A foreign interpreter would make every collected node id describe
@@ -364,6 +394,7 @@ def run_collection_preflight(
                     timeout_seconds=timeout_seconds,
                     report_path=Path(directory) / f"{index}.json",
                     raw_output_directory=raw_output_directory,
+                    **({"probe_budget": probe_budget} if probe_budget is not None else {}),
                 )
             )
 
@@ -602,7 +633,21 @@ def _run_collection_command(
     timeout_seconds: float,
     report_path: Path,
     raw_output_directory: Path | None = None,
+    probe_budget: MeasurementBudget | None = None,
 ) -> CollectionResult:
+    if probe_budget is not None:
+        from scripts.production_gate_parallel_collection import run_collection_probe
+
+        return run_collection_probe(
+            name=name,
+            command=command,
+            project_root=project_root,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            report_path=report_path,
+            budget=probe_budget,
+            raw_output_directory=raw_output_directory,
+        )
     started = time.monotonic()
     child_environment = dict(environment)
     child_environment["POKERED_GATE_REPORT"] = str(report_path)

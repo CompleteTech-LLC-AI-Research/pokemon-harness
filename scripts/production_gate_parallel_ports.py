@@ -1,34 +1,34 @@
-"""Owner-held listening sockets for concurrent runtime jobs (#107 F6).
+"""Root-local listening-socket handoff custody (#107 B2-L prerequisite).
 
-A number-only reservation (find a free port, close it, hand the number on) leaves a window in which
-any other process can bind the port.  Here the owner BINDS AND LISTENS the socket itself and keeps
-it; the listener that will really serve the port receives that very socket over a unix socket
-(SCM_RIGHTS), validates it and acknowledges, and only then does the owner close its copy.  A
-request for a port the owner never leased is answered "not leased" so ordinary binds are unchanged.
-The unix socket lives in the abstract namespace under a random name, which avoids path-length
-limits, and every peer must carry this process's uid (SO_PEERCRED).
+ACK permits a checked sender-copy close, never proof of exported-copy retirement.
+Unknown sends/ACKs stay retained and cannot be offered again. Recipient authority,
+linked resource release and shared adoption remain separate J1/C/B1/B3 obligations.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
 import struct
 import threading
+import time
 import uuid
 from typing import Any
 
+from scripts.production_gate_parallel_handler_custody import ConnectionCustody, stop_hub
+from scripts.production_gate_parallel_handoff_custody import HandoffBook, HandoffView, Refused
+from scripts.production_gate_parallel_job_lifecycle import dispose_listener, start_listener
+
 LOOPBACK = "127.0.0.1"
 HANDOFF_ENV = "POKERED_LISTENER_HANDOFF"
-_SOCKET = socket.socket  # the real class, immune to tests replacing socket.socket
+_SOCKET = socket.socket
 ACK_TIMEOUT_SECONDS = 30.0
 MESSAGE_LIMIT = 4096
 
 
 class ListenerBroker:
-    """Binds and keeps loopback listeners from a job's port range until a listener adopts them."""
-
     def __init__(
         self,
         first_port: int = 0,
@@ -36,160 +36,292 @@ class ListenerBroker:
         *,
         host: str = LOOPBACK,
         ack_timeout: float = ACK_TIMEOUT_SECONDS,
+        clock: Any = time.monotonic,
+        on_loss: Any = None,
+        lease_limit: int | None = None,
+        handler_limit: int | None = None,
     ) -> None:
+        limit = max(4, count) if count else 64
+        if lease_limit is not None:
+            limit = lease_limit
         self.name = uuid.uuid4().hex
         self.first_port, self.count, self.host = first_port, count, host
-        self.ack_timeout = ack_timeout
-        self._leases: dict[int, dict[str, Any]] = {}
-        self._lock = threading.Lock()
+        self.ack_timeout, self._clock, self.on_loss = ack_timeout, clock, on_loss
         self._closing = threading.Event()
-        self._server: socket.socket | None = None
-        self._thread: threading.Thread | None = None
+        self._stopping = self._closing  # stop_hub adapter, same Event
+        self._server: Any = None
+        self._thread: Any = None
+        self._startup_state, self._server_state, self._thread_state = "new", "none", "none"
+        self._thread_dispose_attempted = False
+        self._connections = ConnectionCustody(
+            max(4, 2 * limit + 2) if handler_limit is None else handler_limit, self.lose
+        )
+        self._book = HandoffBook(
+            self._connections,
+            limit,
+            self.current_clock,
+            lambda: getattr(self, "_startup_deadline", None),
+            self.lose,
+            ack_timeout,
+        )
+        self._lock = self._connections.lock
+
+    def current_clock(self) -> float:
+        return getattr(self, "_startup_clock", self._clock)()
+
+    def lose(self, reason: str) -> None:
+        first = self._book.lose(reason)
+        self._closing.set()
+        if first and self.on_loss is not None:
+            self.on_loss(reason)
 
     def start(self) -> ListenerBroker:
-        server = _SOCKET(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        server.bind("\0" + self.name)
-        server.listen(16)
-        server.settimeout(0.2)
-        self._server = server
-        self._thread = threading.Thread(target=self._serve, name="listener-broker", daemon=True)
-        self._thread.start()
-        return self
+        return start_listener(self, _SOCKET, threading.Thread, self._serve, "listener-broker")
+
+    @property
+    def startup_disposed(self) -> bool:
+        return (
+            self._server_state in ("none", "closed")
+            and self._thread_state in ("none", "quiescent")
+            and self._connections.disposed()
+            and self._book.disposed()
+        )
 
     def lease(self) -> int:
-        """Bind and listen a port of the range (or any free port when no range) and keep it."""
+        with self._book.operation() as operation:
+            return self._lease(operation)
 
+    def _lease(self, operation: Any) -> int:
         candidates = range(self.first_port, self.first_port + self.count) if self.count else [0]
         for port in candidates:
-            with self._lock:
-                if port and port in self._leases:
-                    continue
-            sock = _SOCKET(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind((self.host, port))
-                sock.listen(1)
-            except OSError:
-                sock.close()
+            lease = self._book.reserve(operation, port)
+            if lease is None:
                 continue
-            bound = int(sock.getsockname()[1])
-            with self._lock:
-                self._leases[bound] = {"sock": sock, "state": "leased", "note": ""}
-            return bound
-        raise OSError("no loopback port is left in this job's reserved range")
+            try:
+                self._book.remaining(operation)
+                lease.sock = _SOCKET(socket.AF_INET, socket.SOCK_STREAM)
+                lease.close_state, lease.state = "open", "configuring"
+                self._book.remaining(operation)
+                lease.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    self._book.remaining(operation)
+                    lease.sock.bind((self.host, port))
+                except OSError as error:
+                    if error.errno != errno.EADDRINUSE:
+                        raise
+                    self._book.close_lease(lease, operation)
+                    lease.state = "bind_conflict"
+                    self._book.retire(lease)
+                    continue  # known failed candidate only; original operation cap
+                self._book.remaining(operation)
+                lease.sock.listen(1)
+                self._book.remaining(operation)
+                bound = int(lease.sock.getsockname()[1])
+                if not self._book.publish(lease, bound):
+                    self._book.close_lease(lease, operation)
+                    self._book.retire(lease)
+                    raise Refused("handoff stopped during lease setup")
+                return bound
+            except Refused:
+                raise  # known stop refusal after checked disposal, not a retry
+            except BaseException as error:
+                self._book.fault(
+                    operation, "listener allocation/configuration unproven", lease, primary=error
+                )
+                raise
+        raise Refused("no loopback port is left in this job's reserved range")
 
     def state(self, port: int) -> str | None:
-        with self._lock:
-            lease = self._leases.get(port)
-            return None if lease is None else str(lease["state"])
+        return self._book.state(port)
 
     def _serve(self) -> None:
         assert self._server is not None
-        while not self._closing.is_set():
-            try:
-                descriptor, _ = self._server._accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                return
-            conn = _SOCKET(
-                self._server.family, self._server.type, self._server.proto, fileno=descriptor
-            )
-            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+        pool = self._connections
+        try:
+            while not self._closing.is_set():
+                record = pool.reserve()
+                if record is None:
+                    return
+                try:
+                    record.raw_result = self._server._accept()
+                except (TimeoutError, BlockingIOError):
+                    pool.unreadable(record)
+                    continue
+                except BaseException as error:
+                    pool.fail(record, "handoff accept return unproven", accept=True)
+                    if isinstance(error, OSError):
+                        return
+                    raise
+                pool.accepted(record)
+                record.handoff_cap = self.current_clock() + self.ack_timeout
+                bound = getattr(self, "_startup_deadline", None)
+                if bound is not None:
+                    record.handoff_cap = min(record.handoff_cap, bound)
+                pool.wrap(record, _SOCKET, self._server)
+
+                def serve(_view: Any, record: Any = record) -> None:
+                    with self._book.operation(cap=record.handoff_cap) as operation:
+                        self._handle(HandoffView(pool, record, self._book, operation), operation)
+
+                pool.dispatch(record, threading.Thread, serve)
+        finally:
+            pool.complete_accept()
 
     @staticmethod
-    def _same_user(conn: socket.socket) -> bool:
+    def _same_user(conn: Any) -> bool:
         raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         return struct.unpack("3i", raw)[1] == os.getuid()
 
-    def _handle(self, conn: socket.socket) -> None:
-        with conn:
-            conn.settimeout(self.ack_timeout)
+    def _handle(self, conn: Any, existing_operation: Any = None) -> None:
+        with self._book.operation(existing_operation) as operation, conn:
+            conn.settimeout(self._book.remaining(operation))
             try:
                 if not self._same_user(conn):
                     return
+                conn.settimeout(self._book.remaining(operation))
                 request = json.loads(conn.recv(MESSAGE_LIMIT))
-                operation = request.get("op") if isinstance(request, dict) else None
-                if operation == "lease":
-                    conn.send(json.dumps({"ok": True, "port": self.lease()}).encode("ascii"))
-                elif operation == "release":
-                    self._release(request.get("port"))
+                kind = request.get("op") if isinstance(request, dict) else None
+                if kind == "lease":
+                    reply = json.dumps({"ok": True, "port": self._lease(operation)}).encode("ascii")
+                    conn.settimeout(self._book.remaining(operation))
+                    conn.send(reply)
+                elif kind == "release":
+                    self._release(request.get("port"), operation)
+                    conn.settimeout(self._book.remaining(operation))
                     conn.send(b'{"ok":true}')
-                elif operation == "take":
-                    self._take(conn, request)
+                elif kind == "take":
+                    self._take(conn, request, operation)
             except (OSError, ValueError, TimeoutError):
-                return
+                return  # operation/lease uncertainty is committed by the effect path
 
-    def _release(self, port: object) -> None:
-        with self._lock:
-            lease = self._leases.get(port) if type(port) is int else None
-            if lease is not None and lease["sock"] is not None and lease["state"] == "leased":
-                lease["sock"].close()
-                lease["sock"], lease["state"] = None, "released"
+    def _release(self, port: object, existing_operation: Any = None) -> None:
+        with self._book.operation(existing_operation) as operation:
+            self._book.remaining(operation)
+            lease = self._book.claim(port, operation, "release_claimed")
+            if lease is not None:
+                self._book.close_lease(lease, operation)
+                lease.state = "released"
+                self._book.retire(lease)
 
-    def _take(self, conn: socket.socket, request: dict[str, Any]) -> None:
-        port = request.get("port")
-        with self._lock:
-            lease = self._leases.get(port) if type(port) is int else None
-            if lease is None or lease["state"] != "leased" or request.get("host") != self.host:
+    def _take(self, conn: Any, request: dict[str, Any], existing_operation: Any = None) -> None:
+        with self._book.operation(existing_operation) as operation:
+            lease = (
+                self._book.claim(request.get("port"), operation, "offer_claimed")
+                if request.get("host") == self.host
+                else None
+            )
+            if lease is None:
+                conn.settimeout(self._book.remaining(operation))
                 conn.send(b'{"ok":false,"error":"not leased"}')
                 return
-            lease["state"] = "transferred"
-            sock = lease["sock"]
-        socket.send_fds(conn, [b'{"ok":true}'], [sock.fileno()])
-        try:
-            answer = json.loads(conn.recv(MESSAGE_LIMIT))
-        except (OSError, ValueError, TimeoutError):
-            answer = {}
-        with self._lock:
-            if isinstance(answer, dict) and answer.get("op") == "ack":
-                sock.close()
-                lease["sock"], lease["state"] = None, "acknowledged"
-            else:
-                lease["state"], lease["note"] = "leased", "no acknowledgment: socket kept"
+            try:
+                self._book.mark(lease, "send_attempted")
+                conn.settimeout(self._book.remaining(operation))
+                descriptor = lease.sock.fileno()
+                lease.sent = socket.send_fds(conn, [b'{"ok":true}'], [descriptor])
+                lease.exported = True
+                if lease.sent != len(b'{"ok":true}'):
+                    raise OSError("short listener rights send; no continuation allowed")
+                self._book.mark(lease, "sent_await_ack")
+                conn.settimeout(self._book.remaining(operation))
+                answer = json.loads(conn.recv(MESSAGE_LIMIT))
+                self._book.remaining(operation)  # late ACK never upgrades the offer
+                if not isinstance(answer, dict) or answer.get("op") != "ack":
+                    raise ValueError("listener acknowledgment absent or negative")
+                self._book.mark(lease, "ack_validated")
+                self._book.close_lease(lease, operation)
+                lease.state = "acknowledged"
+                self._book.retire(lease)
+            except BaseException as error:
+                lease.note = "listener offer unproven; socket kept, never offered again"
+                self._book.fault(operation, "listener offer/ACK unproven", lease, primary=error)
+                raise
+
+    def service(self) -> None:
+        self._connections.housekeep()  # owner leaf; no socket repair or process waits
 
     def close(self) -> dict[str, Any]:
-        """Stop serving, close every socket still held, and return what happened to each lease."""
-
-        self._closing.set()
-        if self._server is not None:
-            self._server.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-        with self._lock:
-            ledger = []
-            for port, lease in sorted(self._leases.items()):
-                ledger.append({"port": port, "state": lease["state"], "note": lease["note"]})
-                if lease["sock"] is not None:
-                    lease["sock"].close()
-                    lease["sock"] = None
+        stop_hub(self, dispose_listener)
+        self._book.dispose_idle(self)
+        rows = self._book.snapshot()
         return {
-            "leases": ledger,
-            "unconsumed": [
-                item["port"] for item in ledger if item["state"] in ("leased", "released")
+            "leases": rows,
+            "unconsumed": [x["port"] for x in rows if x["state"] in ("leased", "released")],
+            "unacknowledged": [
+                x["port"]
+                for x in rows
+                if x["unknown"] or x["state"] in ("send_attempted", "sent_await_ack")
             ],
-            "unacknowledged": [item["port"] for item in ledger if item["state"] == "transferred"],
+            "pending": not self.startup_disposed,
+            "first_reason": self._book.reason(),
         }
 
 
 class HandoffRegistry:
-    """One broker per job: opened before its worker exists, closed with the job's cleanup."""
-
-    def __init__(self) -> None:
+    def __init__(self, *, job_ids: Any = None, max_brokers: int = 64) -> None:
+        keys = None if job_ids is None else frozenset(job_ids)
+        maximum = max_brokers if keys is None else len(keys)
+        if type(maximum) is not int or maximum < 1:
+            raise ValueError("a finite positive broker bound is required")
+        self._keys, self._maximum = keys, maximum
+        self._issued: set[str] = set()
+        self._retired: set[str] = set()
         self._brokers: dict[str, ListenerBroker] = {}
+        self._loss: Any = None
+        self._loss_bound = False
 
-    def open(self, job_id: str, first_port: int, count: int) -> str:
-        broker = ListenerBroker(first_port, count).start()
-        self._brokers[job_id] = broker
+    def bind_loss(self, sink: Any) -> None:
+        if self._loss_bound or self._issued:
+            raise RuntimeError("handoff loss binding cannot be retried or delayed")
+        self._loss, self._loss_bound = sink, True
+
+    def open(self, job_id: str, first_port: int, count: int, *, launch: Any = None) -> str:
+        if job_id in self._issued:
+            raise RuntimeError("handoff startup cannot be retried")
+        if (
+            len(self._issued) >= self._maximum
+            or self._keys is not None
+            and job_id not in self._keys
+        ):
+            raise Refused("handoff registry admission exceeded its fixed job bound")
+        self._issued.add(job_id)
+        self._brokers[job_id] = ListenerBroker(first_port, count, on_loss=self._loss)
+        broker = self._brokers[job_id]
+        if launch is not None:
+            launch.broker = broker
+            broker._startup_deadline, broker._startup_clock = launch.cleanup_cap, launch.clock
+        broker.start()
         return broker.name
 
     def close(self, job_id: str) -> dict[str, Any] | None:
-        broker = self._brokers.pop(job_id, None)
-        return None if broker is None else broker.close()
+        broker = self._brokers.get(job_id)
+        if broker is None:
+            return None
+        record = broker.close()
+        if broker.startup_disposed:
+            del self._brokers[job_id]
+            self._retired.add(job_id)
+        return record
+
+    def _visit(self, method: str) -> None:
+        first = None
+        for job_id, broker in tuple(self._brokers.items()):
+            try:
+                self.close(job_id) if method == "close" else broker.service()
+            except Exception as error:  # noqa: BLE001 - service siblings then preserve first failure
+                first = first or error
+        if first is not None:
+            raise first
+
+    def service(self) -> None:
+        self._visit("service")
+
+    @property
+    def startup_disposed(self) -> bool:
+        return not self._brokers and self._issued == self._retired
 
     def close_all(self) -> None:
-        for job_id in list(self._brokers):
-            self.close(job_id)
+        self._visit("close")
 
 
 __all__ = ("HandoffRegistry", "ListenerBroker")

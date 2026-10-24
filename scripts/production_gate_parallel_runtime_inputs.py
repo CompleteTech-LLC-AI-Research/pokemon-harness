@@ -29,12 +29,25 @@ from pathlib import Path
 from typing import Any
 
 from scripts.production_gate_parallel_identity import noop_checkpoint, sha256_file
-from scripts.production_gate_parallel_io import read_evidence_bytes
+from scripts.production_gate_parallel_io import (
+    copy_file_bytes,
+    directory_entries,
+    read_evidence_bytes,
+    read_file_data,
+    replace_file_data,
+    tree_entries,
+    write_file_data,
+)
 from scripts.production_gate_parallel_isolation import (
     IsolationError,
     freeze_tree,
     write_denied_problems,
 )
+from scripts.production_gate_parallel_measurement_budget import (
+    MeasurementBudget,
+    pre_dispatch_budget,
+)
+from scripts.production_gate_parallel_probe_bootstrap import CONTROL_ENVIRONMENT
 
 PROBE = r"""
 import json, os, site, sys, sysconfig
@@ -69,20 +82,26 @@ PROBE_TIMEOUT_SECONDS = 120
 WRITABLE_REPORT_LIMIT = 8
 
 
-def probe_runtime(interpreter: str, pythonpath: str) -> dict[str, Any]:
+def probe_runtime(
+    interpreter: str,
+    pythonpath: str,
+    *,
+    budget: MeasurementBudget | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    budget = budget or pre_dispatch_budget()
     environment = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": pythonpath,
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    environment.update({name: "1" for name in CONTROL_ENVIRONMENT if name.endswith("THREADS")})
     try:
-        result = subprocess.run(
+        result = budget.run_probe(
             [interpreter, "-c", PROBE],
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=False,
-            env=environment,
+            environment=environment,
+            cwd=(cwd or Path.cwd()).resolve(),
+            max_seconds=PROBE_TIMEOUT_SECONDS,
         )
         info = json.loads(result.stdout.strip().splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
@@ -92,20 +111,34 @@ def probe_runtime(interpreter: str, pythonpath: str) -> dict[str, Any]:
     return info
 
 
-def writable_entries(root: Path, limit: int = WRITABLE_REPORT_LIMIT) -> list[str]:
+def writable_entries(
+    root: Path,
+    limit: int = WRITABLE_REPORT_LIMIT,
+    *,
+    checkpoint: Callable[[], None] = noop_checkpoint,
+) -> list[str]:
     """Entries under ``root`` the executing UID could modify, by the kernel's own access check."""
 
     found: list[str] = []
     stack = [root]
+    checkpoint()
     while stack and len(found) < limit:
+        checkpoint()
         path = stack.pop()
         try:
-            if os.access(path, os.W_OK):
-                found.append(str(path))
-            elif path.is_dir() and not path.is_symlink():
-                stack.extend(path.iterdir())
+            writable = os.access(path, os.W_OK)
+            descend = not writable and path.is_dir() and not path.is_symlink()
         except OSError:
             continue
+        checkpoint()
+        if writable:
+            found.append(str(path))
+        elif descend:
+            # Only filesystem errors are ignored, never callback refusals.
+            for child in directory_entries(path, checkpoint=checkpoint, ignore_errors=True):
+                checkpoint()
+                stack.append(child)
+    checkpoint()
     return found
 
 
@@ -164,46 +197,83 @@ def runtime_pin_problem(
     return f"the runtime under {prefix} differs from the digest the plan pinned"
 
 
-def redirect_editable_paths(copy: Path, original: Path, snapshot: Path) -> int:
+def redirect_editable_paths(
+    copy: Path, original: Path, snapshot: Path, *, checkpoint: Callable[[], None] = noop_checkpoint
+) -> int:
     """Point editable-install files of the private copy at the immutable snapshot checkout."""
 
     spellings = {str(original).encode(), os.path.realpath(original).encode()}
     new, changed = str(snapshot).encode(), 0
-    for path in copy.rglob("*"):
+    checkpoint()
+    for path in tree_entries(copy, checkpoint=checkpoint):
+        checkpoint()
         if path.is_symlink() or not path.is_file():
             continue
         if path.suffix == ".pth" or path.name.startswith("__editable__"):
-            data = original_data = path.read_bytes()
+            data = original_data = read_file_data(path, checkpoint=checkpoint)
             for old in spellings:
-                data = data.replace(old, new)
+                data = replace_file_data(data, old, new, checkpoint=checkpoint)
             if data != original_data:
-                path.write_bytes(data)
+                write_file_data(path, data, checkpoint=checkpoint)
                 changed += 1
+    checkpoint()
     return changed
 
 
-def rebase_links(copy: Path, old: Path, new: Path) -> int:
+def rebase_links(
+    copy: Path, old: Path, new: Path, *, checkpoint: Callable[[], None] = noop_checkpoint
+) -> int:
     """Point absolute links and ``pyvenv.cfg`` text of a private venv copy at the private base."""
 
+    checkpoint()
     changed, old_text = 0, str(old)
     bin_dir = copy / "bin"
-    for path in bin_dir.iterdir() if bin_dir.is_dir() else ():
+    for path in directory_entries(bin_dir, checkpoint=checkpoint) if bin_dir.is_dir() else ():
+        checkpoint()
         if path.is_symlink() and os.readlink(path).startswith(old_text):
             target = str(new) + os.readlink(path)[len(old_text) :]
             path.unlink()
             path.symlink_to(target)
             changed += 1
     cfg = copy / "pyvenv.cfg"
-    if cfg.is_file() and old_text in cfg.read_text(encoding="utf-8"):
-        cfg.write_text(
-            cfg.read_text(encoding="utf-8").replace(old_text, str(new)), encoding="utf-8"
-        )
-        changed += 1
+    checkpoint()
+    if cfg.is_file():
+        text = read_file_data(cfg, text=True, checkpoint=checkpoint)
+        changed_text = replace_file_data(text, old_text, str(new), checkpoint=checkpoint)
+        if old_text in text:
+            write_file_data(cfg, changed_text, checkpoint=checkpoint)
+            changed += 1
+    checkpoint()
     return changed
 
 
-def _copy_frozen(source: Path, target: Path) -> None:
-    shutil.copytree(source, target, symlinks=True, ignore=shutil.ignore_patterns("__pycache__"))
+def _copy_frozen(
+    source: Path, target: Path, *, checkpoint: Callable[[], None] = noop_checkpoint
+) -> None:
+    """Copy2 metadata/link policy with streamed entries and file bytes.
+
+    Refusal deliberately leaves the private target for its continuing owner.
+    No automatic deletion or claim of cross-UID immutability is made.
+    """
+
+    checkpoint()
+    target.mkdir(parents=True)  # refuse destination reuse, like copytree
+    for origin in directory_entries(source, checkpoint=checkpoint):
+        checkpoint()
+        if origin.name == "__pycache__":
+            continue
+        destination = target / origin.name
+        if origin.is_symlink():
+            destination.symlink_to(os.readlink(origin))
+            shutil.copystat(origin, destination, follow_symlinks=False)
+        elif origin.is_dir():
+            _copy_frozen(origin, destination, checkpoint=checkpoint)
+        else:
+            copy_file_bytes(origin, destination, checkpoint=checkpoint)
+            shutil.copystat(origin, destination)
+        checkpoint()
+    shutil.copystat(source, target)
+    checkpoint()
 
 
 def build_private_runtimes(
@@ -212,6 +282,7 @@ def build_private_runtimes(
     project_root: Path,
     checkout: Path,
     destination: Path,
+    budget: MeasurementBudget | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve, classify and copy-and-freeze whatever the executing UID could modify.
 
@@ -221,19 +292,23 @@ def build_private_runtimes(
     in the snapshot, or in a tree this UID cannot write.
     """
 
+    budget = budget or pre_dispatch_budget()
+    budget.checkpoint()
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     pythonpath = os.pathsep.join(str(checkout / part) for part in ("src", "vendor/pyboy-src", "."))
     copies: dict[str, Path] = {}
     results: dict[str, dict[str, Any]] = {}
     for mode, interpreter in sorted(interpreters.items()):
-        info = probe_runtime(interpreter, pythonpath)
+        budget.checkpoint()
+        info = probe_runtime(interpreter, pythonpath, budget=budget, cwd=checkout)
         prefix, base = Path(info["prefix"]), Path(info["base_prefix"])
         problems: list[str] = []
         protected: list[str] = []
         base_writable = False
         for root in (info["real_executable"], info["stdlib"], info["platstdlib"]):
+            budget.checkpoint()
             if Path(root).exists():
-                if writable_entries(Path(root)):
+                if writable_entries(Path(root), checkpoint=budget.checkpoint):
                     base_writable = True
                 else:
                     protected.append(str(root))
@@ -244,9 +319,12 @@ def build_private_runtimes(
             else:
                 if f"base:{base}" not in copies:
                     target = destination / f"base-{len(copies)}"
-                    _copy_frozen(base, target)
-                    freeze_tree(target)
-                    problems.extend(f"{mode}: {item}" for item in write_denied_problems(target))
+                    _copy_frozen(base, target, checkpoint=budget.checkpoint)
+                    freeze_tree(target, checkpoint=budget.checkpoint)
+                    problems.extend(
+                        f"{mode}: {item}"
+                        for item in write_denied_problems(target, checkpoint=budget.checkpoint)
+                    )
                     copies[f"base:{base}"] = target
                 private_base = copies[f"base:{base}"]
         private_prefix: Path | None = None
@@ -254,12 +332,17 @@ def build_private_runtimes(
         if prefix != base:
             if str(prefix) not in copies:
                 target = destination / f"env-{len(copies)}"
-                _copy_frozen(prefix, target)
-                redirect_editable_paths(target, project_root, checkout)
+                _copy_frozen(prefix, target, checkpoint=budget.checkpoint)
+                redirect_editable_paths(
+                    target, project_root, checkout, checkpoint=budget.checkpoint
+                )
                 if private_base is not None:
-                    rebase_links(target, base, private_base)
-                freeze_tree(target)
-                problems.extend(f"{mode}: {item}" for item in write_denied_problems(target))
+                    rebase_links(target, base, private_base, checkpoint=budget.checkpoint)
+                freeze_tree(target, checkpoint=budget.checkpoint)
+                problems.extend(
+                    f"{mode}: {item}"
+                    for item in write_denied_problems(target, checkpoint=budget.checkpoint)
+                )
                 copies[str(prefix)] = target
             private_prefix = copies[str(prefix)]
             candidate = Path(interpreter)
@@ -272,7 +355,8 @@ def build_private_runtimes(
             run_interpreter = str(private_base / Path(info["real_executable"]).relative_to(base))
         else:
             for site_dir in info["sites"]:
-                found = writable_entries(Path(site_dir))
+                budget.checkpoint()
+                found = writable_entries(Path(site_dir), checkpoint=budget.checkpoint)
                 if found:
                     problems.append(
                         f"{mode}: a non-venv interpreter with writable site directories needs a "
@@ -281,7 +365,7 @@ def build_private_runtimes(
         frozen = [root for root in (private_prefix, private_base) if root is not None]
         if run_interpreter != interpreter:
             # What the job will really run, not what was originally resolved.
-            final = probe_runtime(run_interpreter, pythonpath)
+            final = probe_runtime(run_interpreter, pythonpath, budget=budget, cwd=checkout)
             info = {**info, "path": final["path"]}
             if private_base is not None:
                 for label in ("real_executable", "stdlib"):
@@ -290,10 +374,11 @@ def build_private_runtimes(
                             f"{mode}: the private interpreter's {label} is not in the copy"
                         )
             for entry in final["path"]:
+                budget.checkpoint()
                 where = Path(entry) if entry else None
                 if where is None or any(where.is_relative_to(r) for r in [*frozen, checkout]):
                     continue
-                if where.exists() and writable_entries(where, 1):
+                if where.exists() and writable_entries(where, 1, checkpoint=budget.checkpoint):
                     problems.append(
                         f"{mode}: the private interpreter's default sys.path names {entry}, which "
                         "the executing UID can modify"
@@ -305,12 +390,15 @@ def build_private_runtimes(
             immutability[str(private_base)] = "private_copy_mode_bits"
         libraries: list[str] = []
         for library in info["libraries"]:
+            budget.checkpoint()
             path = Path(library)
             if (private_prefix is not None and path.is_relative_to(prefix)) or (
                 private_base is not None and path.is_relative_to(base)
             ):
                 continue  # served from a frozen private copy
-            if writable_entries(path, 1) or os.access(path.parent, os.W_OK):
+            if writable_entries(path, 1, checkpoint=budget.checkpoint) or os.access(
+                path.parent, os.W_OK
+            ):
                 problems.append(f"{mode}: the linked library {library} is writable by this UID")
             else:
                 libraries.append(library)
@@ -332,6 +420,7 @@ def build_private_runtimes(
                 "evidence": "static resolution only; no runtime execution evidence",
             },
         }
+    budget.checkpoint()
     return results
 
 

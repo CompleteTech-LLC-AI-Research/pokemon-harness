@@ -4,16 +4,24 @@ import signal
 from collections.abc import Mapping
 from typing import Any
 
+from scripts import production_gate_parallel_job_retirement as retirement
 
-def signal_guardians(running: list[Any], problems: list[str]) -> None:
+
+def signal_guardians(
+    running: list[Any], problems: list[str], *, notified: set[str] | None = None
+) -> None:
     """A failed sibling notification cannot undo a latched containment loss."""
 
     for item in tuple(running):
+        if not retirement.active_item(item) or (notified is not None and item.job_id in notified):
+            continue
         try:
             view = item.process.guardian_status
             view.drain()
             if view.ready:
                 item.owned.signal_root(signal.SIGTERM)
+                if notified is not None:
+                    notified.add(item.job_id)
         except Exception as exc:  # noqa: BLE001 - retain failure and continue other owned jobs
             problems.append(f"{item.job_id}: stop notification failed: {type(exc).__name__}")
 
@@ -35,6 +43,7 @@ def observe_cgroup_membership(tree: Any) -> None:
     checks of the held pidfd/start pair to reject a recycled PID or unreadable process.
     """
 
+    retirement.require_active(tree)
     if tree.cgroup is None or tree.cgroup_joined:
         return
     target = (tree.root_pid, tree.root_start)

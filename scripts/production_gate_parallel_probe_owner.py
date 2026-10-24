@@ -68,7 +68,9 @@ class RootProbeOwner:
         endpoint: Path,
         grace_seconds: float = 1.0,
     ) -> None:
-        # The caller retains even a partially initialized owner on setup failure.
+        # Resource-free preparation only: no callback, process query, socket or
+        # fd mutation. A failed pure constructor returns no owner; its caller
+        # still retains the original Popen, pin, channels and directory intent.
         self.context, self.budget = context, budget
         self.root_pin, self.holder_pin = root_pin, holder_pin
         self.control_python, self.endpoint = control_python, endpoint
@@ -79,9 +81,37 @@ class RootProbeOwner:
         self.sequence = 0
         self.servicing = False
         self.holder_wait_status: int | None = None
+        self.holder_wait_state = "ready"
+        self.root_context = None
+        self.wait_scope = None
         self.physical_cleanup_verified_at: float | None = None
         self.closed = False
+        self.unadmitted_process: Any | None = None
         self.stop_state = ProbeStopState(grace_seconds)
+
+    @classmethod
+    def prepare(
+        cls,
+        context: ProbeContext,
+        budget: MeasurementBudget,
+        *,
+        root_pin: RetainedDescriptor,
+        holder_pin: RetainedDescriptor,
+        control_python: Path,
+        endpoint: Path,
+        grace_seconds: float = 1.0,
+    ) -> RootProbeOwner:
+        """Return a complete pure owner for publication BEFORE validation/setup."""
+
+        return cls(
+            context,
+            budget,
+            root_pin=root_pin,
+            holder_pin=holder_pin,
+            control_python=control_python,
+            endpoint=endpoint,
+            grace_seconds=grace_seconds,
+        )
 
     def open_endpoint(self) -> None:
         """Caller registers this object before invoking this reversible setup step."""
@@ -263,15 +293,19 @@ class RootProbeOwner:
         if body.get("job_deadline") != self.context.job_deadline:
             problems.append("supervisor changed the original success budget")
         bound = body.get("cleanup_deadline")
-        if type(bound) not in (int, float) or not 0 < bound <= min(
-            self.context.cleanup_deadline, self.budget.cleanup_bound()
-        ):
+        # Physical proof is authenticated against admitted context. A completed
+        # producer need not know a tightened bound not yet delivered to it.
+        if type(bound) not in (int, float) or not 0 < bound <= self.context.cleanup_deadline:
             problems.append("supervisor cleanup bound differs or became unknown")
-        now = self.budget.now()
         if problems:
             raise ProbeProtocolError("; ".join(problems))
         peer.record.sequence = body["sequence"]
-        peer.final = body
+        peer.final = body  # retain physical proof before querying mutable current bounds
+        now = self.budget.now()
+        if bound > self.budget.cleanup_bound():
+            self.custody.refuse("supervisor final did not attest the tightened cleanup bound")
+        if not body["timely_cleanup"]:
+            self.custody.refuse("supervisor physical cleanup completed after its original bound")
         if now >= self.budget.cleanup_bound() or (
             body.get("success") and now >= self.budget.deadline
         ):
@@ -290,6 +324,9 @@ class RootProbeOwner:
             return
         self.servicing = True
         try:
+            if self.unadmitted_process is not None:
+                self._service_unadmitted_abort()
+                return
             if self.listener is not None and not self.custody.failures:
                 for _ in range(MAX_OWNER_CONNECTIONS - len(self.peers)):
                     try:
@@ -337,6 +374,90 @@ class RootProbeOwner:
             except (OSError, ProbeProtocolError):
                 pass  # missing stop delivery is not cleanup or terminal proof
 
+    def service_unadmitted_abort(self) -> None:
+        """Only the original owner may stop the pre-parent-ACK child.
+
+        No accepts, descriptor receives, ACKs or numeric process operations.
+        Existing stop state retains the original cleanup bound and escalation.
+        """
+
+        if self.servicing or self.closed:
+            return
+        self.servicing = True
+        try:
+            self._service_unadmitted_abort()
+        finally:
+            self.servicing = False
+
+    def _service_unadmitted_abort(self) -> None:
+        """Internal step; either public entry must already own servicing."""
+
+        if self.unadmitted_process is None or self.peers or self.custody.records:
+            raise ProbeProtocolError("unadmitted abort custody is not exclusive")
+        advance_probe_stop(self)
+
+    def _wait_holder(self) -> bool:
+        if self.holder_wait_state == "unknown":
+            return False
+        if self.holder_wait_status is not None:
+            return True
+        partition = self.root_context.partition if self.root_context is not None else None
+        self.holder_wait_state = "attempting"  # before bound_descriptor OR waitid
+        try:
+            if partition is not None:
+                partition.holder_attempt(self)
+            result = os.waitid(
+                os.P_PIDFD, self.holder_pin.bound_descriptor(), os.WEXITED | os.WNOHANG
+            )
+            # Cache consumed status BEFORE budget/evidence callbacks can fail.
+            self.holder_wait_status = (
+                None if result is None else (
+                    result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+                )
+            )
+            self.holder_wait_state = "ready" if result is None else "consumed"
+            if partition is not None:
+                if result is not None:
+                    # Same original object: remove a consumed root from PID-only
+                    # exclusions BEFORE a later budget callback can escape.
+                    self.wait_scope.process.returncode = self.holder_wait_status
+                partition.holder_result(self, self.holder_wait_status)
+        except BaseException:
+            self.holder_wait_state = "unknown"
+            if partition is not None:
+                partition.unknown(self.wait_scope, "original holder wait returned no disposition")
+            raise
+        return result is not None
+
+    def _reconcile_unadmitted(self) -> bool:
+        process = self.unadmitted_process
+        held = self.holder_pin
+        if (
+            process is None
+            or self.peers
+            or self.custody.records
+            or self.custody.roles
+            or held.instance is None
+            or held.instance[0] != process.pid
+            or held.parent != self.root_pin.instance
+            or not held.validated
+        ):
+            return False
+        if self.physical_cleanup_verified_at is not None:
+            return True
+        if (
+            process.returncode is not None
+            and (self.holder_wait_status is None or process.returncode != self.holder_wait_status)
+        ) or not held.exited():
+            return False  # only this exact owner's cached consumed wait is accepted
+        if not self._wait_holder():
+            return False
+        # Save consumed exact wait before querying mutable budget evidence.
+        self.physical_cleanup_verified_at = self.budget.now()
+        if self.physical_cleanup_verified_at >= self.budget.cleanup_bound():
+            self.custody.refuse("unadmitted child cleanup observed after original bound")
+        return True
+
     def reconcile(self) -> bool:
         """Require the holder final, actual held exits and direct-root wait.
 
@@ -345,6 +466,8 @@ class RootProbeOwner:
         custody and withhold new admission instead of releasing this scope.
         """
 
+        if self.unadmitted_process is not None:
+            return self._reconcile_unadmitted()
         if self.physical_cleanup_verified_at is not None:
             return True
         finals = {peer.record.role: peer.final for peer in self.peers if peer.record is not None}
@@ -372,15 +495,8 @@ class RootProbeOwner:
             self.custody.refuse("guardian final missing; operation failed, holder sweep only")
         elif holder["child_status"] != (0 if guardian["success"] else 1):
             self.custody.refuse("holder and guardian exit dispositions differ")
-        if self.holder_wait_status is None:
-            result = os.waitid(
-                os.P_PIDFD, self.holder_pin.bound_descriptor(), os.WEXITED | os.WNOHANG
-            )
-            if result is None:
-                return False
-            self.holder_wait_status = (
-                result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
-            )
+        if not self._wait_holder():
+            return False
         if self.holder_wait_status != (0 if holder["success"] else 1):
             self.custody.refuse("root wait differs from holder final")
         self.physical_cleanup_verified_at = self.budget.now()
@@ -396,7 +512,7 @@ class RootProbeOwner:
         ):
             return False
         finals = {peer.record.role: peer.final for peer in self.peers if peer.record is not None}
-        return bool(
+        reconciled = bool(
             all(role in self.custody.roles for role in ROLES)
             and all(
                 finals.get(role) is not None and finals[role]["success"]
@@ -405,6 +521,12 @@ class RootProbeOwner:
             and self.reconcile()
             and not self.custody.failures
         )
+        if not reconciled:
+            return False
+        if self.budget.now() >= min(self.budget.deadline, self.budget.cleanup_bound()):
+            self.custody.refuse("operation expired during physical reconciliation")
+            return False
+        return True
 
     def release_confirmed_resources(self) -> bool:
         """Retire only the physically reconciled scope, retaining partial failures.

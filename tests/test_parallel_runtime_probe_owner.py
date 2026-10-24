@@ -53,6 +53,7 @@ def final_body(owner, role, instance, child, *, adopted=()):
         "subreaper_start": True,
         "subreaper_end": True,
         "proof": True,
+        "timely_cleanup": True,
         "success": True,
         "custody_errors": [],
         "operation_errors": [],

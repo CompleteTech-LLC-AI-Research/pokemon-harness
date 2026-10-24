@@ -15,13 +15,18 @@ import ipaddress
 import json
 import os
 import socket
+import time
 from collections.abc import Callable
 from typing import Any
+
+from .listener_handoff_custody import INT_SIZE, ReceiveBook, ReceiveRecord
 
 HANDOFF_ENV = "POKERED_LISTENER_HANDOFF"
 _SOCKET = socket.socket  # the real class: tests may replace socket.socket afterwards
 HANDOFF_TIMEOUT_SECONDS = 10.0
 MESSAGE_LIMIT = 4096
+_CLOCK = time.monotonic
+_BOOK = ReceiveBook()
 
 
 class HandoffError(RuntimeError):
@@ -32,26 +37,51 @@ def broker_name() -> str | None:
     return os.environ.get(HANDOFF_ENV) or None
 
 
-def _connect(name: str) -> socket.socket:
-    conn = _SOCKET(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    conn.settimeout(HANDOFF_TIMEOUT_SECONDS)
+def _record() -> ReceiveRecord:
+    buffer_bytes = socket.CMSG_SPACE(INT_SIZE)
     try:
-        conn.connect("\0" + name)
-    except OSError:
-        conn.close()
+        return _BOOK.reserve(buffer_bytes // INT_SIZE, _CLOCK() + HANDOFF_TIMEOUT_SECONDS, _CLOCK)
+    except RuntimeError as error:
+        raise HandoffError(str(error)) from error
+
+
+def _open(record: ReceiveRecord, name: str) -> None:
+    record.remaining()
+    record.control_state = "constructing"
+    record.control = _SOCKET(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    record.control_state = "open"
+    record.effect("connect", "\0" + name)
+
+
+def _connect(name: str) -> socket.socket:
+    record = _record()
+    try:
+        _open(record, name)
+        return record.transfer_control()  # original raw object; ordinary transfer only
+    except BaseException as error:
+        record.fail(error)
         raise
-    return conn
+
+
+def _request(body: dict[str, Any]) -> bytes:
+    record = _record()
+    try:
+        _open(record, broker_name())
+        record.send(json.dumps(body).encode("ascii"))
+        reply = record.effect("recv", MESSAGE_LIMIT)
+        record.close_control()
+        record.book.finish(record)
+        return reply
+    except BaseException as error:
+        record.fail(error)
+        raise
 
 
 def lease_port(host: str = "127.0.0.1") -> int | None:
-    """Ask the owner to bind and keep a listening port; None when no owner is configured."""
-
-    name = broker_name()
-    if name is None:
+    """Ask the owner to keep a listening port; None only without an owner."""
+    if broker_name() is None:
         return None
-    with _connect(name) as conn:
-        conn.send(json.dumps({"op": "lease", "host": host}).encode("ascii"))
-        reply = json.loads(conn.recv(MESSAGE_LIMIT))
+    reply = json.loads(_request({"op": "lease", "host": host}))
     if (
         not isinstance(reply, dict)
         or reply.get("ok") is not True
@@ -62,15 +92,16 @@ def lease_port(host: str = "127.0.0.1") -> int | None:
 
 
 def release_port(port: int) -> None:
-    name = broker_name()
-    if name is None:
-        return
-    with _connect(name) as conn:
-        conn.send(json.dumps({"op": "release", "port": port}).encode("ascii"))
-        conn.recv(MESSAGE_LIMIT)
+    if broker_name() is not None:
+        _request({"op": "release", "port": port})
 
 
 def validate_listener(listener: socket.socket, host: str, port: int) -> None:
+    """A handed-over socket must be a listening loopback TCP socket on exactly (host, port)."""
+    _validate_listener(listener, host, port, lambda: None)
+
+
+def _validate_listener(listener: Any, host: str, port: int, checkpoint: Any) -> None:
     """A handed-over socket must be a listening loopback TCP socket on exactly (host, port)."""
 
     if listener.type != socket.SOCK_STREAM or listener.family not in (
@@ -78,8 +109,10 @@ def validate_listener(listener: socket.socket, host: str, port: int) -> None:
         socket.AF_INET6,
     ):
         raise HandoffError("the handed-over socket is not a TCP stream socket")
+    checkpoint()
     if not listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
         raise HandoffError("the handed-over socket is not listening")
+    checkpoint()
     address = listener.getsockname()
     if address[1] != port:
         raise HandoffError("the handed-over socket is bound to a different port")
@@ -105,21 +138,36 @@ def take_listener(
         raise HandoffError(
             f"a configured parallel job can only listen on a leased port, not {port!r}"
         )
-    with _connect(name) as conn:
-        conn.send(json.dumps({"op": "take", "host": host, "port": port}).encode("ascii"))
-        data, descriptors, _flags, _address = socket.recv_fds(conn, MESSAGE_LIMIT, 1)
-        reply = json.loads(data)
-        if not descriptors:
-            raise HandoffError(f"the listener owner did not lease {host}:{port}: {reply!r}")
-        listener = socket_class(fileno=descriptors[0])
+    record = _record()
+    validating = False
+    try:
+        _open(record, name)
+        record.send(json.dumps({"op": "take", "host": host, "port": port}).encode("ascii"))
+        record.phase = "recv_attempted"
+        record.raw_tuple = record.effect("recvmsg", MESSAGE_LIMIT, socket.CMSG_SPACE(INT_SIZE))
+        record.phase = "raw_returned"
         try:
-            validate_listener(listener, host, port)
-        except BaseException:
-            conn.send(b'{"op":"nack"}')
-            listener.close()
-            raise
-        conn.send(b'{"op":"ack"}')
-        return listener
+            data = record.classify()
+            reply = json.loads(data)
+            if not isinstance(reply, dict) or reply.get("ok") is not True:
+                raise ValueError("listener owner refused the handoff")
+        except ValueError as error:
+            raise HandoffError(str(error)) from error
+        listener = record.wrap(socket_class)
+        validating = True
+        record.remaining()
+        _validate_listener(listener, host, port, record.remaining)
+        validating = False
+        record.phase = "ack_attempted"
+        record.send(b'{"op":"ack"}')
+        record.phase = "acknowledged"
+        record.close_control()  # ACK never discards unresolved local control custody
+        return record.transfer_listener()
+    except BaseException as error:
+        if record.phase == "recv_attempted" and record.raw_tuple is None:
+            record.uncertain("listener receive return unproven")
+        record.fail(error, nack=validating)
+        raise
 
 
 __all__ = (

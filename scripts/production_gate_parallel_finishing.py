@@ -40,6 +40,7 @@ def finish_job(
     worker_pid: int | None = None,
     *,
     checkpoint: Callable[[], None] = noop_checkpoint,
+    cancel_reason: Callable[[], str] = lambda: "",
 ) -> dict[str, Any]:
     artifact, child_capacity = None, None
     problems: list[str] = []
@@ -51,6 +52,7 @@ def finish_job(
         clock=clock,
         service=checkpoint,
         cleanup_limit=lambda: getattr(running, "cleanup_deadline", None),
+        cancel_reason=cancel_reason,
     )
     measurement_checkpoint = budget.checkpoint
 

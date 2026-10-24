@@ -17,6 +17,7 @@ def terminate_tree(
     deadline: float | None = None,
     orphan_rounds: int = 3,
     late_kill_number: int = signal.SIGKILL,
+    retain_pins: bool = False,
 ) -> dict[str, Any]:
     """Use one absolute wait bound; late stages cannot buy a fresh allowance."""
 
@@ -106,5 +107,6 @@ def terminate_tree(
         "root": {"pid": tree.root_pid, "start": tree.root_start},
         "proof": tree.contained and not remaining and not surviving,
     }
-    tree.close()
+    if not retain_pins:
+        tree.close()
     return receipt

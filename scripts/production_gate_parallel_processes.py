@@ -41,9 +41,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
 
+from scripts import production_gate_parallel_job_retirement as retirement
+from scripts import production_gate_parallel_root_wait_partition as wait_partition
 from scripts.production_gate_parallel_adoption import read_subreaper, restore_adoption
 from scripts.production_gate_parallel_cgroup import JobCgroup
 from scripts.production_gate_parallel_cleanup import terminate_tree
+from scripts.production_gate_parallel_job_lifecycle import allocate_process, prepare_owned_tree
 from scripts.production_gate_parallel_ownership import observe_cgroup_membership
 from scripts.production_gate_parallel_validation import loads_strict
 
@@ -257,30 +260,18 @@ class OwnedTree:
         known_children: Callable[[], set[int]] = set,
         cgroup: JobCgroup | None = None,
     ) -> None:
-        self.root_pid = root_pid
-        self.cgroup = cgroup
-        self.cgroup_joined = False
-        self._known_children = known_children
-        self.adoption = adoption
-        self.status = status
-        self.holder_mode = (
-            getattr(status, "holder", None) is not None
-        )  # root is a holder, not a guardian
+        prepare_owned_tree(
+            self,
+            root_pid,
+            token,
+            clock=clock,
+            observe_seconds=observe_seconds,
+            adoption=adoption,
+            status=status,
+            known_children=known_children,
+            cgroup=cgroup,
+        )
         self.launch_adopting = bool(adoption is not None and adoption.verify())
-        self.orphans_pinned = 0
-        self.unattributed: list[int] = []
-        self.unknown_live: list[int] = []
-        self._orphans: set[int] = set()
-        self.token = token  # attestation only; never used to find or signal a process
-        self._clock = clock
-        self._observe_seconds = observe_seconds
-        self._last = float("-inf")
-        self._entries: dict[int, tuple[int, int]] = {}
-        self.ports: set[int] = set()
-        self.root_start: int | None = None
-        self.adopted_total = 0
-        self.contained = True
-        self.reason = ""
         stat = read_stat(root_pid)
         descriptor = _pidfd_open(root_pid)
         if stat is None or descriptor is None:
@@ -292,11 +283,43 @@ class OwnedTree:
             self._entries[root_pid] = (descriptor, stat[0])
             self.root_start = stat[0]
 
+    @classmethod
+    def prepare(cls, root_pid: int, token: str, **kwargs: Any) -> OwnedTree:
+        owner = cls.__new__(cls)
+        kwargs.setdefault("clock", time.monotonic)
+        kwargs.setdefault("observe_seconds", DEFAULT_OBSERVE_SECONDS)
+        prepare_owned_tree(owner, root_pid, token, **kwargs)
+        return owner
+
+    def initialize_original(self, process: Any, launch: Any) -> None:
+        """Acquire once from the retained original unreaped child, before any poll."""
+        if launch.process is not process or self.root_pid != process.pid:
+            raise RuntimeError("original retained process does not match the prepared tree")
+        if launch.pin_state != "unopened" or launch.initialized:
+            raise RuntimeError("original first pin cannot be retried")
+        launch.pin_state = "attempted"
+        self.launch_adopting = bool(self.adoption is not None and self.adoption.verify())
+        stat = read_stat(process.pid)
+        launch.raw_pidfd = _pidfd_open(process.pid)
+        if stat is None or launch.raw_pidfd is None:
+            self.contained = False
+            self.reason = "containment not established: the original root could not be pinned"
+            raise RuntimeError(self.reason)
+        launch.pin_state = "transferring"
+        self._entries[process.pid] = (launch.raw_pidfd, stat[0])
+        self.root_start = stat[0]
+        launch.pin_state = "tree"
+        launch.raw_pidfd = None
+        launch.initialized = True
+
     @property
     def tracked(self) -> dict[int, int]:
         return {pid: started for pid, (_, started) in self._entries.items()}
 
     def _adopt(self, pid: int, seen_start: int, parent: int | None = None) -> bool:
+        retirement.require_active(self)
+        if not wait_partition.allow_descendant_pin(self, pid, seen_start):
+            return False
         descriptor = _pidfd_open(pid)
         if descriptor is None:
             self.contained = False
@@ -313,10 +336,12 @@ class OwnedTree:
             os.close(descriptor)  # the parent may have died and its number been reused: discard
             return False
         self._entries[pid] = (descriptor, seen_start)
+        wait_partition.note_tree_pin(self, pid, descriptor, seen_start)
         self.adopted_total += 1
         return True
 
     def _alive_set(self) -> set[int]:
+        retirement.require_active(self)
         return {pid for pid, (fd, _) in self._entries.items() if not _exited(fd)}
 
     def alive(self, table: object = None) -> set[int]:
@@ -325,6 +350,7 @@ class OwnedTree:
     def _parent_instance_valid(self, parent: int) -> bool:
         """The very instance pinned earlier is still unexited (held pidfd) and keeps its start time."""
 
+        retirement.require_active(self)
         entry = self._entries.get(parent)
         if entry is None or _exited(entry[0]):
             return False
@@ -353,6 +379,7 @@ class OwnedTree:
         Each owned process is asked for its own children; no other process is read.
         """
 
+        retirement.require_active(self)
         now = self._clock()
         if not self.contained or (not force and now - self._last < self._observe_seconds):
             return
@@ -404,6 +431,7 @@ class OwnedTree:
         and keeps the cleanup proof from being claimed (bounded UNPROVEN retention).
         """
 
+        retirement.require_active(self)
         adoption = self.adoption
         if adoption is None or not self.contained:
             return
@@ -425,7 +453,10 @@ class OwnedTree:
         foreign: list[int] = []
         known = self._known_children()
         for pid in kids:
-            if pid in self._entries or pid in known:
+            if pid in self._entries:
+                wait_partition.note_reparented(self, pid, me, read_stat)
+                continue
+            if pid in known:
                 continue
             stat = read_stat(pid)
             if stat is None:
@@ -436,6 +467,11 @@ class OwnedTree:
                     return
                 continue
             if stat[1] != me:
+                continue
+            disposition = wait_partition.orphan_disposition(self, pid, stat[0])
+            if disposition != "candidate":
+                if disposition == "unknown":
+                    foreign.append(pid)
                 continue
             descriptor = _pidfd_open(pid)
             if descriptor is None:
@@ -457,6 +493,7 @@ class OwnedTree:
             )
             if mine:
                 self._entries[pid] = (descriptor, stat[0])
+                wait_partition.note_tree_pin(self, pid, descriptor, stat[0])
                 self._orphans.add(pid)
                 self.adopted_total += 1
                 self.orphans_pinned += 1
@@ -472,21 +509,13 @@ class OwnedTree:
         self.observe(force=True)
 
     def _reap_orphans(self) -> None:
-        """Reap exited pinned processes that are this orchestrator's children (never the root).
-
-        The root is reaped by its ``Popen``; a pinned process that is not our child makes
-        ``waitid`` fail with ECHILD, which is ignored, and a pidfd cannot name a recycled pid.
-        """
-
-        for pid, (descriptor, _started) in list(self._entries.items()):
-            if pid != self.root_pid and _exited(descriptor):
-                with contextlib.suppress(OSError, AttributeError):
-                    os.waitid(os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG)
+        wait_partition.reap_owned(self, retirement.require_active, _exited, os)
 
     def current_ports(self) -> set[int]:
         return {p for ports in socket_ports(self._alive_set()).values() for p in ports}
 
     def _signal(self, pids: set[int], signum: int) -> list[int]:
+        retirement.require_active(self)
         sent: list[int] = []
         for pid in sorted(pids):
             try:
@@ -503,9 +532,11 @@ class OwnedTree:
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         deadline: float | None = None,
+        retain_pins: bool = False,
     ) -> dict[str, Any]:
         """Stop pinned instances under a single absolute cleanup deadline."""
 
+        retirement.require_active(self)
         return terminate_tree(
             self,
             grace_seconds=grace_seconds,
@@ -514,11 +545,13 @@ class OwnedTree:
             deadline=deadline,
             orphan_rounds=ORPHAN_ROUNDS,
             late_kill_number=SIGKILL_NUMBER,
+            retain_pins=retain_pins,
         )
 
     def signal_root(self, signum: int) -> bool:
         """Signal only the pinned root (the guardian) so it contains its own subtree first."""
 
+        retirement.require_active(self)
         entry = self._entries.get(self.root_pid)
         if entry is None:
             return False
@@ -535,6 +568,7 @@ class OwnedTree:
         return sorted(self._alive_set())
 
     def close(self) -> None:
+        retirement.require_legacy_close(self)
         for descriptor, _ in self._entries.values():
             try:
                 os.close(descriptor)
@@ -732,8 +766,12 @@ class GuardianStatus:
     """
 
     def __init__(self, descriptor: int, holder: Any = None) -> None:
-        self.fd = descriptor
-        os.set_blocking(descriptor, False)
+        self._prepare(holder)
+        self.configure(descriptor)
+
+    def _prepare(self, holder: Any = None) -> None:
+        self.fd = -1
+        self.close_state = "unconfigured"
         self.holder = holder  # a HolderRef when the root is a per-job holder above the guardian
         self.guardian: tuple[int, int] | None = None  # the guardian instance the holder recorded
         self.ready = False
@@ -743,7 +781,22 @@ class GuardianStatus:
         self.eof = False
         self.error = False
 
+    @classmethod
+    def prepare(cls, *, holder: Any = None) -> GuardianStatus:
+        owner = cls.__new__(cls)
+        owner._prepare(holder)
+        return owner
+
+    def configure(self, descriptor: int) -> None:
+        retirement.require_active(self)
+        if self.fd >= 0:
+            raise RuntimeError("status descriptor already configured")
+        os.set_blocking(descriptor, False)
+        self.fd = descriptor
+        self.close_state = "open"
+
     def drain(self) -> None:
+        retirement.require_active(self)
         while self.fd >= 0 and not self.eof and not self.error:
             try:
                 data = os.read(self.fd, 64)
@@ -776,6 +829,7 @@ class GuardianStatus:
     ) -> tuple[dict[str, Any] | None, list[str]]:
         """Receipts of this job.  Legacy: the root IS the guardian.  Holder mode: the root is the holder and
         the guardian is authenticated against ITS OWN recorded instance (never the root's)."""
+        retirement.require_active(self)
         reader = reader or read_guardian_receipt
         if self.holder is None:
             return reader(guardian_path, secret, root_pid, root_start)
@@ -787,10 +841,16 @@ class GuardianStatus:
         self.drain()
         return self.eof and not self.error and not self.spawned
 
-    def close(self) -> None:
-        if self.fd >= 0:
-            with contextlib.suppress(OSError):
+    def close(self, *, custody: Any = None) -> None:
+        retirement.begin_status_close(self, custody)
+        if self.fd >= 0 and self.close_state == "open":
+            self.close_state = "closing"
+            try:
                 os.close(self.fd)
+            except OSError:
+                self.close_state = "unknown"
+            else:
+                self.close_state = "closed"
             self.fd = -1
 
 
@@ -799,43 +859,29 @@ def launch_guardian(
     grace_seconds: float,
     worker_argv: list[str],
     *,
+    launch: Any,
     cgroup: str = "",
     **popen_kwargs: Any,
 ) -> tuple[subprocess.Popen[Any], bytes]:
-    """Start the guardian; the HMAC key and the status pipe never reach the worker."""
-
-    secret = os.urandom(32)
-    secret_read, secret_write = os.pipe()
-    status_read, status_write = os.pipe()
-    try:
-        os.write(secret_write, secret.hex().encode())
-        os.close(secret_write)
-        secret_write = -1
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                GUARDIAN_SOURCE,
-                str(receipt_path),
-                str(grace_seconds),
-                str(secret_read),
-                str(status_write),
-                f"--cgroup={cgroup}",
-                *worker_argv,
-            ],
-            pass_fds=(secret_read, status_write),
-            **popen_kwargs,
-        )
-    except BaseException:
-        os.close(status_read)
-        raise
-    finally:
-        os.close(secret_read)
-        os.close(status_write)
-        if secret_write >= 0:
-            os.close(secret_write)
-    process.guardian_status = GuardianStatus(status_read)  # type: ignore[attr-defined]
-    return process, secret
+    """Start G using the caller's retained slot; the key never reaches W."""
+    return allocate_process(
+        launch,
+        command=lambda slot: [
+            sys.executable,
+            "-c",
+            GUARDIAN_SOURCE,
+            str(receipt_path),
+            str(grace_seconds),
+            str(slot.pipes["secret_read"]),
+            str(slot.pipes["status_write"]),
+            f"--cgroup={cgroup}",
+            *worker_argv,
+        ],
+        popen=subprocess.Popen,
+        os_module=os,
+        status_type=GuardianStatus,
+        popen_kwargs=popen_kwargs,
+    )
 
 
 @contextlib.contextmanager
